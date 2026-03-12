@@ -1369,7 +1369,7 @@ if page == "🎓 Train & Tune":
             default_days = 90 if data_source == "database" else 30
             # Derive max from actual data span
             _db_info = _cached_db_stats()
-            _max_days = 600
+            _max_days = 2000
             try:
                 from datetime import datetime as _dt
                 _earliest = _db_info.get("earliest_date", "")
