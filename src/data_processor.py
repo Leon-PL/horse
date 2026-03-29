@@ -271,7 +271,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     if "official_rating" in df.columns:
         df["official_rating"] = pd.to_numeric(
             df["official_rating"], errors="coerce"
-        ).fillna(0)
+        ).astype(float).fillna(0.0)
         df["has_official_rating"] = (df["official_rating"] > 0).astype(int)
         # Fill 0s with per-race median (or global median as fallback)
         global_median_or = df.loc[

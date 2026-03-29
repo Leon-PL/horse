@@ -227,7 +227,10 @@ class TheRacingAPIClient:
                 row["finish_position"] = _parse_position(pos_raw)
                 row["won"] = 1 if row["finish_position"] == 1 else 0
                 row["num_runners"] = race_info["field_size"] or len(race.get("runners", []))
-                row["lengths_behind"] = _safe_float(runner.get("distance_btn", ""))
+                _btn_raw = _safe_float(runner.get("distance_btn", ""))
+                row["lengths_behind"] = (
+                    _btn_raw if row["finish_position"] >= 1 else float('nan')
+                )
                 row["finish_time_secs"] = 0.0  # Not always available
 
                 rows.append(row)
@@ -414,7 +417,10 @@ class RapidAPIRacingClient:
                 pos_raw = runner.get("position", "")
                 row["finish_position"] = _parse_position(pos_raw)
                 row["won"] = 1 if row["finish_position"] == 1 else 0
-                row["lengths_behind"] = _safe_float(runner.get("distance", ""))
+                _btn_raw2 = _safe_float(runner.get("distance", ""))
+                row["lengths_behind"] = (
+                    _btn_raw2 if row["finish_position"] >= 1 else float('nan')
+                )
                 row["finish_time_secs"] = 0.0
 
                 rows.append(row)

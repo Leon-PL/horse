@@ -1,13 +1,13 @@
 """
-Optuna Hyperparameter Search for the Triple Ensemble
+Optuna Hyperparameter Search
 =====================================================
-Tunes each of the 6 sub-models independently using a fast
+Tunes the win classifier and place classifier independently using a fast
 2-fold walk-forward validation.  The objective is average
 NDCG@1 across folds (higher = better ranking quality).
 
 Usage::
 
-    # Full search (default 60 trials per model, ~2-4 hours)
+    # Full search (default 60 trials per model)
     python optuna_search.py
 
     # Quick test run
@@ -34,7 +34,6 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from sklearn.metrics import ndcg_score as _ndcg
-from sklearn.preprocessing import StandardScaler
 
 import config
 
@@ -46,35 +45,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Sub-model definitions ────────────────────────────────────────
-# Each entry maps a sub-model name to:
-#   config_key  – the config.*_PARAMS dict it reads from
-#   model_type  – "ranker" | "regressor" | "classifier"
-#                 | "place" | "norm_pos"
 SUB_MODELS = {
-    "ltr": {
-        "config_key": "LTR_PARAMS",
-        "kind": "ranker",
-        "description": "LTR Ranker (LambdaRank)",
-    },
-    "regressor": {
-        "config_key": "REGRESSOR_PARAMS",
-        "kind": "regressor",
-        "description": "Lengths-Behind Regressor",
-    },
     "classifier": {
         "config_key": "CLASSIFIER_PARAMS",
         "kind": "classifier",
-        "description": "Win Classifier (Focal Loss)",
+        "description": "Win Classifier",
     },
     "place": {
         "config_key": "PLACE_CLASSIFIER_PARAMS",
         "kind": "place",
-        "description": "Place Classifier (Focal Loss)",
-    },
-    "norm_pos": {
-        "config_key": "NORM_POS_PARAMS",
-        "kind": "norm_pos",
-        "description": "Normalised-Position Regressor",
+        "description": "Place Classifier",
     },
 }
 
@@ -225,7 +205,7 @@ def _train_and_score(
     feature_cols: list[str],
 ) -> float:
     """Train a single sub-model type on each fold and return avg NDCG@1."""
-    from lightgbm import LGBMRanker, LGBMRegressor, LGBMClassifier
+    from lightgbm import LGBMClassifier
     from src.model import (
         _focal_binary_objective,
         _FocalLGBMClassifier,
@@ -238,18 +218,12 @@ def _train_and_score(
         X_train = train_df[feature_cols].values
         X_test = test_df[feature_cols].values
 
-        scaler = StandardScaler()
-        X_train_s = scaler.fit_transform(X_train)
-        X_test_s = scaler.transform(X_test)
+        X_train_s = X_train
+        X_test_s = X_test
 
         fp_train = train_df["finish_position"].values.astype(np.float32)
-        y_rel = np.maximum(0, 11 - fp_train.astype(int))
-        y_lb = train_df["lengths_behind"].fillna(0).values.astype(np.float32)
         y_won = train_df["won"].fillna(0).values.astype(int)
         y_placed = (fp_train <= 3).astype(int)
-        nr = train_df["num_runners"].replace(0, 1).values.astype(np.float32)
-        y_norm_pos = (fp_train - 1) / np.maximum(nr - 1, 1)
-        groups_train = train_df.groupby("race_id", sort=False).size().values
 
         sw = _recency_weights(train_df)
 
@@ -257,19 +231,7 @@ def _train_and_score(
         base_kw = dict(random_state=config.RANDOM_SEED, n_jobs=-1, verbose=-1)
         hp = {k: v for k, v in params.items()}
 
-        if kind == "ranker":
-            model = LGBMRanker(objective="lambdarank", **hp, **base_kw)
-            model.fit(X_train_s, y_rel, group=groups_train)
-            raw_scores = model.predict(
-                pd.DataFrame(X_test_s, columns=feature_cols),
-            )
-
-        elif kind == "regressor":
-            model = LGBMRegressor(objective="regression", **hp, **base_kw)
-            model.fit(X_train_s, y_lb, sample_weight=sw)
-            raw_scores = -model.predict(X_test_s)  # negate: lower LB = better
-
-        elif kind == "classifier":
+        if kind == "classifier":
             model = _FocalLGBMClassifier(
                 objective=_focal_binary_objective, **hp, **base_kw,
             )
@@ -283,11 +245,6 @@ def _train_and_score(
             )
             model.fit(X_train_s, y_placed, sample_weight=sw)
             raw_scores = model.predict_proba(X_test_s)[:, 1]
-
-        elif kind == "norm_pos":
-            model = LGBMRegressor(objective="regression", **hp, **base_kw)
-            model.fit(X_train_s, y_norm_pos, sample_weight=sw)
-            raw_scores = -model.predict(X_test_s)  # negate
 
         else:
             raise ValueError(f"Unknown model kind: {kind}")
@@ -457,7 +414,7 @@ def run_search(
 # ── CLI ──────────────────────────────────────────────────────────
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Optuna hyperparameter search for 6-model ensemble",
+        description="Optuna hyperparameter search for win and place classifiers",
     )
     parser.add_argument(
         "--trials", type=int, default=60,
@@ -466,7 +423,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model", type=str, default=None,
         choices=list(SUB_MODELS.keys()),
-        help="Tune a single sub-model (default: all 6)",
+        help="Tune a single sub-model (default: all)",
     )
     parser.add_argument(
         "--folds", type=int, default=2,

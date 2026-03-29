@@ -13,13 +13,12 @@ Usage::
 
     from src.backtester import walk_forward_validation
 
-    report = walk_forward_validation(featured_df, model_type="xgb_ranker")
+    report = walk_forward_validation(featured_df)
     print(report["summary"])
 
 CLI::
 
-    python -m src.backtester                          # uses saved featured data
-    python -m src.backtester --model xgb_ranker
+    python -m src.backtester
     python -m src.backtester --min-train-months 2
 """
 
@@ -32,7 +31,8 @@ from sklearn.metrics import brier_score_loss
 
 import config
 from src.model import (
-    train_ranker, get_feature_columns, RANKER_MODELS,
+    get_feature_columns, make_relevance_labels,
+    normalise_implied_prob_by_race,
     TripleEnsemblePredictor,
 )
 from src.each_way import get_ew_terms, ew_value as _ew_value
@@ -117,11 +117,13 @@ class FoldResult:
 
 def walk_forward_validation(
     df: pd.DataFrame,
-    model_type: str = "xgb_ranker",
+    model_type: str = "triple_ensemble",
     min_train_months: int = 2,
     test_window_months: int = 1,
     value_threshold: float = 0.05,
-    progress_callback: "Callable[[str, float], None] | None" = None,
+    frameworks: dict[str, str] | None = None,
+    params: dict[str, dict] | None = None,
+    progress_callback=None,
     fast_fold: bool = True,
     ew_min_place_edge: float | None = None,
 ) -> dict:
@@ -130,8 +132,7 @@ def walk_forward_validation(
 
     Args:
         df: Feature-engineered DataFrame with ``race_date`` column.
-        model_type: ``"xgb_ranker"``, ``"lgbm_ranker"``,
-                    or ``"rank_ensemble"``.
+        model_type: ``"triple_ensemble"``.
         min_train_months: Minimum number of months to use for the first
                          training fold.
         test_window_months: How many months each test fold covers.
@@ -237,55 +238,31 @@ def walk_forward_validation(
         X_train_s = X_train
         X_test_s = X_test
 
-        # Relevance labels for LTR — must exactly match production.
-        y_train_rel = np.maximum(
-            0, 11 - train_df["finish_position"].values.astype(int),
+        # Relevance labels for ranking metrics.
+        y_train_rel = make_relevance_labels(
+            train_df["finish_position"].values.astype(int),
         )
         groups_train = train_df.groupby("race_id", sort=False).size().values
 
-        if model_type == "triple_ensemble":
-            groups_test_arr = test_df.groupby("race_id", sort=False).size().values
-            _te = TripleEnsemblePredictor()
-            raw_scores, win_probs_cal, place_probs = _te.train_on_fold(
-                X_train_s, X_test_s, train_df,
-                groups_train, groups_test_arr, feature_cols,
-                return_place_probs=True,
-                fast_fold=fast_fold,
-            )
-            # train_on_fold returns calibrated probabilities
-            y_prob = win_probs_cal
-        elif model_type == "rank_ensemble":
-            ranker_weights = {"xgb_ranker": 0.5, "lgbm_ranker": 0.5}
-            ranker_models = {}
-            for mt in ranker_weights:
-                ranker_models[mt] = train_ranker(X_train_s, y_train_rel, groups_train, mt)
-            raw_scores = np.zeros(len(X_test_s))
-            for mt, m in ranker_models.items():
-                raw_scores += ranker_weights[mt] * m.predict(X_test_s)
-            place_probs = None  # not available for non-triple models
-            y_prob = None
-        else:
-            ranker_model = train_ranker(X_train_s, y_train_rel, groups_train, model_type)
-            raw_scores = ranker_model.predict(X_test_s)
-            place_probs = None
-            y_prob = None
-
-        # For non-triple models, convert raw scores to softmax probabilities
-        if y_prob is None:
-            temperature = getattr(config, "SOFTMAX_TEMPERATURE", 1.0)
-            y_prob = np.zeros(len(raw_scores))
-            for race_id in test_df["race_id"].unique():
-                race_mask = test_df["race_id"].values == race_id
-                race_scores = raw_scores[race_mask]
-                scaled = race_scores / max(temperature, 1e-6)
-                exp_s = np.exp(scaled - scaled.max())
-                y_prob[race_mask] = exp_s / exp_s.sum()
+        groups_test_arr = test_df.groupby("race_id", sort=False).size().values
+        _te = TripleEnsemblePredictor(frameworks=frameworks)
+        win_probs_cal, place_probs = _te.train_on_fold(
+            X_train_s, X_test_s, train_df,
+            groups_train, groups_test_arr, feature_cols,
+            params=params,
+            return_place_probs=True,
+            fast_fold=fast_fold,
+            test_df=test_df,
+        )
+        # train_on_fold returns calibrated probabilities
+        y_prob = win_probs_cal
+        raw_scores = win_probs_cal  # use win probs for ranking metrics
 
         # --- Ranking metrics (NDCG@1, Top-1, Winner-in-Top-3) ---
         from sklearn.metrics import ndcg_score as _ndcg
 
-        y_test_rel = np.maximum(
-            0, 11 - test_df["finish_position"].values.astype(int),
+        y_test_rel = make_relevance_labels(
+            test_df["finish_position"].values.astype(int),
         )
 
         ndcg1_list, top1_ok, win3_ok, n_eval = [], 0, 0, 0
@@ -318,22 +295,16 @@ def walk_forward_validation(
         # --- P&L simulation (flat 1-unit stakes) ---
         test_with_probs = test_df.copy()
         test_with_probs["model_prob"] = y_prob
-        test_with_probs["rank_score"] = raw_scores
-        test_with_probs["implied_prob"] = 1.0 / test_with_probs["odds"]
+        test_with_probs["implied_prob"] = normalise_implied_prob_by_race(test_with_probs)
         test_with_probs["value_score"] = (
             test_with_probs["model_prob"] - test_with_probs["implied_prob"]
         )
         if place_probs is not None:
             test_with_probs["place_prob"] = place_probs
 
-        # --- Strategy 1: Top Pick (LTR ranker's #1, vectorised) ---
-        # Use rank_score if differentiated, otherwise fall back to model_prob.
-        # Skip races where the chosen column is constant (model has no opinion).
-        _tp_col = "rank_score"
-        _rs_range = test_with_probs.groupby("race_id", sort=False)["rank_score"]
-        _rs_diff = _rs_range.transform("max") - _rs_range.transform("min")
-        if (_rs_diff == 0).all():
-            _tp_col = "model_prob"
+        # --- Strategy 1: Top Pick (highest win probability, vectorised) ---
+        # Skip races where model_prob is constant (model has no opinion).
+        _tp_col = "model_prob"
         _tp_range = test_with_probs.groupby("race_id", sort=False)[_tp_col]
         _tp_diff = _tp_range.transform("max") - _tp_range.transform("min")
         _tp_valid = test_with_probs[_tp_diff > 0].copy()
@@ -600,12 +571,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="xgb_ranker",
-        choices=[
-            "xgb_ranker", "lgbm_ranker", "cat_ranker", "rank_ensemble",
-            "triple_ensemble",
-        ],
-        help="Model type (default: xgb_ranker)",
+        default="triple_ensemble",
+        choices=["triple_ensemble"],
+        help="Model type (default: triple_ensemble)",
     )
     parser.add_argument(
         "--min-train-months",

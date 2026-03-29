@@ -1,15 +1,11 @@
 """
 Model Module
 =============
-Learning-to-Rank models for horse race prediction.
+Win and Place classifiers for horse race prediction.
 
 Supports:
-- XGBRanker (listwise ranking objective)
-- LGBMRanker (LambdaRank objective)
-- Rank Ensemble (weighted blend of both rankers)
-
-Ranks horses **within** each race and converts raw scores to
-pseudo-probabilities via softmax for downstream consumption.
+- Win Classifier  — calibrated P(win) for value betting
+- Place Classifier — calibrated P(place) for each-way betting
 """
 
 import os
@@ -30,6 +26,7 @@ import numpy as np
 import pandas as pd
 import joblib
 from sklearn.model_selection import train_test_split
+from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
     brier_score_loss,
     log_loss,
@@ -37,9 +34,8 @@ from sklearn.metrics import (
     ndcg_score,
 )
 from sklearn.model_selection import GroupShuffleSplit
-from xgboost import XGBRanker, XGBRegressor, XGBClassifier
-from lightgbm import LGBMRanker, LGBMRegressor, LGBMClassifier
-CatBoostRanker = None
+from xgboost import XGBRegressor, XGBClassifier
+from lightgbm import LGBMRegressor, LGBMClassifier
 CatBoostRegressor = None
 CatBoostClassifier = None
 Pool = None
@@ -106,13 +102,168 @@ def _rebuild_identity_scaler() -> "_IdentityScaler":
     return _Cls()
 
 
+def _is_truthy_flag(value) -> bool:
+    """Interpret LightGBM-style param flags stored as bool/int/str."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _model_uses_linear_tree(model) -> bool:
+    """Detect whether a model was trained with LightGBM linear leaves."""
+    candidates = []
+
+    try:
+        if hasattr(model, "get_params"):
+            params = model.get_params()
+            if isinstance(params, dict):
+                candidates.append(params)
+    except Exception:
+        pass
+
+    for attr in ("_other_params", "params"):
+        params = getattr(model, attr, None)
+        if isinstance(params, dict):
+            candidates.append(params)
+
+    for booster_attr in ("booster_", "_Booster", "_booster"):
+        booster = getattr(model, booster_attr, None)
+        if booster is not None:
+            params = getattr(booster, "params", None)
+            if isinstance(params, dict):
+                candidates.append(params)
+
+    for params in candidates:
+        if "linear_tree" in params:
+            return _is_truthy_flag(params["linear_tree"])
+
+    return False
+
+
+def _predict_for_shap(model, X):
+    """Return a 1-D output suitable for SHAP from classifiers."""
+    if hasattr(model, "predict_proba"):
+        pred = np.asarray(model.predict_proba(X))
+        if pred.ndim == 2:
+            return pred[:, -1]
+        return pred.reshape(-1)
+
+    pred = np.asarray(model.predict(X))
+    if pred.ndim == 2:
+        return pred[:, -1]
+    return pred.reshape(-1)
+
+
+def _compute_shap_matrix(
+    model,
+    X_scaled: pd.DataFrame,
+    top_n_features: int,
+    feature_cols: list[str],
+) -> tuple[np.ndarray, str]:
+    """Compute per-row SHAP values, using Kernel SHAP for linear-tree LGBM."""
+    import shap
+
+    if _model_uses_linear_tree(model):
+        bg_n = min(len(X_scaled), 8)
+        background = (
+            X_scaled.sample(n=bg_n, random_state=config.RANDOM_SEED)
+            if len(X_scaled) > bg_n
+            else X_scaled.copy()
+        )
+
+        def _predict_fn(arr):
+            arr_df = pd.DataFrame(arr, columns=feature_cols)
+            return _predict_for_shap(model, arr_df)
+
+        explainer = shap.KernelExplainer(_predict_fn, background.to_numpy())
+        _shap_logger = logging.getLogger("shap")
+        _prev_shap_level = _shap_logger.level
+        _shap_logger.setLevel(logging.ERROR)
+        try:
+            try:
+                shap_values = explainer.shap_values(
+                    X_scaled.to_numpy(),
+                    nsamples=min(512, max(128, top_n_features * 32)),
+                    l1_reg=f"num_features({max(top_n_features * 2, 20)})",
+                    silent=True,
+                )
+            except TypeError:
+                shap_values = explainer.shap_values(
+                    X_scaled.to_numpy(),
+                    nsamples=min(512, max(128, top_n_features * 32)),
+                    l1_reg=f"num_features({max(top_n_features * 2, 20)})",
+                )
+        finally:
+            _shap_logger.setLevel(_prev_shap_level)
+        method_label = "Kernel SHAP"
+    else:
+        explainer = shap.TreeExplainer(model)
+        shap_values = explainer.shap_values(X_scaled)
+        method_label = "Tree SHAP"
+
+    if isinstance(shap_values, list):
+        shap_values = shap_values[-1]
+    elif isinstance(shap_values, np.ndarray) and shap_values.ndim == 3:
+        shap_values = shap_values[:, :, -1]
+
+    shap_values = np.asarray(shap_values)
+    if shap_values.ndim == 1:
+        shap_values = shap_values.reshape(1, -1)
+
+    return shap_values, method_label
+
+
+def _explain_race_with_shap(
+    model,
+    race_df: pd.DataFrame,
+    feature_cols: list[str],
+    scaler,
+    top_n_features: int,
+) -> tuple[dict[str, pd.DataFrame], str]:
+    """Shared SHAP explanation path for one race across model wrappers."""
+    race_df = race_df.copy().reset_index(drop=True)
+
+    missing = [c for c in feature_cols if c not in race_df.columns]
+    for col in missing:
+        race_df[col] = 0
+
+    X = race_df[feature_cols].values
+    X_scaled = pd.DataFrame(
+        scaler.transform(X),
+        columns=feature_cols,
+        index=race_df.index,
+    )
+
+    shap_values, method_label = _compute_shap_matrix(
+        model, X_scaled, top_n_features, feature_cols,
+    )
+
+    explanations: dict[str, pd.DataFrame] = {}
+    horse_names = race_df["horse_name"].values
+
+    for i, name in enumerate(horse_names):
+        sv = shap_values[i]
+        fv = X_scaled.iloc[i]
+        df_expl = pd.DataFrame({
+            "feature": feature_cols,
+            "shap_value": sv,
+            "feature_value": fv,
+        })
+        df_expl["abs_shap"] = df_expl["shap_value"].abs()
+        df_expl = df_expl.sort_values("abs_shap", ascending=False)
+        explanations[name] = df_expl.head(top_n_features).drop(
+            columns="abs_shap",
+        )
+
+    return explanations, method_label
+
+
 def _require_catboost() -> None:
-    global CatBoostRanker, CatBoostRegressor, CatBoostClassifier, Pool
-    if CatBoostRanker is not None and CatBoostRegressor is not None and CatBoostClassifier is not None and Pool is not None:
+    global CatBoostRegressor, CatBoostClassifier, Pool
+    if CatBoostRegressor is not None and CatBoostClassifier is not None and Pool is not None:
         return
     try:
         cb = importlib.import_module("catboost")
-        CatBoostRanker = cb.CatBoostRanker
         CatBoostRegressor = cb.CatBoostRegressor
         CatBoostClassifier = cb.CatBoostClassifier
         Pool = cb.Pool
@@ -122,9 +273,88 @@ def _require_catboost() -> None:
         ) from e
 
 
-def _groups_to_group_id(groups: np.ndarray) -> np.ndarray:
-    """Expand group sizes into per-row group-id array."""
-    return np.repeat(np.arange(len(groups), dtype=np.int32), groups.astype(int))
+def get_autotune_search_space(
+    model_key: str,
+    framework: str,
+    *,
+    include_recency: bool = True,
+) -> list[dict]:
+    """Return the Optuna search-space spec for a sub-model/framework pair."""
+    framework = str(framework)
+    specs: list[dict] = []
+
+    if framework == "cat":
+        specs.extend([
+            {"name": "n_estimators", "kind": "int", "low": 100, "high": 1200, "step": 50},
+            {"name": "depth", "kind": "int", "low": 4, "high": 10},
+            {"name": "learning_rate", "kind": "float", "low": 0.01, "high": 0.3, "log": True},
+            {"name": "l2_leaf_reg", "kind": "float", "low": 1e-3, "high": 20.0, "log": True},
+            {"name": "random_strength", "kind": "float", "low": 0.0, "high": 2.0},
+            {"name": "bagging_temperature", "kind": "float", "low": 0.0, "high": 2.0},
+        ])
+    else:
+        specs.extend([
+            {"name": "n_estimators", "kind": "int", "low": 100, "high": 1500, "step": 50},
+            {"name": "max_depth", "kind": "int", "low": 3, "high": 12},
+            {"name": "learning_rate", "kind": "float", "low": 0.005, "high": 0.3, "log": True},
+            {"name": "subsample", "kind": "float", "low": 0.5, "high": 1.0, "step": 0.05},
+            {"name": "colsample_bytree", "kind": "float", "low": 0.3, "high": 1.0, "step": 0.05},
+            {"name": "reg_alpha", "kind": "float", "low": 1e-8, "high": 10.0, "log": True},
+            {"name": "reg_lambda", "kind": "float", "low": 1e-8, "high": 10.0, "log": True},
+        ])
+        if framework == "xgb":
+            specs.extend([
+                {"name": "min_child_weight", "kind": "int", "low": 1, "high": 20},
+                {"name": "gamma", "kind": "float", "low": 0.0, "high": 5.0, "step": 0.1},
+            ])
+        elif framework == "lgbm":
+            specs.extend([
+                {"name": "min_child_samples", "kind": "int", "low": 10, "high": 40},
+                {"name": "num_leaves", "kind": "int", "low": 20, "high": 100},
+                {"name": "linear_tree", "kind": "categorical", "choices": [True, False]},
+            ])
+
+    if include_recency and model_key in {"classifier", "place"}:
+        specs.extend([
+            {"name": "recency_half_life_days", "kind": "int", "low": 60, "high": 360, "step": 30},
+            {"name": "recency_seasonal_boost", "kind": "float", "low": 0.0, "high": 0.30, "step": 0.05},
+            {"name": "recency_decay_shape", "kind": "categorical", "choices": ["exp", "poly", "linear"]},
+        ])
+
+    # Feature pruning params (shared across all frameworks)
+    specs.extend([
+        {"name": "FEATURE_PRUNE_FRACTION", "kind": "float", "low": 0.0, "high": 0.35, "step": 0.05},
+        {"name": "FEATURE_CORR_THRESHOLD", "kind": "float", "low": 0.80, "high": 0.98, "step": 0.02},
+    ])
+
+    return specs
+
+
+def _suggest_from_autotune_space(trial, specs: list[dict]) -> dict:
+    """Sample a params dict from a search-space spec."""
+    params: dict = {}
+    for spec in specs:
+        name = spec["name"]
+        kind = spec["kind"]
+        if kind == "fixed":
+            params[name] = spec["value"]
+        elif kind == "categorical":
+            params[name] = trial.suggest_categorical(name, spec["choices"])
+        elif kind == "int":
+            kwargs = {}
+            if spec.get("step") is not None:
+                kwargs["step"] = spec["step"]
+            params[name] = trial.suggest_int(name, spec["low"], spec["high"], **kwargs)
+        elif kind == "float":
+            kwargs = {}
+            if spec.get("step") is not None:
+                kwargs["step"] = spec["step"]
+            if spec.get("log"):
+                kwargs["log"] = True
+            params[name] = trial.suggest_float(name, spec["low"], spec["high"], **kwargs)
+        else:
+            raise ValueError(f"Unknown autotune spec kind: {kind}")
+    return params
 
 
 # ── Focal Loss ────────────────────────────────────────────────
@@ -272,6 +502,7 @@ EXCLUDE_COLUMNS = [
     # target for any model (ranking or classification).
     "horse_elo_delta",
     "jockey_elo_delta",
+    "horse_margin_elo_delta",
     # year is almost a perfect proxy for train-vs-test in a temporal
     # split — it encodes *when* the row is, not anything about racing.
     "year",
@@ -301,12 +532,8 @@ EXCLUDE_COLUMNS = [
     "jockey_elo_x_fav",
 ]
 
-# Model types that use the ranking objective
-RANKER_MODELS = {"xgb_ranker", "lgbm_ranker", "cat_ranker", "rank_ensemble"}
-ALL_MODELS = RANKER_MODELS | {"triple_ensemble"}
-
 # XGB-compatible hyperparameter names (used to filter params for
-# regressor / classifier sub-models that may receive ranker-tuned dicts)
+# classifier sub-models that may receive tuned dicts)
 _XGB_VALID_HP = {
     "n_estimators", "max_depth", "learning_rate", "subsample",
     "colsample_bytree", "reg_alpha", "reg_lambda",
@@ -317,7 +544,7 @@ _XGB_VALID_HP = {
 _LGBM_VALID_HP = {
     "n_estimators", "max_depth", "learning_rate", "subsample",
     "colsample_bytree", "reg_alpha", "reg_lambda",
-    "min_child_samples", "num_leaves",
+    "min_child_samples", "num_leaves", "linear_tree",
 }
 
 # CatBoost-compatible hyperparameter names
@@ -326,15 +553,82 @@ _CAT_VALID_HP = {
     "l2_leaf_reg", "random_strength", "bagging_temperature",
 }
 
-# Default framework selection for each sub-model in the ensemble.
+# Default framework selection for each sub-model.
 DEFAULT_FRAMEWORKS: dict[str, str] = {
-    "ltr": "lgbm",
-    "regressor": "lgbm",
     "classifier": "cat",
     "place": "cat",
-    "norm_pos": "lgbm",
-    "residual": "cat",
 }
+
+
+def make_relevance_labels(finish_positions: np.ndarray) -> np.ndarray:
+    """Winner-heavy relevance labels used for ranking-quality metrics."""
+    fp = np.asarray(finish_positions, dtype=int)
+    return np.where(fp == 1, 5, np.where(fp == 2, 2, np.where(fp == 3, 1, 0)))
+
+
+def normalise_implied_prob_by_race(df: pd.DataFrame) -> np.ndarray:
+    """Return overround-normalised implied win probabilities per race."""
+    if "odds" not in df.columns:
+        return np.zeros(len(df), dtype=np.float32)
+    raw_ip = (
+        (1.0 / df["odds"].replace(0, np.nan))
+        .fillna(0.0)
+        .clip(0.0, 1.0)
+        .values.astype(np.float32)
+    )
+    overround = df.groupby("race_id")["odds"].transform(
+        lambda odds: (1.0 / odds).sum(),
+    ).values.astype(np.float32)
+    return raw_ip / np.maximum(overround, 1e-9)
+
+
+def compute_recency_sample_weights(
+    dates_like,
+    half_life_days: float | None = None,
+    seasonal_boost: float | None = None,
+    decay_shape: str | None = None,
+) -> np.ndarray:
+    """Return normalised recency weights for dated rows.
+
+    Supports three decay shapes (selected via *decay_shape*):
+      * ``"exp"``    — exponential:  w = exp(-ln2 · t / hl)
+      * ``"poly"``   — polynomial:   w = 1 / (1 + t / hl)  (heavier tail)
+      * ``"linear"`` — linear ramp:  w = max(0, 1 - t / (2·hl))  (hard cutoff)
+
+    All shapes share the same *half_life_days* parameter so that the
+    meaning of "half-life" is comparable across shapes.
+    """
+    dates = pd.Series(pd.to_datetime(dates_like))
+    if len(dates) == 0:
+        return np.array([], dtype=np.float64)
+    _hl = float(
+        half_life_days
+        if half_life_days is not None
+        else getattr(config, "RECENCY_HALF_LIFE_DAYS", 180)
+    )
+    _hl = max(_hl, 1.0)
+    _shape = (
+        decay_shape
+        if decay_shape is not None
+        else getattr(config, "RECENCY_DECAY_SHAPE", "exp")
+    )
+    days_ago = (dates.max() - dates).dt.days.values.astype(np.float64)
+    if _shape == "poly":
+        weights = 1.0 / (1.0 + days_ago / _hl)
+    elif _shape == "linear":
+        weights = np.maximum(0.0, 1.0 - days_ago / (2.0 * _hl))
+    else:  # "exp" (default)
+        weights = np.exp(-np.log(2) * days_ago / _hl)
+    _seasonal = float(
+        seasonal_boost
+        if seasonal_boost is not None
+        else getattr(config, "RECENCY_SEASONAL_BOOST", 0.0)
+    )
+    if _seasonal > 0:
+        _cur_month = dates.max().month
+        _same_month = (dates.dt.month.values == _cur_month).astype(np.float64)
+        weights *= (1.0 + _seasonal * _same_month)
+    return weights / max(weights.mean(), 1e-12)
 
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
@@ -344,6 +638,30 @@ def get_feature_columns(df: pd.DataFrame) -> list[str]:
         for col in df.columns
         if col not in EXCLUDE_COLUMNS and df[col].dtype in ["int64", "float64", "int32", "float32"]
     ]
+
+
+def _value_bet_selection(
+    probs: np.ndarray,
+    odds: np.ndarray,
+    value_threshold: float,
+) -> dict[str, np.ndarray]:
+    """Return the value-bet mask plus edge/CLV diagnostics for a threshold."""
+    probs_arr = np.asarray(probs, dtype=np.float64)
+    odds_arr = np.asarray(odds, dtype=np.float64)
+    implied_prob = np.where(odds_arr > 0, 1.0 / odds_arr, 0.0)
+    edge = probs_arr - implied_prob
+    dyn_threshold = float(value_threshold) * np.sqrt(np.clip(odds_arr, 1.0, None) / 3.0)
+    clv = probs_arr * odds_arr
+    expected_roi = clv - 1.0
+    mask = (odds_arr > 0) & np.isfinite(odds_arr) & np.isfinite(probs_arr) & (edge > dyn_threshold)
+    return {
+        "mask": mask,
+        "implied_prob": implied_prob,
+        "edge": edge,
+        "dyn_threshold": dyn_threshold,
+        "clv": clv,
+        "expected_roi": expected_roi,
+    }
 
 
 def _event_sort_key(df: pd.DataFrame) -> pd.Series:
@@ -356,6 +674,73 @@ def _event_sort_key(df: pd.DataFrame) -> pd.Series:
     return race_dt + pd.to_timedelta(off_secs, unit="s")
 
 
+def _drop_correlated_features(
+    X: np.ndarray,
+    feature_cols: list[str],
+    importance: np.ndarray,
+    threshold: float,
+) -> list[str]:
+    """Remove one feature from each highly-correlated pair.
+
+    For every pair with |Pearson r| > *threshold*, the feature with
+    **lower** pilot-model importance is dropped.  This avoids the
+    classic pitfall where two near-identical features split importance
+    between them, making both look unimportant to a subsequent pruning
+    step.
+
+    Runs in O(F²) with early-exit, which is fine for F < 500.
+    """
+    n_features = len(feature_cols)
+    if n_features < 2 or threshold <= 0:
+        return feature_cols
+
+    # Rank features by importance (ascending) so we drop the weaker one
+    imp_rank = np.argsort(importance)  # weakest first
+
+    # Compute correlation matrix (on a subsample for speed)
+    max_rows = min(len(X), 50_000)
+    if max_rows < len(X):
+        rng = np.random.RandomState(config.RANDOM_SEED)
+        idx = rng.choice(len(X), max_rows, replace=False)
+        X_sub = X[idx]
+    else:
+        X_sub = X
+
+    # Standardise columns to avoid numerical issues with constant cols
+    std = X_sub.std(axis=0)
+    std[std < 1e-12] = 1.0
+    X_norm = (X_sub - X_sub.mean(axis=0)) / std
+    corr = (X_norm.T @ X_norm) / max_rows
+    np.fill_diagonal(corr, 0.0)  # ignore self-correlation
+
+    drop = set()
+    # Walk features weakest-first; if it's correlated with a stronger
+    # feature, drop it.
+    for idx in imp_rank:
+        if idx in drop:
+            continue
+        partners = np.where(np.abs(corr[idx]) > threshold)[0]
+        for p in partners:
+            if p not in drop and importance[p] > importance[idx]:
+                drop.add(idx)
+                break
+        # Also mark weaker partners of this feature
+        if idx not in drop:
+            for p in partners:
+                if p not in drop and importance[p] <= importance[idx]:
+                    drop.add(p)
+
+    kept = [f for i, f in enumerate(feature_cols) if i not in drop]
+    if drop:
+        dropped_names = [feature_cols[i] for i in sorted(drop)]
+        logger.info(
+            "Correlation pruning (|r|>%.2f): %d → %d (dropped %d)",
+            threshold, n_features, len(kept), len(drop),
+        )
+        logger.info("  Dropped: %s", dropped_names[:15])
+    return kept
+
+
 def _prune_features_quick(
     train_df: pd.DataFrame,
     feature_cols: list[str],
@@ -363,9 +748,12 @@ def _prune_features_quick(
 ) -> list[str]:
     """Drop the lowest-importance features using a quick pilot model.
 
-    Trains a lightweight LGBMClassifier (100 trees) on the training
-    data to rank features by split-based importance, then removes the
-    bottom ``prune_fraction`` of features.
+    Pipeline:
+    1. Train a lightweight pilot LGBMClassifier.
+    2. **Correlation pruning** — for each pair with |r| above
+       ``FEATURE_CORR_THRESHOLD``, drop the less-important feature.
+    3. **Importance pruning** — drop the bottom ``prune_fraction``
+       of remaining features by split importance.
     """
     if len(train_df) < 2:
         logger.warning("Feature pruning skipped: not enough training samples (%d)", len(train_df))
@@ -375,9 +763,12 @@ def _prune_features_quick(
     y = train_df["won"].fillna(0).values.astype(int)
 
     pilot = LGBMClassifier(
-        n_estimators=100,
+        n_estimators=60,
         max_depth=5,
         learning_rate=0.1,
+        subsample=0.7,
+        colsample_bytree=0.7,
+        min_child_samples=30,
         objective="binary",
         random_state=config.RANDOM_SEED,
         n_jobs=-1,
@@ -386,6 +777,21 @@ def _prune_features_quick(
     pilot.fit(X, y)
 
     importance = pilot.feature_importances_
+
+    # --- Step 1: correlation-aware pruning ---
+    corr_thresh = float(getattr(config, "FEATURE_CORR_THRESHOLD", 0.0))
+    if corr_thresh > 0:
+        kept_after_corr = _drop_correlated_features(
+            X, feature_cols, importance, corr_thresh,
+        )
+        if len(kept_after_corr) < len(feature_cols):
+            # Re-index importance to match surviving columns
+            keep_idx = [feature_cols.index(c) for c in kept_after_corr]
+            importance = importance[keep_idx]
+            X = X[:, keep_idx]
+            feature_cols = kept_after_corr
+
+    # --- Step 2: importance-based pruning ---
     n_drop = int(len(feature_cols) * prune_fraction)
     if n_drop < 1:
         return feature_cols
@@ -404,136 +810,50 @@ def _prune_features_quick(
     return kept
 
 
-def prepare_ranking_data(
-    df: pd.DataFrame,
-) -> tuple:
-    """
-    Prepare data for Learning-to-Rank models.
+def _quick_prune_mask(
+    X: np.ndarray,
+    y: np.ndarray,
+    feature_cols: list[str],
+    prune_fraction: float,
+    corr_threshold: float,
+) -> np.ndarray:
+    """Return a boolean column mask after quick pilot importance+correlation pruning."""
+    n_feats = X.shape[1]
+    mask = np.ones(n_feats, dtype=bool)
 
-    Instead of a binary win/loss target, LTR uses **relevance labels**
-    derived from finishing position.  Higher label = better horse.
-    A ``group`` array tells the ranker which rows belong to the same race.
+    if n_feats < 2 or len(X) < 2:
+        return mask
 
-    Returns:
-        X_train, X_test, y_train, y_test, groups_train, groups_test,
-        feature_columns, scaler, test_df
-    """
-    logger.info("Preparing ranking data...")
-
-    feature_cols = get_feature_columns(df)
-    logger.info(f"Using {len(feature_cols)} features")
-
-    df = df.copy()
-    df["race_date"] = pd.to_datetime(df["race_date"])
-    df["_event_dt"] = _event_sort_key(df)
-    # Sort by horse_name within each race to break the finish_position
-    # ordering from the raw data — prevents row-position from leaking
-    # the outcome when model scores are degenerate (all-equal).
-    _sort_cols = ["_event_dt", "race_id"]
-    if "horse_name" in df.columns:
-        _sort_cols.append("horse_name")
-    df = df.sort_values(_sort_cols).reset_index(drop=True)
-
-    # Only keep rows with valid finish positions
-    df = df[df["finish_position"].notna() & (df["finish_position"] > 0)].copy()
-
-    # ── Degenerate race filter (training quality) ─────────────────────────
-    # Remove entire races that contain systematic data errors:
-    #   • Single-runner races  — no competition, relevance labels are meaningless
-    #   • All-identical finish positions within a race — scraping artefact
-    #   • Any runner with odds < 1.01       — impossible market, data error
-    # These races are removed from training only; they never affect prediction.
-    if "num_runners" in df.columns:
-        _single_runner_ids = df.groupby("race_id")["num_runners"].first()
-        _single_runner_ids = _single_runner_ids[_single_runner_ids <= 1].index
-    else:
-        _single_runner_ids = pd.Index([])
-    _pos_spread = df.groupby("race_id")["finish_position"].transform("nunique")
-    _identical_pos_ids = df.loc[_pos_spread <= 1, "race_id"].unique()
-    _bad_odds_ids = pd.Index([])
-    if "odds" in df.columns:
-        _bad_odds_ids = df.loc[df["odds"] < 1.01, "race_id"].unique()
-    _degenerate_ids = set(_single_runner_ids) | set(_identical_pos_ids) | set(_bad_odds_ids)
-    if _degenerate_ids:
-        _n_before = len(df)
-        df = df[~df["race_id"].isin(_degenerate_ids)].copy()
-        logger.info(
-            f"Removed {_n_before - len(df)} rows from {len(_degenerate_ids)} "
-            f"degenerate races (single-runner / identical positions / bad odds)"
-        )
-
-    # Relevance label: higher is better, ordinal.
-    # Winner-heavy scheme so LambdaRank's NDCG gradient focuses on
-    # getting the winner right: 1st=5, 2nd=2, 3rd=1, 4th+=0.
-    # With NDCG gain = 2^label - 1: winner=31, 2nd=3, 3rd=1
-    # → winner is 10× more important than 2nd place.
-    fp = df["finish_position"].values.astype(int)
-    df["relevance"] = np.where(fp == 1, 5, np.where(fp == 2, 2, np.where(fp == 3, 1, 0)))
-
-    # Time-based split
-    split_idx = int(len(df) * (1 - config.TEST_SIZE))
-    # Ensure we split at a race boundary
-    split_race = df.iloc[split_idx]["race_id"]
-    while split_idx < len(df) and df.iloc[split_idx]["race_id"] == split_race:
-        split_idx += 1
-
-    train_df = df.iloc[:split_idx]
-    test_df = df.iloc[split_idx:]
-    train_df = train_df.drop(columns=["_event_dt"], errors="ignore")
-    test_df = test_df.drop(columns=["_event_dt"], errors="ignore")
-
-    # ── Purge gap ────────────────────────────────────────────────
-    _purge_days = getattr(config, "PURGE_DAYS", 7)
-    if _purge_days > 0:
-        _test_start = test_df["race_date"].min()
-        _purge_cutoff = _test_start - pd.Timedelta(days=_purge_days)
-        train_df = train_df[train_df["race_date"] <= _purge_cutoff].copy()
-
-    # ── Burn-in exclusion ────────────────────────────────────────
-    _burn_months = getattr(config, "BURN_IN_MONTHS", 4)
-    if _burn_months > 0 and len(train_df) > 0:
-        _train_start = pd.Timestamp(train_df["race_date"].min())
-        _train_end = pd.Timestamp(train_df["race_date"].max())
-        _burn_cutoff = _train_start + pd.DateOffset(months=_burn_months)
-        if _burn_cutoff < _train_end:
-            train_df = train_df[train_df["race_date"] >= _burn_cutoff].copy()
-        else:
-            logger.info(
-                f"Burn-in skipped: dataset span "
-                f"({(_train_end - _train_start).days} days) "
-                f"does not exceed {_burn_months}-month burn-in period"
-            )
-
-    X_train = train_df[feature_cols].values
-    X_test = test_df[feature_cols].values
-    y_train = train_df["relevance"].values
-    y_test = test_df["relevance"].values
-
-    # Group sizes: number of runners per race (order must match row order)
-    groups_train = train_df.groupby("race_id", sort=False).size().values
-    groups_test = test_df.groupby("race_id", sort=False).size().values
-
-    # Scale features
-    scaler = _IdentityScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test = scaler.transform(X_test)
-
-    logger.info(
-        f"Training: {X_train.shape[0]} runners in {len(groups_train)} races"
+    pilot = LGBMClassifier(
+        n_estimators=60, max_depth=5, learning_rate=0.1,
+        subsample=0.7, colsample_bytree=0.7, min_child_samples=30,
+        objective="binary", random_state=config.RANDOM_SEED,
+        n_jobs=1, verbose=-1,
     )
-    logger.info(
-        f"Test:     {X_test.shape[0]} runners in {len(groups_test)} races"
-    )
-    logger.info(
-        f"Test set: most recent data from {test_df['race_date'].min().date()} "
-        f"to {test_df['race_date'].max().date()}"
-    )
+    pilot.fit(X, y.astype(int))
+    importance = pilot.feature_importances_
 
-    return (
-        X_train, X_test, y_train, y_test,
-        groups_train, groups_test,
-        feature_cols, scaler, test_df,
-    )
+    # Correlation de-dup
+    if corr_threshold > 0:
+        kept = _drop_correlated_features(X, list(feature_cols), importance, corr_threshold)
+        if len(kept) < n_feats:
+            kept_set = set(kept)
+            for i, c in enumerate(feature_cols):
+                if c not in kept_set:
+                    mask[i] = False
+            # Re-index importance
+            importance = importance[mask]
+
+    # Importance pruning
+    active_idx = np.where(mask)[0]
+    n_drop = int(len(active_idx) * prune_fraction)
+    if n_drop >= 1:
+        sorted_imp = np.argsort(importance)
+        drop_positions = sorted_imp[:n_drop]
+        for dp in drop_positions:
+            mask[active_idx[dp]] = False
+
+    return mask
 
 
 def prepare_multi_target_data(
@@ -542,16 +862,15 @@ def prepare_multi_target_data(
     """
     Prepare a shared train/test split with **multiple** target arrays.
 
-    Identical preprocessing and temporal split to
-    :func:`prepare_ranking_data`, but returns three targets per split:
+    Returns multiple targets per split:
 
-    * ``y_*_rel``  — non-linear relevance labels  (for LTR ranker)
-    * ``y_*_lb``   — ``lengths_behind``            (for regressor)
-    * ``y_*_won``  — binary ``won``                (for classifier)
+    * ``y_*_won``    — binary ``won``         (for win classifier)
+    * ``y_*_placed`` — binary placed          (for place classifier)
+    * ``y_*_rel``    — relevance labels       (for ranking metrics)
 
     Returns:
         dict with keys ``X_train``, ``X_test``, ``y_train_rel``,
-        ``y_test_rel``, ``y_train_lb``, ``y_test_lb``, ``y_train_won``,
+        ``y_test_rel``, ``y_train_won``,
         ``y_test_won``, ``groups_train``, ``groups_test``,
         ``feature_cols``, ``scaler``, ``test_df``.
     """
@@ -575,6 +894,8 @@ def prepare_multi_target_data(
     df = df[df["finish_position"].notna() & (df["finish_position"] > 0)].copy()
 
     # ── Degenerate race filter (training quality) ─────────────────────────
+    _degenerate_removed_rows = 0
+    _degenerate_removed_races = 0
     if "num_runners" in df.columns:
         _single_runner_ids = df.groupby("race_id")["num_runners"].first()
         _single_runner_ids = _single_runner_ids[_single_runner_ids <= 1].index
@@ -589,14 +910,38 @@ def prepare_multi_target_data(
     if _degenerate_ids:
         _n_before = len(df)
         df = df[~df["race_id"].isin(_degenerate_ids)].copy()
+        _degenerate_removed_rows = _n_before - len(df)
+        _degenerate_removed_races = len(_degenerate_ids)
         logger.info(
-            f"Removed {_n_before - len(df)} rows from {len(_degenerate_ids)} "
+            f"Removed {_degenerate_removed_rows} rows from {_degenerate_removed_races} "
             f"degenerate races (single-runner / identical positions / bad odds)"
         )
 
+    # ── Burn-in exclusion (dataset-level, before split) ────────────────
+    # Applied once from the absolute dataset start so that every
+    # downstream split / CV fold sees the same burn-in boundary.
+    _burn_months = getattr(config, "BURN_IN_MONTHS", 4)
+    if _burn_months > 0 and len(df) > 0:
+        _ds_start = pd.Timestamp(df["race_date"].min())
+        _ds_end = pd.Timestamp(df["race_date"].max())
+        _burn_cutoff = _ds_start + pd.DateOffset(months=_burn_months)
+        if _burn_cutoff < _ds_end:
+            _n_before = len(df)
+            df = df[df["race_date"] >= _burn_cutoff].copy()
+            logger.info(
+                f"Burn-in: excluded {_n_before - len(df)} cold-start rows "
+                f"(first {_burn_months} months, cutoff {_burn_cutoff.date()})"
+            )
+        else:
+            logger.info(
+                f"Burn-in skipped: dataset span "
+                f"({(_ds_end - _ds_start).days} days) "
+                f"does not exceed {_burn_months}-month burn-in period"
+            )
+
     # Relevance labels: winner-heavy (1st=5, 2nd=2, 3rd=1, rest=0)
     fp = df["finish_position"].values.astype(int)
-    df["relevance"] = np.where(fp == 1, 5, np.where(fp == 2, 2, np.where(fp == 3, 1, 0)))
+    df["relevance"] = make_relevance_labels(fp)
 
     # Time-based split (aligned to race boundary)
     split_idx = int(len(df) * (1 - config.TEST_SIZE))
@@ -625,33 +970,6 @@ def prepare_multi_target_data(
                 f"days of test boundary ({_test_start.date()})"
             )
 
-    # ── Burn-in exclusion ────────────────────────────────────────────
-    # Drop rows from the very START of the training window.  Feature
-    # engineering already ran on the full history so cumulative/rolling
-    # stats are correct — but these earliest rows have cold-start counts
-    # (horse_prev_races ≈ 0, Elo ≈ 1500) that are unusable as training
-    # signal and actively hurt gradient quality.
-    _burn_months = getattr(config, "BURN_IN_MONTHS", 4)
-    if _burn_months > 0 and len(train_df) > 0:
-        _train_start = pd.Timestamp(train_df["race_date"].min())
-        _train_end = pd.Timestamp(train_df["race_date"].max())
-        _burn_cutoff = _train_start + pd.DateOffset(months=_burn_months)
-        if _burn_cutoff < _train_end:
-            _n_before = len(train_df)
-            train_df = train_df[train_df["race_date"] >= _burn_cutoff].copy()
-            _n_burned = _n_before - len(train_df)
-            if _n_burned > 0:
-                logger.info(
-                    f"Burn-in: excluded {_n_burned} cold-start rows "
-                    f"(first {_burn_months} months of training window)"
-                )
-        else:
-            logger.info(
-                f"Burn-in skipped: dataset span "
-                f"({(_train_end - _train_start).days} days) "
-                f"does not exceed {_burn_months}-month burn-in period"
-            )
-
     if len(train_df) < 2:
         raise ValueError(
             f"Training data has only {len(train_df)} row(s) after filtering "
@@ -662,11 +980,6 @@ def prepare_multi_target_data(
 
     # Save training dates for purged CV fold splitting in Phase 1
     train_race_dates = train_df["race_date"].values
-
-    # Optional feature pruning (quick pilot model → drop bottom N %)
-    _prune_frac = getattr(config, "FEATURE_PRUNE_FRACTION", 0.0)
-    if _prune_frac > 0:
-        feature_cols = _prune_features_quick(train_df, feature_cols, _prune_frac)
 
     X_train = train_df[feature_cols].values
     X_test = test_df[feature_cols].values
@@ -711,8 +1024,23 @@ def prepare_multi_target_data(
     y_train_rel = train_df["relevance"].values
     y_test_rel = test_df["relevance"].values
 
-    y_train_lb = train_df["lengths_behind"].fillna(0).values.astype(np.float32)
-    y_test_lb = test_df["lengths_behind"].fillna(0).values.astype(np.float32)
+    # Non-finishers have NaN lengths_behind; impute with field-size
+    # penalty (last + 10L) so the regressor treats them as poor outcomes
+    # rather than as winners (0.0).
+    def _impute_lb(df: pd.DataFrame) -> np.ndarray:
+        lb = df["lengths_behind"].copy()
+        if "finish_position" in df.columns:
+            non_finisher = df["finish_position"].fillna(0).astype(int) < 1
+        else:
+            non_finisher = lb.isna()
+        # For non-finishers: use max lb in race + 10, or 30 if unknown
+        race_max_lb = df.groupby("race_id")["lengths_behind"].transform("max")
+        lb = lb.where(~non_finisher, race_max_lb + 10.0)
+        lb = lb.fillna(30.0)
+        return lb.values.astype(np.float32)
+
+    y_train_lb = _impute_lb(train_df)
+    y_test_lb = _impute_lb(test_df)
 
     y_train_won = train_df["won"].fillna(0).values.astype(int)
     y_test_won = test_df["won"].fillna(0).values.astype(int)
@@ -720,18 +1048,8 @@ def prepare_multi_target_data(
     # Market-residual target: realised outcome minus *normalised* implied
     # win probability (overround removed).  Using raw 1/odds would inflate
     # the baseline by ~20% and introduce overround-dependent noise.
-    if "odds" in train_df.columns:
-        _raw_ip_tr = (1.0 / train_df["odds"].replace(0, np.nan)).fillna(0.0).clip(0.0, 1.0).values.astype(np.float32)
-        _overround_tr = train_df.groupby("race_id")["odds"].transform(lambda o: (1.0 / o).sum()).values.astype(np.float32)
-        ip_tr = _raw_ip_tr / np.maximum(_overround_tr, 1e-9)
-    else:
-        ip_tr = np.zeros(len(train_df), dtype=np.float32)
-    if "odds" in test_df.columns:
-        _raw_ip_te = (1.0 / test_df["odds"].replace(0, np.nan)).fillna(0.0).clip(0.0, 1.0).values.astype(np.float32)
-        _overround_te = test_df.groupby("race_id")["odds"].transform(lambda o: (1.0 / o).sum()).values.astype(np.float32)
-        ip_te = _raw_ip_te / np.maximum(_overround_te, 1e-9)
-    else:
-        ip_te = np.zeros(len(test_df), dtype=np.float32)
+    ip_tr = normalise_implied_prob_by_race(train_df)
+    ip_te = normalise_implied_prob_by_race(test_df)
 
     y_train_resid = y_train_won.astype(np.float32) - ip_tr
     y_test_resid = y_test_won.astype(np.float32) - ip_te
@@ -770,18 +1088,7 @@ def prepare_multi_target_data(
 
     # ── Recency sample weights ────────────────────────────────────
     # Recent races are more predictive — exponential decay over time.
-    max_date = train_df["race_date"].max()
-    days_ago = (max_date - train_df["race_date"]).dt.days.values.astype(np.float64)
-    _hl = getattr(config, "RECENCY_HALF_LIFE_DAYS", 180)
-    sample_weight_train = np.exp(-np.log(2) * days_ago / _hl)
-    # Seasonal boost: same calendar month gets an uplift
-    _seasonal = getattr(config, "RECENCY_SEASONAL_BOOST", 0.0)
-    if _seasonal > 0:
-        _cur_month = max_date.month
-        _same_month = (train_df["race_date"].dt.month.values == _cur_month).astype(np.float64)
-        sample_weight_train *= (1.0 + _seasonal * _same_month)
-    # Normalise so mean weight ≈ 1 (keeps effective sample size stable)
-    sample_weight_train = sample_weight_train / sample_weight_train.mean()
+    sample_weight_train = compute_recency_sample_weights(train_df["race_date"])
 
     # Group sizes
     groups_train = train_df.groupby("race_id", sort=False).size().values
@@ -826,6 +1133,8 @@ def prepare_multi_target_data(
         "sample_weight_train": sample_weight_train,
         "train_race_dates": train_race_dates,
         "train_df": train_df,
+        "degenerate_removed_rows": int(_degenerate_removed_rows),
+        "degenerate_removed_races": int(_degenerate_removed_races),
     }
 
 
@@ -924,869 +1233,6 @@ def rps_per_race(
     return float(np.mean(per_group_rps[valid]))
 
 
-def _rps_objective_factory(
-    groups: np.ndarray,
-    finish_pos: np.ndarray,
-):
-    """Create a LightGBM custom ``fobj`` (gradient + Hessian) for RPS loss.
-
-    Rank-Probability Score for a race of N runners:
-
-        RPS = 1/(N-1) * sum_{k=1}^{N-1} (F_k - 1)^2
-
-    The target CDF is 1 at every position (the winner is always in the
-    top-k for all k >= 1).
-
-    Gradient derivation for horse i with actual rank j_i (0-indexed):
-
-        ∂RPS/∂s_i = 2·p_i/(N-1) · Σ_k  (F_k - 1) · (1_{j_i ≤ k} - F_k)
-                  = 2·p_i/(N-1) · (suffix[j_i] - prefix[j_i])
-
-    where:
-        suffix[j] = Σ_{k=j}^{N-2}  residuals[k] · (1 - F_k)
-        prefix[j] = Σ_{k=0}^{j-1}  residuals[k] · F_k
-        residuals[k] = F_k - 1
-
-    Hessian: diagonal approximation H_i = p_i·(1-p_i)·2/(N-1).
-
-    Args:
-        groups: Array of group sizes (runners per race).
-        finish_pos: Actual finish positions (1 = winner), aligned with groups.
-
-    Returns:
-        A ``fobj(preds, dataset)`` callable set via ``params["objective"]``.
-    """
-    cum_g = np.concatenate([[0], np.cumsum(groups)]).astype(np.intp)
-    fp_arr = finish_pos.astype(np.float32)
-    n_races = len(groups)
-
-    def rps_obj(preds: np.ndarray, train_data) -> tuple:  # LightGBM always calls fobj(preds, dataset)
-        # train_data (Dataset) is unused — fp_arr from closure provides ground-truth ordering
-        grad = np.zeros_like(preds, dtype=np.float64)
-        hess = np.zeros_like(preds, dtype=np.float64)
-        for r in range(n_races):
-            start = int(cum_g[r])
-            end = int(cum_g[r + 1])
-            N = end - start
-            if N < 2:
-                hess[start:end] = 1.0
-                continue
-
-            # Softmax within race (numerically stable)
-            s = preds[start:end].astype(np.float64)
-            s = s - s.max()
-            exp_s = np.exp(s)
-            p = exp_s / exp_s.sum()
-
-            # Sort by actual finish position (ascending → winner first)
-            order = np.argsort(fp_arr[start:end])
-            inv_order = np.empty(N, dtype=np.intp)
-            inv_order[order] = np.arange(N, dtype=np.intp)
-
-            # Cumulative predicted probability along actual ranking
-            F = np.cumsum(p[order])                               # shape (N,)
-            residuals = F[:N - 1] - 1.0
-
-            # Vectorised suffix / prefix sums (avoid Python inner loops)
-            rf_comp = residuals * (1.0 - F[:N - 1])              # r[k]·(1-F[k])
-            suffix = np.zeros(N, dtype=np.float64)
-            suffix[:N - 1] = np.cumsum(rf_comp[::-1])[::-1]      # suffix[j..N-2]
-
-            rf_self = residuals * F[:N - 1]                       # r[k]·F[k]
-            prefix = np.zeros(N, dtype=np.float64)
-            prefix[1:] = np.cumsum(rf_self)                       # prefix[0..j-1]
-
-            scale = 2.0 / (N - 1)
-            j_arr = inv_order                                      # actual rank per runner
-            grad[start:end] = p * scale * (suffix[j_arr] - prefix[j_arr])
-            hess[start:end] = np.maximum(p * (1.0 - p) * scale, 1e-6)
-
-        return grad, hess
-
-    return rps_obj
-
-
-def _value_objective_factory(
-    groups: np.ndarray,
-    finish_pos: np.ndarray,
-    implied_probs: np.ndarray,
-):
-    """Create a LightGBM custom objective that optimises for betting value.
-
-    Per-race softmax cross-entropy weighted by log-odds of the winner:
-
-        L_r = -w_r · log(p_winner)
-        w_r = max(1, log(1 / implied_prob_winner))
-
-    This focuses model capacity on races where the winner was at higher
-    odds (bigger overlay potential).  A 20/1 winner contributes ~3x the
-    gradient of a 2/1 favourite, making the model prioritise exactly the
-    edge-finding skill that drives positive ROI.
-
-    Gradient:
-        g_i = w_r · (p_i - y_i)     (standard softmax CE scaled by race weight)
-
-    Hessian:
-        H_i = w_r · p_i · (1 - p_i) (exact, no diagonal approximation)
-    """
-    cum_g = np.concatenate([[0], np.cumsum(groups)]).astype(np.intp)
-    fp_arr = finish_pos.astype(np.float32)
-    ip_arr = implied_probs.astype(np.float64)
-    n_races = len(groups)
-
-    # Pre-compute per-race weight from winner's implied probability
-    race_weights = np.ones(n_races, dtype=np.float64)
-    for r in range(n_races):
-        start = int(cum_g[r])
-        end = int(cum_g[r + 1])
-        winner_mask = fp_arr[start:end] == 1
-        if winner_mask.any():
-            ip_winner = float(ip_arr[start + int(np.argmax(winner_mask))])
-            # log(1/ip) ≈ log(decimal_odds);  clamp ip to avoid log(inf)
-            ip_winner = max(ip_winner, 0.01)
-            race_weights[r] = max(1.0, -np.log(ip_winner))
-
-    def value_obj(preds: np.ndarray, train_data) -> tuple:
-        grad = np.zeros_like(preds, dtype=np.float64)
-        hess = np.zeros_like(preds, dtype=np.float64)
-        for r in range(n_races):
-            start = int(cum_g[r])
-            end = int(cum_g[r + 1])
-            N = end - start
-            if N < 2:
-                hess[start:end] = 1.0
-                continue
-
-            s = preds[start:end].astype(np.float64)
-            s = s - s.max()
-            exp_s = np.exp(s)
-            p = exp_s / exp_s.sum()
-
-            y = np.zeros(N, dtype=np.float64)
-            winner_mask = fp_arr[start:end] == 1
-            if winner_mask.any():
-                y[np.argmax(winner_mask)] = 1.0
-
-            w = race_weights[r]
-            grad[start:end] = w * (p - y)
-            hess[start:end] = np.maximum(w * p * (1.0 - p), 1e-6)
-
-        return grad, hess
-
-    return value_obj
-
-
-def _unpickle_lgbm_rps_ranker(state):
-    """Stable reconstructor for _LGBMRpsRanker.
-
-    Pickle serialises this *function* by name so Streamlit module reloads
-    no longer cause a ``PicklingError: it's not the same object`` failure.
-    """
-    from src.model import _LGBMRpsRanker as _cls  # noqa: PLC0415
-    obj = object.__new__(_cls)
-    obj.__setstate__(state)
-    return obj
-
-
-class _LGBMRpsRanker:
-    """Sklearn-compatible wrapper around a native LightGBM booster trained
-    with the custom Rank-Probability Score (RPS) objective.
-
-    Provides ``.predict(X)`` returning raw scores (higher → more likely to
-    win), fully compatible with the rest of the ``EnsembleModel`` pipeline.
-    """
-
-    def __init__(self, booster) -> None:
-        self._booster = booster
-        try:
-            self.feature_importances_ = booster.feature_importance(
-                importance_type="gain",
-            )
-        except Exception:
-            self.feature_importances_ = None
-
-    def predict(self, X) -> np.ndarray:
-        if isinstance(X, pd.DataFrame):
-            X = X.values
-        return self._booster.predict(X)
-
-    def __repr__(self) -> str:
-        try:
-            return f"_LGBMRpsRanker(n_trees={self._booster.num_trees()})"
-        except Exception:
-            return "_LGBMRpsRanker()"
-
-    # ── Pickle / joblib serialisation ───────────────────────────────────
-    def __getstate__(self):
-        return {
-            "model_str": self._booster.model_to_string(),
-            "feature_importances_": self.feature_importances_,
-        }
-
-    def __setstate__(self, state):
-        import lightgbm as _lgb
-        self._booster = _lgb.Booster(model_str=state["model_str"])
-        self.feature_importances_ = state.get("feature_importances_")
-
-    def __reduce__(self):
-        return (_unpickle_lgbm_rps_ranker, (self.__getstate__(),))
-
-
-def _build_monotone_constraints(
-    feature_cols: list[str] | None,
-) -> list[int] | None:
-    """Build a LightGBM ``monotone_constraints`` vector (1 = mono-positive).
-
-    Returns *None* if no ``feature_cols`` are provided (e.g. when train_ranker
-    is called from auto-tune without column names known), which means LightGBM
-    will apply no constraints.
-    """
-    if not feature_cols:
-        return None
-    _mono_feats = set(getattr(config, "MONOTONE_FEATURES", []))
-    if not _mono_feats:
-        return None
-    constraints = [1 if c in _mono_feats else 0 for c in feature_cols]
-    n_pos = sum(constraints)
-    if n_pos > 0:
-        logger.debug(
-            f"Monotonic constraints: {n_pos} features constrained to be "
-            f"monotone-positive ({[c for c in feature_cols if c in _mono_feats]})"
-        )
-    return constraints if any(constraints) else None
-
-
-def train_ranker(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    groups_train: np.ndarray,
-    model_type: str = "xgb_ranker",
-    params: dict | None = None,
-    X_val: np.ndarray | None = None,
-    y_val: np.ndarray | None = None,
-    groups_val: np.ndarray | None = None,
-    finish_pos: np.ndarray | None = None,
-    finish_pos_val: np.ndarray | None = None,
-    implied_prob: np.ndarray | None = None,
-    implied_prob_val: np.ndarray | None = None,
-    feature_cols: list[str] | None = None,
-    sample_weight: np.ndarray | None = None,
-) -> object:
-    """
-    Train a Learning-to-Rank model.
-
-    Args:
-        X_train: Training features
-        y_train: Relevance labels (higher = better)
-        groups_train: Array of group sizes (runners per race)
-        model_type: ``"xgb_ranker"`` or ``"lgbm_ranker"``
-        params: Optional dict of hyperparameters. If *None*, falls back
-                to ``config.XGBOOST_PARAMS`` / ``config.LIGHTGBM_PARAMS``.
-        X_val / y_val / groups_val: Optional validation set for early
-                stopping.  When provided, training stops if the
-                validation metric does not improve for 50 rounds.
-
-    Returns:
-        Trained ranker model
-    """
-    logger.info(f"Training {model_type} ranker...")
-    _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
-
-    if model_type == "xgb_ranker":
-        defaults = {
-            "n_estimators": config.XGBOOST_PARAMS["n_estimators"],
-            "max_depth": config.XGBOOST_PARAMS["max_depth"],
-            "learning_rate": config.XGBOOST_PARAMS["learning_rate"],
-            "subsample": config.XGBOOST_PARAMS["subsample"],
-            "colsample_bytree": config.XGBOOST_PARAMS["colsample_bytree"],
-        }
-        hp = {**defaults, **(params or {})}
-        model = XGBRanker(
-            objective="rank:ndcg",
-            **hp,
-            random_state=config.RANDOM_SEED,
-            n_jobs=-1,
-        )
-        fit_kw: dict = {"group": groups_train}
-        if sample_weight is not None:
-            fit_kw["sample_weight"] = sample_weight
-        if X_val is not None and y_val is not None and groups_val is not None:
-            fit_kw["eval_set"] = [(X_val, y_val)]
-            fit_kw["eval_group"] = [groups_val]
-            fit_kw["verbose"] = False
-            model.set_params(early_stopping_rounds=_es_rounds)
-        model.fit(X_train, y_train, **fit_kw)
-
-    elif model_type == "lgbm_ranker":
-        defaults = {
-            "n_estimators": config.LTR_PARAMS.get("n_estimators", 500),
-            "max_depth": config.LTR_PARAMS.get("max_depth", 6),
-            "learning_rate": config.LTR_PARAMS.get("learning_rate", 0.05),
-            "subsample": config.LTR_PARAMS.get("subsample", 0.8),
-            "colsample_bytree": config.LTR_PARAMS.get("colsample_bytree", 0.8),
-            "min_child_samples": config.LTR_PARAMS.get("min_child_samples", 10),
-            "reg_alpha": config.LTR_PARAMS.get("reg_alpha", 0.1),
-            "reg_lambda": config.LTR_PARAMS.get("reg_lambda", 1.0),
-        }
-        hp = {**defaults, **(params or {})}
-        _mono = _build_monotone_constraints(feature_cols)
-        _can_es = (
-            X_val is not None and groups_val is not None
-            and finish_pos_val is not None and _es_rounds > 0
-        )
-        if _can_es:
-            # Use native LightGBM API with custom RPS eval for early
-            # stopping — RPS is smooth and reliable on small groups,
-            # unlike NDCG.
-            import lightgbm as _lgb_native  # noqa: PLC0415
-            n_est = int(hp.pop("n_estimators", 500))
-            lgb_params: dict = {
-                "boosting_type": "gbdt",
-                "objective": "lambdarank",
-                "num_leaves": int(hp.pop("num_leaves", config.LTR_PARAMS.get("num_leaves", 31))),
-                "max_depth": int(hp.pop("max_depth", -1)),
-                "learning_rate": float(hp.pop("learning_rate", 0.05)),
-                "feature_fraction": float(hp.pop("colsample_bytree", 0.8)),
-                "bagging_fraction": float(hp.pop("subsample", 0.8)),
-                "bagging_freq": 1,
-                "min_child_samples": int(hp.pop("min_child_samples", 10)),
-                "lambda_l1": float(hp.pop("reg_alpha", 0.1)),
-                "lambda_l2": float(hp.pop("reg_lambda", 1.0)),
-                "verbose": -1,
-                "seed": config.RANDOM_SEED,
-                "num_threads": -1,
-                "metric": "None",
-                "eval_at": [1],
-            }
-            if _mono is not None:
-                lgb_params["monotone_constraints"] = _mono
-            train_data = _lgb_native.Dataset(
-                X_train, label=y_train.astype(np.float32),
-                group=groups_train, free_raw_data=False,
-            )
-            val_data = _lgb_native.Dataset(
-                X_val, label=y_val.astype(np.float32),
-                group=groups_val, reference=train_data, free_raw_data=False,
-            )
-            _fp_val = finish_pos_val.astype(np.float32)
-            _g_val = groups_val.copy()
-
-            def _rps_eval_ranker(preds, _dataset):
-                """Custom RPS feval for LGBMRanker early stopping."""
-                probs = np.zeros(len(preds), dtype=np.float64)
-                off = 0
-                for g in _g_val:
-                    sl = slice(off, off + g)
-                    s = preds[sl].astype(np.float64)
-                    s = s - s.max()
-                    e = np.exp(s)
-                    probs[sl] = e / max(e.sum(), 1e-12)
-                    off += g
-                rps = rps_per_race(probs, _fp_val, _g_val)
-                return "rps", rps, False
-
-            from lightgbm import early_stopping as _lgb_es, log_evaluation as _lgb_log
-            callbacks = [
-                _lgb_es(_es_rounds, verbose=False),
-                _lgb_log(period=0),
-            ]
-            booster = _lgb_native.train(
-                lgb_params, train_data, num_boost_round=n_est,
-                valid_sets=[train_data, val_data],
-                valid_names=["training", "valid"],
-                feval=_rps_eval_ranker,
-                callbacks=callbacks,
-            )
-            _best = getattr(booster, "best_iteration", n_est)
-            if _best < n_est:
-                logger.info(f"  lgbm_ranker early-stopped at round {_best}/{n_est}")
-            model = _LGBMRpsRanker(booster)
-        else:
-            model = LGBMRanker(
-                objective="lambdarank",
-                **hp,
-                subsample_freq=1,
-                monotone_constraints=_mono,
-                random_state=config.RANDOM_SEED,
-                n_jobs=-1,
-                verbose=-1,
-            )
-            fit_kw = {"group": groups_train, "eval_at": [1]}
-            if sample_weight is not None:
-                fit_kw["sample_weight"] = sample_weight
-            model.fit(X_train, y_train, **fit_kw)
-
-    elif model_type == "cat_ranker":
-        _require_catboost()
-        defaults = {
-            "n_estimators": config.LTR_PARAMS.get("n_estimators", 500),
-            "depth": config.LTR_PARAMS.get("max_depth", 6),
-            "learning_rate": config.LTR_PARAMS.get("learning_rate", 0.05),
-            "l2_leaf_reg": 3.0,
-        }
-        hp = {**defaults, **(params or {})}
-        model = CatBoostRanker(
-            loss_function="YetiRankPairwise",
-            eval_metric="NDCG:top=1",
-            random_seed=config.RANDOM_SEED,
-            verbose=False,
-            **hp,
-        )
-        g_train = _groups_to_group_id(groups_train)
-        train_pool = Pool(X_train, y_train, group_id=g_train,
-                          weight=sample_weight)
-        fit_kw: dict = {}
-        if X_val is not None and y_val is not None and groups_val is not None:
-            g_val = _groups_to_group_id(groups_val)
-            fit_kw["eval_set"] = Pool(X_val, y_val, group_id=g_val)
-            fit_kw["use_best_model"] = True
-            fit_kw["early_stopping_rounds"] = _es_rounds
-        model.fit(train_pool, **fit_kw)
-
-    elif model_type == "lgbm_rps":
-        # ── LightGBM with custom Rank-Probability Score objective ──────────
-        import lightgbm as _lgb_native  # noqa: PLC0415
-        if finish_pos is None:
-            raise ValueError(
-                "finish_pos must be supplied when model_type='lgbm_rps'"
-            )
-        _lp: dict = {**config.LTR_PARAMS, **(params or {})}
-        n_est = int(_lp.get("n_estimators", 500))
-        lgb_params: dict = {
-            "boosting_type": "gbdt",
-            "num_leaves": int(_lp.get("num_leaves", 31)),
-            "max_depth": int(_lp.get("max_depth", -1)),
-            "learning_rate": float(_lp.get("learning_rate", 0.05)),
-            "feature_fraction": float(_lp.get("colsample_bytree", 0.8)),
-            "bagging_fraction": float(_lp.get("subsample", 0.8)),
-            "bagging_freq": 5,
-            "min_child_samples": int(_lp.get("min_child_samples", 10)),
-            "lambda_l1": float(_lp.get("reg_alpha", 0.1)),
-            "lambda_l2": float(_lp.get("reg_lambda", 1.0)),
-            "verbose": -1,
-            "seed": config.RANDOM_SEED,
-            "num_threads": -1,
-        }
-        lgb_params["objective"] = _rps_objective_factory(groups_train, finish_pos)
-        _mono = _build_monotone_constraints(feature_cols)
-        if _mono is not None:
-            lgb_params["monotone_constraints"] = _mono
-        train_data = _lgb_native.Dataset(
-            X_train,
-            label=finish_pos.astype(np.float32),
-            group=groups_train,
-            free_raw_data=False,
-        )
-
-        # Build validation set + custom RPS eval for early stopping
-        valid_sets = [train_data]
-        valid_names = ["training"]
-        callbacks = []
-        if (X_val is not None and groups_val is not None
-                and finish_pos_val is not None and _es_rounds > 0):
-            val_data = _lgb_native.Dataset(
-                X_val,
-                label=finish_pos_val.astype(np.float32),
-                group=groups_val,
-                reference=train_data,
-                free_raw_data=False,
-            )
-            valid_sets.append(val_data)
-            valid_names.append("valid")
-
-            _fp_val = finish_pos_val.astype(np.float32)
-            _g_val = groups_val.copy()
-
-            def _rps_eval(preds, _dataset):
-                """Custom LightGBM feval: race-level RPS on validation."""
-                probs = np.zeros(len(preds), dtype=np.float64)
-                off = 0
-                for g in _g_val:
-                    sl = slice(off, off + g)
-                    s = preds[sl].astype(np.float64)
-                    s = s - s.max()
-                    e = np.exp(s)
-                    probs[sl] = e / max(e.sum(), 1e-12)
-                    off += g
-                rps = rps_per_race(probs, _fp_val, _g_val)
-                return "rps", rps, False  # name, value, is_higher_better
-
-            lgb_params["metric"] = "None"  # disable default metric
-            from lightgbm import early_stopping as _lgb_es, log_evaluation as _lgb_log
-            callbacks.append(_lgb_es(_es_rounds, verbose=False))
-            callbacks.append(_lgb_log(period=0))  # suppress per-round log
-
-        booster = _lgb_native.train(
-            lgb_params,
-            train_data,
-            num_boost_round=n_est,
-            valid_sets=valid_sets,
-            valid_names=valid_names,
-            feval=_rps_eval if len(valid_sets) > 1 else None,
-            callbacks=callbacks if callbacks else None,
-        )
-        _best = getattr(booster, "best_iteration", n_est)
-        if _best < n_est:
-            logger.info(f"  lgbm_rps early-stopped at round {_best}/{n_est}")
-        model = _LGBMRpsRanker(booster)
-
-    elif model_type == "lgbm_value":
-        # ── LightGBM with value-weighted cross-entropy objective ───────────
-        # Softmax CE weighted by log-odds of the winner — focuses model
-        # capacity on identifying high-odds winners, the skill that
-        # directly drives positive ROI.
-        import lightgbm as _lgb_native  # noqa: PLC0415
-        if finish_pos is None:
-            raise ValueError(
-                "finish_pos must be supplied when model_type='lgbm_value'"
-            )
-        if implied_prob is None:
-            raise ValueError(
-                "implied_prob must be supplied when model_type='lgbm_value'"
-            )
-        _lp: dict = {**config.LTR_PARAMS, **(params or {})}
-        n_est = int(_lp.get("n_estimators", 500))
-        lgb_params: dict = {
-            "boosting_type": "gbdt",
-            "num_leaves": int(_lp.get("num_leaves", 31)),
-            "max_depth": int(_lp.get("max_depth", -1)),
-            "learning_rate": float(_lp.get("learning_rate", 0.05)),
-            "feature_fraction": float(_lp.get("colsample_bytree", 0.8)),
-            "bagging_fraction": float(_lp.get("subsample", 0.8)),
-            "bagging_freq": 5,
-            "min_child_samples": int(_lp.get("min_child_samples", 10)),
-            "lambda_l1": float(_lp.get("reg_alpha", 0.1)),
-            "lambda_l2": float(_lp.get("reg_lambda", 1.0)),
-            "verbose": -1,
-            "seed": config.RANDOM_SEED,
-            "num_threads": -1,
-        }
-        lgb_params["objective"] = _value_objective_factory(
-            groups_train, finish_pos, implied_prob,
-        )
-        _mono = _build_monotone_constraints(feature_cols)
-        if _mono is not None:
-            lgb_params["monotone_constraints"] = _mono
-        train_data = _lgb_native.Dataset(
-            X_train,
-            label=finish_pos.astype(np.float32),
-            group=groups_train,
-            free_raw_data=False,
-        )
-
-        valid_sets = [train_data]
-        valid_names = ["training"]
-        callbacks = []
-        if (X_val is not None and groups_val is not None
-                and finish_pos_val is not None and _es_rounds > 0):
-            val_data = _lgb_native.Dataset(
-                X_val,
-                label=finish_pos_val.astype(np.float32),
-                group=groups_val,
-                reference=train_data,
-                free_raw_data=False,
-            )
-            valid_sets.append(val_data)
-            valid_names.append("valid")
-
-            _fp_val_v = finish_pos_val.astype(np.float32)
-            _g_val_v = groups_val.copy()
-
-            def _rps_eval_value(preds, _dataset):
-                """Custom feval: RPS on validation (objective-agnostic)."""
-                probs = np.zeros(len(preds), dtype=np.float64)
-                off = 0
-                for g in _g_val_v:
-                    sl = slice(off, off + g)
-                    s = preds[sl].astype(np.float64)
-                    s = s - s.max()
-                    e = np.exp(s)
-                    probs[sl] = e / max(e.sum(), 1e-12)
-                    off += g
-                rps = rps_per_race(probs, _fp_val_v, _g_val_v)
-                return "rps", rps, False
-
-            lgb_params["metric"] = "None"
-            from lightgbm import early_stopping as _lgb_es, log_evaluation as _lgb_log
-            callbacks.append(_lgb_es(_es_rounds, verbose=False))
-            callbacks.append(_lgb_log(period=0))
-
-        booster = _lgb_native.train(
-            lgb_params,
-            train_data,
-            num_boost_round=n_est,
-            valid_sets=valid_sets,
-            valid_names=valid_names,
-            feval=_rps_eval_value if len(valid_sets) > 1 else None,
-            callbacks=callbacks if callbacks else None,
-        )
-        _best = getattr(booster, "best_iteration", n_est)
-        if _best < n_est:
-            logger.info(f"  lgbm_value early-stopped at round {_best}/{n_est}")
-        model = _LGBMRpsRanker(booster)
-
-    else:
-        raise ValueError(f"Unknown ranker type: {model_type}")
-
-    logger.info(f"{model_type} training complete")
-    return model
-
-
-def auto_tune_ranker(
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    groups_train: np.ndarray,
-    X_val: np.ndarray,
-    y_val: np.ndarray,
-    groups_val: np.ndarray,
-    model_type: str = "xgb_ranker",
-    n_trials: int = 30,
-    callback=None,
-) -> dict:
-    """
-    Automatic hyperparameter optimisation via Optuna.
-
-    Uses **RPS** (Rank Probability Score) on a validation fold as the
-    objective.  RPS is the natural metric for ranked outcomes: it
-    penalises the full predicted finishing distribution, not just
-    the binary win probability.
-    Lower RPS = better calibrated probabilities = better value detection.
-
-    Args:
-        X_train / y_train / groups_train: Training split.
-        X_val / y_val / groups_val: Validation split (held-out from
-            training data — *not* the final test set).
-        model_type: ``"xgb_ranker"``, ``"lgbm_ranker"``, or ``"cat_ranker"``.
-        n_trials: Number of Optuna trials.
-        callback: Optional ``callable(trial_number, total, best_score)``
-                  for progress updates.
-
-    Returns:
-        dict with ``best_params``, ``best_score``,
-        ``trials`` (list of dicts), ``n_trials``.
-    """
-    import optuna
-
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    # Derive finish positions from relevance labels (higher = better)
-    fp_val = np.zeros(len(y_val), dtype=np.float32)
-    offset = 0
-    for g in groups_val:
-        gl = y_val[offset:offset + g]
-        # Convert relevance to rank: highest relevance = finish pos 1
-        order = np.argsort(-gl)
-        for rank, idx in enumerate(order):
-            fp_val[offset + idx] = rank + 1
-        offset += g
-
-    temperature = getattr(config, "SOFTMAX_TEMPERATURE", 1.0)
-
-    def _rps_score(model, X, groups):
-        """RPS via per-race softmax probabilities."""
-        scores = model.predict(X)
-        probs = np.zeros(len(scores))
-        offset = 0
-        for g in groups:
-            gs = scores[offset:offset + g]
-            scaled = gs / max(temperature, 1e-6)
-            exp_s = np.exp(scaled - scaled.max())
-            probs[offset:offset + g] = exp_s / exp_s.sum()
-            offset += g
-        return rps_per_race(probs, fp_val, groups)
-
-    def objective(trial):
-        params = {
-            "n_estimators": trial.suggest_int("n_estimators", 100, 1500, step=50),
-            "max_depth": trial.suggest_int("max_depth", 3, 12),
-            "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
-            "subsample": trial.suggest_float("subsample", 0.5, 1.0, step=0.05),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.3, 1.0, step=0.05),
-            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
-            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
-        }
-        if model_type == "xgb_ranker":
-            params["min_child_weight"] = trial.suggest_int("min_child_weight", 1, 20)
-            params["gamma"] = trial.suggest_float("gamma", 0.0, 5.0, step=0.1)
-        elif model_type == "lgbm_ranker":
-            params["min_child_samples"] = trial.suggest_int("min_child_samples", 5, 50)
-            params["num_leaves"] = trial.suggest_int("num_leaves", 15, 255)
-        else:
-            params["depth"] = trial.suggest_int("depth", 4, 10)
-            params["l2_leaf_reg"] = trial.suggest_float("l2_leaf_reg", 1e-3, 20.0, log=True)
-
-        model = train_ranker(X_train, y_train, groups_train, model_type, params=params)
-        score = _rps_score(model, X_val, groups_val)
-
-        if callback is not None:
-            callback(trial.number + 1, n_trials, score)
-
-        return score
-
-    study = optuna.create_study(direction="minimize")  # lower RPS = better
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
-
-    trials_log = []
-    for t in study.trials:
-        trials_log.append({
-            "number": t.number,
-            "params": t.params,
-            "score": t.value,
-        })
-
-    logger.info(
-        f"\nOptuna auto-tune ({model_type}) — {n_trials} trials\n"
-        f"  Best RPS: {study.best_value:.6f}\n"
-        f"  Best params: {study.best_params}"
-    )
-
-    return {
-        "best_params": study.best_params,
-        "best_score": round(study.best_value, 4),
-        "trials": trials_log,
-        "n_trials": n_trials,
-    }
-
-
-def evaluate_ranker(
-    model,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
-    groups_test: np.ndarray,
-    test_df: pd.DataFrame,
-    model_name: str = "Ranker",
-    feature_cols: list[str] | None = None,
-) -> dict:
-    """
-    Evaluate a ranking model with ranking + calibration metrics.
-
-    Metrics:
-        - RPS — full-ranking calibration quality (lower = better)
-        - Brier Score — binary calibration quality (lower = better)
-        - Log Loss — penalises confident wrong predictions
-        - NDCG@1, NDCG@3 — how well the model ranks the top finishers
-        - Top-1 accuracy — how often the model's #1 pick actually won
-        - Win-in-top-3 — how often the actual winner is in the model's top 3
-    """
-    if feature_cols is not None and isinstance(X_test, np.ndarray):
-        X_test = pd.DataFrame(X_test, columns=feature_cols)
-    scores = model.predict(X_test)
-
-    # Split scores back into per-race groups
-    ndcg_1_list, ndcg_3_list = [], []
-    top1_correct, win_in_top3, total_races = 0, 0, 0
-    temperature = getattr(config, "SOFTMAX_TEMPERATURE", 1.0)
-    all_probs = np.zeros(len(scores))
-    offset = 0
-
-    for g_size in groups_test:
-        g_scores = scores[offset : offset + g_size]
-        g_labels = y_test[offset : offset + g_size]
-
-        # Per-race softmax for calibration metrics
-        scaled = g_scores / max(temperature, 1e-6)
-        exp_s = np.exp(scaled - scaled.max())
-        all_probs[offset : offset + g_size] = exp_s / exp_s.sum()
-        offset += g_size
-
-        if g_size < 2 or g_labels.max() == g_labels.min():
-            continue
-
-        total_races += 1
-
-        # NDCG (sklearn wants 2-D arrays)
-        try:
-            ndcg_1_list.append(ndcg_score([g_labels], [g_scores], k=1))
-            ndcg_3_list.append(ndcg_score([g_labels], [g_scores], k=3))
-        except ValueError:
-            pass
-
-        # Top-1 accuracy: did the model's top pick actually won?
-        model_top = np.argmax(g_scores)
-        actual_top = np.argmax(g_labels)
-        if model_top == actual_top:
-            top1_correct += 1
-
-        # Winner in model's top 3?
-        model_top3 = set(np.argsort(g_scores)[-3:])
-        if actual_top in model_top3:
-            win_in_top3 += 1
-
-    # Calibration metrics
-    if "won" in test_df.columns:
-        y_won = test_df["won"].values[:len(scores)].astype(int)
-    elif "finish_position" in test_df.columns:
-        y_won = (test_df["finish_position"].values[:len(scores)] == 1).astype(int)
-    else:
-        y_won = (y_test == y_test.max()).astype(int)
-
-    probs_clipped = np.clip(all_probs, 1e-15, 1 - 1e-15)
-    try:
-        brier = float(brier_score_loss(y_won, probs_clipped))
-    except Exception:
-        brier = float('nan')
-    try:
-        logloss = float(log_loss(y_won, probs_clipped))
-    except Exception:
-        logloss = float('nan')
-
-    # RPS — full-ranking calibration metric; needs finish positions
-    if "finish_position" in test_df.columns:
-        fp_eval = test_df["finish_position"].values[:len(scores)].astype(np.float32)
-        rps = rps_per_race(all_probs, fp_eval, groups_test)
-    else:
-        rps = float("nan")
-
-    metrics = {
-        "rps": round(rps, 6),
-        "brier_score": round(brier, 6),
-        "log_loss": round(logloss, 4),
-        "ndcg_at_1": np.mean(ndcg_1_list) if ndcg_1_list else 0.0,
-        "ndcg_at_3": np.mean(ndcg_3_list) if ndcg_3_list else 0.0,
-        "top1_accuracy": top1_correct / total_races if total_races else 0.0,
-        "win_in_top3": win_in_top3 / total_races if total_races else 0.0,
-        "total_races": total_races,
-    }
-
-    # ── Reliability diagram (10-bin ECE) ──────────────────────────
-    # Each bin: (mean_predicted_prob, observed_win_rate, n_runners).
-    # ECE = Σ |mean_pred - obs_win_rate| × (bin_count / total).
-    _bins = np.linspace(0.0, 1.0, 11)  # 10 bins of width 0.1
-    _bin_ids = np.digitize(probs_clipped, _bins, right=False) - 1
-    _bin_ids = np.clip(_bin_ids, 0, 9)
-    _reliability_bins = []
-    _ece_sum = 0.0
-    _n_total = len(probs_clipped)
-    for _b in range(10):
-        _mask = _bin_ids == _b
-        _cnt = int(_mask.sum())
-        if _cnt == 0:
-            _reliability_bins.append(None)
-            continue
-        _mean_pred = float(probs_clipped[_mask].mean())
-        _obs = float(y_won[_mask].mean())
-        _reliability_bins.append((_mean_pred, _obs, _cnt))
-        _ece_sum += abs(_mean_pred - _obs) * (_cnt / _n_total)
-    metrics["ece"] = round(_ece_sum, 6)
-    metrics["reliability_bins"] = _reliability_bins  # list of (mean_pred, obs_frac, n) or None
-
-    logger.info(f"\n{'='*50}")
-    logger.info(f"  {model_name} Evaluation Results")
-    logger.info(f"{'='*50}")
-    logger.info(f"  RPS:             {metrics['rps']:.6f}")
-    logger.info(f"  Brier Score:     {metrics['brier_score']:.6f}")
-    logger.info(f"  ECE:             {metrics['ece']:.6f}")
-    logger.info(f"  Log Loss:        {metrics['log_loss']:.4f}")
-    logger.info(f"  NDCG@1:          {metrics['ndcg_at_1']:.4f}")
-    logger.info(f"  NDCG@3:          {metrics['ndcg_at_3']:.4f}")
-    logger.info(f"  Top-1 Accuracy:  {metrics['top1_accuracy']:.4f}")
-    logger.info(f"  Winner in Top 3: {metrics['win_in_top3']:.4f}")
-    logger.info(f"  Races evaluated: {metrics['total_races']}")
-    logger.info(f"{'='*50}")
-
-    return metrics
-
-
 def get_feature_importance(
     model,
     feature_cols: list[str],
@@ -1806,7 +1252,6 @@ def get_feature_importance(
 
 
 def analyse_test_set(
-    ltr_scores: np.ndarray,
     win_probs: np.ndarray,
     groups_test: np.ndarray,
     test_df: pd.DataFrame,
@@ -1821,7 +1266,6 @@ def analyse_test_set(
     Run betting simulation on the held-out test set.
 
     Args:
-        ltr_scores: Raw LTR ranking scores (for top_pick selection).
         win_probs: Pre-calibrated P(win) from the win classifier.
         groups_test: Runners-per-race arrays.
         test_df: Test DataFrame (needs race_id, race_date, horse_name, odds, won).
@@ -1838,7 +1282,6 @@ def analyse_test_set(
 
     # Probabilities are already calibrated — use directly
     analysis_df["model_prob"] = win_probs
-    analysis_df["rank_score"] = ltr_scores
 
     has_odds = "odds" in analysis_df.columns
     has_won = "won" in analysis_df.columns
@@ -1851,9 +1294,24 @@ def analyse_test_set(
         analysis_df["value_score"] = (
             analysis_df["model_prob"] - analysis_df["implied_prob"]
         )
+        _value_sel = _value_bet_selection(
+            analysis_df["model_prob"].values,
+            analysis_df["odds"].values,
+            value_threshold,
+        )
+        analysis_df["value_edge"] = _value_sel["edge"]
+        analysis_df["value_dyn_threshold"] = _value_sel["dyn_threshold"]
+        analysis_df["value_clv"] = _value_sel["clv"]
+        analysis_df["value_expected_roi"] = _value_sel["expected_roi"]
+        analysis_df["is_value_bet"] = _value_sel["mask"]
     else:
         analysis_df["implied_prob"] = 0.0
         analysis_df["value_score"] = 0.0
+        analysis_df["value_edge"] = 0.0
+        analysis_df["value_dyn_threshold"] = 0.0
+        analysis_df["value_clv"] = np.nan
+        analysis_df["value_expected_roi"] = np.nan
+        analysis_df["is_value_bet"] = False
 
     if not has_won:
         analysis_df["won"] = (
@@ -1884,16 +1342,13 @@ def analyse_test_set(
     for race_id in _race_order:
         race_group = analysis_df[analysis_df["race_id"] == race_id]
 
-        # Strategy 1 — Top Pick: use model_prob (value model) when LTR
-        # scores are unavailable (all-zero), otherwise use rank_score.
-        _rs = race_group["rank_score"]
-        _pick_col = "rank_score" if _rs.max() != _rs.min() else "model_prob"
-        # Skip top pick when the model cannot genuinely distinguish
+        # Strategy 1 — Top Pick: highest win probability.
+        # Skip when the model cannot genuinely distinguish
         # runners (all scores identical) — otherwise idxmax() picks by
         # row order, inflating strike rate via data-ordering artefacts.
-        if race_group[_pick_col].max() == race_group[_pick_col].min():
+        if race_group["model_prob"].max() == race_group["model_prob"].min():
             continue
-        best = race_group.loc[race_group[_pick_col].idxmax()]
+        best = race_group.loc[race_group["model_prob"].idxmax()]
         odds_val = float(best["odds"]) if has_odds else 0.0
         pnl = (odds_val - 1.0) if best["won"] == 1 else -1.0
 
@@ -1920,17 +1375,14 @@ def analyse_test_set(
         # Uses raw implied probability (1/odds) — same as strategy calibrator.
         # Any bet passing this check already has CLV > 1, so no extra gate needed.
         if has_odds:
-            edge = race_group["value_score"]
-            odds_col = race_group["odds"]
-            dyn_thresh = value_threshold * np.sqrt(odds_col / 3.0)
-            value_picks = race_group[edge > dyn_thresh]
+            value_picks = race_group[race_group["is_value_bet"]]
             for _, vp in value_picks.iterrows():
                 vp_odds = float(vp["odds"])
                 vp_prob = float(vp["model_prob"])
 
                 # CLV > 1 is guaranteed by positive raw edge + threshold;
                 # no separate gate needed.
-                vp_clv = round(vp_prob * vp_odds, 4)
+                vp_clv = round(float(vp.get("value_clv", vp_prob * vp_odds)), 4)
 
                 # Determine stake
                 if use_kelly and _current_bankroll > 0:
@@ -2073,6 +1525,33 @@ def analyse_test_set(
             "avg_clv": round(avg_clv, 4) if avg_clv is not None else None,
         }
 
+    if has_odds and "is_value_bet" in analysis_df.columns and "value" in stats:
+        value_subset = analysis_df[analysis_df["is_value_bet"]].copy()
+        if not value_subset.empty:
+            _vb_y = value_subset["won"].astype(int).values
+            _vb_probs = np.clip(
+                value_subset["model_prob"].values.astype(np.float64),
+                1e-15,
+                1 - 1e-15,
+            )
+            stats["value"]["avg_edge"] = round(float(value_subset["value_edge"].mean()), 4)
+            stats["value"]["avg_clv"] = round(float(value_subset["value_clv"].mean()), 4)
+            stats["value"]["expected_roi"] = round(float(value_subset["value_expected_roi"].mean()) * 100.0, 1)
+            try:
+                stats["value"]["selected_brier"] = round(float(brier_score_loss(_vb_y, _vb_probs)), 6)
+            except Exception:
+                stats["value"]["selected_brier"] = None
+            try:
+                stats["value"]["selected_log_loss"] = round(float(log_loss(_vb_y, _vb_probs)), 4)
+            except Exception:
+                stats["value"]["selected_log_loss"] = None
+        else:
+            stats["value"]["avg_edge"] = None
+            stats["value"]["avg_clv"] = None
+            stats["value"]["expected_roi"] = None
+            stats["value"]["selected_brier"] = None
+            stats["value"]["selected_log_loss"] = None
+
     # ── Daily P&L (for bar chart) ────────────────────────────────
     for strategy in ["top_pick", "value", "each_way"]:
         strat = (
@@ -2194,433 +1673,18 @@ def _max_drawdown(pnl_series: np.ndarray) -> float:
 
 
 # =====================================================================
-#  Learning-to-Rank Predictors
-# =====================================================================
-
-
-class RankingPredictor:
-    """
-    Predictor using a Learning-to-Rank model (XGBRanker or LGBMRanker).
-
-    Instead of predicting win probabilities, it produces a *relevance
-    score* for each runner.  Scores are only meaningful **relative to
-    other horses in the same race**.
-
-    The predict_race method normalises scores into pseudo-probabilities
-    (softmax over the race) so the output format is compatible with the
-    rest of the application.
-    """
-
-    def __init__(self):
-        self.model = None
-        self.scaler = None
-        self.feature_cols = None
-        self.model_type = None
-        self.metrics = None
-        self.test_analysis = None
-
-    def train(
-        self,
-        df: pd.DataFrame,
-        model_type: str = "xgb_ranker",
-        save: bool = True,
-        params: dict | None = None,
-    ) -> dict:
-        self.model_type = model_type
-
-        (
-            X_train, X_test, y_train, y_test,
-            groups_train, groups_test,
-            self.feature_cols, self.scaler, test_df,
-        ) = prepare_ranking_data(df)
-
-        self.model = train_ranker(X_train, y_train, groups_train, model_type, params=params)
-
-        self.metrics = evaluate_ranker(
-            self.model, X_test, y_test, groups_test, test_df,
-            model_name=model_type.upper(),
-        )
-
-        # Test-set betting analysis (equity curves, P&L, value stats)
-        test_scores = self.model.predict(X_test)
-        _win_probs = _grouped_softmax(test_scores, groups_test, 1.0)
-        self.test_analysis = analyse_test_set(
-            ltr_scores=test_scores,
-            win_probs=_win_probs,
-            groups_test=groups_test,
-            test_df=test_df,
-        )
-
-        # Feature importance
-        fi = get_feature_importance(self.model, self.feature_cols)
-        logger.info(f"\nTop 15 Features:\n{fi.head(15).to_string()}")
-
-        if save:
-            self.save()
-
-        return self.metrics
-
-    def predict_race(self, race_df: pd.DataFrame) -> pd.DataFrame:
-        if self.model is None:
-            raise ValueError("Model not trained. Call train() or load() first.")
-
-        missing = [c for c in self.feature_cols if c not in race_df.columns]
-        for col in missing:
-            race_df[col] = 0
-
-        X = race_df[self.feature_cols].values
-        X_scaled = self.scaler.transform(X)
-
-        # Raw ranking scores (higher = better)
-        raw_scores = self.model.predict(X_scaled)
-
-        # Convert to pseudo-probabilities via softmax
-        exp_scores = np.exp(raw_scores - raw_scores.max())  # numerical stability
-        win_probs = exp_scores / exp_scores.sum()
-
-        results = race_df[["horse_name"]].copy()
-        if "jockey" in race_df.columns:
-            results["jockey"] = race_df["jockey"]
-        if "trainer" in race_df.columns:
-            results["trainer"] = race_df["trainer"]
-        if "odds" in race_df.columns:
-            results["odds"] = race_df["odds"]
-
-        results["win_probability"] = win_probs
-        results["rank_score"] = raw_scores
-        results["predicted_rank"] = results["win_probability"].rank(
-            ascending=False, method="min"
-        ).astype(int)
-
-        if "odds" in race_df.columns:
-            results["implied_prob"] = 1.0 / race_df["odds"].values
-            results["value_score"] = results["win_probability"] - results["implied_prob"]
-
-        return results.sort_values("predicted_rank")
-
-    def explain_race(
-        self,
-        race_df: pd.DataFrame,
-        top_n_features: int = 10,
-    ) -> dict:
-        """
-        Compute SHAP values for every runner in a race.
-
-        Returns a dict mapping horse_name → DataFrame with columns
-        ``feature``, ``shap_value``, ``feature_value``
-        (sorted by absolute SHAP value, top *top_n_features*).
-        """
-        import shap
-
-        if self.model is None:
-            raise ValueError("Model not trained. Call train() or load() first.")
-
-        missing = [c for c in self.feature_cols if c not in race_df.columns]
-        for col in missing:
-            race_df[col] = 0
-
-        X = race_df[self.feature_cols].values
-        X_scaled = self.scaler.transform(X)
-
-        explainer = shap.TreeExplainer(self.model)
-        shap_values = explainer.shap_values(X_scaled)
-
-        explanations: dict[str, pd.DataFrame] = {}
-        horse_names = race_df["horse_name"].values
-
-        for i, name in enumerate(horse_names):
-            sv = shap_values[i]
-            fv = X_scaled[i]
-            df_expl = pd.DataFrame({
-                "feature": self.feature_cols,
-                "shap_value": sv,
-                "feature_value": fv,
-            })
-            df_expl["abs_shap"] = df_expl["shap_value"].abs()
-            df_expl = df_expl.sort_values("abs_shap", ascending=False)
-            explanations[name] = df_expl.head(top_n_features).drop(
-                columns="abs_shap",
-            )
-
-        return explanations
-
-    def save(self):
-        save_path = os.path.join(config.MODELS_DIR, "ranker_model.joblib")
-        joblib.dump(
-            {
-                "model": self.model,
-                "scaler": self.scaler,
-                "feature_cols": self.feature_cols,
-                "model_type": self.model_type,
-            },
-            save_path,
-        )
-        logger.info(f"Ranking model saved to {save_path}")
-
-    def load(self):
-        load_path = os.path.join(config.MODELS_DIR, "ranker_model.joblib")
-        if not os.path.exists(load_path):
-            raise FileNotFoundError(f"No ranking model found at {load_path}")
-        data = joblib.load(load_path)
-        self.model = data["model"]
-        self.scaler = data.get("scaler") or _IdentityScaler()
-        self.feature_cols = data["feature_cols"]
-        self.model_type = data["model_type"]
-        logger.info("Ranking model loaded successfully")
-
-
-class RankEnsemblePredictor:
-    """
-    Ensemble that averages XGBRanker + LGBMRanker scores (and optionally
-    blends with a classifier's probabilities).
-    """
-
-    def __init__(self):
-        self.models = {}
-        self.scaler = None
-        self.feature_cols = None
-        self.weights = {"xgb_ranker": 0.5, "lgbm_ranker": 0.5}
-        self.metrics = None
-        self.test_analysis = None
-
-    def train(self, df: pd.DataFrame, save: bool = True, params: dict | None = None) -> dict:
-        (
-            X_train, X_test, y_train, y_test,
-            groups_train, groups_test,
-            self.feature_cols, self.scaler, test_df,
-        ) = prepare_ranking_data(df)
-
-        all_metrics = {}
-        for mt in ["xgb_ranker", "lgbm_ranker"]:
-            self.models[mt] = train_ranker(X_train, y_train, groups_train, mt, params=params)
-            m = evaluate_ranker(
-                self.models[mt], X_test, y_test, groups_test, test_df,
-                model_name=mt.upper(),
-            )
-            all_metrics[mt] = m
-
-        # Evaluate ensemble: average the raw scores, then re-evaluate
-        ens_scores = np.zeros(X_test.shape[0])
-        for mt, model in self.models.items():
-            ens_scores += self.weights[mt] * model.predict(X_test)
-
-        # Re-run evaluation metrics on blended scores
-        ens_metrics = self._evaluate_blended(
-            ens_scores, y_test, groups_test, test_df
-        )
-        all_metrics["rank_ensemble"] = ens_metrics
-        self.metrics = all_metrics
-
-        # Test-set betting analysis (equity curves, P&L, value stats)
-        _win_probs = _grouped_softmax(ens_scores, groups_test, 1.0)
-        self.test_analysis = analyse_test_set(
-            ltr_scores=ens_scores,
-            win_probs=_win_probs,
-            groups_test=groups_test,
-            test_df=test_df,
-        )
-
-        if save:
-            self.save()
-
-        return all_metrics
-
-    @staticmethod
-    def _evaluate_blended(
-        scores, y_test, groups_test, test_df
-    ) -> dict:
-        from sklearn.metrics import ndcg_score as _ndcg
-
-        ndcg1, ndcg3, top1, win3, total = [], [], 0, 0, 0
-        temperature = getattr(config, "SOFTMAX_TEMPERATURE", 1.0)
-        all_probs = np.zeros(len(scores))
-        offset = 0
-        for g in groups_test:
-            gs = scores[offset:offset + g]
-            gl = y_test[offset:offset + g]
-            scaled = gs / max(temperature, 1e-6)
-            exp_s = np.exp(scaled - scaled.max())
-            all_probs[offset:offset + g] = exp_s / exp_s.sum()
-            offset += g
-            if g < 2 or gl.max() == gl.min():
-                continue
-            total += 1
-            try:
-                ndcg1.append(_ndcg([gl], [gs], k=1))
-                ndcg3.append(_ndcg([gl], [gs], k=3))
-            except ValueError:
-                pass
-            if np.argmax(gs) == np.argmax(gl):
-                top1 += 1
-            if np.argmax(gl) in set(np.argsort(gs)[-3:]):
-                win3 += 1
-
-        if "won" in test_df.columns:
-            y_won = test_df["won"].values[:len(scores)].astype(int)
-        elif "finish_position" in test_df.columns:
-            y_won = (test_df["finish_position"].values[:len(scores)] == 1).astype(int)
-        else:
-            y_won = (y_test == y_test.max()).astype(int)
-
-        probs_clipped = np.clip(all_probs, 1e-15, 1 - 1e-15)
-        try:
-            brier = float(brier_score_loss(y_won, probs_clipped))
-        except Exception:
-            brier = float('nan')
-        try:
-            logloss = float(log_loss(y_won, probs_clipped))
-        except Exception:
-            logloss = float('nan')
-
-        # RPS — full-ranking calibration metric
-        if "finish_position" in test_df.columns:
-            _fp_eval = test_df["finish_position"].values[:len(scores)].astype(np.float32)
-            rps = rps_per_race(all_probs, _fp_eval, groups_test)
-        else:
-            rps = float("nan")
-
-        metrics = {
-            "rps": round(rps, 6),
-            "brier_score": round(brier, 6),
-            "log_loss": round(logloss, 4),
-            "ndcg_at_1": np.mean(ndcg1) if ndcg1 else 0,
-            "ndcg_at_3": np.mean(ndcg3) if ndcg3 else 0,
-            "top1_accuracy": top1 / total if total else 0,
-            "win_in_top3": win3 / total if total else 0,
-            "total_races": total,
-        }
-        logger.info(f"\n{'='*50}")
-        logger.info("  RANK ENSEMBLE Evaluation Results")
-        logger.info(f"{'='*50}")
-        logger.info(f"  RPS:             {metrics['rps']:.6f}")
-        logger.info(f"  Brier Score:     {metrics['brier_score']:.6f}")
-        logger.info(f"  Log Loss:        {metrics['log_loss']:.4f}")
-        for k in ["ndcg_at_1", "ndcg_at_3", "top1_accuracy", "win_in_top3"]:
-            logger.info(f"  {k}: {metrics[k]:.4f}")
-        logger.info(f"  total_races: {metrics['total_races']}")
-        logger.info(f"{'='*50}")
-        return metrics
-
-    def predict_race(self, race_df: pd.DataFrame) -> pd.DataFrame:
-        missing = [c for c in self.feature_cols if c not in race_df.columns]
-        for col in missing:
-            race_df[col] = 0
-
-        X = race_df[self.feature_cols].values
-        X_scaled = self.scaler.transform(X)
-
-        raw_scores = np.zeros(X_scaled.shape[0])
-        for mt, model in self.models.items():
-            raw_scores += self.weights[mt] * model.predict(X_scaled)
-
-        exp_scores = np.exp(raw_scores - raw_scores.max())
-        win_probs = exp_scores / exp_scores.sum()
-
-        results = race_df[["horse_name"]].copy()
-        if "jockey" in race_df.columns:
-            results["jockey"] = race_df["jockey"]
-        if "trainer" in race_df.columns:
-            results["trainer"] = race_df["trainer"]
-        if "odds" in race_df.columns:
-            results["odds"] = race_df["odds"]
-
-        results["win_probability"] = win_probs
-        results["rank_score"] = raw_scores
-        results["predicted_rank"] = results["win_probability"].rank(
-            ascending=False, method="min"
-        ).astype(int)
-
-        if "odds" in race_df.columns:
-            results["implied_prob"] = 1.0 / race_df["odds"].values
-            results["value_score"] = results["win_probability"] - results["implied_prob"]
-
-        return results.sort_values("predicted_rank")
-
-    def explain_race(
-        self,
-        race_df: pd.DataFrame,
-        top_n_features: int = 10,
-    ) -> dict:
-        """
-        Compute SHAP values for each runner using the **xgb_ranker**
-        sub-model (dominant tree in the ensemble).
-        """
-        import shap
-
-        # Pick whichever sub-model is available (prefer xgb)
-        model = self.models.get("xgb_ranker") or next(iter(self.models.values()))
-
-        missing = [c for c in self.feature_cols if c not in race_df.columns]
-        for col in missing:
-            race_df[col] = 0
-
-        X = race_df[self.feature_cols].values
-        X_scaled = self.scaler.transform(X)
-
-        explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_scaled)
-
-        explanations: dict[str, pd.DataFrame] = {}
-        horse_names = race_df["horse_name"].values
-
-        for i, name in enumerate(horse_names):
-            sv = shap_values[i]
-            fv = X_scaled[i]
-            df_expl = pd.DataFrame({
-                "feature": self.feature_cols,
-                "shap_value": sv,
-                "feature_value": fv,
-            })
-            df_expl["abs_shap"] = df_expl["shap_value"].abs()
-            df_expl = df_expl.sort_values("abs_shap", ascending=False)
-            explanations[name] = df_expl.head(top_n_features).drop(
-                columns="abs_shap",
-            )
-
-        return explanations
-
-    def save(self):
-        path = os.path.join(config.MODELS_DIR, "rank_ensemble_models.joblib")
-        joblib.dump(
-            {
-                "models": self.models,
-                "scaler": self.scaler,
-                "feature_cols": self.feature_cols,
-                "weights": self.weights,
-            },
-            path,
-        )
-        logger.info(f"Rank ensemble saved to {path}")
-
-    def load(self):
-        path = os.path.join(config.MODELS_DIR, "rank_ensemble_models.joblib")
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"No rank ensemble found at {path}")
-        data = joblib.load(path)
-        self.models = data["models"]
-        self.scaler = data.get("scaler") or _IdentityScaler()
-        self.feature_cols = data["feature_cols"]
-        self.weights = data["weights"]
-        logger.info("Rank ensemble loaded successfully")
-
-
-# =====================================================================
-#  Triple Ensemble (LTR + Regressor + Classifier)
-# =====================================================================
 
 
 class TripleEnsemblePredictor:
     """
-    Three task-specific models, each optimised for a different betting strategy:
+    Two task-specific classifiers for horse race prediction:
 
-    1. **LTR Ranker** — Optimised for ranking horses correctly within each
-       race (LambdaRank / NDCG).  Used for the **Top Pick** strategy.
-    2. **Win Classifier** — Binary classifier → calibrated P(win) (Value Bets).
-       Used for the **Value Bet** strategy (edge vs market).
-    3. **Place Classifier** — Calibrated P(place) estimates.
+    1. **Win Classifier** — Binary classifier → calibrated P(win).
+       Used for the **Value Bet** and **Top Pick** strategies.
+    2. **Place Classifier** — Calibrated P(place) estimates.
        Used for the **Each-Way** strategy.
 
-    Each model is trained independently — no blending or ensembling.
+    Each model is trained independently.
     Calibration (Platt scaling) is fitted per-model on OOF data.
     """
 
@@ -2629,13 +1693,12 @@ class TripleEnsemblePredictor:
         frameworks: dict[str, str] | None = None,
         **_ignored,
     ):
-        self.ltr_model = None
         self.clf_model = None
         self.place_model = None
         self.scaler = None
         self.feature_cols = None
         self.frameworks = {
-            "ltr": "lgbm", "classifier": "cat", "place": "cat",
+            "classifier": "cat", "place": "cat",
             **(frameworks or {}),
         }
         # Win-classifier calibration (Platt)
@@ -2645,27 +1708,19 @@ class TripleEnsemblePredictor:
         # Place-classifier calibration (Platt)
         self.place_platt_a = 1.0
         self.place_platt_b = 0.0
+        # Isotonic calibration (fitted after Platt)
+        self.win_iso_cal: IsotonicRegression | None = None
+        self.place_iso_cal: IsotonicRegression | None = None
+        # n_jobs override — capped during autotune to leave CPU headroom
+        self._autotune_njobs: int = -1
         self.metrics = None
         self.test_analysis = None
+        self.last_explain_model_label = None
 
     # ── Framework-aware helpers ──────────────────────────────────
     def _clf_predict_proba(self, model, X) -> np.ndarray:
         """Return P(class=1) from a classifier (XGB or LGBM)."""
         return model.predict_proba(X)[:, 1]
-
-    @property
-    def _ltr_ranker_type(self) -> str:
-        """Map framework key to train_ranker model_type string."""
-        if self.frameworks["ltr"] == "cat":
-            return "cat_ranker"
-        if self.frameworks["ltr"] == "lgbm":
-            obj = getattr(config, "LTR_OBJECTIVE", "value")
-            if obj == "value":
-                return "lgbm_value"
-            if obj == "rps":
-                return "lgbm_rps"
-            return "lgbm_ranker"  # "lambdarank" or anything else
-        return "xgb_ranker"
 
     # ── Training ─────────────────────────────────────────────────
     def train(
@@ -2678,10 +1733,9 @@ class TripleEnsemblePredictor:
         auto_tune: dict | None = None,
         **_ignored,
     ) -> dict:
-        """Train three task-specific models:
+        """Train two task-specific models:
 
-        * **LTR Ranker** — optimised for ranking (Top Pick).
-        * **Win Classifier** — calibrated P(win) (Value Bets).
+        * **Win Classifier** — calibrated P(win) (Value Bets / Top Pick).
         * **Place Classifier** — calibrated P(place) (Each-Way).
 
         Phase 1: OOF CV → fit per-model calibration.
@@ -2698,6 +1752,19 @@ class TripleEnsemblePredictor:
         groups_train = data["groups_train"]
         groups_test = data["groups_test"]
         test_df = data["test_df"]
+
+        X_eval = X_test
+        groups_eval = groups_test
+        y_eval_rel = data["y_test_rel"]
+        eval_df = test_df
+
+        self.eval_split_info = {
+            "holdout_races": int(len(groups_test)),
+            "validation_races": int(len(groups_eval)),
+            "validation_runners": int(len(X_eval)),
+            "degenerate_removed_rows": int(data.get("degenerate_removed_rows", 0)),
+            "degenerate_removed_races": int(data.get("degenerate_removed_races", 0)),
+        }
 
         def _cb(msg: str, pct: float = 0.0) -> None:
             if progress_callback is not None:
@@ -2724,11 +1791,36 @@ class TripleEnsemblePredictor:
         ]
         boundaries[-1] = date_max + pd.Timedelta(days=1)
 
+        _prune_frac = float(getattr(config, "FEATURE_PRUNE_FRACTION", 0.0))
+        if _prune_frac > 0 and len(self.feature_cols) > 8:
+            _anchor_cutoff = boundaries[1] - pd.Timedelta(days=purge_gap)
+            _anchor_mask = pd.to_datetime(data["train_df"]["race_date"]) <= _anchor_cutoff
+            _anchor_df = data["train_df"].loc[_anchor_mask].copy()
+            if len(_anchor_df) >= 200:
+                _kept_cols = _prune_features_quick(_anchor_df, self.feature_cols, _prune_frac)
+                if len(_kept_cols) < len(self.feature_cols):
+                    _keep_idx = [self.feature_cols.index(col) for col in _kept_cols]
+                    self.feature_cols = _kept_cols
+                    X_train = X_train[:, _keep_idx]
+                    X_test = X_test[:, _keep_idx]
+                    X_eval = X_test
+                    data["feature_cols"] = _kept_cols
+                    logger.info(
+                        "Applied leak-safe feature pruning using %d anchor rows before OOF validation",
+                        len(_anchor_df),
+                    )
+            else:
+                logger.info(
+                    "Feature pruning skipped: anchor slice too small (%d rows)",
+                    len(_anchor_df),
+                )
+
         oof_clf_logits_parts: list[np.ndarray] = []
         oof_place_probs_parts: list[np.ndarray] = []
         oof_groups_parts: list[np.ndarray] = []
         oof_fp_parts: list[np.ndarray] = []
         oof_placed_parts: list[np.ndarray] = []
+        oof_df_parts: list[pd.DataFrame] = []
 
         _p: dict[str, dict] = params if isinstance(params, dict) else {}
 
@@ -2787,14 +1879,14 @@ class TripleEnsemblePredictor:
             )
 
             # Score validation fold
-            X_f_vl_df = pd.DataFrame(X_f_vl, columns=self.feature_cols)
-            clf_probs_vl = self.clf_model.predict_proba(X_f_vl_df)[:, 1]
-            place_probs_vl = self.place_model.predict_proba(X_f_vl_df)[:, 1]
+            clf_probs_vl = self.clf_model.predict_proba(X_f_vl)[:, 1]
+            place_probs_vl = self.place_model.predict_proba(X_f_vl)[:, 1]
 
             oof_clf_logits_parts.append(clf_probs_vl)
             oof_place_probs_parts.append(place_probs_vl)
             oof_groups_parts.append(g_f_vl)
             oof_fp_parts.append(fp_f_vl)
+            oof_df_parts.append(data["train_df"].iloc[vl_beg:vl_end].copy())
             # Dynamic place target matching training labels
             _nr_vl = data["train_df"]["num_runners"].values[vl_beg:vl_end]
             _hc_vl = data["train_df"].get("handicap", pd.Series(0, index=data["train_df"].index)).values[vl_beg:vl_end].astype(bool)
@@ -2809,6 +1901,7 @@ class TripleEnsemblePredictor:
         _all_fp = np.concatenate(oof_fp_parts)
         _all_place_probs = np.concatenate(oof_place_probs_parts)
         _all_placed = np.concatenate(oof_placed_parts)
+        _oof_df = pd.concat(oof_df_parts, ignore_index=True) if oof_df_parts else pd.DataFrame()
 
         # Win-classifier calibration: Platt only (classifier outputs
         # probabilities directly, no softmax/temperature needed)
@@ -2829,6 +1922,13 @@ class TripleEnsemblePredictor:
             f"  Place-clf Platt: a={self.place_platt_a:.4f}, "
             f"b={self.place_platt_b:.4f}"
         )
+
+        # Isotonic calibration on OOF Platt-calibrated probs
+        _oof_win_cal = self._calibrate_win_probs(_all_clf_logits, _all_groups)
+        self.win_iso_cal = self._fit_isotonic(_oof_win_cal, (_all_fp == 1).astype(np.float64))
+        _oof_place_cal = self._calibrate_place_probs(_all_place_probs)
+        self.place_iso_cal = self._fit_isotonic(_oof_place_cal, _all_placed.astype(np.float64))
+        logger.info("  Isotonic calibration fitted on OOF predictions.")
 
         # ── Phase 1b: Per-model Optuna auto-tune (optional) ──────
         if auto_tune is not None and params is None:
@@ -2875,38 +1975,62 @@ class TripleEnsemblePredictor:
             }
 
             _tuned_params: dict[str, dict] = {}
-            _tune_models = {"ltr": "LTR Ranker", "classifier": "Win Classifier", "place": "Place Classifier"}
-            _tune_metrics = {"ltr": "NDCG@1", "classifier": "LogLoss", "place": "LogLoss"}
+            _tune_models = {"classifier": "Win Classifier", "place": "Place Classifier"}
+            _tune_metrics = {"classifier": "LogLoss", "place": "LogLoss"}
             for _m_i, (_mk, _m_label) in enumerate(sorted(_tune_models.items())):
-                _m_pct = 0.36 + (_m_i / 3) * 0.25
+                _m_pct = 0.36 + (_m_i / 2) * 0.25
                 _m_metric = _tune_metrics[_mk]
-                _cb(f"Phase 1b — Tuning {_m_label} ({_m_i + 1}/3) …", _m_pct)
+                _cb(f"Phase 1b — Tuning {_m_label} ({_m_i + 1}/2) …", _m_pct)
 
                 def _at_cb(tnum, total, score, _lbl=_m_label, _base=_m_pct, _met=_m_metric):
                     _cb(
                         f"Tuning {_lbl} — trial {tnum}/{total} ({_met} {score:.4f})",
-                        _base + (tnum / total) * (0.25 / 3),
+                        _base + (tnum / total) * (0.25 / 2),
                     )
 
                 _at_result = self._auto_tune_model(
                     _mk, _at_X_tr, _at_X_vl,
                     _at_targets_tr, _at_targets_vl,
                     _at_g_tr, _at_g_vl,
-                    sw_train=_at_sw, n_trials=_at_trials, callback=_at_cb,
+                    sw_train=_at_sw,
+                    train_dates=pd.to_datetime(data["train_df"]["race_date"].iloc[:_at_tr_end]),
+                    n_trials=_at_trials,
+                    callback=_at_cb,
                 )
                 _tuned_params[_mk] = _at_result["best_params"]
                 logger.info(f"  {_m_label}: {_m_metric} {_at_result['best_score']:.6f}")
             params = _tuned_params
             _p = _tuned_params
 
+            # Apply best pruning params to config for the full retrain
+            # (take from any model's best params — same values across models)
+            for _mk_params in _tuned_params.values():
+                if "FEATURE_PRUNE_FRACTION" in _mk_params:
+                    config.FEATURE_PRUNE_FRACTION = _mk_params.pop("FEATURE_PRUNE_FRACTION")
+                if "FEATURE_CORR_THRESHOLD" in _mk_params:
+                    config.FEATURE_CORR_THRESHOLD = _mk_params.pop("FEATURE_CORR_THRESHOLD")
+                break  # same values in each model's params
+
         # ── Phase 2: Retrain on full training data ───────────────
         _cb("Phase 2 — Retraining on full data …", 0.62)
         all_metrics: dict = {}
         sw_full = data["sample_weight_train"]
+        train_dates_full = pd.to_datetime(data["train_df"]["race_date"])
+
+        def _weights_for_params(base_dates, model_params, default_weights):
+            _hl, _seasonal, _shape = self._extract_recency_params(model_params)
+            if _hl is None and _seasonal is None and _shape is None:
+                return default_weights
+            return compute_recency_sample_weights(
+                base_dates,
+                half_life_days=_hl,
+                seasonal_boost=_seasonal,
+                decay_shape=_shape,
+            )
 
         logger.info("Retraining 3 task-specific models on full training data …")
 
-        n_test = len(X_test)
+        n_test = len(X_eval)
 
         # Internal temporal validation split for early stopping
         _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
@@ -2945,6 +2069,7 @@ class TripleEnsemblePredictor:
             fp_es_vl = data["fp_train"][es_vl_beg:]
             ip_es_tr = data["ip_train"][:es_tr_end]
             ip_es_vl = data["ip_train"][es_vl_beg:]
+            dates_es_tr = train_dates_full.iloc[:es_tr_end]
             logger.info(
                 f"  Phase-2 early stopping split: {len(X_es_tr)} train, "
                 f"{len(X_es_vl)} val ({es_vl_beg - es_tr_end} runners purged)"
@@ -2954,46 +2079,19 @@ class TripleEnsemblePredictor:
         else:
             logger.info("  Phase-2 early stopping disabled by config")
 
-        # 1) LTR Ranker (Top Pick model)
-        # Skipped when config.TRAIN_RANKER is False — value model is used for
-        # sorting instead.  Existing saved models that contain an ltr_model
-        # will still use it at prediction time.
-        if getattr(config, "TRAIN_RANKER", True):
-            _ltr_fw = self.frameworks["ltr"].upper()
-            _cb(f"Phase 2 — Training LTR Ranker ({_ltr_fw}) …", 0.64)
-            logger.info(f"Training LTR Ranker ({_ltr_fw}) — Top Pick model …")
-            _ltr_uses_es = use_es
-            if _ltr_uses_es:
-                self.ltr_model = train_ranker(
-                    X_es_tr, y_es_rel_tr, g_es_tr,
-                    self._ltr_ranker_type, params=_p.get("ltr"),
-                    X_val=X_es_vl, y_val=y_es_rel_vl, groups_val=g_es_vl,
-                    finish_pos=fp_es_tr, finish_pos_val=fp_es_vl,
-                    implied_prob=ip_es_tr, implied_prob_val=ip_es_vl,
-                    feature_cols=self.feature_cols, sample_weight=sw_es_tr,
-                )
-            else:
-                self.ltr_model = train_ranker(
-                    X_train, data["y_train_rel"], groups_train,
-                    self._ltr_ranker_type, params=_p.get("ltr"),
-                    finish_pos=data["fp_train"], implied_prob=data["ip_train"],
-                    feature_cols=self.feature_cols, sample_weight=sw_full,
-                )
-        else:
-            logger.info("Skipping LTR Ranker training (TRAIN_RANKER=False); predictions will use value model ordering.")
-            self.ltr_model = None
-
-        # 2) Win Classifier (Value Bets model)
+        # 1) Win Classifier (Value Bets / Top Pick model)
         _clf_fw = self.frameworks.get("classifier", "cat").upper()
         _cb(f"Phase 2 — Training Win Classifier ({_clf_fw}) …", 0.72)
         logger.info(f"Training Win Classifier ({_clf_fw}) — Value model …")
+        _sw_clf_full = _weights_for_params(train_dates_full, _p.get("classifier"), sw_full)
         if use_es:
             n_pos_w = int(y_es_won_tr.sum())
             n_neg_w = len(y_es_won_tr) - n_pos_w
+            _sw_clf_es = _weights_for_params(dates_es_tr, _p.get("classifier"), sw_es_tr)
             self.clf_model = self._train_win_classifier(
                 X_es_tr, y_es_won_tr,
                 scale_pos_weight=n_neg_w / max(n_pos_w, 1),
-                params=_p.get("classifier"), sample_weight=sw_es_tr,
+                params=_p.get("classifier"), sample_weight=_sw_clf_es,
                 eval_set=[(X_es_vl, y_es_won_vl)],
             )
         else:
@@ -3002,20 +2100,22 @@ class TripleEnsemblePredictor:
             self.clf_model = self._train_win_classifier(
                 X_train, data["y_train_won"],
                 scale_pos_weight=n_neg_w / max(n_pos_w, 1),
-                params=_p.get("classifier"), sample_weight=sw_full,
+                params=_p.get("classifier"), sample_weight=_sw_clf_full,
             )
 
-        # 3) Place Classifier (EW model)
+        # 2) Place Classifier (EW model)
         _place_fw = self.frameworks.get("place", "cat").upper()
         _cb(f"Phase 2 — Training Place Classifier ({_place_fw}) …", 0.80)
         logger.info(f"Training Place Classifier ({_place_fw}) — EW model …")
+        _sw_place_full = _weights_for_params(train_dates_full, _p.get("place"), sw_full)
         if use_es:
             n_pos_p = int(y_es_placed_tr.sum())
             n_neg_p = len(y_es_placed_tr) - n_pos_p
+            _sw_place_es = _weights_for_params(dates_es_tr, _p.get("place"), sw_es_tr)
             self.place_model = self._train_place_classifier(
                 X_es_tr, y_es_placed_tr,
                 scale_pos_weight=n_neg_p / max(n_pos_p, 1),
-                params=_p.get("place"), sample_weight=sw_es_tr,
+                params=_p.get("place"), sample_weight=_sw_place_es,
                 eval_set=[(X_es_vl, y_es_placed_vl)],
             )
         else:
@@ -3024,102 +2124,113 @@ class TripleEnsemblePredictor:
             self.place_model = self._train_place_classifier(
                 X_train, data["y_train_placed"],
                 scale_pos_weight=n_neg_p / max(n_pos_p, 1),
-                params=_p.get("place"), sample_weight=sw_full,
+                params=_p.get("place"), sample_weight=_sw_place_full,
             )
 
         # ── Score test set with each model ───────────────────────
-        _cb("Evaluating models on test set …", 0.86)
-        X_test_df = pd.DataFrame(X_test, columns=self.feature_cols)
+        _cb("Evaluating models on holdout validation set …", 0.86)
+        clf_test_probs_raw = self.clf_model.predict_proba(X_eval)[:, 1]
+        place_test_probs_raw = self.place_model.predict_proba(X_eval)[:, 1]
 
-        ltr_test_scores = (
-            self.ltr_model.predict(X_test_df)
-            if self.ltr_model is not None
-            else np.zeros(len(X_test))
+        # ── Re-calibrate Platt on holdout (full-data model preds) ─
+        # Phase 1 fitted Platt(a,b) on OOF predictions from partial-
+        # data fold models.  After Phase 2 retraining on 100% of the
+        # training set, the score distributions are tighter/more
+        # confident, so the OOF calibration can be suboptimal.
+        # Re-fitting on the holdout closes this gap.
+        _fp_eval = data["fp_test"][:len(clf_test_probs_raw)]
+        _oof_platt = (self.platt_a, self.platt_b)
+        _oof_place_platt = (self.place_platt_a, self.place_platt_b)
+
+        self.platt_a, self.platt_b = self._optimise_platt_calibration(
+            clf_test_probs_raw, groups_eval, _fp_eval,
         )
-        clf_test_probs_raw = self.clf_model.predict_proba(X_test_df)[:, 1]
-        place_test_probs_raw = self.place_model.predict_proba(X_test_df)[:, 1]
+        logger.info(
+            f"  Win-clf Platt recalibrated on holdout: "
+            f"a={self.platt_a:.4f} (was {_oof_platt[0]:.4f}), "
+            f"b={self.platt_b:.4f} (was {_oof_platt[1]:.4f})"
+        )
 
-        # Apply calibration
-        win_probs = self._calibrate_win_probs(clf_test_probs_raw, groups_test, test_df)
+        _placed_eval = data["y_test_placed"][:len(place_test_probs_raw)]
+        self.place_platt_a, self.place_platt_b = self._optimise_place_platt(
+            place_test_probs_raw, _placed_eval,
+        )
+        logger.info(
+            f"  Place-clf Platt recalibrated on holdout: "
+            f"a={self.place_platt_a:.4f} (was {_oof_place_platt[0]:.4f}), "
+            f"b={self.place_platt_b:.4f} (was {_oof_place_platt[1]:.4f})"
+        )
+
+        # Refit isotonic on holdout (full-data model predictions)
+        # Temporarily clear OOF isotonic so _calibrate_*_probs applies
+        # only Platt (we want to fit isotonic on Platt-only-calibrated probs).
+        self.win_iso_cal = None
+        self.place_iso_cal = None
+        _ho_win_cal = self._calibrate_win_probs(clf_test_probs_raw, groups_eval, eval_df)
+        _won_eval = (_fp_eval == 1).astype(np.float64)
+        self.win_iso_cal = self._fit_isotonic(_ho_win_cal, _won_eval)
+        _ho_place_cal = self._calibrate_place_probs(place_test_probs_raw)
+        self.place_iso_cal = self._fit_isotonic(_ho_place_cal, _placed_eval.astype(np.float64))
+        logger.info("  Isotonic calibration refitted on holdout.")
+
+        # Apply recalibrated calibration
+        win_probs = self._calibrate_win_probs(clf_test_probs_raw, groups_eval, eval_df)
         place_probs = self._calibrate_place_probs(place_test_probs_raw)
+        _vc = dict(value_config or {})
+        if auto_tune is not None:
+            _vc = self._tune_value_threshold(
+                win_probs=win_probs,
+                groups_eval=groups_eval,
+                eval_df=eval_df,
+                value_config=_vc,
+                place_probs=place_probs,
+            )
 
         # ── Evaluate each model for its task ─────────────────────
-        # LTR: ranking metrics (Top Pick task) — skip when not trained.
-        if self.ltr_model is not None:
-            all_metrics["ltr_ranker"] = self._evaluate_as_ranker(
-                ltr_test_scores, data["y_test_rel"], groups_test, test_df,
-                "LTR_RANKER (Top Pick)",
-            )
-        else:
-            all_metrics["ltr_ranker"] = {
-                "ndcg_at_1": None, "ndcg_at_3": None,
-                "top1_accuracy": None, "win_in_top3": None,
-                "rps": None, "brier_score": None, "log_loss": None,
-                "total_races": 0, "note": "LTR ranker not trained (TRAIN_RANKER=False)",
-            }
         # Win Classifier: calibration + value-bet metrics
-        # Pass the fully-calibrated win_probs so evaluation matches
-        # what predict_race / analyse_test_set actually use.
         all_metrics["win_classifier"] = self._evaluate_as_ranker(
-            clf_test_probs_raw, data["y_test_rel"], groups_test, test_df,
+            clf_test_probs_raw, y_eval_rel, groups_eval, eval_df,
             "WIN_CLASSIFIER (Value)",
             calibrated_probs=win_probs,
+            value_threshold=float(_vc.get("value_threshold", 0.05)),
         )
         # Place Classifier: place-specific metrics
         all_metrics["place_classifier"] = self._evaluate_place_model(
-            place_probs, place_test_probs_raw, test_df, groups_test,
+            place_probs, place_test_probs_raw, eval_df, groups_eval,
         )
 
         self.metrics = all_metrics
 
-        # ── Train-set metrics (overfit diagnostics) ──────────────
-        _cb("Computing overfit diagnostics …", 0.89)
-        logger.info("Computing training-set metrics for overfit diagnostics …")
-        X_train_df = pd.DataFrame(X_train, columns=self.feature_cols)
-        train_df_full = data["train_df"]
+        # ── OOF metrics (overfit diagnostics) ────────────────────
+        _cb("Computing OOF diagnostics …", 0.89)
+        logger.info("Computing OOF metrics for overfit diagnostics …")
         train_metrics: dict = {}
-
-        ltr_train_scores = (
-            self.ltr_model.predict(X_train_df)
-            if self.ltr_model is not None
-            else np.zeros(len(X_train))
-        )
-        if self.ltr_model is not None:
-            train_metrics["ltr_ranker"] = self._evaluate_as_ranker(
-                ltr_train_scores, data["y_train_rel"], groups_train,
-                train_df_full, "LTR_RANKER_TRAIN",
+        if not _oof_df.empty:
+            _oof_rel = _oof_df["relevance"].values
+            _oof_win_probs = self._calibrate_win_probs(
+                _all_clf_logits, _all_groups, _oof_df,
+            )
+            train_metrics["win_classifier"] = self._evaluate_as_ranker(
+                _all_clf_logits, _oof_rel, _all_groups,
+                _oof_df, "WIN_CLASSIFIER_OOF",
+                calibrated_probs=_oof_win_probs,
+                value_threshold=float(_vc.get("value_threshold", 0.05)),
+            )
+            _oof_place_cal = self._calibrate_place_probs(_all_place_probs)
+            train_metrics["place_classifier"] = self._evaluate_place_model(
+                _oof_place_cal, _all_place_probs, _oof_df, _all_groups,
             )
         else:
-            train_metrics["ltr_ranker"] = {
-                "ndcg_at_1": None, "ndcg_at_3": None,
-                "top1_accuracy": None, "win_in_top3": None,
-                "rps": None, "brier_score": None, "log_loss": None,
-                "total_races": 0,
-            }
-        clf_train_probs_raw = self.clf_model.predict_proba(X_train_df)[:, 1]
-        win_train_probs = self._calibrate_win_probs(
-            clf_train_probs_raw, groups_train, train_df_full,
-        )
-        train_metrics["win_classifier"] = self._evaluate_as_ranker(
-            clf_train_probs_raw, data["y_train_rel"], groups_train,
-            train_df_full, "WIN_CLASSIFIER_TRAIN",
-            calibrated_probs=win_train_probs,
-        )
-        place_train_raw = self.place_model.predict_proba(X_train)[:, 1]
-        place_train_cal = self._calibrate_place_probs(place_train_raw)
-        train_metrics["place_classifier"] = self._evaluate_place_model(
-            place_train_cal, place_train_raw, train_df_full, groups_train,
-        )
+            train_metrics["win_classifier"] = {}
+            train_metrics["place_classifier"] = {}
         self.train_metrics = train_metrics
 
         # ── Betting simulation ───────────────────────────────────
-        _cb("Analysing test-set betting performance …", 0.92)
-        _vc = value_config or {}
+        _cb("Analysing holdout validation betting performance …", 0.92)
         self.test_analysis = analyse_test_set(
-            ltr_scores=ltr_test_scores,
             win_probs=win_probs,
-            groups_test=groups_test,
-            test_df=test_df,
+            groups_test=groups_eval,
+            test_df=eval_df,
             value_threshold=_vc.get("value_threshold", 0.05),
             staking_mode=_vc.get("staking_mode", "flat"),
             kelly_fraction=_vc.get("kelly_fraction", 0.25),
@@ -3129,9 +2240,8 @@ class TripleEnsemblePredictor:
         )
 
         # Feature importance
-        _fi_model = self.ltr_model or self.clf_model
-        if _fi_model is not None:
-            fi = get_feature_importance(_fi_model, self.feature_cols)
+        if self.clf_model is not None:
+            fi = get_feature_importance(self.clf_model, self.feature_cols)
             logger.info(f"\nTop 15 Features:\n{fi.head(15).to_string()}")
 
         if save:
@@ -3166,8 +2276,13 @@ class TripleEnsemblePredictor:
         groups_train: np.ndarray,
         groups_val: np.ndarray,
         sw_train: np.ndarray | None = None,
+        train_dates=None,
         n_trials: int = 30,
         callback=None,
+        storage: str | None = None,
+        study_name: str | None = None,
+        load_if_exists: bool = False,
+        folds: list[dict] | None = None,
     ) -> dict:
         """Run Optuna to find the best HP for a single sub-model.
 
@@ -3181,154 +2296,178 @@ class TripleEnsemblePredictor:
             dict with ``best_params``, ``best_score``, ``n_trials``.
         """
         import optuna
+        import os as _os
+        self._autotune_njobs = max(1, (_os.cpu_count() or 4) // 2)
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-        # Per-model evaluation helpers (aligned with each model's objective)
-        fp_val = targets_val["fp"].astype(np.float32)
-        rel_val = targets_val["rel"]
-
-        def _ndcg1_eval(scores, groups):
-            """Negative NDCG@1 — lower is better (for LTR)."""
-            off, vals = 0, []
-            for g in groups:
-                if g < 2:
-                    off += g
-                    continue
-                g_scores = scores[off:off + g]
-                g_labels = rel_val[off:off + g]
-                vals.append(ndcg_score([g_labels], [g_scores], k=1))
-                off += g
-            return -float(np.mean(vals)) if vals else 0.0
-
-        def _win_logloss_eval(probs, groups):
-            """Log-loss on P(win) — lower is better (for win classifier)."""
-            won = targets_val["won"].astype(np.float32)
-            eps = 1e-9
-            probs = np.clip(probs, eps, 1 - eps)
-            return -float(np.mean(won * np.log(probs) + (1 - won) * np.log(1 - probs)))
-
-        def _logloss_eval(scores, groups):
-            """Log-loss — lower is better (for place classifier)."""
-            placed = targets_val["placed"].astype(np.float32)
-            probs = 1.0 / (1.0 + np.exp(-scores))   # logits → probs
-            eps = 1e-9
-            probs = np.clip(probs, eps, 1 - eps)
-            return -float(np.mean(placed * np.log(probs) + (1 - placed) * np.log(1 - probs)))
-
-        _eval_fn = {
-            "ltr": _ndcg1_eval,
-            "classifier": _win_logloss_eval,
-            "place": _logloss_eval,
-        }
         _metric_names = {
-            "ltr": "NDCG@1",
             "classifier": "LogLoss",
             "place": "LogLoss",
         }
 
-        fw = self.frameworks.get(
-            model_key, "lgbm" if model_key in {"ltr", "residual"} else "xgb",
-        )
+        fw = self.frameworks.get(model_key, "xgb")
         _feat_cols = self.feature_cols
+        _search_space = get_autotune_search_space(
+            model_key,
+            fw,
+            include_recency=train_dates is not None,
+        )
 
-        def objective(trial):
-            params = {
-                "n_estimators": trial.suggest_int(
-                    "n_estimators", 100, 1500, step=50,
-                ),
-                "max_depth": trial.suggest_int("max_depth", 3, 12),
-                "learning_rate": trial.suggest_float(
-                    "learning_rate", 0.005, 0.3, log=True,
-                ),
-                "subsample": trial.suggest_float(
-                    "subsample", 0.5, 1.0, step=0.05,
-                ),
-                "colsample_bytree": trial.suggest_float(
-                    "colsample_bytree", 0.3, 1.0, step=0.05,
-                ),
-                "reg_alpha": trial.suggest_float(
-                    "reg_alpha", 1e-8, 10.0, log=True,
-                ),
-                "reg_lambda": trial.suggest_float(
-                    "reg_lambda", 1e-8, 10.0, log=True,
-                ),
-            }
-            if fw == "xgb":
-                params["min_child_weight"] = trial.suggest_int(
-                    "min_child_weight", 1, 20,
-                )
-                params["gamma"] = trial.suggest_float(
-                    "gamma", 0.0, 5.0, step=0.1,
-                )
-            elif fw == "lgbm":
-                params["min_child_samples"] = trial.suggest_int(
-                    "min_child_samples", 10, 40,
-                )
-                params["num_leaves"] = trial.suggest_int(
-                    "num_leaves", 20, 100,
-                )
-            else:  # catboost
-                params = {
-                    "n_estimators": trial.suggest_int("n_estimators", 100, 1200, step=50),
-                    "depth": trial.suggest_int("depth", 4, 10),
-                    "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-                    "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1e-3, 20.0, log=True),
-                    "random_strength": trial.suggest_float("random_strength", 0.0, 2.0),
-                    "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 2.0),
-                }
+        def _score_split(
+            params: dict,
+            split_X_train: np.ndarray,
+            split_X_val: np.ndarray,
+            split_targets_train: dict,
+            split_targets_val: dict,
+            split_groups_train: np.ndarray,
+            split_groups_val: np.ndarray,
+            split_sw_train: np.ndarray | None,
+            split_train_dates,
+            col_mask: np.ndarray | None = None,
+        ) -> float:
 
-            # Train and score
-            if model_key == "ltr":
-                mdl = train_ranker(
-                    X_train, targets_train["rel"], groups_train,
-                    self._ltr_ranker_type, params=params,
-                    finish_pos=targets_train["fp"],
-                    implied_prob=targets_train.get("ip"),
-                    feature_cols=_feat_cols,
+            # Apply column mask from trial-level pruning
+            if col_mask is not None:
+                split_X_train = split_X_train[:, col_mask]
+                split_X_val = split_X_val[:, col_mask]
+
+            def _win_logloss_eval(probs):
+                won = split_targets_val["won"].astype(np.float32)
+                eps = 1e-9
+                probs = np.clip(probs, eps, 1 - eps)
+                return -float(np.mean(won * np.log(probs) + (1 - won) * np.log(1 - probs)))
+
+            def _place_logloss_eval(scores):
+                placed = split_targets_val["placed"].astype(np.float32)
+                probs = 1.0 / (1.0 + np.exp(-scores))
+                eps = 1e-9
+                probs = np.clip(probs, eps, 1 - eps)
+                return -float(np.mean(placed * np.log(probs) + (1 - placed) * np.log(1 - probs)))
+
+            trial_sw = split_sw_train
+            if model_key in {"classifier", "place"} and split_train_dates is not None:
+                trial_sw = compute_recency_sample_weights(
+                    split_train_dates,
+                    half_life_days=params["recency_half_life_days"],
+                    seasonal_boost=params["recency_seasonal_boost"],
+                    decay_shape=params.get("recency_decay_shape", "exp"),
                 )
-                scores = mdl.predict(
-                    pd.DataFrame(X_val, columns=_feat_cols)
-                )
-            elif model_key == "classifier":
-                n_pw = max(int(targets_train["won"].sum()), 1)
+
+            if model_key == "classifier":
+                n_pw = max(int(split_targets_train["won"].sum()), 1)
                 mdl = self._train_win_classifier(
-                    X_train, targets_train["won"],
-                    scale_pos_weight=(len(targets_train["won"]) - n_pw) / n_pw,
-                    params=params, sample_weight=sw_train,
+                    split_X_train, split_targets_train["won"],
+                    scale_pos_weight=(len(split_targets_train["won"]) - n_pw) / n_pw,
+                    params=params, sample_weight=trial_sw,
                 )
-                scores = mdl.predict_proba(
-                    pd.DataFrame(X_val, columns=_feat_cols)
-                )[:, 1]
+                scores = mdl.predict_proba(split_X_val)[:, 1]
             elif model_key == "place":
-                n_pp = max(int(targets_train["placed"].sum()), 1)
+                n_pp = max(int(split_targets_train["placed"].sum()), 1)
                 mdl = self._train_place_classifier(
-                    X_train, targets_train["placed"],
-                    scale_pos_weight=(len(targets_train["placed"]) - n_pp) / n_pp,
-                    params=params, sample_weight=sw_train,
+                    split_X_train, split_targets_train["placed"],
+                    scale_pos_weight=(len(split_targets_train["placed"]) - n_pp) / n_pp,
+                    params=params, sample_weight=trial_sw,
                 )
-                scores = _proba_to_logit(mdl.predict_proba(X_val)[:, 1])
+                scores = _proba_to_logit(mdl.predict_proba(split_X_val)[:, 1])
             else:
                 raise ValueError(f"Unknown model_key: {model_key}")
 
-            score = _eval_fn[model_key](scores, groups_val)
+            if model_key == "classifier":
+                return _win_logloss_eval(scores)
+            return _place_logloss_eval(scores)
+
+        def objective(trial):
+            params = _suggest_from_autotune_space(trial, _search_space)
+
+            # Extract feature-pruning params (don't pass to model constructors)
+            _trial_prune_frac = params.pop("FEATURE_PRUNE_FRACTION", 0.0)
+            _trial_corr_thresh = params.pop("FEATURE_CORR_THRESHOLD", 0.0)
+
+            # Pre-compute column mask once for this trial (using first fold or main split)
+            _trial_col_mask = None
+            if _feat_cols is not None and _trial_prune_frac > 0:
+                _ref_X = folds[0]["X_train"] if folds else X_train
+                _ref_y = (folds[0]["targets_train"] if folds else targets_train)["won"]
+                _trial_col_mask = _quick_prune_mask(
+                    _ref_X, _ref_y, _feat_cols,
+                    prune_fraction=_trial_prune_frac,
+                    corr_threshold=_trial_corr_thresh,
+                )
+
+            if folds:
+                split_scores = []
+                for fi, fold in enumerate(folds):
+                    s = _score_split(
+                        params,
+                        fold["X_train"],
+                        fold["X_val"],
+                        fold["targets_train"],
+                        fold["targets_val"],
+                        fold["groups_train"],
+                        fold["groups_val"],
+                        fold.get("sw_train"),
+                        fold.get("train_dates"),
+                        col_mask=_trial_col_mask,
+                    )
+                    split_scores.append(s)
+                    # Report intermediate fold score so Optuna can prune
+                    trial.report(float(np.mean(split_scores)), fi)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned()
+                score = float(np.mean(split_scores))
+            else:
+                score = _score_split(
+                    params,
+                    X_train,
+                    X_val,
+                    targets_train,
+                    targets_val,
+                    groups_train,
+                    groups_val,
+                    sw_train,
+                    train_dates,
+                    col_mask=_trial_col_mask,
+                )
+
             if callback is not None:
                 _mn = _metric_names[model_key]
                 callback(trial.number + 1, n_trials, score)
             return score
 
-        study = optuna.create_study(direction="minimize")
-        study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+        _study_kwargs = {"direction": "minimize"}
+        _study_kwargs["pruner"] = optuna.pruners.MedianPruner(
+            n_startup_trials=5, n_warmup_steps=0,
+        )
+        if storage is not None:
+            _study_kwargs["storage"] = storage
+            _study_kwargs["study_name"] = study_name or f"autotune_{model_key}"
+            _study_kwargs["load_if_exists"] = load_if_exists
+
+        study = optuna.create_study(**_study_kwargs)
+        existing_trials = len(study.trials)
+        remaining_trials = max(0, int(n_trials) - existing_trials) if load_if_exists else int(n_trials)
+        if remaining_trials > 0:
+            try:
+                study.optimize(objective, n_trials=remaining_trials, show_progress_bar=False)
+            finally:
+                self._autotune_njobs = -1  # restore full parallelism
 
         _mn = _metric_names[model_key]
         logger.info(
-            f"  Optuna auto-tune ({model_key}, {fw}) — {n_trials} trials\n"
+            f"  Optuna auto-tune ({model_key}, {fw}) — {len(study.trials)} total trials\n"
             f"    Best {_mn}: {study.best_value:.6f}\n"
             f"    Best params: {study.best_params}"
         )
         return {
             "best_params": study.best_params,
             "best_score": round(study.best_value, 6),
-            "n_trials": n_trials,
+            "n_trials": len(study.trials),
+            "target_trials": int(n_trials),
+            "metric_name": _mn,
+            "framework": fw,
+            "study_name": study.study_name,
+            "storage": storage,
+            "cv_folds": len(folds) if folds else 1,
         }
 
     def _train_classifier(self, X, y, scale_pos_weight=1.0, params=None, sample_weight=None, eval_set=None):
@@ -3342,16 +2481,21 @@ class TripleEnsemblePredictor:
             "colsample_bytree": config.CLASSIFIER_PARAMS.get("colsample_bytree", 0.8),
             "reg_alpha": config.CLASSIFIER_PARAMS.get("reg_alpha", 0.05),
             "reg_lambda": config.CLASSIFIER_PARAMS.get("reg_lambda", 1.0),
+            "linear_tree": bool(config.CLASSIFIER_PARAMS.get("linear_tree", False)),
         }
         hp.update(self._filter_params(params, fw))
         if fw == "lgbm":
+            logger.info(
+                "Training win classifier (legacy) with linear_tree=%s",
+                bool(hp.get("linear_tree", False)),
+            )
             hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
             model = _FocalLGBMClassifier(
                 objective=_focal_binary_objective,
                 **hp,
                 subsample_freq=1,
                 random_state=config.RANDOM_SEED,
-                n_jobs=-1,
+                n_jobs=self._autotune_njobs,
                 verbose=-1,
             )
             fit_kw: dict = {"sample_weight": sample_weight}
@@ -3389,7 +2533,7 @@ class TripleEnsemblePredictor:
                 eval_metric="logloss",
                 **hp,
                 random_state=config.RANDOM_SEED,
-                n_jobs=-1,
+                n_jobs=self._autotune_njobs,
             )
             fit_kw = {"sample_weight": sample_weight}
             if eval_set is not None:
@@ -3420,18 +2564,23 @@ class TripleEnsemblePredictor:
             "colsample_bytree": config.CLASSIFIER_PARAMS.get("colsample_bytree", 0.8),
             "reg_alpha": config.CLASSIFIER_PARAMS.get("reg_alpha", 0.05),
             "reg_lambda": config.CLASSIFIER_PARAMS.get("reg_lambda", 1.0),
+            "linear_tree": bool(config.CLASSIFIER_PARAMS.get("linear_tree", False)),
         }
         if "num_leaves" in config.CLASSIFIER_PARAMS:
             hp["num_leaves"] = config.CLASSIFIER_PARAMS["num_leaves"]
         hp.update(self._filter_params(params, fw))
         if fw == "lgbm":
+            logger.info(
+                "Training win classifier with linear_tree=%s",
+                bool(hp.get("linear_tree", False)),
+            )
             hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
             model = LGBMClassifier(
                 objective="binary",
                 **hp,
                 subsample_freq=1,
                 random_state=config.RANDOM_SEED,
-                n_jobs=-1,
+                n_jobs=self._autotune_njobs,
                 verbose=-1,
             )
             fit_kw: dict = {"sample_weight": sample_weight}
@@ -3467,7 +2616,7 @@ class TripleEnsemblePredictor:
                 eval_metric="logloss",
                 **hp,
                 random_state=config.RANDOM_SEED,
-                n_jobs=-1,
+                n_jobs=self._autotune_njobs,
             )
             fit_kw = {"sample_weight": sample_weight}
             if eval_set is not None:
@@ -3496,16 +2645,21 @@ class TripleEnsemblePredictor:
             "colsample_bytree": config.PLACE_CLASSIFIER_PARAMS.get("colsample_bytree", 0.8),
             "reg_alpha": config.PLACE_CLASSIFIER_PARAMS.get("reg_alpha", 0.1),
             "reg_lambda": config.PLACE_CLASSIFIER_PARAMS.get("reg_lambda", 1.0),
+            "linear_tree": bool(config.PLACE_CLASSIFIER_PARAMS.get("linear_tree", False)),
         }
         hp.update(self._filter_params(params, fw))
         if fw == "lgbm":
+            logger.info(
+                "Training place classifier with linear_tree=%s",
+                bool(hp.get("linear_tree", False)),
+            )
             hp.setdefault("min_child_samples", config.PLACE_CLASSIFIER_PARAMS.get("min_child_samples", 10))
             model = LGBMClassifier(
                 objective="binary",
                 **hp,
                 subsample_freq=1,
                 random_state=config.RANDOM_SEED,
-                n_jobs=-1,
+                n_jobs=self._autotune_njobs,
                 verbose=-1,
             )
             fit_kw: dict = {"sample_weight": sample_weight}
@@ -3542,7 +2696,7 @@ class TripleEnsemblePredictor:
                 eval_metric="logloss",
                 **hp,
                 random_state=config.RANDOM_SEED,
-                n_jobs=-1,
+                n_jobs=self._autotune_njobs,
             )
             fit_kw = {"sample_weight": sample_weight}
             if eval_set is not None:
@@ -3554,7 +2708,7 @@ class TripleEnsemblePredictor:
         return model
 
     def _evaluate_as_ranker(self, scores, y_test, groups_test, test_df, name,
-                            calibrated_probs=None):
+                            calibrated_probs=None, value_threshold: float | None = None):
         """Evaluate scores using ranking + calibration metrics.
 
         *scores* are used for ranking metrics (NDCG, top-k accuracy).
@@ -3567,8 +2721,7 @@ class TripleEnsemblePredictor:
         ndcg1, ndcg3 = [], []
         top1, win3, total = 0, 0, 0
 
-        # Use pre-calibrated probabilities when available;
-        # fall back to raw softmax for LTR / uncalibrated models.
+        # Use pre-calibrated probabilities when available.
         if calibrated_probs is not None:
             all_probs = calibrated_probs
         else:
@@ -3581,9 +2734,8 @@ class TripleEnsemblePredictor:
             gs = scores[offset:offset + g]
             offset += g
             # Skip races with no label variation (no clear ground-truth winner)
-            # OR where all scores are identical (model has no opinion — e.g.
-            # all-zero LTR scores when ranker was not trained).  Counting
-            # argmax ties as "correct" would inflate top-1 accuracy artificially.
+            # OR where all scores are identical (model has no opinion).
+            # Counting argmax ties as "correct" would inflate top-1 accuracy.
             if g < 2 or gl.max() == gl.min() or gs.max() == gs.min():
                 continue
             total += 1
@@ -3623,15 +2775,62 @@ class TripleEnsemblePredictor:
         else:
             rps = float("nan")
 
+        # ── ECE + reliability diagram (10 equal-width bins) ────
+        _n_bins = 10
+        _bin_edges = np.linspace(0.0, 1.0, _n_bins + 1)
+        _bin_ids = np.digitize(probs_clipped, _bin_edges, right=False) - 1
+        _bin_ids = np.clip(_bin_ids, 0, _n_bins - 1)
+        _reliability: list[dict | None] = []
+        _ece = 0.0
+        _n_total = len(probs_clipped)
+        for _b in range(_n_bins):
+            _mask = _bin_ids == _b
+            _cnt = int(_mask.sum())
+            if _cnt == 0:
+                _reliability.append(None)
+                continue
+            _mean_pred = float(probs_clipped[_mask].mean())
+            _obs = float(y_won[_mask].mean())
+            _reliability.append({
+                "bin_lo": round(float(_bin_edges[_b]), 2),
+                "bin_hi": round(float(_bin_edges[_b + 1]), 2),
+                "mean_pred": round(_mean_pred, 4),
+                "obs_rate": round(_obs, 4),
+                "count": _cnt,
+            })
+            _ece += abs(_mean_pred - _obs) * (_cnt / _n_total)
+
+        # ── Per-decile calibration (10 equal-count bins) ─────────
+        _decile_bins: list[dict] = []
+        if _n_total >= 20:
+            _sort_idx = np.argsort(probs_clipped)
+            _chunk = _n_total // 10
+            for _d in range(10):
+                _lo = _d * _chunk
+                _hi = (_d + 1) * _chunk if _d < 9 else _n_total
+                _d_probs = probs_clipped[_sort_idx[_lo:_hi]]
+                _d_won = y_won[_sort_idx[_lo:_hi]]
+                _decile_bins.append({
+                    "decile": _d + 1,
+                    "prob_lo": round(float(_d_probs.min()), 4),
+                    "prob_hi": round(float(_d_probs.max()), 4),
+                    "mean_pred": round(float(_d_probs.mean()), 4),
+                    "obs_rate": round(float(_d_won.mean()), 4),
+                    "count": int(len(_d_probs)),
+                })
+
         metrics = {
             "rps": round(rps, 6),
             "brier_score": round(brier, 6),
             "log_loss": round(logloss, 4),
+            "ece": round(_ece, 6),
             "ndcg_at_1": np.mean(ndcg1) if ndcg1 else 0,
             "ndcg_at_3": np.mean(ndcg3) if ndcg3 else 0,
             "top1_accuracy": top1 / total if total else 0,
             "win_in_top3": win3 / total if total else 0,
             "total_races": total,
+            "reliability_bins": _reliability,
+            "decile_calibration": _decile_bins,
         }
 
         # ── Betting-relevant metrics ─────────────────────────────
@@ -3640,44 +2839,60 @@ class TripleEnsemblePredictor:
         _has_odds = "odds" in test_df.columns
         if _has_odds:
             _odds = test_df["odds"].values[:len(scores)].astype(np.float64)
-            _raw_ip = np.where(_odds > 0, 1.0 / _odds, 0.0)
-            # Normalise per race to strip bookmaker overround
-            _ip_group_sum = np.add.reduceat(_raw_ip, _group_offsets(groups_test))
-            _gids = np.repeat(np.arange(len(groups_test)), groups_test)
-            _imp_prob = _raw_ip / np.maximum(_ip_group_sum[_gids], 1e-9)
-            _edge = all_probs - _imp_prob
-            _vt = getattr(config, "VALUE_THRESHOLD", 0.05)
-            _dyn_thresh = _vt * np.sqrt(_odds / 3.0)
-            _is_vb = _edge > _dyn_thresh
+            _vt = float(value_threshold if value_threshold is not None else getattr(config, "VALUE_THRESHOLD", 0.05))
+            _vb = _value_bet_selection(all_probs, _odds, _vt)
+            _is_vb = _vb["mask"]
             _n_vb = int(_is_vb.sum())
             if _n_vb > 0:
                 _vb_won = y_won[_is_vb]
                 _vb_odds = _odds[_is_vb]
+                _vb_probs = np.clip(all_probs[_is_vb], 1e-15, 1 - 1e-15)
                 _vb_sr = float(_vb_won.mean())
                 # Flat-stake ROI: (sum of returns - stakes) / stakes
                 _vb_returns = np.where(_vb_won == 1, _vb_odds - 1.0, -1.0)
                 _vb_roi = float(_vb_returns.mean())  # per-bet avg P&L
-                _vb_avg_edge = float(_edge[_is_vb].mean())
+                _vb_avg_edge = float(_vb["edge"][_is_vb].mean())
+                _vb_avg_clv = float(_vb["clv"][_is_vb].mean())
+                _vb_exp_roi = float(_vb["expected_roi"][_is_vb].mean())
                 metrics["value_bets"] = _n_vb
                 metrics["value_bet_sr"] = round(_vb_sr, 4)
                 metrics["value_bet_roi"] = round(_vb_roi, 4)
                 metrics["avg_edge"] = round(_vb_avg_edge, 4)
+                metrics["value_bet_avg_clv"] = round(_vb_avg_clv, 4)
+                metrics["value_bet_exp_roi_pct"] = round(_vb_exp_roi * 100.0, 2)
+                try:
+                    metrics["value_bet_brier"] = round(float(brier_score_loss(_vb_won, _vb_probs)), 6)
+                except Exception:
+                    metrics["value_bet_brier"] = None
+                try:
+                    metrics["value_bet_log_loss"] = round(float(log_loss(_vb_won, _vb_probs)), 4)
+                except Exception:
+                    metrics["value_bet_log_loss"] = None
             else:
                 metrics["value_bets"] = 0
                 metrics["value_bet_sr"] = None
                 metrics["value_bet_roi"] = None
                 metrics["avg_edge"] = None
+                metrics["value_bet_avg_clv"] = None
+                metrics["value_bet_exp_roi_pct"] = None
+                metrics["value_bet_brier"] = None
+                metrics["value_bet_log_loss"] = None
         else:
             metrics["value_bets"] = None
             metrics["value_bet_sr"] = None
             metrics["value_bet_roi"] = None
             metrics["avg_edge"] = None
+            metrics["value_bet_avg_clv"] = None
+            metrics["value_bet_exp_roi_pct"] = None
+            metrics["value_bet_brier"] = None
+            metrics["value_bet_log_loss"] = None
 
         logger.info(f"\n{'='*50}")
         logger.info(f"  {name} Evaluation Results")
         logger.info(f"{'='*50}")
         logger.info(f"  RPS:             {metrics['rps']:.6f}")
         logger.info(f"  Brier Score:     {metrics['brier_score']:.6f}")
+        logger.info(f"  ECE:             {metrics['ece']:.6f}")
         logger.info(f"  Log Loss:        {metrics['log_loss']:.4f}")
         for k in ["ndcg_at_1", "ndcg_at_3", "top1_accuracy", "win_in_top3"]:
             logger.info(f"  {k}: {metrics[k]:.4f}")
@@ -3689,6 +2904,72 @@ class TripleEnsemblePredictor:
         logger.info(f"  total_races: {metrics['total_races']}")
         logger.info(f"{'='*50}")
         return metrics
+
+    @staticmethod
+    def _extract_recency_params(
+        params: dict | None,
+    ) -> tuple[float | None, float | None, str | None]:
+        if not params:
+            return None, None, None
+        half_life = params.get("recency_half_life_days")
+        seasonal = params.get("recency_seasonal_boost")
+        shape = params.get("recency_decay_shape")
+        return (
+            float(half_life) if half_life is not None else None,
+            float(seasonal) if seasonal is not None else None,
+            str(shape) if shape is not None else None,
+        )
+
+    def _tune_value_threshold(
+        self,
+        win_probs: np.ndarray,
+        groups_eval: np.ndarray,
+        eval_df: pd.DataFrame,
+        value_config: dict | None,
+        place_probs: np.ndarray | None = None,
+    ) -> dict:
+        """Grid-search the value threshold on validation data only."""
+        base_cfg = dict(value_config or {})
+        base_vt = float(base_cfg.get("value_threshold", 0.05))
+        candidates = sorted({0.02, 0.03, 0.05, 0.07, 0.10, 0.15, round(base_vt, 3)})
+
+        best_cfg = dict(base_cfg)
+        best_score = -np.inf
+        best_stats = None
+        for vt in candidates:
+            trial_cfg = {**base_cfg, "value_threshold": float(vt)}
+            analysis = analyse_test_set(
+                win_probs=win_probs,
+                groups_test=groups_eval,
+                test_df=eval_df,
+                value_threshold=float(vt),
+                staking_mode=trial_cfg.get("staking_mode", "flat"),
+                kelly_fraction=trial_cfg.get("kelly_fraction", 0.25),
+                bankroll=trial_cfg.get("bankroll", 100.0),
+                place_probs=place_probs,
+                ew_min_place_edge=trial_cfg.get("ew_min_place_edge"),
+            )
+            stats = analysis.get("stats", {}).get("value", {})
+            n_bets = int(stats.get("bets", 0))
+            roi = float(stats.get("roi", 0.0))
+            total_pnl = float(stats.get("pnl", 0.0))
+            # Prefer profitable thresholds that still place a non-trivial number of bets.
+            score = total_pnl + 0.05 * n_bets + 0.1 * roi
+            if n_bets < 5:
+                score -= 5.0
+            if score > best_score:
+                best_score = score
+                best_cfg = trial_cfg
+                best_stats = stats
+
+        if best_cfg.get("value_threshold") != base_vt:
+            logger.info(
+                "Validation tuned value threshold: %.3f -> %.3f%s",
+                base_vt,
+                best_cfg["value_threshold"],
+                f" (bets={best_stats.get('bets', 0)}, pnl={best_stats.get('pnl', 0):+.2f})" if best_stats else "",
+            )
+        return best_cfg
 
     @staticmethod
     def _optimise_calibration_temperature(
@@ -3792,6 +3073,21 @@ class TripleEnsemblePredictor:
         b = float(np.clip(res.x[1], -3.0, 3.0))
         return a, b
 
+    # ── Isotonic calibration ──────────────────────────────────────
+    @staticmethod
+    def _fit_isotonic(
+        probs: np.ndarray, targets: np.ndarray,
+    ) -> IsotonicRegression | None:
+        """Fit isotonic regression calibrator on probabilities.
+
+        Returns None if there are too few samples for a meaningful fit.
+        """
+        if len(probs) < 50:
+            return None
+        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+        iso.fit(probs.astype(np.float64), targets.astype(np.float64))
+        return iso
+
     # ── Calibration application ──────────────────────────────────
     def _calibrate_win_probs(
         self, raw_probs: np.ndarray, groups: np.ndarray,
@@ -3814,16 +3110,126 @@ class TripleEnsemblePredictor:
         else:
             probs = _grouped_normalize(probs, groups)
 
+        # Isotonic refinement (preserves ranking, adjusts calibration curve)
+        if self.win_iso_cal is not None:
+            probs = self.win_iso_cal.predict(probs.astype(np.float64))
+            probs = np.clip(probs, 1e-9, 1.0)
+            probs = _grouped_normalize(probs, groups)
+
         return probs
 
     def _calibrate_place_probs(self, raw_probs: np.ndarray) -> np.ndarray:
-        """Apply Platt calibration to place probabilities."""
+        """Apply Platt + isotonic calibration to place probabilities."""
         if self.place_platt_a == 1.0 and self.place_platt_b == 0.0:
-            return raw_probs.copy()
-        _eps = 1e-9
-        lp = np.log(np.clip(raw_probs, _eps, 1 - _eps)
-                     / np.clip(1 - raw_probs, _eps, 1))
-        return 1.0 / (1.0 + np.exp(-(self.place_platt_a * lp + self.place_platt_b)))
+            probs = raw_probs.copy()
+        else:
+            _eps = 1e-9
+            lp = np.log(np.clip(raw_probs, _eps, 1 - _eps)
+                         / np.clip(1 - raw_probs, _eps, 1))
+            probs = 1.0 / (1.0 + np.exp(-(self.place_platt_a * lp + self.place_platt_b)))
+
+        # Isotonic refinement
+        if self.place_iso_cal is not None:
+            probs = self.place_iso_cal.predict(probs.astype(np.float64))
+            probs = np.clip(probs, 1e-9, 1.0)
+
+        return probs
+
+    def _prepare_prediction_frame(self, race_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        predict_df = race_df.reset_index(drop=True).copy()
+        missing = [c for c in self.feature_cols if c not in predict_df.columns]
+        for col in missing:
+            predict_df[col] = 0
+
+        X = predict_df[self.feature_cols].values
+        X_scaled_np = self.scaler.transform(X)
+        X_scaled = pd.DataFrame(X_scaled_np, columns=self.feature_cols, index=predict_df.index)
+        return predict_df, X_scaled
+
+    def _compute_place_probabilities(
+        self,
+        predict_df: pd.DataFrame,
+        X_scaled: pd.DataFrame,
+        win_probs: np.ndarray,
+        groups: np.ndarray,
+    ) -> np.ndarray:
+        total_rows = len(predict_df)
+        if total_rows == 0:
+            return np.empty(0, dtype=np.float64)
+
+        place_probs = np.zeros(total_rows, dtype=np.float64)
+        if self.place_model is not None:
+            raw_place = self.place_model.predict_proba(X_scaled)[:, 1]
+            base_place = self._calibrate_place_probs(raw_place)
+        else:
+            base_place = None
+
+        offsets = np.concatenate([[0], np.cumsum(groups[:-1])]) if len(groups) else np.empty(0, dtype=np.int64)
+        for off, group_size in zip(offsets, groups):
+            sl = slice(int(off), int(off + group_size))
+            n = int(group_size)
+            win_slice = win_probs[sl]
+            if base_place is not None:
+                race_df = predict_df.iloc[sl]
+                is_hcap = bool(race_df["handicap"].iloc[0]) if "handicap" in race_df.columns else False
+                from src.each_way import adjust_place_probs_for_race, get_ew_terms as _get_ew
+
+                ew_terms = _get_ew(n, is_handicap=is_hcap)
+                places_paid = ew_terms.places_paid if ew_terms.eligible else 3
+                place_probs[sl] = adjust_place_probs_for_race(base_place[sl], win_slice, places_paid)
+            else:
+                places_paid = 3 if n >= 8 else (2 if n >= 5 else 0)
+                if places_paid > 0 and n > places_paid:
+                    k = n / places_paid
+                    fallback = 1.0 - (1.0 - win_slice) ** k
+                    fallback = np.maximum(fallback, win_slice)
+                    total = fallback.sum()
+                    if total > 0:
+                        fallback = np.clip(fallback * (places_paid / total), 0.0, 1.0)
+                    place_probs[sl] = fallback
+                else:
+                    place_probs[sl] = np.zeros(n, dtype=np.float64)
+        return place_probs
+
+    def predict_races(self, featured_df: pd.DataFrame, ew_fraction: float | None = None) -> pd.DataFrame:
+        if self.clf_model is None:
+            raise ValueError("Model not trained. Call train() or load() first.")
+        if "race_id" not in featured_df.columns:
+            raise ValueError("predict_races requires a race_id column.")
+
+        predict_df, X_scaled = self._prepare_prediction_frame(featured_df)
+        race_ids = pd.Index(pd.unique(predict_df["race_id"]))
+        groups = predict_df.groupby("race_id", sort=False).size().values.astype(np.int64)
+        offsets = _group_offsets(groups)
+        n = len(predict_df)
+
+        clf_probs_raw = self.clf_model.predict_proba(X_scaled)[:, 1] if self.clf_model is not None else np.repeat(1.0 / np.maximum(groups, 1), groups)
+        win_probs = self._calibrate_win_probs(clf_probs_raw, groups, predict_df)
+        place_probs = self._compute_place_probabilities(predict_df, X_scaled, win_probs, groups)
+
+        result_cols = [col for col in ["race_id", "track", "off_time", "race_name", "horse_name", "jockey", "trainer", "odds", "num_runners", "handicap"] if col in predict_df.columns]
+        results = predict_df[result_cols].copy()
+        results["win_probability"] = win_probs
+        results["place_probability"] = place_probs
+        results["predicted_rank"] = results.groupby("race_id", sort=False)["win_probability"].rank(ascending=False, method="min").astype(int)
+
+        if "odds" in predict_df.columns:
+            raw_ip = 1.0 / predict_df["odds"].values
+            overround = np.add.reduceat(raw_ip, offsets)
+            results["implied_prob"] = raw_ip / np.maximum(np.repeat(overround, groups), 1e-9)
+            results["value_score"] = results["win_probability"] - results["implied_prob"]
+
+        if "odds" in predict_df.columns:
+            try:
+                from src.each_way import compute_ew_columns
+
+                results = compute_ew_columns(results, fraction_override=ew_fraction)
+            except Exception as e:
+                logger.debug("EW columns skipped: %s", e)
+
+        results["_race_order"] = pd.Categorical(results["race_id"], categories=race_ids, ordered=True)
+        results = results.sort_values(["_race_order", "predicted_rank"], kind="stable")
+        return results.drop(columns=["_race_order"], errors="ignore")
 
     # ── Place model evaluation ───────────────────────────────────
     @staticmethod
@@ -3862,57 +3268,50 @@ class TripleEnsemblePredictor:
             f"Place precision: {place_precision:.3f}"
         )
 
+        # ── ECE + reliability for place model ────────────────
+        _pp_clipped = np.clip(place_probs, 1e-15, 1 - 1e-15)
+        _p_n_bins = 10
+        _p_edges = np.linspace(0.0, 1.0, _p_n_bins + 1)
+        _p_bids = np.clip(np.digitize(_pp_clipped, _p_edges, right=False) - 1, 0, _p_n_bins - 1)
+        _p_rel: list[dict | None] = []
+        _p_ece = 0.0
+        _p_total = len(_pp_clipped)
+        for _b in range(_p_n_bins):
+            _m = _p_bids == _b
+            _c = int(_m.sum())
+            if _c == 0:
+                _p_rel.append(None)
+                continue
+            _mp = float(_pp_clipped[_m].mean())
+            _ob = float(placed[_m].mean())
+            _p_rel.append({"bin_lo": round(float(_p_edges[_b]), 2), "bin_hi": round(float(_p_edges[_b + 1]), 2), "mean_pred": round(_mp, 4), "obs_rate": round(_ob, 4), "count": _c})
+            _p_ece += abs(_mp - _ob) * (_c / _p_total)
+
         return {
             "brier_calibrated": round(brier_cal, 4),
             "brier_raw": round(brier_raw, 4),
             "place_precision": round(place_precision, 3),
+            "ece": round(_p_ece, 6),
+            "reliability_bins": _p_rel,
         }
 
     # ── Prediction ───────────────────────────────────────────────
     def predict_race(self, race_df: pd.DataFrame, ew_fraction: float | None = None) -> pd.DataFrame:
-        if self.ltr_model is None and self.clf_model is None:
+        if self.clf_model is None:
             raise ValueError("Model not trained. Call train() or load() first.")
 
-        race_df = race_df.reset_index(drop=True)
-        missing = [c for c in self.feature_cols if c not in race_df.columns]
-        for col in missing:
-            race_df[col] = 0
-
-        X = race_df[self.feature_cols].values
-        X_scaled_np = self.scaler.transform(X)
-        X_scaled = pd.DataFrame(X_scaled_np, columns=self.feature_cols, index=race_df.index)
+        race_df, X_scaled = self._prepare_prediction_frame(race_df)
         n = len(X_scaled)
         groups = np.array([n])
 
         # ── Score with each model ────────────────────────────────
-        ltr_scores = self.ltr_model.predict(X_scaled) if self.ltr_model is not None else np.zeros(n)
         clf_probs_raw = self.clf_model.predict_proba(X_scaled)[:, 1] if self.clf_model is not None else np.full(n, 1.0 / n)
 
         # Calibrated win probabilities
         win_probs = self._calibrate_win_probs(clf_probs_raw, groups, race_df)
 
         # Place probabilities
-        if self.place_model is not None:
-            _place_raw = self.place_model.predict_proba(X_scaled)[:, 1]
-            _place_probs = self._calibrate_place_probs(_place_raw)
-            # Adjust for actual EW places paid
-            from src.each_way import adjust_place_probs_for_race, get_ew_terms as _get_ew
-            _is_hcap = bool(race_df["handicap"].iloc[0]) if "handicap" in race_df.columns else False
-            _ew_t = _get_ew(n, is_handicap=_is_hcap)
-            _pp = _ew_t.places_paid if _ew_t.eligible else 3
-            _place_probs = adjust_place_probs_for_race(_place_probs, win_probs, _pp)
-        else:
-            # Harville fallback
-            places_paid = 3 if n >= 8 else (2 if n >= 5 else 0)
-            if places_paid > 0 and n > places_paid:
-                k = n / places_paid
-                _place_probs = 1.0 - (1.0 - win_probs) ** k
-                _place_probs = np.maximum(_place_probs, win_probs)
-                _s = _place_probs.sum()
-                if _s > 0:
-                    _place_probs = np.clip(_place_probs * (places_paid / _s), 0.0, 1.0)
-            else:
-                _place_probs = np.zeros(n)
+        _place_probs = self._compute_place_probabilities(race_df, X_scaled, win_probs, groups)
 
         # ── Build results ────────────────────────────────────────
         results = race_df[["horse_name"]].copy()
@@ -3925,9 +3324,6 @@ class TripleEnsemblePredictor:
 
         results["win_probability"] = win_probs
         results["place_probability"] = _place_probs
-        results["rank_score"] = ltr_scores
-        # Always sort by win_probability (value model). LTR rank_score is kept
-        # in the output for reference but is no longer used for ordering.
         results["predicted_rank"] = pd.Series(win_probs).rank(
             ascending=False, method="min",
         ).astype(int).values
@@ -3951,52 +3347,34 @@ class TripleEnsemblePredictor:
 
         return results.sort_values("predicted_rank")
 
-    # ── SHAP explanation (uses LTR sub-model) ────────────────────
+    # ── SHAP explanation ────────────────────────────────────────
     def explain_race(
         self,
         race_df: pd.DataFrame,
         top_n_features: int = 10,
     ) -> dict:
-        import shap
+        explain_model = None
+        explain_label = None
+        if self.clf_model is not None:
+            explain_model = self.clf_model
+            explain_label = "Win Classifier"
+        elif self.place_model is not None:
+            explain_model = self.place_model
+            explain_label = "Place Classifier"
 
-        if self.ltr_model is None:
+        if explain_model is None:
             raise ValueError(
                 "Model not trained. Call train() or load() first."
             )
 
-        race_df = race_df.reset_index(drop=True)
-
-        missing = [c for c in self.feature_cols if c not in race_df.columns]
-        for col in missing:
-            race_df[col] = 0
-
-        X = race_df[self.feature_cols].values
-        X_scaled = pd.DataFrame(
-            self.scaler.transform(X),
-            columns=self.feature_cols,
-            index=race_df.index,
+        explanations, method_label = _explain_race_with_shap(
+            explain_model,
+            race_df,
+            self.feature_cols,
+            self.scaler,
+            top_n_features,
         )
-
-        explainer = shap.TreeExplainer(self.ltr_model)
-        shap_values = explainer.shap_values(X_scaled)
-
-        explanations: dict[str, pd.DataFrame] = {}
-        horse_names = race_df["horse_name"].values
-
-        for i, name in enumerate(horse_names):
-            sv = shap_values[i]
-            fv = X_scaled.iloc[i]
-            df_expl = pd.DataFrame({
-                "feature": self.feature_cols,
-                "shap_value": sv,
-                "feature_value": fv,
-            })
-            df_expl["abs_shap"] = df_expl["shap_value"].abs()
-            df_expl = df_expl.sort_values("abs_shap", ascending=False)
-            explanations[name] = df_expl.head(top_n_features).drop(
-                columns="abs_shap",
-            )
-
+        self.last_explain_model_label = f"{explain_label} ({method_label})"
         return explanations
 
     # ── Persistence ──────────────────────────────────────────────
@@ -4004,7 +3382,6 @@ class TripleEnsemblePredictor:
         path = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
         joblib.dump(
             {
-                "ltr_model": self.ltr_model,
                 "clf_model": self.clf_model,
                 "place_model": self.place_model,
                 "scaler": self.scaler,
@@ -4014,6 +3391,8 @@ class TripleEnsemblePredictor:
                 "platt_b": self.platt_b,
                 "place_platt_a": self.place_platt_a,
                 "place_platt_b": self.place_platt_b,
+                "win_iso_cal": self.win_iso_cal,
+                "place_iso_cal": self.place_iso_cal,
                 "frameworks": self.frameworks,
             },
             path,
@@ -4025,7 +3404,6 @@ class TripleEnsemblePredictor:
         if not os.path.exists(path):
             raise FileNotFoundError(f"No models found at {path}")
         data = joblib.load(path)
-        self.ltr_model = data.get("ltr_model")
         self.clf_model = data.get("clf_model")
         self.place_model = data.get("place_model")
         self.scaler = data.get("scaler") or _IdentityScaler()
@@ -4035,7 +3413,9 @@ class TripleEnsemblePredictor:
         self.platt_b = float(data.get("platt_b", 0.0))
         self.place_platt_a = float(data.get("place_platt_a", 1.0))
         self.place_platt_b = float(data.get("place_platt_b", 0.0))
-        self.frameworks = data.get("frameworks", {"ltr": "lgbm", "classifier": "cat", "place": "cat"})
+        self.win_iso_cal = data.get("win_iso_cal")
+        self.place_iso_cal = data.get("place_iso_cal")
+        self.frameworks = data.get("frameworks", {"classifier": "cat", "place": "cat"})
         logger.info(f"Models loaded (frameworks: {self.frameworks})")
 
     # ── Walk-forward fold helper ─────────────────────────────────
@@ -4047,8 +3427,10 @@ class TripleEnsemblePredictor:
         groups_train: np.ndarray,
         groups_test: np.ndarray,
         feature_cols: list[str],
+        params: dict[str, dict] | None = None,
         return_place_probs: bool = False,
         fast_fold: bool = False,
+        test_df: pd.DataFrame | None = None,
     ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Train 3 models on a pre-split fold with calibration.
 
@@ -4061,6 +3443,7 @@ class TripleEnsemblePredictor:
         trained and the models are disposable).
         """
         self.feature_cols = feature_cols
+        fold_params = params or {}
 
         # Fast-fold overrides: halve n_estimators + cap depth for speed
         _saved_params: dict | None = None
@@ -4081,8 +3464,31 @@ class TripleEnsemblePredictor:
             config.LIGHTGBM_PARAMS["max_depth"] = min(_saved_params["lgb_depth"], 5)
 
         fp = train_df["finish_position"].values.astype(np.float32)
-        y_rel = np.maximum(0, 11 - fp.astype(int))
         y_won = train_df["won"].fillna(0).values.astype(int)
+
+        _prune_frac = float(getattr(config, "FEATURE_PRUNE_FRACTION", 0.0))
+        if _prune_frac > 0 and len(self.feature_cols) > 8:
+            n_races_fold = len(groups_train)
+            anchor_races = max(1, int(n_races_fold * 0.6))
+            anchor_rows = int(np.cumsum(groups_train)[anchor_races - 1])
+            anchor_df = train_df.iloc[:anchor_rows].copy()
+            if len(anchor_df) >= 200:
+                kept_cols = _prune_features_quick(anchor_df, self.feature_cols, _prune_frac)
+                if len(kept_cols) < len(self.feature_cols):
+                    keep_idx = [self.feature_cols.index(col) for col in kept_cols]
+                    self.feature_cols = kept_cols
+                    feature_cols = kept_cols
+                    X_train = X_train[:, keep_idx]
+                    X_test = X_test[:, keep_idx]
+                    logger.info(
+                        "Applied leak-safe fold pruning using %d anchor rows",
+                        len(anchor_df),
+                    )
+            else:
+                logger.info(
+                    "Fold feature pruning skipped: anchor slice too small (%d rows)",
+                    len(anchor_df),
+                )
 
         # Dynamic place target based on actual EW places paid per race
         _nr_fold = train_df["num_runners"].values
@@ -4090,27 +3496,9 @@ class TripleEnsemblePredictor:
         _pp_fold = np.where(_nr_fold <= 4, 3, np.where(_nr_fold <= 7, 2, np.where(_nr_fold <= 15, 3, np.where(_hc_fold, 4, 3))))
         y_placed = (fp <= _pp_fold).astype(int)
 
-        if "implied_prob" in train_df.columns:
-            ip = train_df["implied_prob"].fillna(0.0).clip(0.0, 1.0).values.astype(np.float32)
-        elif "odds" in train_df.columns:
-            ip = (1.0 / train_df["odds"].replace(0, np.nan)).fillna(0.0).clip(0.0, 1.0).values.astype(np.float32)
-        else:
-            ip = np.zeros(len(train_df), dtype=np.float32)
-
-        nr = train_df["num_runners"].replace(0, 1).values.astype(np.float32)
-        y_norm = 1.0 - (fp - 1) / np.maximum(nr - 1, 1)
-
         # Recency sample weights
         dates = pd.to_datetime(train_df["race_date"])
-        days_ago = (dates.max() - dates).dt.days.values.astype(np.float64)
-        _hl = getattr(config, "RECENCY_HALF_LIFE_DAYS", 180)
-        sw = np.exp(-np.log(2) * days_ago / _hl)
-        _seasonal = getattr(config, "RECENCY_SEASONAL_BOOST", 0.0)
-        if _seasonal > 0:
-            _cur_month = dates.max().month
-            _same_month = (dates.dt.month.values == _cur_month).astype(np.float64)
-            sw *= (1.0 + _seasonal * _same_month)
-        sw /= sw.mean()
+        sw = compute_recency_sample_weights(dates).copy()
 
         # ── Internal calibration split (last 20 % of races) ─────
         n_races = len(groups_train)
@@ -4124,37 +3512,27 @@ class TripleEnsemblePredictor:
             X_cal_tr = X_train[:cal_row_start]
             X_cal_vl = X_train[cal_row_start:]
             sw_cal = sw[:cal_row_start]
-            fp_cal_tr = fp[:cal_row_start]
-            ip_cal_tr = ip[:cal_row_start]
-            y_norm_cal_tr = y_norm[:cal_row_start]
             y_placed_cal_tr = y_placed[:cal_row_start]
-            g_cal_tr = groups_train[:cal_bnd]
             fp_cal_vl = fp[cal_row_start:]
 
-            _cal_ltr = train_ranker(
-                X_cal_tr,
-                np.maximum(0, 11 - fp_cal_tr.astype(int)),
-                g_cal_tr, self._ltr_ranker_type,
-                finish_pos=fp_cal_tr, implied_prob=ip_cal_tr,
-                feature_cols=self.feature_cols,
-            )
             y_won_cal_tr = y_won[:cal_row_start]
             _n_pw = max(int(y_won_cal_tr.sum()), 1)
             _cal_clf = self._train_win_classifier(
                 X_cal_tr, y_won_cal_tr,
                 scale_pos_weight=(len(y_won_cal_tr) - _n_pw) / _n_pw,
+                params=fold_params.get("classifier"),
                 sample_weight=sw_cal,
             )
             _n_pp = max(int(y_placed_cal_tr.sum()), 1)
             _cal_place = self._train_place_classifier(
                 X_cal_tr, y_placed_cal_tr,
                 scale_pos_weight=(len(y_placed_cal_tr) - _n_pp) / _n_pp,
+                params=fold_params.get("place"),
                 sample_weight=sw_cal,
             )
 
-            X_cal_vl_df = pd.DataFrame(X_cal_vl, columns=feature_cols)
-            _cal_clf_probs = _cal_clf.predict_proba(X_cal_vl_df)[:, 1]
-            _cal_place_raw = _cal_place.predict_proba(X_cal_vl_df)[:, 1]
+            _cal_clf_probs = _cal_clf.predict_proba(X_cal_vl)[:, 1]
+            _cal_place_raw = _cal_place.predict_proba(X_cal_vl)[:, 1]
             # Dynamic place target for calibration slab
             _nr_cal = train_df["num_runners"].values[cal_row_start:]
             _hc_cal = train_df.get("handicap", pd.Series(0, index=train_df.index)).values[cal_row_start:].astype(bool)
@@ -4169,37 +3547,67 @@ class TripleEnsemblePredictor:
             self.place_platt_a, self.place_platt_b = self._optimise_place_platt(
                 _cal_place_raw, _cal_placed_vl,
             )
+
+            # Isotonic calibration on held-out slab
+            _cal_win_probs = self._calibrate_win_probs(_cal_clf_probs, cal_groups)
+            _cal_won_vl = (fp_cal_vl == 1).astype(np.float64)
+            self.win_iso_cal = self._fit_isotonic(_cal_win_probs, _cal_won_vl)
+            _cal_place_probs = self._calibrate_place_probs(_cal_place_raw)
+            self.place_iso_cal = self._fit_isotonic(_cal_place_probs, _cal_placed_vl.astype(np.float64))
         else:
             # Too few races — skip calibration
             self.calibration_temp = 1.0
             self.platt_a, self.platt_b = 1.0, 0.0
             self.place_platt_a, self.place_platt_b = 1.0, 0.0
+            self.win_iso_cal = None
+            self.place_iso_cal = None
 
         # ── Train final models on ALL training data ──────────────
-        self.ltr_model = train_ranker(
-            X_train, y_rel, groups_train, self._ltr_ranker_type,
-            finish_pos=fp, implied_prob=ip,
-            feature_cols=self.feature_cols,
-        )
         n_pw = max(int(y_won.sum()), 1)
         self.clf_model = self._train_win_classifier(
             X_train, y_won,
             scale_pos_weight=(len(y_won) - n_pw) / n_pw,
+            params=fold_params.get("classifier"),
             sample_weight=sw,
         )
         n_pp = max(int(y_placed.sum()), 1)
         self.place_model = self._train_place_classifier(
             X_train, y_placed,
             scale_pos_weight=(len(y_placed) - n_pp) / n_pp,
+            params=fold_params.get("place"),
             sample_weight=sw,
         )
 
         # ── Score test set with calibration ──────────────────────
-        X_test_df = pd.DataFrame(X_test, columns=feature_cols)
-        ltr_scores = self.ltr_model.predict(X_test_df)
-        clf_probs_raw = self.clf_model.predict_proba(X_test_df)[:, 1]
+        clf_probs_raw = self.clf_model.predict_proba(X_test)[:, 1]
+        place_probs_raw = self.place_model.predict_proba(X_test)[:, 1]
+
+        # Re-calibrate Platt on test fold when test_df is available.
+        # Calibration was fitted on a training slab (partial-data
+        # models); the full-retrained models have a tighter score
+        # distribution, so refitting corrects the mismatch.
+        if test_df is not None and "finish_position" in test_df.columns:
+            _fp_test = test_df["finish_position"].values[:len(clf_probs_raw)].astype(np.float32)
+            self.platt_a, self.platt_b = self._optimise_platt_calibration(
+                clf_probs_raw, groups_test, _fp_test,
+            )
+            _nr_te = test_df["num_runners"].values[:len(place_probs_raw)]
+            _hc_te = test_df.get("handicap", pd.Series(0, index=test_df.index)).values[:len(place_probs_raw)].astype(bool)
+            _pp_te = np.where(_nr_te <= 4, 3, np.where(_nr_te <= 7, 2, np.where(_nr_te <= 15, 3, np.where(_hc_te, 4, 3))))
+            _placed_te = (_fp_test <= _pp_te).astype(int)
+            self.place_platt_a, self.place_platt_b = self._optimise_place_platt(
+                place_probs_raw, _placed_te,
+            )
+
+            # Refit isotonic on test fold
+            self.win_iso_cal = None
+            self.place_iso_cal = None
+            _te_win_cal = self._calibrate_win_probs(clf_probs_raw, groups_test)
+            self.win_iso_cal = self._fit_isotonic(_te_win_cal, (_fp_test == 1).astype(np.float64))
+            _te_place_cal = self._calibrate_place_probs(place_probs_raw)
+            self.place_iso_cal = self._fit_isotonic(_te_place_cal, _placed_te.astype(np.float64))
+
         win_probs = self._calibrate_win_probs(clf_probs_raw, groups_test)
-        place_probs_raw = self.place_model.predict_proba(X_test_df)[:, 1]
         place_probs = self._calibrate_place_probs(place_probs_raw)
 
         # Restore config if fast_fold
@@ -4212,5 +3620,5 @@ class TripleEnsemblePredictor:
             config.LIGHTGBM_PARAMS["max_depth"] = _saved_params["lgb_depth"]
 
         if return_place_probs:
-            return ltr_scores, win_probs, place_probs
-        return ltr_scores
+            return win_probs, place_probs
+        return win_probs

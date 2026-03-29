@@ -13,11 +13,10 @@ The flagship model is a **6-model ensemble** combining Learning-to-Rank, regress
 - **Real Data — No Accounts or Keys Needed** — Scrapes live racecards and historical results directly from [Sporting Life](https://www.sportinglife.com), including SP odds, jockey, trainer, form, official ratings, and more
 - **120+ Predictive Features** — Horse form, jockey/trainer stats, jockey-trainer combos, C&D winners, class changes, headgear signals, track/going/distance preferences, speed figures, market indicators, field quality metrics
 - **Elo Ratings** — Dynamic head-to-head strength ratings for horses, jockeys, and trainers with adaptive K-factors (if A beats B, and B beats C → A is rated above C)
-- **6-Model Ensemble** — LTR Ranker + LB Regressor + Win Classifier + Pairwise Classifier + Place Classifier + Norm-Pos Regressor, blended with Optuna-learned weights
+- **2-Model Ensemble** — Win Classifier + Place Classifier, blended with Optuna-learned weights
 - **Temperature Probability Calibration** — Out-of-sample race-coherent probability scaling fitted on purged CV folds
-- **Framework Selection** — Each sub-model can independently use XGBoost or LightGBM — configurable via UI, CLI, or `config.py`
+- **Framework Selection** — Each sub-model can independently use XGBoost, LightGBM, or CatBoost — configurable via UI, CLI, or `config.py`
 - **Brier Score Optimisation** — All ensemble weight learning targets Brier Score for value betting alignment
-- **Learning-to-Rank** — XGBRanker and LGBMRanker rank horses *within each race* (eliminates the class imbalance problem)
 - **Early Stopping** — All sub-models use validation-fold early stopping (50 rounds) to prevent overfitting
 - **Interactive Web UI** — Streamlit dashboard with 7 pages: Train & Tune, Experiments, Predict, Today's Picks, Data Explorer, Model Insights, Guide
 - **Today's Races** — Predict live UK & Ireland racecards with win probabilities, real odds, and value indicators
@@ -84,32 +83,27 @@ pip install -r requirements.txt
 python train.py --model triple_ensemble --source database --days-back 90
 
 # First run scrapes all 90 days; subsequent runs only fetch new days
-python train.py --model triple_ensemble --source database --days-back 90
+python train.py --source database --days-back 90
 
 # Train with all sub-models using LightGBM
-python train.py --model triple_ensemble --source database --days-back 90 \
-  --frameworks ltr=lgbm,regressor=lgbm,classifier=lgbm,pairwise=lgbm,place=lgbm,norm_pos=lgbm
+python train.py --source database --days-back 90 \
+  --frameworks classifier=lgbm,place=lgbm
 
-# Mix frameworks: LGBM ranker + XGB classifiers/regressors (default)
-python train.py --model triple_ensemble --source sample --races 2000
+# Default frameworks (CatBoost)
+python train.py --source sample --races 2000
 
 # Override specific sub-models
 python train.py --model triple_ensemble --source sample \
   --frameworks classifier=lgbm,pairwise=lgbm
 
 # Train + run walk-forward backtest
-python train.py --model triple_ensemble --source database --days-back 90 --backtest
+python train.py --source database --days-back 90 --backtest
 
 # Train with sample (synthetic) data — instant, no network needed
 python train.py --source sample --races 3000
 
-# Standalone Learning-to-Rank models
-python train.py --source sample --races 2000 --model xgb_ranker
-python train.py --source sample --races 2000 --model lgbm_ranker
-python train.py --source sample --races 2000 --model rank_ensemble
-
 # Retrain on already-downloaded data
-python train.py --skip-collection --model triple_ensemble
+python train.py --skip-collection
 ```
 
 ### 3. Launch the Web App
@@ -182,36 +176,22 @@ Sporting Life  →  Scraper  →  Processor  →  Feature Engineer  →  6-Model
 | Field Quality | `field_avg_elo`, `field_strength` | Strength of competition |
 | Interactions | Cross-feature combination features | Non-linear interactions |
 
-4. **Model Training** — The 6-model ensemble trains in two phases:
+4. **Model Training** — The 2-model ensemble trains in two phases:
   - **Phase 1 (Weight Learning):** Sub-models train on purged expanding-window CV folds. A meta-learner/weighting layer is learned from OOF predictions targeting **Brier Score**, then a race-level temperature calibrator is fitted on OOF probabilities.
    - **Phase 2 (Final Models):** All sub-models retrain on 100% of training data using the locked-in weights.
 
-### The 6-Model Ensemble
+### The 2-Model Ensemble
 
-The `TripleEnsemblePredictor` combines six diverse sub-models, each capturing a different aspect of race prediction:
+The `TripleEnsemblePredictor` combines two classifiers, each capturing a different aspect of race prediction:
 
 | # | Sub-Model | Task | Framework | What It Learns |
 |---|-----------|------|-----------|----------------|
-| 1 | **LTR Ranker** | Learning-to-Rank | LGBM (default) | Within-race ordering via `lambdarank` — no class imbalance |
-| 2 | **LB Regressor** | Regression | XGB (default) | Lengths behind the winner — continuous distance measure |
-| 3 | **Win Classifier** | Binary classification | XGB (default) | Win probability with class-weighted loss |
-| 4 | **Pairwise Classifier** | Binary classification | XGB (default) | "Is horse A better than horse B?" on feature differences |
-| 5 | **Place Classifier** | Binary classification | XGB (default) | Top-3 finish probability |
-| 6 | **Norm-Pos Regressor** | Regression | XGB (default) | Normalised finishing position (0=win, 1=last) |
-
-**Default ensemble weights** (before Optuna tuning): LTR=0.30, Reg=0.15, Clf=0.15, Pair=0.15, Place=0.10, NormPos=0.15
+| 1 | **Win Classifier** | Binary classification | CatBoost (default) | Win probability with class-weighted loss |
+| 2 | **Place Classifier** | Binary classification | CatBoost (default) | Top-3 finish probability |
 
 **Blending:** Each sub-model's raw scores are min-max normalised per race, then combined using learned weights/meta-learner. The blended scores pass through a softmax layer with global + learned calibration temperature to produce final calibrated win probabilities.
 
-**Framework selection:** Each sub-model can independently use XGBoost or LightGBM. Change defaults in `config.py` under `SUB_MODEL_FRAMEWORKS`, or override via the Streamlit UI or `--frameworks` CLI flag.
-
-### Other Models
-
-| Model | Description |
-|-------|-------------|
-| **XGB Ranker** | Standalone XGBoost `rank:pairwise` |
-| **LGBM Ranker** | Standalone LightGBM `lambdarank` |
-| **Rank Ensemble** | 50/50 blend of XGB + LGBM rankers |
+**Framework selection:** Each sub-model can independently use XGBoost, LightGBM, or CatBoost. Change defaults in `config.py` under `SUB_MODEL_FRAMEWORKS`, or override via the Streamlit UI or `--frameworks` CLI flag.
 
 ### Prediction Output
 
@@ -243,14 +223,10 @@ The backtest tracks cumulative P&L, strike rate, ROI, and Brier Score per fold.
 
 ```bash
 # Run backtest after training
-python train.py --model triple_ensemble --source database --days-back 90 --backtest
+python train.py --source database --days-back 90 --backtest
 
 # Standalone backtester with custom settings
-python -m src.backtester --model triple_ensemble --min-train-months 3
-
-# Backtest with a standalone ranker
-python -m src.backtester --model xgb_ranker
-python -m src.backtester --model lgbm_ranker
+python -m src.backtester --min-train-months 3
 ```
 
 ### Elo Rating System
@@ -353,9 +329,8 @@ Edit `config.py` to adjust:
 - **Scraper settings** — Request delay, user agent
 - **Database** — SQLite path (`data/races.db`), managed automatically
 - **Feature settings** — Rolling window sizes, form calculation periods
-- **Sub-model frameworks** — `SUB_MODEL_FRAMEWORKS` dict: set each of the 6 sub-models to `"xgb"` or `"lgbm"`
-- **Per-sub-model hyperparameters** — Independent parameter dicts for LTR, Regressor, Classifier, Pairwise, Place, and Norm-Pos sub-models
-- **Ranker hyperparameters** — XGBoost and LightGBM ranker defaults
+- **Sub-model frameworks** — `SUB_MODEL_FRAMEWORKS` dict: set each sub-model to `"xgb"`, `"lgbm"`, or `"cat"`
+- **Per-sub-model hyperparameters** — Independent parameter dicts for Win Classifier and Place Classifier
 - **Softmax temperature** — Controls sharpness of probability output (`<1` = sharper, `>1` = softer)
 - **Elo settings** — Base K-factor, minimum K, decay rate per run
 - **Training settings** — Test/train split ratio, random seed

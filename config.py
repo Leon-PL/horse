@@ -43,6 +43,7 @@ ROLLING_WINDOWS = [3, 5, 10, 20]
 # older than LIVE_FE_HISTORY_MONTHS contributes nothing to live predictions.
 # Increase if you notice stale-looking Elo/form values; decrease to go faster.
 LIVE_FE_HISTORY_MONTHS = 30
+LIVE_FEATURE_CACHE_VERSION = 1
 
 # --- Model Settings ---
 MODEL_FILE = os.path.join(MODELS_DIR, "horse_race_model.joblib")
@@ -55,7 +56,7 @@ TEST_SIZE = 0.2
 # Random seed for reproducibility
 RANDOM_SEED = 42
 
-# --- Ranker Hyperparameters ---
+# --- Classifier Hyperparameters ---
 XGBOOST_PARAMS = {
     "n_estimators": 300,
     "max_depth": 5,
@@ -86,45 +87,6 @@ LIGHTGBM_PARAMS = {
 # --- Per-Sub-Model Hyperparameters (Triple Ensemble) ---
 # Each sub-model can have independent tuning.
 # These override XGBOOST_PARAMS / LIGHTGBM_PARAMS where set.
-LTR_PARAMS = {
-    "n_estimators": 350,
-    "max_depth": 5,
-    "learning_rate": 0.03,
-    "subsample": 0.7,
-    "colsample_bytree": 0.7,
-    "min_child_samples": 20,
-    "reg_alpha": 0.3,
-    "reg_lambda": 1.5,
-    "num_leaves": 24,
-}
-# LTR_OBJECTIVE controls the LGBM LTR training objective.
-#   "value"      – odds-weighted softmax cross-entropy (default).  Weights each
-#                  race's gradient by max(1, -log(implied_prob_winner)) so the
-#                  model spends most capacity learning to spot high-odds winners
-#                  — the skill that directly drives ROI.
-#   "rps"        – custom Rank-Probability Score objective.  Penalises all
-#                  pairwise ordering errors proportionally (not just top-k),
-#                  giving well-calibrated win probabilities.
-#   "lambdarank" – native LGBMRanker with NDCG objective.
-LTR_OBJECTIVE = "lambdarank"
-
-# Set to False to skip training the LTR ranker for new models.
-# Existing trained models that include an ltr_model will still use it at
-# prediction time; new models will fall back to value-model (win_probability)
-# ordering instead.
-TRAIN_RANKER = False
-
-REGRESSOR_PARAMS = {
-    "n_estimators": 500,
-    "max_depth": 4,
-    "learning_rate": 0.03,
-    "subsample": 0.75,
-    "colsample_bytree": 0.7,
-    "min_child_weight": 5,
-    "min_child_samples": 20,
-    "reg_alpha": 0.5,
-    "reg_lambda": 2.0,
-}
 
 CLASSIFIER_PARAMS = {
     "n_estimators": 2000,
@@ -151,30 +113,6 @@ PLACE_CLASSIFIER_PARAMS = {
     "reg_lambda": 3.0,
 }
 
-NORM_POS_PARAMS = {
-    "n_estimators": 500,
-    "max_depth": 5,
-    "learning_rate": 0.04,
-    "subsample": 0.75,
-    "colsample_bytree": 0.75,
-    "min_child_weight": 5,
-    "min_child_samples": 20,
-    "reg_alpha": 0.3,
-    "reg_lambda": 1.5,
-}
-
-RESIDUAL_PARAMS = {
-    "n_estimators": 500,
-    "max_depth": 5,
-    "learning_rate": 0.04,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 4,
-    "min_child_samples": 20,
-    "reg_alpha": 0.2,
-    "reg_lambda": 1.2,
-}
-
 # --- Softmax Temperature ---
 # Controls sharpness of probability output: <1 = sharper, >1 = softer
 SOFTMAX_TEMPERATURE = 1.0
@@ -183,18 +121,17 @@ SOFTMAX_TEMPERATURE = 1.0
 # For each sub-model role, choose "xgb" (XGBoost), "lgbm" (LightGBM),
 # or "cat" (CatBoost).
 SUB_MODEL_FRAMEWORKS: dict[str, str] = {
-    "ltr": "lgbm",        # Learning-to-Rank ranker
-    "regressor": "lgbm",   # Lengths-Behind regressor
     "classifier": "lgbm",  # Win classifier
     "place": "lgbm",       # Place classifier
-    "norm_pos": "lgbm",    # Normalised-position regressor
-    "residual": "cat",     # Market-residual regressor
 }
 
 # --- Elo Settings ---
 ELO_K_BASE = 32.0   # K for horses with 0 prior runs
 ELO_K_MIN = 8.0     # K floor for experienced horses
 ELO_K_DECAY = 0.05  # exponential decay rate per run
+MARGIN_ELO_SCALE = 5.0          # base lengths at which margin score ≈ 0.82
+MARGIN_ELO_REF_DIST = 8.0       # reference distance (furlongs) for scale normalisation
+MARGIN_ELO_DNF_PENALTY = 30.0   # virtual lb for non-finishers
 
 # --- Recency Weighting ---
 # Half-life in days for exponential recency sample weights.
@@ -203,6 +140,11 @@ RECENCY_HALF_LIFE_DAYS = 180
 # Seasonal boost: uplift for training data from the same calendar month.
 # Racing patterns (going, fitness cycles) repeat annually.
 RECENCY_SEASONAL_BOOST = 0.15   # 15 % uplift for same-month data
+# Decay shape: "exp" (exponential), "poly" (polynomial), or "linear".
+# "exp"    — w = exp(-ln2 * t / half_life)
+# "poly"   — w = 1 / (1 + t / half_life)            (heavier tail than exp)
+# "linear" — w = max(0, 1 - t / (2 * half_life))   (hard cutoff)
+RECENCY_DECAY_SHAPE = "exp"
 
 # --- Focal Loss (Win & Place classifiers) ---
 FOCAL_GAMMA = 2.0    # focusing parameter: higher → harder focus on ambiguous cases
@@ -211,6 +153,9 @@ FOCAL_ALPHA = "auto" # positive-class weight — "auto" computes from actual pre
 # --- Feature Pruning ---
 # Fraction of lowest-importance features to drop (0.0 = keep all).
 FEATURE_PRUNE_FRACTION = 0.2
+# Absolute Pearson correlation above which the less-important feature
+# in a pair is dropped (before importance pruning). 0.0 = disabled.
+FEATURE_CORR_THRESHOLD = 0.95
 
 # --- Early Stopping ---
 # Number of boosting rounds without improvement before stopping.
@@ -263,9 +208,9 @@ ENSEMBLE_GUARD_TOL = 0.0
 WEIGHT_OPTUNA_TRIALS = 200
 
 # --- Monotonic Constraints ---
-# Features that should be monotone-positive in LightGBM rankers.
+# Features that should be monotone-positive in LightGBM classifiers.
 # Higher values of these features should (all else equal) produce higher
-# ranking scores — enforcing domain knowledge and preventing physically
+# predicted scores — enforcing domain knowledge and preventing physically
 # impossible inversions.
 MONOTONE_FEATURES: list[str] = [
     "horse_elo",

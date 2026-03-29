@@ -48,26 +48,30 @@ def adjust_place_probs_for_race(
     places_paid: int,
     model_k: int = 3,
 ) -> np.ndarray:
-    """Adjust model P(top-3) → P(top-*places_paid*) for a single race.
+    """Adjust model P(top-k) → P(top-*places_paid*) for a single race.
 
-    Two-step process:
+    Uses **logit-space shrinkage + shift** to produce calibrated place
+    probabilities that account for field size.
 
-    1. **Power scaling** – shifts probability mass towards favourites
-       when fewer places are paid (``exponent > 1``) or spreads it when
-       more places are paid (``exponent < 1``).  Uses the ratio
-       ``model_k / places_paid`` as the exponent, which is a Harville-
-       inspired approximation.
+    In small fields (e.g. 6 runners, 3 places paid), placing is nearly
+    a coin-flip — the model's discrimination between "placers" and
+    "non-placers" should be compressed.  In large fields, the model's
+    ordering is more decisive and should be preserved.
 
-    2. **Per-race normalisation** – rescales so the adjusted
-       probabilities sum to ``places_paid`` within the race.  This
-       corrects any systematic over/under-prediction from the model.
-
-    Finally, each horse's place probability is floored at its win
-    probability (you can't win without placing).
+    Algorithm
+    ---------
+    1. Clamp raw place probs to (ε, 1−ε) and convert to logits.
+    2. **Shrink** logits toward their mean by a factor that depends on
+       ``places_paid / n_runners``.  High ratio (small field) → more
+       shrinkage → probabilities bunch toward 50%.
+    3. **Shift** the shrunken logits by a scalar δ so that
+       σ(logit + δ) sums to ``places_paid`` (Newton, 2–4 iterations).
+    4. Floor each runner at its win probability.
+    5. Clip to [0, 1].
 
     Args:
-        place_probs: Raw model P(top-3) values for each runner.
-        win_probs: Per-race softmax win probabilities (lower bound).
+        place_probs: Raw model P(top-k) values for each runner.
+        win_probs: Per-race win probabilities (lower bound).
         places_paid: Actual number of places paid by EW terms.
         model_k: The *k* the model was trained on (default 3).
 
@@ -79,15 +83,42 @@ def adjust_place_probs_for_race(
 
     n = len(place_probs)
     adjusted = place_probs.astype(np.float64).copy()
-
-    # Per-race normalise → sum ≈ places_paid
-    # (Model is trained on variable EW places_paid targets, so no
-    #  power-scaling is needed — just normalise and floor.)
     total = adjusted.sum()
-    if total > 1e-8:
-        adjusted *= places_paid / total
-    else:
+
+    if places_paid >= n:
+        adjusted = np.ones(n, dtype=np.float64)
+    elif total < 1e-8:
         adjusted = np.full(n, places_paid / n, dtype=np.float64)
+    else:
+        _eps = 1e-6
+        clamped = np.clip(adjusted, _eps, 1.0 - _eps)
+        logits = np.log(clamped / (1.0 - clamped))
+
+        # Shrink logits toward their mean for small fields.
+        # When places_paid/n is high (≥0.4), everyone has a decent
+        # placing chance and the model's spread is too confident.
+        place_ratio = places_paid / n
+        # shrink_factor: 1.0 at ratio≤0.25 (large field), 0.5 at ratio≥0.5
+        shrink_factor = np.clip(1.0 - 2.0 * max(0.0, place_ratio - 0.25), 0.5, 1.0)
+        mean_logit = logits.mean()
+        logits = mean_logit + shrink_factor * (logits - mean_logit)
+
+        # Newton shift: find δ so Σ σ(logit_i + δ) = places_paid
+        # Initialise near the analytic solution for uniform logits.
+        target = float(places_paid)
+        target_mean = np.clip(target / n, 1e-6, 1.0 - 1e-6)
+        delta = np.log(target_mean / (1.0 - target_mean)) - logits.mean()
+        for _ in range(20):
+            p = 1.0 / (1.0 + np.exp(-(logits + delta)))
+            residual = p.sum() - target
+            if abs(residual) < 1e-8:
+                break
+            grad = (p * (1.0 - p)).sum()
+            if grad < 1e-12:
+                break
+            delta -= residual / grad
+
+        adjusted = 1.0 / (1.0 + np.exp(-(logits + delta)))
 
     # Floor: P(place) >= P(win) — you can't win without placing
     adjusted = np.maximum(adjusted, win_probs.astype(np.float64))

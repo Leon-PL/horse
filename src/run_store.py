@@ -10,6 +10,10 @@ containing:
 - **curves.csv** — cumulative P&L curves DataFrame.
 - **model.joblib** — a snapshot of the model artifact so it can be
   restored later.
+- **featured_races.parquet** — the exact featured dataset used to train
+    the saved model, when available.
+- **processed_races.parquet** — the exact processed history used to train
+    the saved model, when available.
 
 The module exposes a small set of functions that the Streamlit app
 (and nothing else) needs to call.
@@ -79,6 +83,8 @@ def save_run(
     auto_tune: dict | None = None,
     training_config: dict | None = None,
     wf_report: dict | None = None,
+    featured_df: pd.DataFrame | None = None,
+    processed_df: pd.DataFrame | None = None,
 ) -> str:
     """
     Persist a complete training run to disk.
@@ -152,8 +158,9 @@ def save_run(
         if isinstance(wf_curves, pd.DataFrame) and not wf_curves.empty:
             wf_curves.to_csv(os.path.join(run_dir, "wf_curves.csv"), index=False)
 
-    # ── Snapshot model artifact ──────────────────────────────────
+    # ── Snapshot model artifact + exact datasets ────────────────
     _snapshot_model(run_dir)
+    _snapshot_datasets(run_dir, featured_df=featured_df, processed_df=processed_df)
 
     logger.info(f"Run {run_id} ({name}) saved to {run_dir}")
     return run_id
@@ -277,11 +284,9 @@ def get_latest_run_id() -> str | None:
 
 # ── Model snapshot helpers ───────────────────────────────────────────
 
-# The canonical model files written by TripleEnsemblePredictor.save()
+# The canonical model file written by TripleEnsemblePredictor.save()
 _MODEL_FILENAMES = [
     "triple_ensemble_models.joblib",
-    "rank_ensemble_models.joblib",
-    "ranker_model.joblib",
 ]
 
 
@@ -302,18 +307,24 @@ def _snapshot_model(run_dir: str) -> None:
     else:
         logger.warning("No model file found to snapshot.")
 
-    # ── Processed-data snapshot ───────────────────────────────────
-    # This ensures feature engineering uses the same history the model
-    # was trained on, even after future training runs overwrite the
-    # global processed_races file.
-    proc_pq = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.parquet")
-    proc_csv = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.csv")
-    if os.path.isfile(proc_pq):
-        _shutil.copy2(proc_pq, os.path.join(run_dir, "processed_races.parquet"))
+
+
+def _snapshot_datasets(
+    run_dir: str,
+    *,
+    featured_df: pd.DataFrame | None = None,
+    processed_df: pd.DataFrame | None = None,
+) -> None:
+    """Persist the exact datasets used for the training run when available."""
+    if isinstance(featured_df, pd.DataFrame) and not featured_df.empty:
+        featured_path = os.path.join(run_dir, "featured_races.parquet")
+        featured_df.to_parquet(featured_path, index=False)
+        logger.info("  Featured-data snapshot saved (parquet)")
+
+    if isinstance(processed_df, pd.DataFrame) and not processed_df.empty:
+        processed_path = os.path.join(run_dir, "processed_races.parquet")
+        processed_df.to_parquet(processed_path, index=False)
         logger.info("  Processed-data snapshot saved (parquet)")
-    elif os.path.isfile(proc_csv):
-        _shutil.copy2(proc_csv, os.path.join(run_dir, "processed_races.csv"))
-        logger.info("  Processed-data snapshot saved (csv)")
 
 
 def restore_run_model(run_id: str) -> bool:
@@ -335,12 +346,7 @@ def restore_run_model(run_id: str) -> bool:
     import joblib
 
     data = joblib.load(snapshot)
-    if isinstance(data, dict) and "ltr_model" in data:
-        dest_name = "triple_ensemble_models.joblib"
-    elif isinstance(data, dict) and "ranker" in data:
-        dest_name = "rank_ensemble_models.joblib"
-    else:
-        dest_name = "ranker_model.joblib"
+    dest_name = "triple_ensemble_models.joblib"
 
     os.makedirs(config.MODELS_DIR, exist_ok=True)
     dest = os.path.join(config.MODELS_DIR, dest_name)
@@ -359,6 +365,18 @@ def get_run_processed_path(run_id: str) -> str | None:
     run_dir = os.path.join(RUNS_DIR, run_id)
     pq = os.path.join(run_dir, "processed_races.parquet")
     csv = os.path.join(run_dir, "processed_races.csv")
+    if os.path.isfile(pq):
+        return pq
+    if os.path.isfile(csv):
+        return csv
+    return None
+
+
+def get_run_featured_path(run_id: str) -> str | None:
+    """Return the path to the featured-data snapshot for *run_id*, or ``None``."""
+    run_dir = os.path.join(RUNS_DIR, run_id)
+    pq = os.path.join(run_dir, "featured_races.parquet")
+    csv = os.path.join(run_dir, "featured_races.csv")
     if os.path.isfile(pq):
         return pq
     if os.path.isfile(csv):

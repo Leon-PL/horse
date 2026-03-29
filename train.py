@@ -7,7 +7,6 @@ Usage:
     python train.py                                      # Full pipeline (sample data)
     python train.py --source database --days-back 90     # Incremental DB (recommended)
     python train.py --source scrape --days-back 14       # Real data via web scraping
-    python train.py --model rank_ensemble                # Rank ensemble
     python train.py --races 2000                         # More synthetic races
     python train.py --skip-collection                    # Reuse existing data
     python train.py --backtest                           # Walk-forward backtest after training
@@ -27,8 +26,8 @@ from src.data_collector import collect_data
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.model import (
-    RankingPredictor, RankEnsemblePredictor, TripleEnsemblePredictor,
-    RANKER_MODELS, DEFAULT_FRAMEWORKS,
+    TripleEnsemblePredictor,
+    DEFAULT_FRAMEWORKS,
 )
 
 logging.basicConfig(
@@ -39,7 +38,6 @@ logger = logging.getLogger(__name__)
 
 
 def run_pipeline(
-    model_type: str = "xgb_ranker",
     num_races: int = 1500,
     skip_collection: bool = False,
     data_source: str = "sample",
@@ -52,12 +50,11 @@ def run_pipeline(
     Run the full training pipeline.
 
     Args:
-        model_type: Model to train ("xgb_ranker", "lgbm_ranker", "rank_ensemble")
         num_races: Number of races for synthetic data
         skip_collection: Skip data collection (reuse existing data)
         data_source: "database" (incremental, recommended), "scrape", or "sample"
         days_back: Number of days of history for real data
-        frameworks: Per-sub-model framework overrides for triple_ensemble
+        frameworks: Per-sub-model framework overrides
         weights: Manual ensemble weights (skips Optuna if provided)
     """
     start_time = time.time()
@@ -98,27 +95,17 @@ def run_pipeline(
     logger.info(f"  Featured data shape: {featured_data.shape}")
 
     # --- Step 4: Model Training ---
-    logger.info(f"\n🤖 Step 4/4: Training {model_type} model...")
+    logger.info("\n🤖 Step 4/4: Training model...")
 
-    if model_type == "triple_ensemble":
-        predictor = TripleEnsemblePredictor(frameworks=frameworks)
-        metrics = predictor.train(featured_data, weights=weights)
-        logger.info(f"\nTriple Ensemble Results (frameworks: {predictor.frameworks}):")
-        for name, m in metrics.items():
-            logger.info(
-                f"  {name}: Brier = {m.get('brier_score', 0):.6f}, "
-                f"NDCG@1 = {m.get('ndcg_at_1', 0):.4f}, "
-                f"Top-1 = {m.get('top1_accuracy', 0):.4f}"
-            )
-    elif model_type == "rank_ensemble":
-        predictor = RankEnsemblePredictor()
-        metrics = predictor.train(featured_data)
-        logger.info("\nRank Ensemble Results:")
-        for name, m in metrics.items():
-            logger.info(f"  {name}: NDCG@1 = {m['ndcg_at_1']:.4f}, Top-1 = {m['top1_accuracy']:.4f}")
-    else:
-        predictor = RankingPredictor()
-        metrics = predictor.train(featured_data, model_type=model_type)
+    predictor = TripleEnsemblePredictor(frameworks=frameworks)
+    metrics = predictor.train(featured_data, weights=weights)
+    logger.info(f"\nTriple Ensemble Results (frameworks: {predictor.frameworks}):")
+    for name, m in metrics.items():
+        logger.info(
+            f"  {name}: Brier = {m.get('brier_score', 0):.6f}, "
+            f"NDCG@1 = {m.get('ndcg_at_1', 0):.4f}, "
+            f"Top-1 = {m.get('top1_accuracy', 0):.4f}"
+        )
 
     # --- Summary ---
     elapsed = time.time() - start_time
@@ -144,7 +131,7 @@ def run_pipeline(
         logger.info("\n🔄 Running walk-forward backtest...")
         from src.backtester import walk_forward_validation
         report = walk_forward_validation(
-            featured_data, model_type=model_type,
+            featured_data,
         )
         # Save backtest results
         import os as _os
@@ -169,16 +156,6 @@ def run_pipeline(
 def main():
     parser = argparse.ArgumentParser(
         description="Train horse racing prediction model"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="xgb_ranker",
-        choices=[
-            "xgb_ranker", "lgbm_ranker", "cat_ranker", "rank_ensemble",
-            "triple_ensemble",
-        ],
-        help="Model type to train (default: xgb_ranker)",
     )
     parser.add_argument(
         "--races",
@@ -214,22 +191,10 @@ def main():
         type=str,
         default=None,
         help=(
-            "Comma-separated key=value pairs to override sub-model frameworks "
-            "for triple_ensemble, e.g. 'classifier=lgbm,regressor=lgbm'. "
+            "Comma-separated key=value pairs to override sub-model frameworks, "
+            "e.g. 'classifier=lgbm,place=cat'. "
             f"Valid keys: {list(DEFAULT_FRAMEWORKS.keys())}. "
             "Values: 'xgb', 'lgbm', or 'cat'."
-        ),
-    )
-    parser.add_argument(
-        "--weights",
-        type=str,
-        default=None,
-        help=(
-            "Comma-separated key=value pairs to set manual ensemble weights "
-            "for triple_ensemble (skips Optuna optimisation), e.g. "
-            "'ltr=0.30,regressor=0.16,classifier=0.16,"
-            "place=0.12,norm_pos=0.14,residual=0.12'. "
-            "Values are auto-normalised to sum to 1."
         ),
     )
 
@@ -247,29 +212,13 @@ def main():
                 parser.error(f"Invalid framework value '{v}'. Must be 'xgb', 'lgbm', or 'cat'.")
             fw_overrides[k] = v
 
-    # Parse --weights into a dict
-    _valid_weight_keys = {"ltr", "regressor", "classifier", "place", "norm_pos", "residual"}
-    weight_overrides: dict[str, float] | None = None
-    if args.weights:
-        weight_overrides = {}
-        for pair in args.weights.split(","):
-            k, v = pair.strip().split("=")
-            if k not in _valid_weight_keys:
-                parser.error(f"Unknown weight key '{k}'. Valid: {sorted(_valid_weight_keys)}")
-            try:
-                weight_overrides[k] = float(v)
-            except ValueError:
-                parser.error(f"Invalid weight value '{v}' for key '{k}'. Must be a number.")
-
     run_pipeline(
-        model_type=args.model,
         num_races=args.races,
         skip_collection=args.skip_collection,
         data_source=args.source,
         days_back=args.days_back,
         backtest=args.backtest,
         frameworks=fw_overrides,
-        weights=weight_overrides,
     )
 
 

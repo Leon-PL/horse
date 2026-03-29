@@ -194,7 +194,7 @@ def _parse_lengths_behind(dist_str: str) -> float:
     into a numeric lengths-behind value.
     """
     if not dist_str:
-        return 0.0
+        return float('nan')
 
     s = str(dist_str).strip().lower()
 
@@ -740,22 +740,27 @@ class SportingLifeScraper:
             headgear = str(headgear_data) if headgear_data else ""
 
         # --- odds ---
-        betting = ride.get("betting", {})
+        # bookmakerOdds is a list of per-bookmaker prices; prefer the
+        # entry flagged ``bestOdds`` which matches what Sporting Life
+        # displays on the racecard page.  Fall back to betting.current_odds.
         odds_str = ""
-        if isinstance(betting, dict):
-            odds_str = betting.get("current_odds", "")
-        # Racecard pages sometimes have bookmakerOdds
+        bk_list = ride.get("bookmakerOdds", [])
+        if isinstance(bk_list, list) and bk_list:
+            best = next((b for b in bk_list if b.get("bestOdds")), None)
+            if best is None:
+                best = bk_list[0]
+            odds_str = best.get("fractionalOdds", "") or str(best.get("decimalOdds", ""))
         if not odds_str:
-            bk = ride.get("bookmakerOdds", {})
-            if isinstance(bk, dict):
-                odds_str = bk.get("fractional", "") or bk.get("decimal", "")
+            betting = ride.get("betting", {})
+            if isinstance(betting, dict):
+                odds_str = betting.get("current_odds", "")
         odds = _parse_fractional_odds(odds_str)
 
         # --- result-specific fields ---
         finish_pos = 0
         finish_pos_label = ""
         won = 0
-        lengths_behind = 0.0
+        lengths_behind = float('nan')
 
         if is_result:
             _raw_fp = ride.get("finish_position", 0)
@@ -764,9 +769,14 @@ class SportingLifeScraper:
             if finish_pos == 0 and _raw_fp not in (None, "", 0):
                 finish_pos_label = str(_raw_fp).strip().upper()
             won = 1 if finish_pos == 1 else 0
-            lengths_behind = _parse_lengths_behind(
-                ride.get("finish_distance", "")
-            )
+            if finish_pos >= 1:
+                # Only parse lengths behind for horses that finished
+                lengths_behind = _parse_lengths_behind(
+                    ride.get("finish_distance", "")
+                )
+                # Winner has 0.0 lengths behind (parse returns NaN for empty string)
+                if finish_pos == 1 and np.isnan(lengths_behind):
+                    lengths_behind = 0.0
 
         # --- lifetime stats ---
         lifetime = ride.get("horse_lifetime_stats", [])
