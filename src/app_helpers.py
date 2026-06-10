@@ -60,7 +60,7 @@ from src.live_prediction import (
 )
 from src.database import db_stats as _raw_db_stats
 from src.model import (
-    TripleEnsemblePredictor,
+    RacePredictor,
     get_autotune_search_space,
     get_feature_importance,
     get_feature_columns,
@@ -229,7 +229,7 @@ def _render_pace_panel(predictions: pd.DataFrame, *, key: str) -> None:
 
 def _attach_ranker_diagnostics(
     predictions: pd.DataFrame,
-    predictor: TripleEnsemblePredictor,
+    predictor: RacePredictor,
     feature_df: pd.DataFrame | None,
 ) -> pd.DataFrame:
     if predictions is None or predictions.empty or feature_df is None or feature_df.empty:
@@ -753,6 +753,8 @@ def _model_display_name(model_key: str) -> str:
         "place_classifier": "Place Classifier",
         "place": "Place Classifier",
         "ranker": "Race Ranker",
+        "baseline_win": "Baseline — Logistic (Win)",
+        "baseline_place": "Baseline — Logistic (Place)",
     }
     return labels.get(model_key, model_key.replace("_", " ").title())
 
@@ -903,6 +905,8 @@ def _build_metric_snapshot_frame(metrics_payload: dict | None) -> tuple[pd.DataF
         ("win_classifier", "classifier"),
         ("ranker",),
         ("place_classifier", "place"),
+        ("baseline_win",),
+        ("baseline_place",),
     ]
 
     full_rows: list[dict] = []

@@ -324,7 +324,7 @@ def prune_runs(keep_latest: int = 5) -> list[str]:
 
 # ── Model snapshot helpers ───────────────────────────────────────────
 
-# The canonical model file written by TripleEnsemblePredictor.save()
+# The canonical model file written by RacePredictor.save()
 _MODEL_FILENAMES = [
     "triple_ensemble_models.joblib",
 ]

@@ -138,10 +138,6 @@ RANKER_PARAMS = {
     "reg_lambda": 2.0,
 }
 
-# --- Softmax Temperature ---
-# Controls sharpness of probability output: <1 = sharper, >1 = softer
-SOFTMAX_TEMPERATURE = 1.0
-
 # --- Sub-Model Framework Selection ---
 # For each sub-model role, choose "xgb" (XGBoost), "lgbm" (LightGBM),
 # or "cat" (CatBoost).
@@ -152,8 +148,9 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
 
 # --- Race Ranker ---
 # LambdaRank learns relative order within each race directly.
+# Trained for diagnostics (ranker/classifier agreement panels) only —
+# its scores are not blended into win probabilities.
 TRAIN_RANKER = True
-RANKER_BLEND_WEIGHT = 0.35
 
 # --- Elo Settings ---
 ELO_K_BASE = 32.0   # K for horses with 0 prior runs
@@ -216,39 +213,10 @@ TE_WINDOW_DAYS = 365
 # smooth exponential decay toward recent form without calendar cliff-edges.
 # Set to 0 to disable.
 TE_EWMA_HALF_LIFE_RACES = 10
-# CV_N_FOLDS: expanding-window folds for Phase 1 meta-learner training.
-# More folds = more OOF data for the meta-learner, but slower.
+# CV_N_FOLDS: purged expanding-window folds for Phase 1 OOF predictions,
+# used to fit the Platt/isotonic calibrators. More folds = more OOF data
+# for calibration, but slower.
 CV_N_FOLDS = 3
-# META_LEARNER_INFERENCE: if True, the LGBM meta-learner is used directly at
-# inference time. If False (default + recommended), the meta-learner is used
-# only to discover optimal sub-model weights; inference then uses those weights
-# via the linear blend path. This avoids the OOF distribution-shift problem
-# (meta trained on weak fold-models, evaluated on stronger full-data models).
-META_LEARNER_INFERENCE = False
 
-# --- Ensemble Safety ---
-# If True, when only a small number of sub-models are enabled,
-# auto mode will select the best OOF single model instead of stacking.
-ENSEMBLE_FORCE_BEST_FOR_SMALL_SETS = True
-ENSEMBLE_SMALL_SET_MAX_MODELS = 3
-# Additional guard for larger sets: if blend RPS is worse than best
-# single-model RPS by this fraction (and top-1 is not better), fallback.
-ENSEMBLE_GUARD_TOL = 0.0
-# Number of Optuna trials for OOF ensemble weight optimisation.
-WEIGHT_OPTUNA_TRIALS = 200
-
-# --- Monotonic Constraints ---
-# Features that should be monotone-positive in LightGBM classifiers.
-# Higher values of these features should (all else equal) produce higher
-# predicted scores — enforcing domain knowledge and preventing physically
-# impossible inversions.
-MONOTONE_FEATURES: list[str] = [
-    "horse_elo",
-    "official_rating",
-    "jockey_elo",
-    "horse_win_rate_shrunk",
-    "trainer_win_rate_shrunk",
-    "horse_track_wr_shrunk",
-]
 
 

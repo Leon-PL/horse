@@ -42,7 +42,7 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
 
 ### 2.4 Modeling & Tuning (`train.py`, `src/model.py`, `src/autotune.py`)
 *   **Status:** Central to project. Focus on tree-based ensembles.
-*   **Description:** The pipeline trains custom ensemble models, rankers, and multi-stage architectures. Optuna is heavily utilized for continuous performance tuning. The test-set betting simulation (`analyse_test_set`) lives in `src/bet_analysis.py`; `src/model.py` re-exports it for backwards compatibility.
+*   **Description:** `src/model.py` defines `RacePredictor` (formerly `TripleEnsemblePredictor` — an alias is kept so old pickles load): two independently trained, Platt+isotonic-calibrated classifiers (Win and Place) that drive all betting, a LambdaRank ranker trained for diagnostics only (not blended into win probabilities), and a logistic-regression baseline reported in metrics as a sanity reference. Optuna is heavily utilized for tuning. The test-set betting simulation (`analyse_test_set`) lives in `src/bet_analysis.py`; `src/model.py` re-exports it for backwards compatibility.
 *   **Checkpoints:** Models are saved straight to `models/` (e.g., `horse_race_model.joblib`, `ensemble_models.joblib`). All runs stream metrics to `data/runs/`.
 
 ### 2.5 Backtesting & Strategy execution (`src/backtester.py`, `src/strategy_calibrator.py`, `src/matchbook_client.py`)

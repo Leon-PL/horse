@@ -33,7 +33,7 @@ import config
 from src.model import (
     get_feature_columns, make_relevance_labels,
     normalise_implied_prob_by_race,
-    TripleEnsemblePredictor,
+    RacePredictor,
 )
 from src.each_way import get_ew_terms, ew_value as _ew_value
 from src.bet_settlement import (
@@ -125,7 +125,7 @@ class FoldResult:
 
 def walk_forward_validation(
     df: pd.DataFrame,
-    model_type: str = "triple_ensemble",
+    model_type: str = "race_predictor",  # informational only — not used to select a model
     min_train_months: int = 2,
     test_window_months: int = 1,
     value_threshold: float = 0.05,
@@ -140,7 +140,7 @@ def walk_forward_validation(
 
     Args:
         df: Feature-engineered DataFrame with ``race_date`` column.
-        model_type: ``"triple_ensemble"``.
+        model_type: informational label recorded with the report.
         min_train_months: Minimum number of months to use for the first
                          training fold.
         test_window_months: How many months each test fold covers.
@@ -253,7 +253,7 @@ def walk_forward_validation(
         groups_train = train_df.groupby("race_id", sort=False).size().values
 
         groups_test_arr = test_df.groupby("race_id", sort=False).size().values
-        _te = TripleEnsemblePredictor(frameworks=frameworks)
+        _te = RacePredictor(frameworks=frameworks)
         win_probs_cal, place_probs = _te.train_on_fold(
             X_train_s, X_test_s, train_df,
             groups_train, groups_test_arr, feature_cols,

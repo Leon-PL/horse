@@ -13,7 +13,7 @@ import config
 from src.data_collector import collect_data
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
-from src.model import TripleEnsemblePredictor, prepare_multi_target_data
+from src.model import RacePredictor, prepare_multi_target_data
 
 logger = logging.getLogger(__name__)
 
@@ -199,8 +199,8 @@ def _build_phase1b_payload(
     featured_df: pd.DataFrame,
     frameworks: dict[str, str],
     n_folds: int = 2,
-) -> tuple[TripleEnsemblePredictor, dict]:
-    predictor = TripleEnsemblePredictor(frameworks=dict(frameworks))
+) -> tuple[RacePredictor, dict]:
+    predictor = RacePredictor(frameworks=dict(frameworks))
     data = prepare_multi_target_data(featured_df)
 
     return predictor, _build_autotune_payload(data, n_folds=n_folds)

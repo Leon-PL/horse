@@ -1235,17 +1235,32 @@ def get_feature_importance(
 # =====================================================================
 
 
-class TripleEnsemblePredictor:
+class RacePredictor:
     """
-    Two task-specific classifiers for horse race prediction:
+    Task-specific calibrated classifiers for horse race prediction.
 
-    1. **Win Classifier** — Binary classifier → calibrated P(win).
-       Used for the **Value Bet** and **Top Pick** strategies.
-    2. **Place Classifier** — Calibrated P(place) estimates.
-       Used for the **Each-Way** strategy.
+    Models trained:
 
-    Each model is trained independently.
-    Calibration (Platt scaling) is fitted per-model on OOF data.
+    1. **Win Classifier** — binary classifier → calibrated P(win).
+       Drives the **Value Bet** and **Top Pick** strategies.
+    2. **Place Classifier** — binary classifier → calibrated P(place).
+       Drives the **Each-Way** strategy.
+    3. **Race Ranker** (optional, ``config.TRAIN_RANKER``) — LambdaRank
+       model trained and evaluated for **diagnostics only** (ranker/
+       classifier agreement panels). Its scores are *not* blended into
+       the win probabilities at inference time.
+    4. **Linear baseline** — logistic regression fitted on the same
+       features and reported in the metrics so tree-model lift is
+       always measured against a simple reference. Not persisted.
+
+    Each model is trained independently. Calibration (Platt + isotonic)
+    is fitted on out-of-fold predictions from purged expanding-window
+    CV, optionally refit on the most recent training slab.
+
+    Historical note: this class was previously named
+    ``TripleEnsemblePredictor``; a module-level alias is kept so older
+    pickled models load unchanged. There is no stacking/blending — the
+    "ensemble" naming was a leftover from a removed architecture.
     """
 
     def __init__(
@@ -1787,6 +1802,39 @@ class TripleEnsemblePredictor:
                 eval_df,
                 "RANKER",
             )
+
+        # ── Linear baseline (sanity reference, not persisted) ─────
+        # A logistic regression on the same features: if the tree
+        # models don't clearly beat this, the extra complexity isn't
+        # earning its keep on the current feature set.
+        _cb("Training linear baseline (logistic regression) …", 0.88)
+        try:
+            _base_win = self._fit_linear_baseline(
+                X_train, data["y_train_won"], sample_weight=sw_full,
+            )
+            _base_win_probs = self._baseline_predict_proba(_base_win, X_eval)
+            all_metrics["baseline_win"] = self._evaluate_as_ranker(
+                _base_win_probs, y_eval_rel, groups_eval, eval_df,
+                "BASELINE_LOGREG_WIN",
+                calibrated_probs=_base_win_probs,
+                value_threshold=float(_vc.get("value_threshold", 0.05)),
+            )
+            _base_place = self._fit_linear_baseline(
+                X_train, data["y_train_placed"], sample_weight=sw_full,
+            )
+            _base_place_probs = self._baseline_predict_proba(_base_place, X_eval)
+            all_metrics["baseline_place"] = self._evaluate_place_model(
+                _base_place_probs, _base_place_probs, eval_df, groups_eval,
+            )
+            logger.info(
+                "Linear baseline (win): NDCG@1 %.4f / Brier %.6f  vs  tree: NDCG@1 %.4f / Brier %.6f",
+                all_metrics["baseline_win"].get("ndcg_at_1", float("nan")),
+                all_metrics["baseline_win"].get("brier_score", float("nan")),
+                all_metrics["win_classifier"].get("ndcg_at_1", float("nan")),
+                all_metrics["win_classifier"].get("brier_score", float("nan")),
+            )
+        except Exception as exc:
+            logger.warning("Linear baseline skipped: %s", exc)
 
         self.metrics = all_metrics
 
@@ -2331,6 +2379,34 @@ class TripleEnsemblePredictor:
             "storage": storage,
             "cv_folds": len(folds) if folds else 1,
         }
+
+    # ── Linear baseline ──────────────────────────────────────────
+    @staticmethod
+    def _sanitise_for_linear(X) -> np.ndarray:
+        """Tree models tolerate NaN/inf natively; linear models don't."""
+        Xs = np.asarray(X, dtype=np.float64).copy()
+        Xs[~np.isfinite(Xs)] = np.nan
+        return Xs
+
+    @classmethod
+    def _fit_linear_baseline(cls, X, y, sample_weight=None):
+        """Fit a logistic-regression baseline on the same feature matrix."""
+        from sklearn.impute import SimpleImputer
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import Pipeline
+        from sklearn.preprocessing import StandardScaler
+
+        pipe = Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler()),
+            ("logreg", LogisticRegression(max_iter=2000, C=1.0)),
+        ])
+        pipe.fit(cls._sanitise_for_linear(X), y, logreg__sample_weight=sample_weight)
+        return pipe
+
+    @classmethod
+    def _baseline_predict_proba(cls, pipe, X) -> np.ndarray:
+        return pipe.predict_proba(cls._sanitise_for_linear(X))[:, 1]
 
     def _train_classifier(self, X, y, scale_pos_weight=1.0, params=None, sample_weight=None, eval_set=None):
         _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
@@ -3562,3 +3638,8 @@ class TripleEnsemblePredictor:
         if return_place_probs:
             return win_probs, place_probs
         return win_probs
+
+
+# Backwards-compatible alias — older pickled models (run snapshots,
+# models/triple_ensemble_models.joblib) reference this name.
+TripleEnsemblePredictor = RacePredictor

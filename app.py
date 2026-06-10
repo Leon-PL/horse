@@ -48,7 +48,7 @@ from src.live_prediction import (
 )
 from src.database import db_stats as _raw_db_stats
 from src.model import (
-    TripleEnsemblePredictor,
+    RacePredictor,
     get_autotune_search_space,
     get_feature_importance,
     get_feature_columns,
@@ -217,7 +217,7 @@ if "did_cache_cleanup" not in st.session_state:
 def _cached_load_model():
     """Load model from disk — cached so joblib deserialization only happens once."""
     try:
-        p = TripleEnsemblePredictor()
+        p = RacePredictor()
         p.load()
         return p
     except FileNotFoundError:
@@ -254,7 +254,7 @@ def _cached_build_featured_from_processed(path: str, _mtime: float) -> pd.DataFr
     return engineer_features(processed.copy(), save=False)
 
 
-def _predictor_runtime_token(predictor: TripleEnsemblePredictor | None) -> str:
+def _predictor_runtime_token(predictor: RacePredictor | None) -> str:
     if predictor is None:
         return "no-predictor"
     model_path = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
@@ -289,7 +289,7 @@ def _prediction_cache_set(cache_key: tuple, value: pd.DataFrame) -> pd.DataFrame
 
 
 def _predict_featured_frame(
-    predictor: TripleEnsemblePredictor,
+    predictor: RacePredictor,
     feature_df: pd.DataFrame,
     *,
     ew_fraction: float | None = None,
@@ -1405,7 +1405,7 @@ def _build_matchbook_predictions_for_date(date_str: str) -> pd.DataFrame:
 
 # ── Sidebar ──────────────────────────────────────────────────────────
 st.sidebar.title("🏇 Horse Race Predictor")
-st.sidebar.caption("v5.0 — 3-Model Pipeline")
+st.sidebar.caption("Calibrated Win + Place classifiers")
 st.sidebar.markdown("---")
 
 page = st.sidebar.radio(
@@ -1510,7 +1510,7 @@ if _sidebar_runs_with_model:
     if st.session_state.predictor is not None:
         _p = st.session_state.predictor
         _mtype = type(_p).__name__
-        _label = "3-Model Pipeline" if _mtype == "TripleEnsemblePredictor" else _mtype
+        _label = "Win + Place Pipeline" if _mtype in ("RacePredictor", "TripleEnsemblePredictor") else _mtype
         st.sidebar.success(f"✅ **{_label}**")
     else:
         # Model file exists on disk but isn't loaded yet
@@ -1524,7 +1524,7 @@ elif os.path.exists(_ENSEMBLE_MODEL_PATH):
     if st.session_state.predictor is not None:
         _p = st.session_state.predictor
         _mtype = type(_p).__name__
-        _label = "3-Model Pipeline" if _mtype == "TripleEnsemblePredictor" else _mtype
+        _label = "Win + Place Pipeline" if _mtype in ("RacePredictor", "TripleEnsemblePredictor") else _mtype
         st.sidebar.success(f"✅ **{_label}** loaded")
     elif st.sidebar.button("Load Saved Model", key="sidebar_load_legacy"):
         if load_existing_model():
@@ -1693,17 +1693,20 @@ st.sidebar.markdown(
 if page == "🎓 Train & Tune":
     st.title("🎓 Train & Tune")
 
-    # ── Ensemble overview ────────────────────────────────────────────
+    # ── Model overview ───────────────────────────────────────────────
     with st.expander("ℹ️ About the Models", expanded=False):
         st.markdown(
-            "The system uses **3 coordinated models**:\n\n"
-            "| Model | Objective | Task |\n"
+            "Two **task-specific classifiers** drive all betting decisions, "
+            "plus two reference models:\n\n"
+            "| Model | Objective | Role |\n"
             "|-------|-----------|------|\n"
-            "| **Win Classifier** | Log-loss / focal | Value Bets — calibrated P(win) for edge detection |\n"
-            "| **Race Ranker** | LambdaRank | Learns within-race ordering and is blended into win scoring |\n"
-            "| **Place Classifier** | Log-loss / focal | Each-Way — calibrated P(place) for EW value |\n\n"
-            "Win probabilities are calibrated via Platt scaling after blending the win classifier with the race ranker. "
-            "Place classifier uses separate Platt calibration on P(place)."
+            "| **Win Classifier** | Log-loss / focal | Value Bets & Top Pick — calibrated P(win) |\n"
+            "| **Place Classifier** | Log-loss / focal | Each-Way — calibrated P(place) |\n"
+            "| **Race Ranker** | LambdaRank | Diagnostics only — ranker/classifier agreement panels; **not** blended into win probabilities |\n"
+            "| **Linear Baseline** | Logistic regression | Sanity reference on the same features — tree models should clearly beat it |\n\n"
+            "Each classifier is calibrated with Platt scaling + isotonic regression, "
+            "fitted on out-of-fold predictions from purged expanding-window CV "
+            "(optionally refit on the most recent training slab)."
         )
 
     # ── Data Settings ────────────────────────────────────────────────
@@ -2134,7 +2137,7 @@ if page == "🎓 Train & Tune":
 
     st.markdown("---")
 
-    model_type = "triple_ensemble"
+    model_type = "race_predictor"
 
     # ── Model Frameworks ─────────────────────────────────────────────
     st.subheader("2️⃣ Model Frameworks")
@@ -2173,7 +2176,7 @@ if page == "🎓 Train & Tune":
     )
     if getattr(config, "TRAIN_RANKER", False):
         st.caption(
-            f"The race ranker is not exposed as a separate manual UI control yet. It is trained automatically alongside the classifier and place model, and saved autotune sessions can now tune it with a dedicated ranker objective. The configured blend weight remains {float(getattr(config, 'RANKER_BLEND_WEIGHT', 0.0)):.2f}."
+            "The race ranker has no manual hyperparameter controls. It is trained automatically alongside the classifier and place model for diagnostics (ranker/classifier agreement), and saved autotune sessions can tune it with a dedicated ranker objective. Its scores are not blended into win probabilities."
         )
 
     tune_mode = st.radio(
@@ -2467,7 +2470,7 @@ if page == "🎓 Train & Tune":
 
             wf_report = walk_forward_validation(
                 featured,
-                model_type="triple_ensemble",
+                model_type="race_predictor",
                 min_train_months=int(wf_min_train),
                 value_threshold=_vc.get("value_threshold", 0.05),
                 frameworks=_frameworks,
@@ -2500,7 +2503,7 @@ if page == "🎓 Train & Tune":
         if not skip_wf:
             _update_train_progress(2, "🤖 Starting final model calibration and training …")
 
-        predictor = TripleEnsemblePredictor(frameworks=_frameworks)
+        predictor = RacePredictor(frameworks=_frameworks)
         metrics = predictor.train(
             featured, params=custom_hp, progress_callback=_training_cb,
             value_config=_value_config,
@@ -3072,12 +3075,6 @@ if page == "🎓 Train & Tune":
         _log_experiment(exp_entry)
 
         # ── Persist full run snapshot ────────────────────────────────
-        _weights = getattr(predictor, "weights", None)
-        _ens_weights = (
-            {k: float(v) for k, v in _weights.items()}
-            if isinstance(_weights, dict) else {}
-        )
-
         _auto_info = None
         if _saved_autotune_session is not None:
             _auto_info = {
@@ -3094,7 +3091,6 @@ if page == "🎓 Train & Tune":
             n_features=len(get_feature_columns(featured)),
             elapsed_seconds=elapsed,
             hyperparameters=custom_hp if custom_hp else {},
-            ensemble_weights=_ens_weights,
             metrics=metrics,
             train_metrics=getattr(predictor, "train_metrics", None),
             test_analysis=test_analysis,
@@ -5243,9 +5239,9 @@ elif page == "💰 Today's Picks":
 
     with _tp_dc2:
         st.caption(
-            "Scrapes racecards for the selected date, runs the ensemble "
-            "on every race, and surfaces horses where the model sees "
-            "genuine value."
+            "Scrapes racecards for the selected date, runs the win/place "
+            "models on every race, and surfaces horses where the model "
+            "sees genuine value."
         )
 
     # ── ensure model is loaded ───────────────────────────────────────
@@ -5544,7 +5540,7 @@ elif page == "💰 Today's Picks":
         st.session_state["picks_thresh"] = value_base_thresh
         # Record which model state produced these predictions
         st.session_state["picks_model_fp"] = _picks_model_fp
-        st.session_state["picks_model_label"] = "3-Model"
+        st.session_state["picks_model_label"] = "Win + Place models"
 
     # ── display results ─────────────────────────────────────────
     if "picks_preds" in st.session_state and st.session_state["picks_preds"] is not None:
@@ -5556,7 +5552,7 @@ elif page == "💰 Today's Picks":
             # Model changed — predictions will auto-refresh on next rerun
             st.rerun()
         else:
-            _used_label = st.session_state.get("picks_model_label", "Ensemble")
+            _used_label = st.session_state.get("picks_model_label", "Win + Place models")
             st.caption(f"ℹ️ Predictions computed with: **{_used_label}**")
 
         full_preds = st.session_state["picks_preds"]
@@ -7763,6 +7759,41 @@ elif page == "📈 Model Insights":
                     )
 
                 st.markdown("---")
+
+            # ── Lift over the linear baseline ─────────────────────
+            _bl_payload = _test_metrics_diag.get("baseline_win") if isinstance(_test_metrics_diag, dict) else None
+            _wc_payload = (
+                _test_metrics_diag.get("win_classifier") or _test_metrics_diag.get("classifier")
+                if isinstance(_test_metrics_diag, dict) else None
+            )
+            if isinstance(_bl_payload, dict) and isinstance(_wc_payload, dict):
+                _bl_ndcg = _first_metric_value(_bl_payload, "ndcg_at_1")
+                _wc_ndcg = _first_metric_value(_wc_payload, "ndcg_at_1")
+                _bl_brier = _first_metric_value(_bl_payload, "brier_score")
+                _wc_brier = _first_metric_value(_wc_payload, "brier_score")
+                if None not in (_bl_ndcg, _wc_ndcg, _bl_brier, _wc_brier):
+                    st.markdown("### 📏 Lift vs Linear Baseline")
+                    st.caption(
+                        "Logistic regression trained on the same features. If the win "
+                        "classifier doesn't clearly beat it, added model complexity "
+                        "isn't paying for itself."
+                    )
+                    _bl_cols = st.columns(3)
+                    _bl_cols[0].metric(
+                        "NDCG@1 lift",
+                        _fmt_metric(_wc_ndcg - _bl_ndcg, "+.4f"),
+                        help=f"Win classifier {_wc_ndcg:.4f} vs baseline {_bl_ndcg:.4f}",
+                    )
+                    _bl_cols[1].metric(
+                        "Brier improvement",
+                        _fmt_metric(_bl_brier - _wc_brier, "+.6f"),
+                        help=f"Win classifier {_wc_brier:.6f} vs baseline {_bl_brier:.6f} (positive = tree model better calibrated)",
+                    )
+                    if _wc_ndcg <= _bl_ndcg:
+                        _bl_cols[2].warning("⚠️ Baseline ranks winners as well as the tree model.")
+                    else:
+                        _bl_cols[2].success("✅ Tree model beats the linear baseline.")
+                    st.markdown("---")
 
             _full_snapshot_df, _value_snapshot_df = _build_metric_snapshot_frame(_test_metrics_diag)
             _selector_explainer = _build_ranker_selector_explainer(_test_metrics_diag)

@@ -112,7 +112,7 @@ def adjust_place_probs_for_race(
         target_mean = np.clip(target / n, 1e-6, 1.0 - 1e-6)
         delta = np.log(target_mean / (1.0 - target_mean)) - logits.mean()
         for _ in range(20):
-            p = 1.0 / (1.0 + np.exp(-(logits + delta)))
+            p = 1.0 / (1.0 + np.exp(-np.clip(logits + delta, -60.0, 60.0)))
             residual = p.sum() - target
             if abs(residual) < 1e-8:
                 break
@@ -121,7 +121,7 @@ def adjust_place_probs_for_race(
                 break
             delta -= residual / grad
 
-        adjusted = 1.0 / (1.0 + np.exp(-(logits + delta)))
+        adjusted = 1.0 / (1.0 + np.exp(-np.clip(logits + delta, -60.0, 60.0)))
 
     # Floor: P(place) >= P(win) — you can't win without placing
     adjusted = np.maximum(adjusted, win_probs.astype(np.float64))

@@ -26,7 +26,7 @@ from src.data_collector import collect_data
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.model import (
-    TripleEnsemblePredictor,
+    RacePredictor,
     DEFAULT_FRAMEWORKS,
 )
 
@@ -97,7 +97,7 @@ def run_pipeline(
     # --- Step 4: Model Training ---
     logger.info("\n🤖 Step 4/4: Training model...")
 
-    predictor = TripleEnsemblePredictor(frameworks=frameworks)
+    predictor = RacePredictor(frameworks=frameworks)
     metrics = predictor.train(featured_data, weights=weights)
     logger.info(f"\nTriple Ensemble Results (frameworks: {predictor.frameworks}):")
     for name, m in metrics.items():
