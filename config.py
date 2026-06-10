@@ -148,9 +148,11 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
 
 # --- Race Ranker ---
 # LambdaRank learns relative order within each race directly.
-# Trained for diagnostics (ranker/classifier agreement panels) only —
-# its scores are not blended into win probabilities.
-TRAIN_RANKER = True
+# Diagnostics only — its scores are never blended into win
+# probabilities, and training it costs roughly a third of total
+# training time. Off by default; enable here or via the Train page
+# toggle when you want the ranker/classifier agreement panels.
+TRAIN_RANKER = False
 
 # --- Elo Settings ---
 ELO_K_BASE = 32.0   # K for horses with 0 prior runs

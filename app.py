@@ -2161,10 +2161,17 @@ if page == "🎓 Train & Tune":
                 index=_framework_options.index(_def_fw) if _def_fw in _framework_options else 0,
                 key=f"fw_{_mk}",
             )
-    if getattr(config, "TRAIN_RANKER", False):
-        st.info(
-            "Race Ranker is enabled for training. It uses **LightGBM LambdaRank** and can now be autotuned as a dedicated study as well."
-        )
+    _train_ranker_toggle = st.checkbox(
+        "Also train diagnostic Race Ranker (LightGBM LambdaRank)",
+        value=bool(getattr(config, "TRAIN_RANKER", False)),
+        key="train_ranker_toggle",
+        help=(
+            "Adds roughly a third to training time. The ranker's scores are "
+            "never used for betting — they only power the ranker/classifier "
+            "agreement panels and a dedicated autotune study."
+        ),
+    )
+    config.TRAIN_RANKER = bool(_train_ranker_toggle)
 
     st.markdown("---")
 
@@ -3214,6 +3221,11 @@ elif page == "🧭 Autotune":
         st.info(
             "The dedicated Autotune page can now tune the race ranker as its own LightGBM LambdaRank study. "
             "Because the objective family changed, older autotune sessions cannot be resumed into this build."
+        )
+    else:
+        st.caption(
+            "ℹ️ The diagnostic Race Ranker is disabled, so no ranker study is offered. "
+            "Enable it via the Train page toggle (or `config.TRAIN_RANKER`) to tune it."
         )
     _at_name = st.text_input(
         "Study name",
