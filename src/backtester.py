@@ -36,6 +36,14 @@ from src.model import (
     TripleEnsemblePredictor,
 )
 from src.each_way import get_ew_terms, ew_value as _ew_value
+from src.bet_settlement import (
+    ew_bet_selected,
+    ew_odds_in_band,
+    ew_placed_flag,
+    settle_ew_bet,
+    settle_win_bets,
+    value_bet_selection,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -314,7 +322,7 @@ def walk_forward_validation(
         else:
             _tp = pd.DataFrame()
         _tp_won = _tp["won"].values.astype(int) if not _tp.empty else np.array([], dtype=int)
-        _tp_pnl_arr = np.where(_tp_won == 1, _tp["odds"].values - 1.0, -1.0) if not _tp.empty else np.array([])
+        _tp_pnl_arr = settle_win_bets(_tp["odds"].values, _tp_won == 1) if not _tp.empty else np.array([])
         top_pick_bets = len(_tp)
         top_pick_winners = int(_tp_won.sum()) if len(_tp_won) else 0
         top_pick_pnl = float(_tp_pnl_arr.sum()) if len(_tp_pnl_arr) else 0.0
@@ -335,11 +343,18 @@ def walk_forward_validation(
             })
 
         # --- Strategy 2: Value Bets (vectorised) ---
-        _dyn_thresh = value_threshold * np.sqrt(test_with_probs["odds"] / 3.0)
-        _vb_mask = test_with_probs["value_score"] > _dyn_thresh
-        _vb = test_with_probs[_vb_mask]
+        # NOTE: unlike analyse_test_set (raw 1/odds), the backtester edge
+        # is computed against race-normalised (overround-corrected)
+        # implied probabilities — passed through explicitly here.
+        _vb_sel = value_bet_selection(
+            test_with_probs["model_prob"].values,
+            test_with_probs["odds"].values,
+            value_threshold,
+            implied_prob=test_with_probs["implied_prob"].values,
+        )
+        _vb = test_with_probs[_vb_sel["mask"]]
         _vb_won = _vb["won"].values.astype(int)
-        _vb_pnl_arr = np.where(_vb_won == 1, _vb["odds"].values - 1.0, -1.0)
+        _vb_pnl_arr = settle_win_bets(_vb["odds"].values, _vb_won == 1)
         value_bets_n = len(_vb)
         value_winners = int(_vb_won.sum())
         value_pnl = float(_vb_pnl_arr.sum())
@@ -379,28 +394,22 @@ def walk_forward_validation(
                     _adj_place = _adj_pp(_raw_pp, _win_pp, ew_terms.places_paid)
 
                     for _ew_i, (_, ep) in enumerate(race_group.iterrows()):
-                        if ep["odds"] < 4.0 or ep["odds"] > 51.0:
+                        if not ew_odds_in_band(ep["odds"]):
                             continue
                         ev_result = _ew_value(
                             ep["model_prob"], float(_adj_place[_ew_i]),
                             ep["odds"], ew_terms,
                         )
                         _ew_base = ew_min_place_edge if ew_min_place_edge is not None else value_threshold
-                        _ew_dyn_thresh = _ew_base * np.sqrt(ep["odds"] / 3.0)
-                        if ev_result["place_edge"] > _ew_dyn_thresh and ev_result["place_ev"] > 0:
+                        if ew_bet_selected(ev_result["place_edge"], ev_result["place_ev"], ep["odds"], _ew_base):
                             ew_bets_n += 1
-                            # EW bet = 2 units (1 win + 1 place)
-                            fp_val = int(ep["finish_position"])
                             won_flag = int(ep["won"])
-                            placed_flag = int(fp_val <= ew_terms.places_paid)
-                            pnl_ew = -2.0  # cost: 2 units
+                            placed_flag = ew_placed_flag(ep.get("finish_position"), ew_terms.places_paid)
+                            pnl_ew = settle_ew_bet(ep["odds"], ev_result["place_odds"], won_flag, placed_flag)
                             if won_flag:
-                                pnl_ew += ep["odds"]  # win leg returns
-                                pnl_ew += ev_result["place_odds"]  # place leg returns
                                 ew_winners += 1
                                 ew_placed_n += 1
                             elif placed_flag:
-                                pnl_ew += ev_result["place_odds"]  # place leg only
                                 ew_placed_n += 1
                             ew_pnl += pnl_ew
 

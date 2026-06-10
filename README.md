@@ -33,33 +33,36 @@ The flagship model is a **6-model ensemble** combining Learning-to-Rank, regress
 
 ```
 horse/
-├── app.py                          # Streamlit web application (7 pages)
+├── app.py                          # Streamlit web application
 ├── train.py                        # Command-line training script
-├── trial_run.py                    # Quick trial: scrape today + predict
 ├── config.py                       # Configuration settings
-├── requirements.txt                # Python dependencies
+├── requirements.txt                # Python dependencies (loose)
+├── requirements.lock               # Pinned dependency versions
+├── CLAUDE.md / PROJECT_OUTLINE.md  # Agent handover & architecture docs
 ├── .gitignore
 ├── README.md
 ├── src/
 │   ├── __init__.py
 │   ├── data_scraper.py             # Web scraper (Sporting Life)
 │   ├── data_collector.py           # Unified data collector interface
-│   ├── data_collector_real.py      # Real data via Sporting Life scraper
 │   ├── data_collector_sample.py    # Synthetic data generator (fallback)
 │   ├── database.py                 # Historical SQLite database
 │   ├── data_processor.py           # Data cleaning & preprocessing
 │   ├── feature_engineer.py         # Feature engineering pipeline (120+ features)
 │   ├── ratings.py                  # Elo rating system (horse/jockey/trainer)
 │   ├── model.py                    # ML models, training, evaluation, tuning
+│   ├── bet_settlement.py           # Shared bet-selection & settlement rules
+│   ├── each_way.py                 # Each-way terms & value calculation
 │   ├── backtester.py               # Walk-forward validation & P&L simulation
 │   ├── run_store.py                # Experiment persistence (run snapshots)
-│   └── utils.py                    # Utility functions
+│   └── utils.py                    # Utility functions & merge-key normalisers
+├── tests/                          # Pytest suite (settlement, EW, utils)
 ├── data/
 │   ├── races.db                    # Historical SQLite database
 │   ├── raw/                        # Raw collected data (CSV)
-│   └── processed/                  # Processed & feature-engineered data
-├── models/                         # Saved trained models
-└── runs/                           # Experiment run snapshots
+│   ├── processed/                  # Processed & feature-engineered data
+│   └── runs/                       # Experiment run snapshots
+└── models/                         # Saved trained models
 ```
 
 ---
@@ -124,11 +127,10 @@ This opens an interactive dashboard with 7 pages:
 | **📈 Model Insights** | Feature importance, SHAP explanations, overfit diagnostics, backtesting with P&L charts |
 | **📖 Guide** | In-app documentation |
 
-### 4. Quick Trial Run
+### 4. Run the Tests
 
 ```bash
-# Scrape today's racecards and predict every race (uses saved model)
-python trial_run.py
+python -m pytest tests/ -q
 ```
 
 ---

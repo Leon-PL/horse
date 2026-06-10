@@ -45,6 +45,10 @@ ROLLING_WINDOWS = [3, 5, 10, 20]
 LIVE_FE_HISTORY_MONTHS = 30
 LIVE_FEATURE_CACHE_VERSION = 2
 
+# Date-stamped cache entries (live feature cache, lookahead cache,
+# racecards cache) older than this are deleted on app start-up.
+CACHE_TTL_DAYS = 30
+
 # --- Matchbook API Settings ---
 MATCHBOOK_EDGE_URL = os.getenv("MATCHBOOK_EDGE_URL", "https://api.matchbook.com/edge/rest")
 MATCHBOOK_BPAPI_URL = os.getenv("MATCHBOOK_BPAPI_URL", "https://api.matchbook.com/bpapi/rest")

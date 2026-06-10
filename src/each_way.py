@@ -37,6 +37,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from src.bet_settlement import EW_MIN_ODDS, EW_MAX_ODDS, dynamic_value_threshold
+from src.utils import kelly_criterion
+
 logger = logging.getLogger(__name__)
 
 
@@ -281,21 +284,14 @@ def kelly_ew(
 
     p_odds = place_odds_decimal(win_odds, ew_terms.fraction)
 
-    # Win leg Kelly
-    b_win = win_odds - 1.0
-    k_win = max(0.0, (b_win * win_prob - (1 - win_prob)) / b_win)
-
-    # Place leg Kelly
-    b_place = p_odds - 1.0
-    k_place = max(0.0, (b_place * place_prob - (1 - place_prob)) / b_place)
+    # Full Kelly per leg (fraction applied on return below)
+    k_win = kelly_criterion(win_prob, win_odds, fraction=1.0)
+    k_place = kelly_criterion(place_prob, p_odds, fraction=1.0)
 
     # EW Kelly: Since EW forces equal stakes on both legs, we use the
     # more conservative of the two individual Kellys, weighted by
     # how much each leg contributes to EV.
     if k_win + k_place > 0:
-        # Weight by each leg's positive contribution
-        w_win = max(0.0, k_win)
-        w_place = max(0.0, k_place)
         ew_kelly = min(k_win, k_place) + 0.5 * abs(k_win - k_place)
         # If one leg is -EV, reduce substantially
         if k_win <= 0 or k_place <= 0:
@@ -414,8 +410,8 @@ def compute_ew_columns(
 def ew_value_bets(
     df: pd.DataFrame,
     min_place_edge: float = 0.05,
-    min_odds: float = 4.0,
-    max_odds: float = 51.0,
+    min_odds: float = EW_MIN_ODDS,
+    max_odds: float = EW_MAX_ODDS,
 ) -> pd.DataFrame:
     """
     Filter for the best each-way value bets.
@@ -432,8 +428,8 @@ def ew_value_bets(
         return pd.DataFrame()
 
     # Dynamic threshold — tighter at short odds, looser at long odds
-    _odds = df["odds"].clip(lower=1.0) if "odds" in df.columns else pd.Series(3.0, index=df.index)
-    _dyn_thresh = min_place_edge * np.sqrt(_odds / 3.0)
+    _odds = df["odds"] if "odds" in df.columns else pd.Series(3.0, index=df.index)
+    _dyn_thresh = dynamic_value_threshold(min_place_edge, _odds)
 
     mask = (
         df["ew_eligible"]

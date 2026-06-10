@@ -6,7 +6,11 @@ from datetime import datetime
 import pandas as pd
 
 import config
-from src.rtv_scraper import _normalise_horse_key, _normalise_off_time_key, _normalise_track_key
+from src.utils import (
+    normalise_horse_key as _normalise_horse_key,
+    normalise_off_time_key as _normalise_off_time_key,
+    normalise_track_key as _normalise_track_key,
+)
 
 
 PAPER_TRADES_DIR = os.path.join(config.DATA_DIR, "paper_trades")

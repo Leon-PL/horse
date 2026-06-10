@@ -74,8 +74,9 @@ from src.rtv_scraper import (
     load_rtv_cache,
 )
 from src.backtester import walk_forward_validation
-from src.run_store import save_run, list_runs as _raw_list_runs, load_run as _raw_load_run, load_run_meta as _raw_load_run_meta, delete_run as _raw_delete_run, rename_run, get_latest_run_id, restore_run_model, run_has_model, get_run_processed_path, get_run_featured_path
-from src.utils import format_odds, kelly_criterion
+from src.run_store import save_run, list_runs as _raw_list_runs, load_run as _raw_load_run, load_run_meta as _raw_load_run_meta, delete_run as _raw_delete_run, rename_run, get_latest_run_id, restore_run_model, run_has_model, get_run_processed_path, get_run_featured_path, prune_runs, run_disk_usage
+from src.utils import format_odds, kelly_criterion, compact_numeric_dtypes as _compact_numeric_dtypes
+from src.bet_settlement import dynamic_value_threshold, ew_placed_flag, settle_ew_bet, settle_win_bet
 from src.each_way import compute_ew_columns, ew_value_bets, get_ew_terms, kelly_ew, EachWayTerms
 from src.matchbook_client import MatchbookAPIError, MatchbookClient
 from src.matchbook_signals import build_fake_prediction_frame, build_signal_frame
@@ -402,40 +403,6 @@ def _progress_timing_text(started_at: float, step_started_at: float, stage_progr
     return " · ".join(parts)
 
 
-def _compact_numeric_dtypes(df: pd.DataFrame | None, *, label: str = "dataset") -> pd.DataFrame | None:
-    """Downcast numeric columns to reduce in-memory dataset size."""
-    if df is None or df.empty:
-        return df
-
-    before_bytes = int(df.memory_usage(deep=False).sum())
-    numeric_cols = list(df.select_dtypes(include=["number"]).columns)
-    if not numeric_cols:
-        return df
-
-    for col in numeric_cols:
-        series = df[col]
-        if pd.api.types.is_bool_dtype(series):
-            continue
-        if pd.api.types.is_float_dtype(series):
-            downcasted = pd.to_numeric(series, downcast="float")
-        elif pd.api.types.is_integer_dtype(series):
-            downcast = "unsigned" if series.min(skipna=True) >= 0 else "integer"
-            downcasted = pd.to_numeric(series, downcast=downcast)
-        else:
-            continue
-        if downcasted.dtype != series.dtype:
-            df[col] = downcasted
-
-    after_bytes = int(df.memory_usage(deep=False).sum())
-    if after_bytes < before_bytes:
-        logger.info(
-            "Compacted %s numeric dtypes: %.1f MB -> %.1f MB",
-            label,
-            before_bytes / (1024 * 1024),
-            after_bytes / (1024 * 1024),
-        )
-    return df
-
 
 def _value_odds_range(value_config: dict | None) -> tuple[float, float]:
     cfg = value_config or {}
@@ -454,7 +421,7 @@ def _value_bet_mask(frame: pd.DataFrame, value_config: dict | None) -> pd.Series
     base_thresh = float(cfg.get("value_threshold", 0.05))
     min_odds, max_odds = _value_odds_range(cfg)
     odds = pd.to_numeric(frame["odds"], errors="coerce")
-    dyn_thresh = base_thresh * np.sqrt(odds.clip(lower=1.0) / 3.0)
+    dyn_thresh = dynamic_value_threshold(base_thresh, odds)
     return (
         pd.to_numeric(frame["value_score"], errors="coerce").gt(dyn_thresh)
         & odds.ge(min_odds)
@@ -1622,6 +1589,16 @@ _DEFAULTS = {
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+# ── Stale-cache housekeeping (once per session) ──────────────────────
+if "did_cache_cleanup" not in st.session_state:
+    from src.utils import cleanup_stale_caches
+
+    try:
+        cleanup_stale_caches()
+    except Exception as _exc:
+        logger.warning("Cache cleanup failed: %s", _exc)
+    st.session_state["did_cache_cleanup"] = True
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -5743,6 +5720,40 @@ elif page == "🧪 Experiments":
             st.success(f"Deleted {len(del_selection)} run(s).")
             st.rerun()
 
+        # ── Disk usage + prune old runs ───────────────────────────────
+        st.markdown("---")
+        st.subheader("💽 Disk Usage & Pruning")
+        _usage = run_disk_usage()
+        _total_gb = sum(b for _, b in _usage) / 1024 ** 3
+        st.caption(
+            f"**{len(_usage)} run(s)** using **{_total_gb:.2f} GB** "
+            "(dataset snapshots dominate — pruning keeps the newest runs)."
+        )
+        _pr_col1, _pr_col2 = st.columns([1, 1])
+        with _pr_col1:
+            _keep_n = st.number_input(
+                "Keep newest N runs", min_value=1, max_value=50, value=5,
+                key="prune_keep_n",
+            )
+        with _pr_col2:
+            _n_prunable = max(0, len(_usage) - int(_keep_n))
+            _do_prune = st.button(
+                f"🧹 Prune {_n_prunable} old run(s)",
+                disabled=_n_prunable == 0,
+                key="btn_prune_runs",
+            )
+        if _do_prune:
+            _pruned = prune_runs(keep_latest=int(_keep_n))
+            list_runs.clear()
+            load_run.clear()
+            load_run_meta.clear()
+            if st.session_state.active_run_id in _pruned:
+                st.session_state.active_run_id = None
+                st.session_state.test_analysis = None
+                st.session_state.metrics = None
+            st.success(f"Pruned {len(_pruned)} run(s).")
+            st.rerun()
+
         # ── Processed-data snapshot migration ────────────────────────
         st.markdown("---")
         st.subheader("📦 Backfill Dataset Snapshots")
@@ -6203,7 +6214,7 @@ elif page == "🔮 Predict":
                                 _vt_base = _ew_cfg["value_threshold"]
                                 _row_odds = float(row.get("odds", 3.0)) if pd.notna(row.get("odds")) else 3.0
                                 _value_min_odds, _value_max_odds = _value_odds_range(_ew_cfg)
-                                _dyn_vt = _vt_base * np.sqrt(_row_odds / 3.0)
+                                _dyn_vt = dynamic_value_threshold(_vt_base, _row_odds)
                                 if (
                                     "value_score" in row
                                     and pd.notna(row["value_score"])
@@ -6220,7 +6231,7 @@ elif page == "🔮 Predict":
                                     and row.get("place_value", False)
                                 ):
                                     _ew_edge_base = _ew_cfg.get("ew_min_place_edge", 0.05)
-                                    _ew_dyn = _ew_edge_base * np.sqrt(_row_odds / 3.0)
+                                    _ew_dyn = dynamic_value_threshold(_ew_edge_base, _row_odds)
                                     if row.get("place_edge", 0) > _ew_dyn:
                                         _badges.append(
                                             f"🔀 **+{row['place_edge']:.1%}** EW"
@@ -7014,7 +7025,7 @@ elif page == "💰 Today's Picks":
 
         # ── identify value bets (odds-dependent threshold) ─────
         if "value_score" in full_preds.columns and "odds" in full_preds.columns:
-            full_preds["dyn_threshold"] = base_thresh * np.sqrt(full_preds["odds"] / 3.0)
+            full_preds["dyn_threshold"] = dynamic_value_threshold(base_thresh, full_preds["odds"])
             _value_min_odds, _value_max_odds = _value_odds_range(st.session_state.value_config)
             full_preds["is_value"] = _value_bet_mask(full_preds, st.session_state.value_config)
             full_preds["value_odds_in_range"] = full_preds["odds"].between(_value_min_odds, _value_max_odds, inclusive="both")
@@ -7060,7 +7071,7 @@ elif page == "💰 Today's Picks":
             _val_wins = int(_val_settled["result_won"].sum()) if _val_n else 0
             _val_pnl = 0.0
             for _, _vs in _val_settled.iterrows():
-                _val_pnl += (_vs["odds"] - 1.0) if _vs["result_won"] else -1.0
+                _val_pnl += settle_win_bet(_vs["odds"], _vs["result_won"])
             _val_roi = (_val_pnl / _val_n * 100) if _val_n else 0.0
 
             # --- EW bet returns (exclude NR/void) ---
@@ -7070,19 +7081,15 @@ elif page == "💰 Today's Picks":
             _ew_placed = 0
             _ew_pnl = 0.0
             for _, _es in _ew_settled.iterrows():
-                _fp = int(_es["result_fp"])
-                _ew_pp = int(_es.get("ew_places", 3))
-                _p_odds = float(_es.get("place_odds", 0))
-                _w_odds = float(_es["odds"])
-                _pnl_ew = -2.0  # cost 2 units
-                if _es["result_won"]:
-                    _pnl_ew += _w_odds + _p_odds
+                _won = bool(_es["result_won"])
+                _placed = bool(ew_placed_flag(_es["result_fp"], _es.get("ew_places", 3)))
+                _ew_pnl += settle_ew_bet(
+                    _es["odds"], _es.get("place_odds", 0), _won, _placed,
+                )
+                if _won:
                     _ew_wins += 1
+                if _won or _placed:
                     _ew_placed += 1
-                elif 0 < _fp <= _ew_pp:
-                    _pnl_ew += _p_odds
-                    _ew_placed += 1
-                _ew_pnl += _pnl_ew
             _ew_roi = (_ew_pnl / (_ew_n * 2) * 100) if _ew_n else 0.0
 
             # --- Top pick returns (exclude races where the top pick was NR) ---
@@ -7097,11 +7104,9 @@ elif page == "💰 Today's Picks":
                 if _tp_best.get("result_is_nr", False):
                     continue
                 _tp_n += 1
+                _tp_pnl += settle_win_bet(_tp_best["odds"], _tp_best["result_won"])
                 if _tp_best["result_won"]:
-                    _tp_pnl += _tp_best["odds"] - 1.0
                     _tp_wins += 1
-                else:
-                    _tp_pnl -= 1.0
 
             # Combined P&L = Value + EW only (top pick excluded)
             _combined_pnl = _val_pnl + _ew_pnl

@@ -282,6 +282,46 @@ def get_latest_run_id() -> str | None:
     return runs[0]["run_id"] if runs else None
 
 
+def run_disk_usage() -> list[tuple[str, int]]:
+    """Return ``(run_id, bytes)`` per run folder, newest first."""
+    if not os.path.isdir(RUNS_DIR):
+        return []
+    usage: list[tuple[str, int]] = []
+    for entry in sorted(os.listdir(RUNS_DIR), reverse=True):
+        run_dir = os.path.join(RUNS_DIR, entry)
+        if not os.path.isdir(run_dir):
+            continue
+        total = sum(
+            os.path.getsize(os.path.join(run_dir, f))
+            for f in os.listdir(run_dir)
+            if os.path.isfile(os.path.join(run_dir, f))
+        )
+        usage.append((entry, total))
+    return usage
+
+
+def prune_runs(keep_latest: int = 5) -> list[str]:
+    """Delete all but the *keep_latest* most recent runs.
+
+    Run folders sort chronologically by id (``YYYYMMDD_HHMMSS``).
+    Returns the list of deleted run ids.
+    """
+    if keep_latest < 1:
+        raise ValueError("keep_latest must be >= 1")
+    if not os.path.isdir(RUNS_DIR):
+        return []
+    run_ids = sorted(
+        (e for e in os.listdir(RUNS_DIR)
+         if os.path.isdir(os.path.join(RUNS_DIR, e))),
+        reverse=True,
+    )
+    deleted: list[str] = []
+    for run_id in run_ids[keep_latest:]:
+        if delete_run(run_id):
+            deleted.append(run_id)
+    return deleted
+
+
 # ── Model snapshot helpers ───────────────────────────────────────────
 
 # The canonical model file written by TripleEnsemblePredictor.save()
@@ -315,15 +355,24 @@ def _snapshot_datasets(
     featured_df: pd.DataFrame | None = None,
     processed_df: pd.DataFrame | None = None,
 ) -> None:
-    """Persist the exact datasets used for the training run when available."""
+    """Persist the exact datasets used for the training run when available.
+
+    Snapshots are downcast to compact numeric dtypes and written with
+    zstd compression — featured datasets run to hundreds of MB per run
+    otherwise.
+    """
+    from src.utils import compact_numeric_dtypes
+
     if isinstance(featured_df, pd.DataFrame) and not featured_df.empty:
         featured_path = os.path.join(run_dir, "featured_races.parquet")
-        featured_df.to_parquet(featured_path, index=False)
+        snapshot = compact_numeric_dtypes(featured_df.copy(), label="featured snapshot")
+        snapshot.to_parquet(featured_path, index=False, compression="zstd")
         logger.info("  Featured-data snapshot saved (parquet)")
 
     if isinstance(processed_df, pd.DataFrame) and not processed_df.empty:
         processed_path = os.path.join(run_dir, "processed_races.parquet")
-        processed_df.to_parquet(processed_path, index=False)
+        snapshot = compact_numeric_dtypes(processed_df.copy(), label="processed snapshot")
+        snapshot.to_parquet(processed_path, index=False, compression="zstd")
         logger.info("  Processed-data snapshot saved (parquet)")
 
 

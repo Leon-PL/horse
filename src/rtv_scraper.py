@@ -34,6 +34,13 @@ import pandas as pd
 import requests
 
 import config
+# Normalisers live in src.utils; private aliases kept for the many
+# internal call sites in this module.
+from src.utils import (
+    normalise_horse_key as _normalise_horse_key,
+    normalise_off_time_key as _normalise_off_time_key,
+    normalise_track_key as _normalise_track_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,33 +192,6 @@ def _off_time_to_hhmm(off_time: str) -> str:
     return str(off_time).replace(":", "")
 
 
-def _normalise_off_time_key(off_time) -> str:
-    """Normalise off-time values to a stable ``HH:MM`` merge key."""
-    s = str(off_time).strip()
-    if not s or s.lower() in {"nan", "none", "nat"}:
-        return ""
-    # 1408 -> 14:08
-    if re.fullmatch(r"\d{4}", s):
-        return f"{s[:2]}:{s[2:]}"
-    # 14:08[:SS] -> 14:08
-    m = re.match(r"^(\d{1,2}):(\d{2})", s)
-    if m:
-        return f"{int(m.group(1)):02d}:{int(m.group(2)):02d}"
-    # Last-resort digit extraction (e.g. "1408 BST")
-    digits = re.sub(r"\D", "", s)
-    if len(digits) >= 4:
-        return f"{digits[:2]}:{digits[2:4]}"
-    return s
-
-
-def _normalise_track_key(track) -> str:
-    """Normalise track names for robust joins."""
-    return re.sub(r"\s+", " ", str(track).strip().lower())
-
-
-def _normalise_horse_key(name) -> str:
-    """Normalise horse names for robust joins."""
-    return re.sub(r"\s+", " ", str(name).strip().title())
 
 
 def _is_bst(date_str: str) -> bool:

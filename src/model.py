@@ -41,6 +41,15 @@ CatBoostClassifier = None
 Pool = None
 
 import config
+from src.bet_settlement import (
+    EW_STAKE_UNITS,
+    ew_bet_selected,
+    ew_odds_in_band,
+    ew_placed_flag,
+    settle_ew_bet,
+    settle_win_bet,
+    value_bet_selection as _value_bet_selection,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -639,30 +648,6 @@ def get_feature_columns(df: pd.DataFrame) -> list[str]:
         for col in df.columns
         if col not in EXCLUDE_COLUMNS and df[col].dtype in ["int64", "float64", "int32", "float32"]
     ]
-
-
-def _value_bet_selection(
-    probs: np.ndarray,
-    odds: np.ndarray,
-    value_threshold: float,
-) -> dict[str, np.ndarray]:
-    """Return the value-bet mask plus edge/CLV diagnostics for a threshold."""
-    probs_arr = np.asarray(probs, dtype=np.float64)
-    odds_arr = np.asarray(odds, dtype=np.float64)
-    implied_prob = np.where(odds_arr > 0, 1.0 / odds_arr, 0.0)
-    edge = probs_arr - implied_prob
-    dyn_threshold = float(value_threshold) * np.sqrt(np.clip(odds_arr, 1.0, None) / 3.0)
-    clv = probs_arr * odds_arr
-    expected_roi = clv - 1.0
-    mask = (odds_arr > 0) & np.isfinite(odds_arr) & np.isfinite(probs_arr) & (edge > dyn_threshold)
-    return {
-        "mask": mask,
-        "implied_prob": implied_prob,
-        "edge": edge,
-        "dyn_threshold": dyn_threshold,
-        "clv": clv,
-        "expected_roi": expected_roi,
-    }
 
 
 def _event_sort_key(df: pd.DataFrame) -> pd.Series:
@@ -1351,7 +1336,7 @@ def analyse_test_set(
             continue
         best = race_group.loc[race_group["model_prob"].idxmax()]
         odds_val = float(best["odds"]) if has_odds else 0.0
-        pnl = (odds_val - 1.0) if best["won"] == 1 else -1.0
+        pnl = settle_win_bet(odds_val, best["won"] == 1)
 
         rd = best["race_date"]
         rd_str = str(rd.date()) if hasattr(rd, "date") else str(rd)[:10]
@@ -1396,7 +1381,7 @@ def analyse_test_set(
                 if stake < 0.01:
                     continue  # skip negligible bets
 
-                pnl_v = stake * (vp_odds - 1.0) if vp["won"] == 1 else -stake
+                pnl_v = settle_win_bet(vp_odds, vp["won"] == 1, stake)
 
                 if use_kelly:
                     _current_bankroll += pnl_v
@@ -1431,7 +1416,7 @@ def analyse_test_set(
                     _adj_place = _adj_pp(_raw_pp, _win_pp, ew_terms.places_paid)
 
                     for _ew_i, (_, ep) in enumerate(race_group.iterrows()):
-                        if ep["odds"] < 4.0 or ep["odds"] > 51.0:
+                        if not ew_odds_in_band(ep["odds"]):
                             continue
                         ev_result = _ew_value_fn(
                             ep["model_prob"], float(_adj_place[_ew_i]),
@@ -1440,18 +1425,10 @@ def analyse_test_set(
                         # Use dedicated EW edge threshold (sidebar "Min place edge")
                         # with the same dynamic odds scaling as value bets.
                         _ew_base = ew_min_place_edge if ew_min_place_edge is not None else value_threshold
-                        _ew_dyn_thresh = _ew_base * np.sqrt(ep["odds"] / 3.0)
-                        if ev_result["place_edge"] > _ew_dyn_thresh and ev_result["place_ev"] > 0:
-                            # EW bet = 2 units (1 win + 1 place)
-                            fp_val = int(ep["finish_position"]) if "finish_position" in ep.index else 0
+                        if ew_bet_selected(ev_result["place_edge"], ev_result["place_ev"], ep["odds"], _ew_base):
                             won_flag = int(ep["won"])
-                            placed_flag = int(fp_val > 0 and fp_val <= ew_terms.places_paid)
-                            pnl_ew = -2.0  # cost: 2 units
-                            if won_flag:
-                                pnl_ew += ep["odds"]  # win leg returns
-                                pnl_ew += ev_result["place_odds"]  # place leg returns
-                            elif placed_flag:
-                                pnl_ew += ev_result["place_odds"]  # place leg only
+                            placed_flag = ew_placed_flag(ep.get("finish_position"), ew_terms.places_paid)
+                            pnl_ew = settle_ew_bet(ep["odds"], ev_result["place_odds"], won_flag, placed_flag)
 
                             ed = ep["race_date"]
                             ed_str = str(ed.date()) if hasattr(ed, "date") else str(ed)[:10]
@@ -1465,7 +1442,7 @@ def analyse_test_set(
                                 "odds": round(float(ep["odds"]), 2),
                                 "won": won_flag,
                                 "placed": int(placed_flag or won_flag),
-                                "stake": 2.0,
+                                "stake": EW_STAKE_UNITS,
                                 "pnl": round(pnl_ew, 4),
                                 "clv": round(float(ep["model_prob"]) * float(ep["odds"]), 4),
                             })
