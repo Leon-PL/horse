@@ -17,6 +17,7 @@ from src.each_way import (
     get_ew_terms,
     adjust_place_probs_for_race,
 )
+from src.bet_analysis import max_drawdown as _max_drawdown
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +34,6 @@ DEFAULT_GRID = {
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
-
-def _max_drawdown(pnls: np.ndarray) -> float:
-    if len(pnls) == 0:
-        return 0.0
-    cum = np.cumsum(pnls)
-    peak = np.maximum.accumulate(cum)
-    return float((peak - cum).max())
-
 
 def _sharpe(pnls: np.ndarray) -> float:
     if len(pnls) < 2:
