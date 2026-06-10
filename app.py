@@ -7760,39 +7760,52 @@ elif page == "📈 Model Insights":
 
                 st.markdown("---")
 
-            # ── Lift over the linear baseline ─────────────────────
-            _bl_payload = _test_metrics_diag.get("baseline_win") if isinstance(_test_metrics_diag, dict) else None
+            # ── Lift over the baselines ───────────────────────────
             _wc_payload = (
                 _test_metrics_diag.get("win_classifier") or _test_metrics_diag.get("classifier")
                 if isinstance(_test_metrics_diag, dict) else None
             )
-            if isinstance(_bl_payload, dict) and isinstance(_wc_payload, dict):
-                _bl_ndcg = _first_metric_value(_bl_payload, "ndcg_at_1")
+            _baseline_rows = [
+                ("baseline_win", "Linear baseline",
+                 "Logistic regression on the same features — beats it or the tree complexity isn't paying for itself."),
+                ("baseline_market", "Market baseline",
+                 "Overround-normalised implied odds — beats it or the model knows nothing the market hasn't priced in."),
+            ]
+            if isinstance(_wc_payload, dict):
                 _wc_ndcg = _first_metric_value(_wc_payload, "ndcg_at_1")
-                _bl_brier = _first_metric_value(_bl_payload, "brier_score")
                 _wc_brier = _first_metric_value(_wc_payload, "brier_score")
-                if None not in (_bl_ndcg, _wc_ndcg, _bl_brier, _wc_brier):
-                    st.markdown("### 📏 Lift vs Linear Baseline")
-                    st.caption(
-                        "Logistic regression trained on the same features. If the win "
-                        "classifier doesn't clearly beat it, added model complexity "
-                        "isn't paying for itself."
-                    )
-                    _bl_cols = st.columns(3)
+                _lift_shown = False
+                for _bl_key, _bl_label, _bl_help in _baseline_rows:
+                    _bl_payload = _test_metrics_diag.get(_bl_key)
+                    if not isinstance(_bl_payload, dict):
+                        continue
+                    _bl_ndcg = _first_metric_value(_bl_payload, "ndcg_at_1")
+                    _bl_brier = _first_metric_value(_bl_payload, "brier_score")
+                    if None in (_bl_ndcg, _wc_ndcg, _bl_brier, _wc_brier):
+                        continue
+                    if not _lift_shown:
+                        st.markdown("### 📏 Lift vs Baselines")
+                        st.caption(
+                            "How much the win classifier beats the reference models. "
+                            "The market baseline is the bar that matters for betting."
+                        )
+                        _lift_shown = True
+                    _bl_cols = st.columns([1, 1, 2])
                     _bl_cols[0].metric(
-                        "NDCG@1 lift",
+                        f"{_bl_label}: NDCG@1 lift",
                         _fmt_metric(_wc_ndcg - _bl_ndcg, "+.4f"),
-                        help=f"Win classifier {_wc_ndcg:.4f} vs baseline {_bl_ndcg:.4f}",
+                        help=f"{_bl_help} Win classifier {_wc_ndcg:.4f} vs {_bl_ndcg:.4f}.",
                     )
                     _bl_cols[1].metric(
-                        "Brier improvement",
+                        f"{_bl_label}: Brier improvement",
                         _fmt_metric(_bl_brier - _wc_brier, "+.6f"),
-                        help=f"Win classifier {_wc_brier:.6f} vs baseline {_bl_brier:.6f} (positive = tree model better calibrated)",
+                        help=f"Positive = win classifier better calibrated ({_wc_brier:.6f} vs {_bl_brier:.6f}).",
                     )
                     if _wc_ndcg <= _bl_ndcg:
-                        _bl_cols[2].warning("⚠️ Baseline ranks winners as well as the tree model.")
+                        _bl_cols[2].warning(f"⚠️ {_bl_label} ranks winners as well as the win classifier.")
                     else:
-                        _bl_cols[2].success("✅ Tree model beats the linear baseline.")
+                        _bl_cols[2].success(f"✅ Win classifier beats the {_bl_label.lower()}.")
+                if _lift_shown:
                     st.markdown("---")
 
             _full_snapshot_df, _value_snapshot_df = _build_metric_snapshot_frame(_test_metrics_diag)

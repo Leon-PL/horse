@@ -755,6 +755,7 @@ def _model_display_name(model_key: str) -> str:
         "ranker": "Race Ranker",
         "baseline_win": "Baseline — Logistic (Win)",
         "baseline_place": "Baseline — Logistic (Place)",
+        "baseline_market": "Baseline — Market (odds)",
     }
     return labels.get(model_key, model_key.replace("_", " ").title())
 
@@ -907,6 +908,7 @@ def _build_metric_snapshot_frame(metrics_payload: dict | None) -> tuple[pd.DataF
         ("place_classifier", "place"),
         ("baseline_win",),
         ("baseline_place",),
+        ("baseline_market",),
     ]
 
     full_rows: list[dict] = []

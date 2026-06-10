@@ -1774,13 +1774,33 @@ class RacePredictor:
         place_probs = self._calibrate_place_probs(place_test_probs_raw)
         _vc = dict(value_config or {})
         if auto_tune is not None:
-            _vc = self._tune_value_threshold(
-                win_probs=win_probs,
-                groups_eval=groups_eval,
-                eval_df=eval_df,
-                value_config=_vc,
-                place_probs=place_probs,
-            )
+            # Tune the value threshold on OOF predictions, NOT the
+            # holdout — tuning on the same set the betting simulation
+            # reports on would make the headline ROI partly in-sample.
+            if not _oof_df.empty:
+                _vt_win = self._calibrate_win_probs(
+                    _all_clf_logits, _all_groups, _oof_df,
+                )
+                _vt_place = self._calibrate_place_probs(_all_place_probs)
+                _vc = self._tune_value_threshold(
+                    win_probs=_vt_win,
+                    groups_eval=_all_groups,
+                    eval_df=_oof_df,
+                    value_config=_vc,
+                    place_probs=_vt_place,
+                )
+            else:
+                logger.warning(
+                    "No OOF data for threshold tuning — falling back to "
+                    "the holdout (reported ROI will be optimistic)."
+                )
+                _vc = self._tune_value_threshold(
+                    win_probs=win_probs,
+                    groups_eval=groups_eval,
+                    eval_df=eval_df,
+                    value_config=_vc,
+                    place_probs=place_probs,
+                )
 
         # ── Evaluate each model for its task ─────────────────────
         # Win Classifier: calibration + value-bet metrics
@@ -1835,6 +1855,28 @@ class RacePredictor:
             )
         except Exception as exc:
             logger.warning("Linear baseline skipped: %s", exc)
+
+        # ── Market baseline (the benchmark that actually matters) ─
+        # Overround-normalised implied probabilities from the odds.
+        # If the win classifier doesn't beat this, the model knows
+        # nothing the market doesn't already price in.
+        try:
+            if "odds" in eval_df.columns and eval_df["odds"].notna().any():
+                _mkt_probs = normalise_implied_prob_by_race(eval_df)
+                all_metrics["baseline_market"] = self._evaluate_as_ranker(
+                    _mkt_probs, y_eval_rel, groups_eval, eval_df,
+                    "BASELINE_MARKET",
+                    calibrated_probs=_mkt_probs,
+                )
+                logger.info(
+                    "Market baseline: NDCG@1 %.4f / Brier %.6f  vs  win classifier: NDCG@1 %.4f / Brier %.6f",
+                    all_metrics["baseline_market"].get("ndcg_at_1", float("nan")),
+                    all_metrics["baseline_market"].get("brier_score", float("nan")),
+                    all_metrics["win_classifier"].get("ndcg_at_1", float("nan")),
+                    all_metrics["win_classifier"].get("brier_score", float("nan")),
+                )
+        except Exception as exc:
+            logger.warning("Market baseline skipped: %s", exc)
 
         self.metrics = all_metrics
 
