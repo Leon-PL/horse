@@ -18,7 +18,7 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
 
 ### 2.1 User Interface (`app.py` & `config.py`)
 *   **Status:** Functional, actively maintained.
-*   **Description:** The main entry point is `app.py`. It is divided into several tabs:
+*   **Description:** The main entry point is `app.py`; pages are selected via a sidebar radio, so only the active page's section executes per rerun. The cached run-store wrappers, chart builders and diagnostic panels live in `src/app_helpers.py`. The page sections:
     *   `🎓 Train & Tune`: Core pipeline execution.
     *   `🧭 Autotune`: Hyperparameter optimization wrapper.
     *   `🧪 Experiments`: Run tracking and MLFlow-style experiment viewing.
@@ -42,7 +42,7 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
 
 ### 2.4 Modeling & Tuning (`train.py`, `src/model.py`, `src/autotune.py`)
 *   **Status:** Central to project. Focus on tree-based ensembles.
-*   **Description:** The pipeline trains custom ensemble models, rankers, and multi-stage architectures. Optuna is heavily utilized for continuous performance tuning.
+*   **Description:** The pipeline trains custom ensemble models, rankers, and multi-stage architectures. Optuna is heavily utilized for continuous performance tuning. The test-set betting simulation (`analyse_test_set`) lives in `src/bet_analysis.py`; `src/model.py` re-exports it for backwards compatibility.
 *   **Checkpoints:** Models are saved straight to `models/` (e.g., `horse_race_model.joblib`, `ensemble_models.joblib`). All runs stream metrics to `data/runs/`.
 
 ### 2.5 Backtesting & Strategy execution (`src/backtester.py`, `src/strategy_calibrator.py`, `src/matchbook_client.py`)
