@@ -35,7 +35,7 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import GroupShuffleSplit
 from xgboost import XGBRegressor, XGBClassifier
-from lightgbm import LGBMRegressor, LGBMClassifier
+from lightgbm import LGBMRegressor, LGBMClassifier, LGBMRanker
 CatBoostRegressor = None
 CatBoostClassifier = None
 Pool = None
@@ -294,7 +294,7 @@ def get_autotune_search_space(
         ])
     else:
         specs.extend([
-            {"name": "n_estimators", "kind": "int", "low": 100, "high": 1500, "step": 50},
+            {"name": "n_estimators", "kind": "int", "low": 100, "high": 3500, "step": 100},
             {"name": "max_depth", "kind": "int", "low": 3, "high": 12},
             {"name": "learning_rate", "kind": "float", "low": 0.005, "high": 0.3, "log": True},
             {"name": "subsample", "kind": "float", "low": 0.5, "high": 1.0, "step": 0.05},
@@ -314,7 +314,7 @@ def get_autotune_search_space(
                 {"name": "linear_tree", "kind": "categorical", "choices": [True, False]},
             ])
 
-    if include_recency and model_key in {"classifier", "place"}:
+    if include_recency and model_key in {"classifier", "place", "ranker"}:
         specs.extend([
             {"name": "recency_half_life_days", "kind": "int", "low": 60, "high": 360, "step": 30},
             {"name": "recency_seasonal_boost", "kind": "float", "low": 0.0, "high": 0.30, "step": 0.05},
@@ -323,7 +323,7 @@ def get_autotune_search_space(
 
     # Feature pruning params (shared across all frameworks)
     specs.extend([
-        {"name": "FEATURE_PRUNE_FRACTION", "kind": "float", "low": 0.0, "high": 0.35, "step": 0.05},
+        {"name": "FEATURE_PRUNE_FRACTION", "kind": "float", "low": 0.0, "high": 0.85, "step": 0.05},
         {"name": "FEATURE_CORR_THRESHOLD", "kind": "float", "low": 0.80, "high": 0.98, "step": 0.02},
     ])
 
@@ -557,6 +557,7 @@ _CAT_VALID_HP = {
 DEFAULT_FRAMEWORKS: dict[str, str] = {
     "classifier": "cat",
     "place": "cat",
+    "ranker": "lgbm",
 }
 
 
@@ -1695,10 +1696,11 @@ class TripleEnsemblePredictor:
     ):
         self.clf_model = None
         self.place_model = None
+        self.ranker_model = None
         self.scaler = None
         self.feature_cols = None
         self.frameworks = {
-            "classifier": "cat", "place": "cat",
+            "classifier": "cat", "place": "cat", "ranker": "lgbm",
             **(frameworks or {}),
         }
         # Win-classifier calibration (Platt)
@@ -1817,6 +1819,7 @@ class TripleEnsemblePredictor:
 
         oof_clf_logits_parts: list[np.ndarray] = []
         oof_place_probs_parts: list[np.ndarray] = []
+        oof_ranker_scores_parts: list[np.ndarray] = []
         oof_groups_parts: list[np.ndarray] = []
         oof_fp_parts: list[np.ndarray] = []
         oof_placed_parts: list[np.ndarray] = []
@@ -1877,13 +1880,26 @@ class TripleEnsemblePredictor:
                 scale_pos_weight=(len(y_placed_f) - n_pp) / n_pp,
                 params=_p.get("place"), sample_weight=sw_f,
             )
+            if getattr(config, "TRAIN_RANKER", False):
+                self.ranker_model = self._train_ranker(
+                    X_f_tr,
+                    data["y_train_rel"][:tr_end],
+                    g_f_tr,
+                    params=_p.get("ranker"),
+                    sample_weight=sw_f,
+                )
+            else:
+                self.ranker_model = None
 
             # Score validation fold
             clf_probs_vl = self.clf_model.predict_proba(X_f_vl)[:, 1]
             place_probs_vl = self.place_model.predict_proba(X_f_vl)[:, 1]
+            ranker_scores_vl = self.ranker_model.predict(X_f_vl) if self.ranker_model is not None else None
 
             oof_clf_logits_parts.append(clf_probs_vl)
             oof_place_probs_parts.append(place_probs_vl)
+            if ranker_scores_vl is not None:
+                oof_ranker_scores_parts.append(np.asarray(ranker_scores_vl, dtype=np.float64))
             oof_groups_parts.append(g_f_vl)
             oof_fp_parts.append(fp_f_vl)
             oof_df_parts.append(data["train_df"].iloc[vl_beg:vl_end].copy())
@@ -1962,6 +1978,7 @@ class TripleEnsemblePredictor:
                 "norm_pos": data["y_train_norm_pos"][:_at_tr_end],
                 "fp": data["fp_train"][:_at_tr_end],
                 "ip": data["ip_train"][:_at_tr_end],
+                "odds": data["odds_train"][:_at_tr_end],
             }
             _at_targets_vl = {
                 "rel": data["y_train_rel"][_at_vl_beg:],
@@ -1972,20 +1989,25 @@ class TripleEnsemblePredictor:
                 "norm_pos": data["y_train_norm_pos"][_at_vl_beg:],
                 "fp": data["fp_train"][_at_vl_beg:],
                 "ip": data["ip_train"][_at_vl_beg:],
+                "odds": data["odds_train"][_at_vl_beg:],
             }
 
             _tuned_params: dict[str, dict] = {}
             _tune_models = {"classifier": "Win Classifier", "place": "Place Classifier"}
-            _tune_metrics = {"classifier": "LogLoss", "place": "LogLoss"}
+            _tune_metrics = {"classifier": "Hybrid", "place": "Hybrid"}
+            if getattr(config, "TRAIN_RANKER", False):
+                _tune_models["ranker"] = "Race Ranker"
+                _tune_metrics["ranker"] = "Ranker Hybrid"
+            _model_count = max(len(_tune_models), 1)
             for _m_i, (_mk, _m_label) in enumerate(sorted(_tune_models.items())):
-                _m_pct = 0.36 + (_m_i / 2) * 0.25
+                _m_pct = 0.36 + (_m_i / _model_count) * 0.25
                 _m_metric = _tune_metrics[_mk]
-                _cb(f"Phase 1b — Tuning {_m_label} ({_m_i + 1}/2) …", _m_pct)
+                _cb(f"Phase 1b — Tuning {_m_label} ({_m_i + 1}/{_model_count}) …", _m_pct)
 
                 def _at_cb(tnum, total, score, _lbl=_m_label, _base=_m_pct, _met=_m_metric):
                     _cb(
                         f"Tuning {_lbl} — trial {tnum}/{total} ({_met} {score:.4f})",
-                        _base + (tnum / total) * (0.25 / 2),
+                        _base + (tnum / total) * (0.25 / _model_count),
                     )
 
                 _at_result = self._auto_tune_model(
@@ -2127,53 +2149,53 @@ class TripleEnsemblePredictor:
                 params=_p.get("place"), sample_weight=_sw_place_full,
             )
 
+        if getattr(config, "TRAIN_RANKER", False):
+            _ranker_fw = self.frameworks.get("ranker", "lgbm").upper()
+            _cb(f"Phase 2 — Training Race Ranker ({_ranker_fw}) …", 0.84)
+            logger.info(f"Training Race Ranker ({_ranker_fw}) …")
+            _sw_ranker_full = _weights_for_params(train_dates_full, _p.get("ranker"), sw_full)
+            if use_es:
+                _sw_ranker_es = _weights_for_params(dates_es_tr, _p.get("ranker"), sw_es_tr)
+                self.ranker_model = self._train_ranker(
+                    X_es_tr,
+                    y_es_rel_tr,
+                    g_es_tr,
+                    params=_p.get("ranker"),
+                    sample_weight=_sw_ranker_es,
+                    eval_set=[(X_es_vl, y_es_rel_vl, g_es_vl)],
+                )
+            else:
+                self.ranker_model = self._train_ranker(
+                    X_train,
+                    data["y_train_rel"],
+                    groups_train,
+                    params=_p.get("ranker"),
+                    sample_weight=_sw_ranker_full,
+                )
+        else:
+            self.ranker_model = None
+
+        _used_training_slab_cal = self._fit_training_slab_calibrators(
+            X_train=X_train,
+            groups_train=groups_train,
+            y_won=data["y_train_won"],
+            y_placed=data["y_train_placed"],
+            finish_positions=data["fp_train"],
+            model_params=_p,
+            sample_weight=sw_full,
+        )
+        if _used_training_slab_cal:
+            logger.info("  Calibration refit on latest training slab; holdout left untouched.")
+        else:
+            logger.info("  Training-slab calibration unavailable; using OOF calibration from Phase 1.")
+
         # ── Score test set with each model ───────────────────────
         _cb("Evaluating models on holdout validation set …", 0.86)
         clf_test_probs_raw = self.clf_model.predict_proba(X_eval)[:, 1]
         place_test_probs_raw = self.place_model.predict_proba(X_eval)[:, 1]
+        ranker_test_scores = self.ranker_model.predict(X_eval) if self.ranker_model is not None else None
 
-        # ── Re-calibrate Platt on holdout (full-data model preds) ─
-        # Phase 1 fitted Platt(a,b) on OOF predictions from partial-
-        # data fold models.  After Phase 2 retraining on 100% of the
-        # training set, the score distributions are tighter/more
-        # confident, so the OOF calibration can be suboptimal.
-        # Re-fitting on the holdout closes this gap.
-        _fp_eval = data["fp_test"][:len(clf_test_probs_raw)]
-        _oof_platt = (self.platt_a, self.platt_b)
-        _oof_place_platt = (self.place_platt_a, self.place_platt_b)
-
-        self.platt_a, self.platt_b = self._optimise_platt_calibration(
-            clf_test_probs_raw, groups_eval, _fp_eval,
-        )
-        logger.info(
-            f"  Win-clf Platt recalibrated on holdout: "
-            f"a={self.platt_a:.4f} (was {_oof_platt[0]:.4f}), "
-            f"b={self.platt_b:.4f} (was {_oof_platt[1]:.4f})"
-        )
-
-        _placed_eval = data["y_test_placed"][:len(place_test_probs_raw)]
-        self.place_platt_a, self.place_platt_b = self._optimise_place_platt(
-            place_test_probs_raw, _placed_eval,
-        )
-        logger.info(
-            f"  Place-clf Platt recalibrated on holdout: "
-            f"a={self.place_platt_a:.4f} (was {_oof_place_platt[0]:.4f}), "
-            f"b={self.place_platt_b:.4f} (was {_oof_place_platt[1]:.4f})"
-        )
-
-        # Refit isotonic on holdout (full-data model predictions)
-        # Temporarily clear OOF isotonic so _calibrate_*_probs applies
-        # only Platt (we want to fit isotonic on Platt-only-calibrated probs).
-        self.win_iso_cal = None
-        self.place_iso_cal = None
-        _ho_win_cal = self._calibrate_win_probs(clf_test_probs_raw, groups_eval, eval_df)
-        _won_eval = (_fp_eval == 1).astype(np.float64)
-        self.win_iso_cal = self._fit_isotonic(_ho_win_cal, _won_eval)
-        _ho_place_cal = self._calibrate_place_probs(place_test_probs_raw)
-        self.place_iso_cal = self._fit_isotonic(_ho_place_cal, _placed_eval.astype(np.float64))
-        logger.info("  Isotonic calibration refitted on holdout.")
-
-        # Apply recalibrated calibration
+        # Apply training-only calibration
         win_probs = self._calibrate_win_probs(clf_test_probs_raw, groups_eval, eval_df)
         place_probs = self._calibrate_place_probs(place_test_probs_raw)
         _vc = dict(value_config or {})
@@ -2198,6 +2220,14 @@ class TripleEnsemblePredictor:
         all_metrics["place_classifier"] = self._evaluate_place_model(
             place_probs, place_test_probs_raw, eval_df, groups_eval,
         )
+        if ranker_test_scores is not None:
+            all_metrics["ranker"] = self._evaluate_as_ranker(
+                ranker_test_scores,
+                y_eval_rel,
+                groups_eval,
+                eval_df,
+                "RANKER",
+            )
 
         self.metrics = all_metrics
 
@@ -2220,9 +2250,21 @@ class TripleEnsemblePredictor:
             train_metrics["place_classifier"] = self._evaluate_place_model(
                 _oof_place_cal, _all_place_probs, _oof_df, _all_groups,
             )
+            if oof_ranker_scores_parts:
+                _all_ranker_scores = np.concatenate(oof_ranker_scores_parts)
+                train_metrics["ranker"] = self._evaluate_as_ranker(
+                    _all_ranker_scores,
+                    _oof_rel,
+                    _all_groups,
+                    _oof_df,
+                    "RANKER_OOF",
+                )
+            else:
+                train_metrics["ranker"] = {}
         else:
             train_metrics["win_classifier"] = {}
             train_metrics["place_classifier"] = {}
+            train_metrics["ranker"] = {}
         self.train_metrics = train_metrics
 
         # ── Betting simulation ───────────────────────────────────
@@ -2275,6 +2317,7 @@ class TripleEnsemblePredictor:
         targets_val: dict,
         groups_train: np.ndarray,
         groups_val: np.ndarray,
+        eval_df: pd.DataFrame | None = None,
         sw_train: np.ndarray | None = None,
         train_dates=None,
         n_trials: int = 30,
@@ -2301,8 +2344,14 @@ class TripleEnsemblePredictor:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
 
         _metric_names = {
-            "classifier": "LogLoss",
-            "place": "LogLoss",
+            "classifier": "Top1-Calibration Hybrid",
+            "place": "Place Top-3 Hybrid",
+            "ranker": "Ranker Top-1 Hybrid",
+        }
+        _metric_directions = {
+            "classifier": "maximize",
+            "place": "maximize",
+            "ranker": "maximize",
         }
 
         fw = self.frameworks.get(model_key, "xgb")
@@ -2312,6 +2361,90 @@ class TripleEnsemblePredictor:
             fw,
             include_recency=train_dates is not None,
         )
+
+        def _bounded_positive(value, *, low: float, high: float, default: float = 0.0) -> float:
+            if value is None:
+                return default
+            try:
+                value_f = float(value)
+            except Exception:
+                return default
+            if not np.isfinite(value_f):
+                return default
+            if high <= low:
+                return default
+            scaled = (value_f - low) / (high - low)
+            return float(np.clip(scaled, 0.0, 1.0))
+
+        def _bounded_negative_loss(value, *, upper: float, default: float = 0.0) -> float:
+            if value is None:
+                return default
+            try:
+                value_f = float(value)
+            except Exception:
+                return default
+            if not np.isfinite(value_f):
+                return default
+            return float(np.clip(1.0 - (value_f / max(upper, 1e-9)), 0.0, 1.0))
+
+        def _bounded_symmetric(value, *, cap: float, default: float = 0.0) -> float:
+            if value is None:
+                return default
+            try:
+                value_f = float(value)
+            except Exception:
+                return default
+            if not np.isfinite(value_f):
+                return default
+            return float(np.clip(value_f / max(cap, 1e-9), -1.0, 1.0))
+
+        def _classifier_hybrid_score(metrics: dict[str, float | int | None]) -> float:
+            top1 = _bounded_positive(metrics.get("top1_accuracy"), low=0.0, high=1.0)
+            win_top3 = _bounded_positive(metrics.get("win_in_top3"), low=0.0, high=1.0)
+            full_brier = _bounded_negative_loss(metrics.get("brier_score"), upper=0.25)
+            value_brier = _bounded_negative_loss(
+                metrics.get("value_bet_brier") if metrics.get("value_bet_brier") is not None else metrics.get("brier_score"),
+                upper=0.30,
+                default=full_brier,
+            )
+            value_bets = int(metrics.get("value_bets") or 0)
+            support = float(np.clip(value_bets / 50.0, 0.0, 1.0))
+            selected_quality = ((1.0 - support) * full_brier) + (support * value_brier)
+
+            return float(
+                0.45 * top1
+                + 0.20 * win_top3
+                + 0.175 * full_brier
+                + 0.175 * selected_quality
+            )
+
+        def _place_hybrid_score(metrics: dict[str, float | int | None]) -> float:
+            top3_accuracy = _bounded_positive(metrics.get("top3_accuracy"), low=0.0, high=1.0)
+            place_precision = _bounded_positive(metrics.get("place_precision"), low=0.0, high=1.0)
+            cal_brier = _bounded_negative_loss(metrics.get("brier_calibrated"), upper=0.25)
+            logloss_quality = _bounded_negative_loss(metrics.get("log_loss"), upper=0.70)
+
+            return float(
+                0.35 * top3_accuracy
+                + 0.25 * place_precision
+                + 0.20 * cal_brier
+                + 0.20 * logloss_quality
+            )
+
+        def _ranker_hybrid_score(metrics: dict[str, float | int | None]) -> float:
+            ndcg1 = _bounded_positive(metrics.get("ndcg_at_1"), low=0.0, high=1.0)
+            ndcg3 = _bounded_positive(metrics.get("ndcg_at_3"), low=0.0, high=1.0)
+            top1 = _bounded_positive(metrics.get("top1_accuracy"), low=0.0, high=1.0)
+            win_top3 = _bounded_positive(metrics.get("win_in_top3"), low=0.0, high=1.0)
+            rps_quality = _bounded_negative_loss(metrics.get("rps"), upper=0.35)
+
+            return float(
+                0.30 * ndcg1
+                + 0.20 * ndcg3
+                + 0.25 * top1
+                + 0.15 * win_top3
+                + 0.10 * rps_quality
+            )
 
         def _score_split(
             params: dict,
@@ -2324,28 +2457,161 @@ class TripleEnsemblePredictor:
             split_sw_train: np.ndarray | None,
             split_train_dates,
             col_mask: np.ndarray | None = None,
-        ) -> float:
+        ) -> tuple[float, dict[str, float | int | None]]:
 
             # Apply column mask from trial-level pruning
             if col_mask is not None:
                 split_X_train = split_X_train[:, col_mask]
                 split_X_val = split_X_val[:, col_mask]
 
-            def _win_logloss_eval(probs):
+            def _win_metrics_eval(probs):
                 won = split_targets_val["won"].astype(np.float32)
                 eps = 1e-9
                 probs = np.clip(probs, eps, 1 - eps)
-                return -float(np.mean(won * np.log(probs) + (1 - won) * np.log(1 - probs)))
+                logloss_value = float(np.mean(won * np.log(probs) + (1 - won) * np.log(1 - probs)))
+                brier = float(brier_score_loss(won, probs))
 
-            def _place_logloss_eval(scores):
+                top1_total = 0
+                top1_hits = 0
+                win3_hits = 0
+                offset = 0
+                for group_size in split_groups_val:
+                    group_won = won[offset:offset + group_size]
+                    group_probs = probs[offset:offset + group_size]
+                    offset += group_size
+                    if group_size < 2 or group_won.max() == group_won.min():
+                        continue
+                    top1_total += 1
+                    if int(np.argmax(group_probs)) == int(np.argmax(group_won)):
+                        top1_hits += 1
+                    if int(np.argmax(group_won)) in set(np.argsort(group_probs)[-3:]):
+                        win3_hits += 1
+
+                metrics: dict[str, float | int | None] = {
+                    "brier_score": round(brier, 6),
+                    "log_loss": round(-logloss_value, 6),
+                    "top1_accuracy": round(top1_hits / top1_total, 6) if top1_total else 0.0,
+                    "win_in_top3": round(win3_hits / top1_total, 6) if top1_total else 0.0,
+                    "total_races": int(top1_total),
+                }
+
+                if "odds" in split_targets_val:
+                    odds_arr = np.asarray(split_targets_val["odds"], dtype=np.float64)
+                    vb = _value_bet_selection(probs, odds_arr, float(getattr(config, "VALUE_THRESHOLD", 0.05)))
+                    vb_mask = vb["mask"]
+                    vb_count = int(vb_mask.sum())
+                    metrics["value_bets"] = vb_count
+                    if vb_count > 0:
+                        vb_won = won[vb_mask]
+                        vb_probs = probs[vb_mask]
+                        vb_returns = np.where(vb_won == 1, odds_arr[vb_mask] - 1.0, -1.0)
+                        metrics["value_bet_roi"] = round(float(vb_returns.mean()), 6)
+                        metrics["avg_edge"] = round(float(vb["edge"][vb_mask].mean()), 6)
+                        metrics["value_bet_brier"] = round(float(brier_score_loss(vb_won, vb_probs)), 6)
+                        try:
+                            metrics["value_bet_log_loss"] = round(float(log_loss(vb_won, vb_probs)), 6)
+                        except Exception:
+                            metrics["value_bet_log_loss"] = None
+                    else:
+                        metrics["value_bet_roi"] = None
+                        metrics["avg_edge"] = None
+                        metrics["value_bet_brier"] = None
+                        metrics["value_bet_log_loss"] = None
+
+                metrics["objective_score"] = round(_classifier_hybrid_score(metrics), 6)
+                return float(metrics["objective_score"]), metrics
+
+            def _place_metrics_eval(scores):
                 placed = split_targets_val["placed"].astype(np.float32)
+                finish_position = np.asarray(split_targets_val["fp"], dtype=np.float64)
                 probs = 1.0 / (1.0 + np.exp(-scores))
                 eps = 1e-9
                 probs = np.clip(probs, eps, 1 - eps)
-                return -float(np.mean(placed * np.log(probs) + (1 - placed) * np.log(1 - probs)))
+                logloss_value = float(np.mean(placed * np.log(probs) + (1 - placed) * np.log(1 - probs)))
+                brier_cal = float(brier_score_loss(placed, probs))
+
+                place_hits = 0
+                total_placed = 0
+                top3_hits = 0
+                top3_total = 0
+                offset = 0
+                for group_size in split_groups_val:
+                    fp_race = finish_position[offset:offset + group_size]
+                    placed_race = placed[offset:offset + group_size]
+                    group_probs = probs[offset:offset + group_size]
+                    offset += group_size
+
+                    if group_size <= 0:
+                        continue
+
+                    places_paid = int(np.clip(np.sum(placed_race == 1), 0, group_size))
+                    predicted_place_idx = np.argsort(-group_probs)[:max(places_paid, 1)]
+                    actual_placed = set(np.where(placed_race == 1)[0])
+                    place_hits += len(set(predicted_place_idx) & actual_placed)
+                    total_placed += len(actual_placed)
+
+                    actual_top3 = set(np.where((fp_race >= 1) & (fp_race <= min(3, group_size)))[0])
+                    if actual_top3:
+                        predicted_top3 = np.argsort(-group_probs)[:min(3, group_size)]
+                        top3_hits += len(set(predicted_top3) & actual_top3)
+                        top3_total += len(actual_top3)
+
+                metrics = {
+                    "brier_calibrated": round(brier_cal, 6),
+                    "log_loss": round(-logloss_value, 6),
+                    "place_precision": round(place_hits / max(total_placed, 1), 6),
+                    "top3_accuracy": round(top3_hits / max(top3_total, 1), 6),
+                    "total_races": int(len(split_groups_val)),
+                }
+                metrics["objective_score"] = round(_place_hybrid_score(metrics), 6)
+                return float(metrics["objective_score"]), metrics
+
+            def _ranker_metrics_eval(scores):
+                rel = np.asarray(split_targets_val["rel"], dtype=np.float64)
+                finish_position = np.asarray(split_targets_val["fp"], dtype=np.float64)
+                scores_arr = np.asarray(scores, dtype=np.float64)
+                probs = _grouped_softmax(scores_arr, split_groups_val)
+                probs_clipped = np.clip(probs, 1e-15, 1 - 1e-15)
+                y_won = (finish_position == 1).astype(np.float64)
+
+                ndcg1_vals: list[float] = []
+                ndcg3_vals: list[float] = []
+                top1_hits = 0
+                win3_hits = 0
+                total = 0
+                offset = 0
+                for group_size in split_groups_val:
+                    gl = rel[offset:offset + group_size]
+                    gs = scores_arr[offset:offset + group_size]
+                    offset += group_size
+                    if group_size < 2 or gl.max() == gl.min() or gs.max() == gs.min():
+                        continue
+                    total += 1
+                    try:
+                        ndcg1_vals.append(float(ndcg_score([gl], [gs], k=1)))
+                        ndcg3_vals.append(float(ndcg_score([gl], [gs], k=3)))
+                    except ValueError:
+                        pass
+                    if int(np.argmax(gs)) == int(np.argmax(gl)):
+                        top1_hits += 1
+                    if int(np.argmax(gl)) in set(np.argsort(gs)[-3:]):
+                        win3_hits += 1
+
+                metrics = {
+                    "rps": round(rps_per_race(probs, finish_position, split_groups_val), 6),
+                    "brier_score": round(float(brier_score_loss(y_won, probs_clipped)), 6),
+                    "log_loss": round(float(log_loss(y_won, probs_clipped)), 6),
+                    "ndcg_at_1": round(float(np.mean(ndcg1_vals)) if ndcg1_vals else 0.0, 6),
+                    "ndcg_at_3": round(float(np.mean(ndcg3_vals)) if ndcg3_vals else 0.0, 6),
+                    "top1_accuracy": round(top1_hits / total, 6) if total else 0.0,
+                    "win_in_top3": round(win3_hits / total, 6) if total else 0.0,
+                    "total_races": int(total),
+                }
+                metrics["objective_score"] = round(_ranker_hybrid_score(metrics), 6)
+                return float(metrics["objective_score"]), metrics
 
             trial_sw = split_sw_train
-            if model_key in {"classifier", "place"} and split_train_dates is not None:
+            if model_key in {"classifier", "place", "ranker"} and split_train_dates is not None:
                 trial_sw = compute_recency_sample_weights(
                     split_train_dates,
                     half_life_days=params["recency_half_life_days"],
@@ -2369,12 +2635,39 @@ class TripleEnsemblePredictor:
                     params=params, sample_weight=trial_sw,
                 )
                 scores = _proba_to_logit(mdl.predict_proba(split_X_val)[:, 1])
+            elif model_key == "ranker":
+                mdl = self._train_ranker(
+                    split_X_train,
+                    split_targets_train["rel"],
+                    split_groups_train,
+                    params=params,
+                    sample_weight=trial_sw,
+                )
+                scores = mdl.predict(split_X_val)
             else:
                 raise ValueError(f"Unknown model_key: {model_key}")
 
             if model_key == "classifier":
-                return _win_logloss_eval(scores)
-            return _place_logloss_eval(scores)
+                return _win_metrics_eval(scores)
+            if model_key == "ranker":
+                return _ranker_metrics_eval(scores)
+            return _place_metrics_eval(scores)
+
+        def _aggregate_trial_metrics(split_metric_dicts: list[dict[str, float | int | None]]) -> dict[str, float | int]:
+            aggregated: dict[str, float | int] = {}
+            if not split_metric_dicts:
+                return aggregated
+
+            keys = set().union(*(m.keys() for m in split_metric_dicts))
+            for key in keys:
+                values = [m.get(key) for m in split_metric_dicts if isinstance(m.get(key), (int, float)) and m.get(key) is not None]
+                if not values:
+                    continue
+                if key in {"value_bets", "total_races"}:
+                    aggregated[key] = int(round(float(np.mean(values))))
+                else:
+                    aggregated[key] = round(float(np.mean(values)), 6)
+            return aggregated
 
         def objective(trial):
             params = _suggest_from_autotune_space(trial, _search_space)
@@ -2396,8 +2689,9 @@ class TripleEnsemblePredictor:
 
             if folds:
                 split_scores = []
+                split_metrics = []
                 for fi, fold in enumerate(folds):
-                    s = _score_split(
+                    s, metrics = _score_split(
                         params,
                         fold["X_train"],
                         fold["X_val"],
@@ -2410,13 +2704,15 @@ class TripleEnsemblePredictor:
                         col_mask=_trial_col_mask,
                     )
                     split_scores.append(s)
+                    split_metrics.append(metrics)
                     # Report intermediate fold score so Optuna can prune
                     trial.report(float(np.mean(split_scores)), fi)
                     if trial.should_prune():
                         raise optuna.TrialPruned()
                 score = float(np.mean(split_scores))
+                trial_metrics = _aggregate_trial_metrics(split_metrics)
             else:
-                score = _score_split(
+                score, trial_metrics = _score_split(
                     params,
                     X_train,
                     X_val,
@@ -2429,12 +2725,17 @@ class TripleEnsemblePredictor:
                     col_mask=_trial_col_mask,
                 )
 
+            for key, value in trial_metrics.items():
+                if isinstance(value, (int, float)):
+                    trial.set_user_attr(key, value)
+
             if callback is not None:
                 _mn = _metric_names[model_key]
                 callback(trial.number + 1, n_trials, score)
             return score
 
-        _study_kwargs = {"direction": "minimize"}
+        _study_direction = _metric_directions[model_key]
+        _study_kwargs = {"direction": _study_direction}
         _study_kwargs["pruner"] = optuna.pruners.MedianPruner(
             n_startup_trials=5, n_warmup_steps=0,
         )
@@ -2444,8 +2745,10 @@ class TripleEnsemblePredictor:
             _study_kwargs["load_if_exists"] = load_if_exists
 
         study = optuna.create_study(**_study_kwargs)
+        study.set_user_attr("objective_name", _metric_names[model_key])
+        study.set_user_attr("objective_direction", _study_direction)
         existing_trials = len(study.trials)
-        remaining_trials = max(0, int(n_trials) - existing_trials) if load_if_exists else int(n_trials)
+        remaining_trials = int(n_trials)
         if remaining_trials > 0:
             try:
                 study.optimize(objective, n_trials=remaining_trials, show_progress_bar=False)
@@ -2462,7 +2765,7 @@ class TripleEnsemblePredictor:
             "best_params": study.best_params,
             "best_score": round(study.best_value, 6),
             "n_trials": len(study.trials),
-            "target_trials": int(n_trials),
+            "target_trials": len(study.trials),
             "metric_name": _mn,
             "framework": fw,
             "study_name": study.study_name,
@@ -2705,6 +3008,55 @@ class TripleEnsemblePredictor:
                 fit_kw["verbose"] = False
         model.fit(X, y, **fit_kw)
         logger.info(f"Place Classifier ({fw.upper()}) training complete")
+        return model
+
+    def _train_ranker(self, X, y, groups, params=None, sample_weight=None, eval_set=None):
+        """Train a LightGBM LambdaRank model on per-race relevance labels."""
+        fw = self.frameworks.get("ranker", "lgbm")
+        if fw != "lgbm":
+            logger.warning(
+                "Ranker framework '%s' is not supported in this build; using LGBM LambdaRank.",
+                fw,
+            )
+        _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
+        hp = {
+            "n_estimators": config.RANKER_PARAMS.get("n_estimators", 800),
+            "max_depth": config.RANKER_PARAMS.get("max_depth", 6),
+            "learning_rate": config.RANKER_PARAMS.get("learning_rate", 0.05),
+            "subsample": config.RANKER_PARAMS.get("subsample", 0.8),
+            "colsample_bytree": config.RANKER_PARAMS.get("colsample_bytree", 0.8),
+            "reg_alpha": config.RANKER_PARAMS.get("reg_alpha", 0.1),
+            "reg_lambda": config.RANKER_PARAMS.get("reg_lambda", 1.0),
+            "linear_tree": bool(config.RANKER_PARAMS.get("linear_tree", False)),
+            "min_child_samples": config.RANKER_PARAMS.get("min_child_samples", 20),
+            "num_leaves": config.RANKER_PARAMS.get("num_leaves", 63),
+        }
+        hp.update(self._filter_params(params, "lgbm"))
+        model = LGBMRanker(
+            objective="lambdarank",
+            metric="ndcg",
+            label_gain=[0, 1, 2, 4, 8, 16, 32],
+            **hp,
+            subsample_freq=1,
+            random_state=config.RANDOM_SEED,
+            n_jobs=self._autotune_njobs,
+            verbose=-1,
+        )
+        fit_kw: dict = {
+            "group": np.asarray(groups, dtype=np.int32).tolist(),
+            "sample_weight": sample_weight,
+        }
+        if eval_set is not None:
+            from lightgbm import early_stopping as _lgb_es
+
+            _eval_X, _eval_y, _eval_group = eval_set[0]
+            fit_kw["eval_set"] = [(_eval_X, _eval_y)]
+            fit_kw["eval_group"] = [np.asarray(_eval_group, dtype=np.int32).tolist()]
+            fit_kw["eval_at"] = [1, 3]
+            fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
+
+        model.fit(X, y, **fit_kw)
+        logger.info("Race Ranker (LGBM) training complete")
         return model
 
     def _evaluate_as_ranker(self, scores, y_test, groups_test, test_df, name,
@@ -3082,11 +3434,106 @@ class TripleEnsemblePredictor:
 
         Returns None if there are too few samples for a meaningful fit.
         """
-        if len(probs) < 50:
+        probs_arr = np.asarray(probs, dtype=np.float64)
+        targets_arr = np.asarray(targets, dtype=np.float64)
+        if len(probs_arr) < 50:
+            return None
+        if np.unique(targets_arr).size < 2:
+            return None
+        if np.unique(np.round(probs_arr, 6)).size < 10:
             return None
         iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
-        iso.fit(probs.astype(np.float64), targets.astype(np.float64))
+        iso.fit(probs_arr, targets_arr)
         return iso
+
+    def _fit_training_slab_calibrators(
+        self,
+        X_train: np.ndarray,
+        groups_train: np.ndarray,
+        y_won: np.ndarray,
+        y_placed: np.ndarray,
+        finish_positions: np.ndarray,
+        model_params: dict[str, dict] | None,
+        sample_weight: np.ndarray | None,
+    ) -> bool:
+        """Fit Platt + isotonic calibrators on a training-only slab.
+
+        A disposable pair of models is trained on the earliest 80 % of races,
+        then calibrated on the latest 20 % of races from the training split.
+        This keeps evaluation data untouched while providing time-local
+        calibration that is closer to live deployment than old OOF folds.
+        """
+        n_races = len(groups_train)
+        if n_races < 25:
+            return False
+
+        cal_bnd = max(1, int(n_races * 0.8))
+        if cal_bnd >= n_races:
+            return False
+
+        cum_g = np.cumsum(groups_train)
+        cal_row_start = int(cum_g[cal_bnd - 1]) if cal_bnd > 0 else 0
+        if cal_row_start <= 0 or cal_row_start >= len(X_train):
+            return False
+
+        cal_groups = groups_train[cal_bnd:]
+        if len(cal_groups) < 5:
+            return False
+
+        X_cal_tr = X_train[:cal_row_start]
+        X_cal_vl = X_train[cal_row_start:]
+        if len(X_cal_tr) < 100 or len(X_cal_vl) < 50:
+            return False
+
+        sw_cal = sample_weight[:cal_row_start] if sample_weight is not None else None
+        y_won_cal_tr = y_won[:cal_row_start]
+        y_placed_cal_tr = y_placed[:cal_row_start]
+        won_cal_vl = y_won[cal_row_start:].astype(np.float64)
+        placed_cal_vl = y_placed[cal_row_start:].astype(np.float64)
+        fp_cal_vl = finish_positions[cal_row_start:]
+
+        if np.unique(won_cal_vl).size < 2 or np.unique(placed_cal_vl).size < 2:
+            return False
+
+        clf_params = (model_params or {}).get("classifier") if isinstance(model_params, dict) else None
+        place_params = (model_params or {}).get("place") if isinstance(model_params, dict) else None
+
+        n_pos_w = max(int(y_won_cal_tr.sum()), 1)
+        cal_clf = self._train_win_classifier(
+            X_cal_tr,
+            y_won_cal_tr,
+            scale_pos_weight=(len(y_won_cal_tr) - n_pos_w) / n_pos_w,
+            params=clf_params,
+            sample_weight=sw_cal,
+        )
+        n_pos_p = max(int(y_placed_cal_tr.sum()), 1)
+        cal_place = self._train_place_classifier(
+            X_cal_tr,
+            y_placed_cal_tr,
+            scale_pos_weight=(len(y_placed_cal_tr) - n_pos_p) / n_pos_p,
+            params=place_params,
+            sample_weight=sw_cal,
+        )
+
+        cal_clf_probs = cal_clf.predict_proba(X_cal_vl)[:, 1]
+        cal_place_raw = cal_place.predict_proba(X_cal_vl)[:, 1]
+
+        self.calibration_temp = 1.0
+        self.platt_a, self.platt_b = self._optimise_platt_calibration(
+            cal_clf_probs,
+            cal_groups,
+            fp_cal_vl,
+        )
+        self.place_platt_a, self.place_platt_b = self._optimise_place_platt(
+            cal_place_raw,
+            placed_cal_vl,
+        )
+
+        cal_win_probs = self._calibrate_win_probs(cal_clf_probs, cal_groups)
+        self.win_iso_cal = self._fit_isotonic(cal_win_probs, won_cal_vl)
+        cal_place_probs = self._calibrate_place_probs(cal_place_raw)
+        self.place_iso_cal = self._fit_isotonic(cal_place_probs, placed_cal_vl)
+        return True
 
     # ── Calibration application ──────────────────────────────────
     def _calibrate_win_probs(
@@ -3361,6 +3808,9 @@ class TripleEnsemblePredictor:
         elif self.place_model is not None:
             explain_model = self.place_model
             explain_label = "Place Classifier"
+        elif self.ranker_model is not None:
+            explain_model = self.ranker_model
+            explain_label = "Race Ranker"
 
         if explain_model is None:
             raise ValueError(
@@ -3384,6 +3834,7 @@ class TripleEnsemblePredictor:
             {
                 "clf_model": self.clf_model,
                 "place_model": self.place_model,
+                "ranker_model": self.ranker_model,
                 "scaler": self.scaler,
                 "feature_cols": self.feature_cols,
                 "calibration_temp": self.calibration_temp,
@@ -3406,6 +3857,7 @@ class TripleEnsemblePredictor:
         data = joblib.load(path)
         self.clf_model = data.get("clf_model")
         self.place_model = data.get("place_model")
+        self.ranker_model = data.get("ranker_model")
         self.scaler = data.get("scaler") or _IdentityScaler()
         self.feature_cols = data["feature_cols"]
         self.calibration_temp = float(data.get("calibration_temp", 1.0))
@@ -3415,7 +3867,7 @@ class TripleEnsemblePredictor:
         self.place_platt_b = float(data.get("place_platt_b", 0.0))
         self.win_iso_cal = data.get("win_iso_cal")
         self.place_iso_cal = data.get("place_iso_cal")
-        self.frameworks = data.get("frameworks", {"classifier": "cat", "place": "cat"})
+        self.frameworks = data.get("frameworks", {"classifier": "cat", "place": "cat", "ranker": "lgbm"})
         logger.info(f"Models loaded (frameworks: {self.frameworks})")
 
     # ── Walk-forward fold helper ─────────────────────────────────
@@ -3500,61 +3952,15 @@ class TripleEnsemblePredictor:
         dates = pd.to_datetime(train_df["race_date"])
         sw = compute_recency_sample_weights(dates).copy()
 
-        # ── Internal calibration split (last 20 % of races) ─────
-        n_races = len(groups_train)
-        cal_bnd = max(1, int(n_races * 0.8))
-        cum_g = np.cumsum(groups_train)
-        cal_row_start = int(cum_g[cal_bnd - 1]) if cal_bnd > 0 else 0
-        cal_groups = groups_train[cal_bnd:]
-
-        if len(cal_groups) >= 5:
-            # Train disposable models on first 80 % for calibration scores
-            X_cal_tr = X_train[:cal_row_start]
-            X_cal_vl = X_train[cal_row_start:]
-            sw_cal = sw[:cal_row_start]
-            y_placed_cal_tr = y_placed[:cal_row_start]
-            fp_cal_vl = fp[cal_row_start:]
-
-            y_won_cal_tr = y_won[:cal_row_start]
-            _n_pw = max(int(y_won_cal_tr.sum()), 1)
-            _cal_clf = self._train_win_classifier(
-                X_cal_tr, y_won_cal_tr,
-                scale_pos_weight=(len(y_won_cal_tr) - _n_pw) / _n_pw,
-                params=fold_params.get("classifier"),
-                sample_weight=sw_cal,
-            )
-            _n_pp = max(int(y_placed_cal_tr.sum()), 1)
-            _cal_place = self._train_place_classifier(
-                X_cal_tr, y_placed_cal_tr,
-                scale_pos_weight=(len(y_placed_cal_tr) - _n_pp) / _n_pp,
-                params=fold_params.get("place"),
-                sample_weight=sw_cal,
-            )
-
-            _cal_clf_probs = _cal_clf.predict_proba(X_cal_vl)[:, 1]
-            _cal_place_raw = _cal_place.predict_proba(X_cal_vl)[:, 1]
-            # Dynamic place target for calibration slab
-            _nr_cal = train_df["num_runners"].values[cal_row_start:]
-            _hc_cal = train_df.get("handicap", pd.Series(0, index=train_df.index)).values[cal_row_start:].astype(bool)
-            _pp_cal = np.where(_nr_cal <= 4, 3, np.where(_nr_cal <= 7, 2, np.where(_nr_cal <= 15, 3, np.where(_hc_cal, 4, 3))))
-            _cal_placed_vl = (fp_cal_vl <= _pp_cal).astype(int)
-
-            # Fit calibration on held-out slab
-            self.calibration_temp = 1.0  # unused — kept for compat
-            self.platt_a, self.platt_b = self._optimise_platt_calibration(
-                _cal_clf_probs, cal_groups, fp_cal_vl,
-            )
-            self.place_platt_a, self.place_platt_b = self._optimise_place_platt(
-                _cal_place_raw, _cal_placed_vl,
-            )
-
-            # Isotonic calibration on held-out slab
-            _cal_win_probs = self._calibrate_win_probs(_cal_clf_probs, cal_groups)
-            _cal_won_vl = (fp_cal_vl == 1).astype(np.float64)
-            self.win_iso_cal = self._fit_isotonic(_cal_win_probs, _cal_won_vl)
-            _cal_place_probs = self._calibrate_place_probs(_cal_place_raw)
-            self.place_iso_cal = self._fit_isotonic(_cal_place_probs, _cal_placed_vl.astype(np.float64))
-        else:
+        if not self._fit_training_slab_calibrators(
+            X_train=X_train,
+            groups_train=groups_train,
+            y_won=y_won,
+            y_placed=y_placed,
+            finish_positions=fp,
+            model_params=fold_params,
+            sample_weight=sw,
+        ):
             # Too few races — skip calibration
             self.calibration_temp = 1.0
             self.platt_a, self.platt_b = 1.0, 0.0
@@ -3581,31 +3987,6 @@ class TripleEnsemblePredictor:
         # ── Score test set with calibration ──────────────────────
         clf_probs_raw = self.clf_model.predict_proba(X_test)[:, 1]
         place_probs_raw = self.place_model.predict_proba(X_test)[:, 1]
-
-        # Re-calibrate Platt on test fold when test_df is available.
-        # Calibration was fitted on a training slab (partial-data
-        # models); the full-retrained models have a tighter score
-        # distribution, so refitting corrects the mismatch.
-        if test_df is not None and "finish_position" in test_df.columns:
-            _fp_test = test_df["finish_position"].values[:len(clf_probs_raw)].astype(np.float32)
-            self.platt_a, self.platt_b = self._optimise_platt_calibration(
-                clf_probs_raw, groups_test, _fp_test,
-            )
-            _nr_te = test_df["num_runners"].values[:len(place_probs_raw)]
-            _hc_te = test_df.get("handicap", pd.Series(0, index=test_df.index)).values[:len(place_probs_raw)].astype(bool)
-            _pp_te = np.where(_nr_te <= 4, 3, np.where(_nr_te <= 7, 2, np.where(_nr_te <= 15, 3, np.where(_hc_te, 4, 3))))
-            _placed_te = (_fp_test <= _pp_te).astype(int)
-            self.place_platt_a, self.place_platt_b = self._optimise_place_platt(
-                place_probs_raw, _placed_te,
-            )
-
-            # Refit isotonic on test fold
-            self.win_iso_cal = None
-            self.place_iso_cal = None
-            _te_win_cal = self._calibrate_win_probs(clf_probs_raw, groups_test)
-            self.win_iso_cal = self._fit_isotonic(_te_win_cal, (_fp_test == 1).astype(np.float64))
-            _te_place_cal = self._calibrate_place_probs(place_probs_raw)
-            self.place_iso_cal = self._fit_isotonic(_te_place_cal, _placed_te.astype(np.float64))
 
         win_probs = self._calibrate_win_probs(clf_probs_raw, groups_test)
         place_probs = self._calibrate_place_probs(place_probs_raw)

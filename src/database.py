@@ -159,6 +159,24 @@ def insert_results(df: pd.DataFrame) -> int:
     if df is None or df.empty:
         return 0
 
+    # Defensive guard: historical results should contain at least one
+    # settled finisher per race.  Sporting Life occasionally serves a
+    # non-settled page shape on result URLs; those batches tend to have
+    # all finish_position values at 0 and should not enter the results DB.
+    if {"race_id", "finish_position"}.issubset(df.columns):
+        _finish_pos = pd.to_numeric(df["finish_position"], errors="coerce").fillna(0)
+        _race_has_finisher = (_finish_pos > 0).groupby(df["race_id"]).transform("any")
+        _bad_races = int((~_race_has_finisher).groupby(df["race_id"]).first().sum())
+        if _bad_races:
+            logger.warning(
+                "Skipping %d unresolved result races with no settled finishers",
+                _bad_races,
+            )
+            df = df.loc[_race_has_finisher].copy()
+
+    if df.empty:
+        return 0
+
     init_db()
 
     # Keep only columns that exist in both the DF and the schema

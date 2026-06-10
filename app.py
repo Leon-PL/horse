@@ -14,6 +14,7 @@ Run with:
     streamlit run app.py
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -63,8 +64,6 @@ from src.autotune import (
     load_optuna_study,
     run_autotune_session,
 )
-from src.h2o_automl import h2o_is_available, run_h2o_automl, save_h2o_leader_model
-from src.flaml_automl import flaml_is_available, run_flaml_automl
 from src.rtv_scraper import (
     RTV_METRIC_COLS,
     RTV_RANK_COLS,
@@ -78,6 +77,9 @@ from src.backtester import walk_forward_validation
 from src.run_store import save_run, list_runs as _raw_list_runs, load_run as _raw_load_run, load_run_meta as _raw_load_run_meta, delete_run as _raw_delete_run, rename_run, get_latest_run_id, restore_run_model, run_has_model, get_run_processed_path, get_run_featured_path
 from src.utils import format_odds, kelly_criterion
 from src.each_way import compute_ew_columns, ew_value_bets, get_ew_terms, kelly_ew, EachWayTerms
+from src.matchbook_client import MatchbookAPIError, MatchbookClient
+from src.matchbook_signals import build_fake_prediction_frame, build_signal_frame
+from src.paper_trade_store import append_paper_trades, build_paper_trades_from_signals, load_paper_trades, save_paper_trades, settle_paper_trades
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,259 @@ def _ordinal(n: int) -> str:
     if 11 <= n % 100 <= 13:
         return f"{n}th"
     return f"{n}{['th','st','nd','rd'][min(n % 10, 3)] if n % 10 < 4 else 'th'}"
+
+
+_PACE_DISPLAY_COLUMNS = [
+    "pace_style_index",
+    "pace_rank_pct",
+    "pace_front_runner_flag",
+    "pace_closer_flag",
+    "lone_speed_flag",
+    "hot_pace_flag",
+    "closer_pace_setup",
+    "field_pace_pressure",
+]
+
+_PACE_REQUIRED_COLUMNS = [
+    "pace_style_index",
+    "pace_rank_pct",
+    "field_pace_pressure",
+]
+
+
+def _attach_pace_diagnostics(
+    predictions: pd.DataFrame,
+    feature_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Attach pace-style diagnostics from the engineered feature frame."""
+    if feature_df is None or feature_df.empty or predictions is None or predictions.empty:
+        return predictions
+
+    join_cols = [c for c in ["race_id", "horse_name"] if c in predictions.columns and c in feature_df.columns]
+    pace_cols = [c for c in _PACE_DISPLAY_COLUMNS if c in feature_df.columns]
+    if not join_cols or not pace_cols:
+        return predictions
+
+    pace_frame = feature_df[join_cols + pace_cols].drop_duplicates(subset=join_cols, keep="last")
+    merged = predictions.merge(pace_frame, on=join_cols, how="left")
+    return merged
+
+
+def _has_pace_diagnostics(df: pd.DataFrame | None) -> bool:
+    if df is None or df.empty:
+        return False
+    return all(col in df.columns for col in _PACE_REQUIRED_COLUMNS)
+
+
+def _pace_runner_tags(row: pd.Series) -> list[str]:
+    tags: list[str] = []
+    if bool(row.get("lone_speed_flag", False)):
+        tags.append("Lone speed")
+    elif bool(row.get("pace_front_runner_flag", False)):
+        tags.append("Front-runner")
+
+    if bool(row.get("pace_closer_flag", False)):
+        tags.append("Closer")
+
+    cps = pd.to_numeric(pd.Series([row.get("closer_pace_setup")]), errors="coerce").iloc[0]
+    if pd.notna(cps) and float(cps) >= 0.08:
+        tags.append("Closer setup")
+
+    return tags
+
+
+def _pace_race_summary(predictions: pd.DataFrame) -> str | None:
+    if predictions is None or predictions.empty or "field_pace_pressure" not in predictions.columns:
+        return None
+
+    front_count = int(pd.to_numeric(predictions.get("pace_front_runner_flag", 0), errors="coerce").fillna(0).sum())
+    closer_count = int(pd.to_numeric(predictions.get("pace_closer_flag", 0), errors="coerce").fillna(0).sum())
+    lone_speed = bool(pd.to_numeric(predictions.get("lone_speed_flag", 0), errors="coerce").fillna(0).any())
+    hot_pace = bool(pd.to_numeric(predictions.get("hot_pace_flag", 0), errors="coerce").fillna(0).any())
+
+    parts = [f"{front_count} likely pace pushers", f"{closer_count} closer candidates"]
+    if lone_speed:
+        parts.append("lone-speed candidate present")
+    elif hot_pace:
+        parts.append("pace looks hot")
+    else:
+        parts.append("pace looks balanced")
+    return " | ".join(parts)
+
+
+def _render_pace_panel(predictions: pd.DataFrame, *, key: str) -> None:
+    """Render a compact pace diagnostics table for one race."""
+    if predictions is None or predictions.empty or "pace_style_index" not in predictions.columns:
+        return
+
+    summary = _pace_race_summary(predictions)
+    if summary:
+        st.caption(f"Pace setup: {summary}")
+
+    panel = predictions.copy()
+    panel["pace_tags"] = panel.apply(lambda row: ", ".join(_pace_runner_tags(row)) or "-", axis=1)
+    panel["pace_index"] = pd.to_numeric(panel.get("pace_style_index"), errors="coerce")
+    panel["pace_rank_pct_display"] = pd.to_numeric(panel.get("pace_rank_pct"), errors="coerce")
+    panel["closer_setup"] = pd.to_numeric(panel.get("closer_pace_setup"), errors="coerce")
+
+    shown = panel[[
+        "predicted_rank",
+        "horse_name",
+        "pace_index",
+        "pace_rank_pct_display",
+        "closer_setup",
+        "pace_tags",
+    ]].copy()
+    shown = shown.rename(columns={
+        "predicted_rank": "#",
+        "horse_name": "Horse",
+        "pace_index": "Pace",
+        "pace_rank_pct_display": "Pace Rank",
+        "closer_setup": "Closer Setup",
+        "pace_tags": "Notes",
+    })
+
+    with st.expander("🏇 Pace Diagnostics", expanded=False):
+        st.dataframe(
+            shown.style.format({
+                "Pace": "{:+.2f}",
+                "Pace Rank": "{:.0%}",
+                "Closer Setup": "{:.0%}",
+            }),
+            hide_index=True,
+            width="stretch",
+        )
+
+
+def _attach_ranker_diagnostics(
+    predictions: pd.DataFrame,
+    predictor: TripleEnsemblePredictor,
+    feature_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if predictions is None or predictions.empty or feature_df is None or feature_df.empty:
+        return predictions
+    ranker_model = getattr(predictor, "ranker_model", None)
+    if ranker_model is None:
+        return predictions
+    if not hasattr(predictor, "_prepare_prediction_frame"):
+        return predictions
+
+    join_cols = [c for c in ["race_id", "horse_name"] if c in predictions.columns and c in feature_df.columns]
+    if "horse_name" not in join_cols:
+        return predictions
+
+    try:
+        predict_df, X_scaled = predictor._prepare_prediction_frame(feature_df)
+        ranker_scores = np.asarray(ranker_model.predict(X_scaled), dtype=np.float64)
+    except Exception:
+        return predictions
+
+    ranker_frame = predict_df[join_cols].copy() if join_cols else predict_df[["horse_name"]].copy()
+    ranker_frame["ranker_score"] = ranker_scores
+    group_cols = [c for c in ["race_id"] if c in ranker_frame.columns]
+    if group_cols:
+        ranker_frame["ranker_rank"] = ranker_frame.groupby(group_cols, sort=False)["ranker_score"].rank(
+            ascending=False,
+            method="min",
+        ).astype(int)
+    else:
+        ranker_frame["ranker_rank"] = ranker_frame["ranker_score"].rank(ascending=False, method="min").astype(int)
+
+    ranker_frame = ranker_frame.drop_duplicates(subset=join_cols, keep="last")
+    merged = predictions.merge(ranker_frame, on=join_cols, how="left")
+    if "predicted_rank" in merged.columns and "ranker_rank" in merged.columns:
+        merged["rank_disagreement"] = (
+            pd.to_numeric(merged["predicted_rank"], errors="coerce")
+            - pd.to_numeric(merged["ranker_rank"], errors="coerce")
+        ).abs()
+        merged["ranker_disagrees_top_pick"] = (
+            (pd.to_numeric(merged["predicted_rank"], errors="coerce") == 1)
+            != (pd.to_numeric(merged["ranker_rank"], errors="coerce") == 1)
+        )
+    return merged
+
+
+def _render_ranker_disagreement_panel(predictions: pd.DataFrame, *, key: str) -> None:
+    if predictions is None or predictions.empty or "ranker_rank" not in predictions.columns:
+        return
+
+    top_pick = predictions.loc[pd.to_numeric(predictions.get("predicted_rank"), errors="coerce") == 1]
+    ranker_top = predictions.loc[pd.to_numeric(predictions.get("ranker_rank"), errors="coerce") == 1]
+    top_pick_name = top_pick["horse_name"].iloc[0] if not top_pick.empty else None
+    ranker_top_name = ranker_top["horse_name"].iloc[0] if not ranker_top.empty else None
+
+    if top_pick_name and ranker_top_name and top_pick_name == ranker_top_name:
+        st.caption(f"Ranker agrees with the win model on the top pick: {top_pick_name}.")
+    elif top_pick_name and ranker_top_name:
+        st.caption(f"Ranker disagreement: win model prefers {top_pick_name}, ranker prefers {ranker_top_name}.")
+
+    panel = predictions.copy()
+    panel["rank_disagreement"] = pd.to_numeric(panel.get("rank_disagreement"), errors="coerce")
+    shown = panel[[c for c in ["predicted_rank", "ranker_rank", "horse_name", "win_probability", "rank_disagreement"] if c in panel.columns]].copy()
+    shown = shown.rename(columns={
+        "predicted_rank": "Win Rank",
+        "ranker_rank": "Ranker Rank",
+        "horse_name": "Horse",
+        "win_probability": "Win Prob",
+        "rank_disagreement": "Δ Rank",
+    }).sort_values(["Δ Rank", "Win Rank"], ascending=[False, True], kind="stable")
+
+    with st.expander("⚔️ Ranker Disagreement", expanded=False):
+        st.dataframe(
+            shown.style.format({
+                "Win Prob": "{:.1%}",
+                "Δ Rank": "{:.0f}",
+            }),
+            hide_index=True,
+            width="stretch",
+        )
+
+
+def _ranker_consensus_state(predictions: pd.DataFrame) -> tuple[str, str]:
+    if predictions is None or predictions.empty or "ranker_rank" not in predictions.columns:
+        return "", ""
+
+    panel = predictions.copy()
+    panel["predicted_rank"] = pd.to_numeric(panel.get("predicted_rank"), errors="coerce")
+    panel["ranker_rank"] = pd.to_numeric(panel.get("ranker_rank"), errors="coerce")
+    panel["rank_disagreement"] = pd.to_numeric(panel.get("rank_disagreement"), errors="coerce")
+
+    top_pick = panel.loc[panel["predicted_rank"] == 1, "horse_name"]
+    ranker_top = panel.loc[panel["ranker_rank"] == 1, "horse_name"]
+    same_top = bool(not top_pick.empty and not ranker_top.empty and top_pick.iloc[0] == ranker_top.iloc[0])
+
+    top_band = panel.loc[(panel["predicted_rank"] <= 3) | (panel["ranker_rank"] <= 3)]
+    mean_gap = float(top_band["rank_disagreement"].dropna().mean()) if not top_band.empty else float("nan")
+
+    if same_top and np.isfinite(mean_gap) and mean_gap <= 0.75:
+        return "🟢 Strong consensus", "Win model and ranker agree tightly at the top of the race."
+    if same_top and np.isfinite(mean_gap) and mean_gap <= 1.5:
+        return "🟡 Moderate consensus", "Top pick agrees, but the rest of the ordering is less stable."
+    if same_top:
+        return "🟡 Narrow consensus", "They agree on the winner, but disagree materially underneath."
+    return "🔴 Split view", "The ranker and win model disagree on the top of the race."
+
+
+def _render_ranker_consensus_badge(predictions: pd.DataFrame) -> None:
+    label, detail = _ranker_consensus_state(predictions)
+    if not label:
+        return
+    st.caption(f"{label} — {detail}")
+
+
+def _bet_confidence_state(row: pd.Series) -> tuple[str, str]:
+    if pd.isna(row.get("ranker_rank")):
+        return "", ""
+    disagreement = pd.to_numeric(pd.Series([row.get("rank_disagreement")]), errors="coerce").iloc[0]
+    if bool(row.get("ranker_disagrees_top_pick", False)) and int(pd.to_numeric(row.get("predicted_rank"), errors="coerce") or 0) == 1:
+        return "⚠ Split", "Ranker does not back the model's top pick."
+    if pd.notna(disagreement) and float(disagreement) >= 2:
+        return "⚠ Caution", "Ranker is materially lower on this runner."
+    if pd.notna(disagreement) and float(disagreement) <= 0:
+        return "✅ Aligned", "Win model and ranker agree on this runner's rank."
+    if pd.notna(disagreement) and float(disagreement) <= 1:
+        return "✓ Supported", "Ranker broadly supports this runner."
+    return "", ""
 
 
 # ── Cached wrappers for disk I/O ─────────────────────────────────────
@@ -122,6 +377,89 @@ def _cached_db_stats() -> dict:
         return _raw_db_stats()
     except Exception:
         return {}
+
+
+def _format_duration_compact(seconds: float) -> str:
+    seconds = max(0, int(round(float(seconds))))
+    minutes, secs = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _progress_timing_text(started_at: float, step_started_at: float, stage_progress: float) -> str:
+    now = time.time()
+    parts = [
+        f"elapsed {_format_duration_compact(now - started_at)}",
+        f"step {_format_duration_compact(now - step_started_at)}",
+    ]
+    if 0.02 <= stage_progress < 1.0:
+        eta_seconds = max((now - step_started_at) * ((1.0 - stage_progress) / stage_progress), 0.0)
+        parts.append(f"eta {_format_duration_compact(eta_seconds)}")
+    return " · ".join(parts)
+
+
+def _compact_numeric_dtypes(df: pd.DataFrame | None, *, label: str = "dataset") -> pd.DataFrame | None:
+    """Downcast numeric columns to reduce in-memory dataset size."""
+    if df is None or df.empty:
+        return df
+
+    before_bytes = int(df.memory_usage(deep=False).sum())
+    numeric_cols = list(df.select_dtypes(include=["number"]).columns)
+    if not numeric_cols:
+        return df
+
+    for col in numeric_cols:
+        series = df[col]
+        if pd.api.types.is_bool_dtype(series):
+            continue
+        if pd.api.types.is_float_dtype(series):
+            downcasted = pd.to_numeric(series, downcast="float")
+        elif pd.api.types.is_integer_dtype(series):
+            downcast = "unsigned" if series.min(skipna=True) >= 0 else "integer"
+            downcasted = pd.to_numeric(series, downcast=downcast)
+        else:
+            continue
+        if downcasted.dtype != series.dtype:
+            df[col] = downcasted
+
+    after_bytes = int(df.memory_usage(deep=False).sum())
+    if after_bytes < before_bytes:
+        logger.info(
+            "Compacted %s numeric dtypes: %.1f MB -> %.1f MB",
+            label,
+            before_bytes / (1024 * 1024),
+            after_bytes / (1024 * 1024),
+        )
+    return df
+
+
+def _value_odds_range(value_config: dict | None) -> tuple[float, float]:
+    cfg = value_config or {}
+    min_odds = float(cfg.get("value_min_odds", 1.0))
+    max_odds = float(cfg.get("value_max_odds", 101.0))
+    if min_odds >= max_odds:
+        return 1.0, 101.0
+    return min_odds, max_odds
+
+
+def _value_bet_mask(frame: pd.DataFrame, value_config: dict | None) -> pd.Series:
+    if frame is None or frame.empty or "value_score" not in frame.columns or "odds" not in frame.columns:
+        return pd.Series(False, index=getattr(frame, "index", pd.Index([])))
+
+    cfg = value_config or {}
+    base_thresh = float(cfg.get("value_threshold", 0.05))
+    min_odds, max_odds = _value_odds_range(cfg)
+    odds = pd.to_numeric(frame["odds"], errors="coerce")
+    dyn_thresh = base_thresh * np.sqrt(odds.clip(lower=1.0) / 3.0)
+    return (
+        pd.to_numeric(frame["value_score"], errors="coerce").gt(dyn_thresh)
+        & odds.ge(min_odds)
+        & odds.le(max_odds)
+    ).fillna(False)
 
 
 def _invalidate_run_caches():
@@ -172,12 +510,39 @@ def _build_run_name(
     }.get(data_source, str(data_source)[:3])
     _days = f"{int(days_back)}d" if days_back is not None else "na"
     _odds = "oddsOn" if include_odds else "oddsOff"
-    _tune = (
-        f"auto{int(auto_trials)}"
-        if tune_mode_label == "🔍 Auto (Optuna)"
-        else ("saved" if tune_mode_label == "📦 Saved Autotune" else "manual")
-    )
+    _tune = "saved" if tune_mode_label == "📦 Saved Autotune" else "manual"
     return f"ens_{_src}_{_days}_{_odds}_{_tune}_{datetime.now():%m%d_%H%M}"
+
+
+# Columns derived from the raw 'odds' column. When odds are disabled these
+# are dropped before training/autotuning so the model never sees market data.
+_ODDS_DERIVED_COLS = [
+    "implied_prob", "norm_implied_prob", "odds_rank",
+    "is_favourite", "log_odds", "odds_vs_field", "overround",
+    "odds_cv", "implied_prob_vs_base",
+    "jockey_elo_x_fav",
+    "mkt_x_win_rate", "logodds_x_elo",
+    "odds_field_x_dropped", "mkt_x_speed",
+    "odds_field_x_jock_elo",
+    "odds_vs_elo_rank",
+    "trainer_runner_rank_by_odds",
+    "trainer_first_string_by_odds",
+    "trainer_odds_vs_stablemate_best",
+    "trainer_stable_market_share",
+    "trainer_first_string_odds_or_agree",
+    "trainer_first_string_odds_elo_agree",
+    "trainer_string_disagreement_or_odds",
+    "trainer_string_disagreement_elo_odds",
+    "trainer_first_string_stable_jockey",
+    "beaten_fav_last",
+]
+
+
+def _drop_market_feature_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    to_drop = [col for col in _ODDS_DERIVED_COLS if col in df.columns]
+    if not to_drop:
+        return df, []
+    return df.drop(columns=to_drop), to_drop
 
 
 # ── Cached chart builders for Overfitting Diagnostics ─────────────────
@@ -275,6 +640,405 @@ def _build_overfit_section_charts(run_id: str) -> dict:
         "heatmap_fig": heatmap_fig,
         "display_df": display_df,
     }
+
+
+def _metric_direction(metric_name: str) -> int:
+    """Return +1 for higher-is-better metrics, -1 for lower-is-better."""
+    lower_better = {
+        "brier_calibrated",
+        "brier_raw",
+        "brier_score",
+        "ece",
+        "log_loss",
+        "value_bet_brier",
+        "value_bet_log_loss",
+        "rps",
+    }
+    return -1 if metric_name in lower_better else 1
+
+
+def _is_diagnostic_metric(metric_name: str) -> bool:
+    """Return True only for scalar performance metrics suitable for diagnostics."""
+    if not metric_name:
+        return False
+
+    metric_name = str(metric_name)
+    allowed_metrics = {
+        "accuracy",
+        "avg_edge",
+        "brier_calibrated",
+        "brier_raw",
+        "brier_score",
+        "ece",
+        "log_loss",
+        "mae",
+        "ndcg_at_1",
+        "ndcg_at_3",
+        "place_precision",
+        "precision",
+        "rank_ndcg_at_1",
+        "rank_ndcg_at_3",
+        "rank_top1_accuracy",
+        "roc_auc",
+        "rps",
+        "top1_accuracy",
+        "value_bet_brier",
+        "value_bet_log_loss",
+        "value_bet_roi",
+        "value_bet_sr",
+        "win_in_top3",
+    }
+    if metric_name in allowed_metrics:
+        return True
+
+    excluded_tokens = {
+        "count",
+        "decile",
+        "fold",
+        "races",
+        "rows",
+        "total",
+    }
+    metric_name_l = metric_name.lower()
+    if any(token in metric_name_l for token in excluded_tokens):
+        return False
+
+    return False
+
+
+def _metric_family(metric_name: str) -> str:
+    """Group metrics into a small number of diagnostics families."""
+    if metric_name in {"brier_calibrated", "brier_raw", "brier_score", "ece", "log_loss"}:
+        return "Calibration"
+    if metric_name in {"ndcg_at_1", "ndcg_at_3", "top1_accuracy", "top3_accuracy", "win_in_top3", "place_precision", "rps"}:
+        return "Generalization"
+    if metric_name.startswith("value_bet_") or metric_name in {"avg_edge", "value_bet_roi", "value_bet_sr"}:
+        return "Value Betting"
+    return "Other"
+
+
+def _metric_label(metric_name: str) -> str:
+    """Readable display labels for diagnostics metrics."""
+    labels = {
+        "ndcg_at_1": "NDCG@1",
+        "ndcg_at_3": "NDCG@3",
+        "top1_accuracy": "Top-1 Accuracy",
+        "top3_accuracy": "Top-3 Accuracy",
+        "win_in_top3": "Winner in Top 3",
+        "place_precision": "Place Precision",
+        "brier_calibrated": "Brier (Calibrated)",
+        "brier_raw": "Brier (Raw)",
+        "brier_score": "Brier",
+        "ece": "ECE",
+        "log_loss": "Log Loss",
+        "rps": "RPS",
+        "value_bet_brier": "Value Bet Brier",
+        "value_bet_log_loss": "Value Bet Log Loss",
+        "value_bet_roi": "Value Bet ROI",
+        "value_bet_sr": "Value Bet Strike Rate",
+        "avg_edge": "Average Edge",
+    }
+    return labels.get(metric_name, metric_name.replace("_", " ").title())
+
+
+def _fmt_metric(value, fmt: str = ".4f", pct: bool = False) -> str:
+    """Format scalar metrics safely for Streamlit metric cards."""
+    if value is None:
+        return "-"
+    try:
+        numeric_value = float(value)
+    except Exception:
+        return "-"
+    if not np.isfinite(numeric_value):
+        return "-"
+    if pct:
+        return f"{numeric_value:.1%}"
+    return format(numeric_value, fmt)
+
+
+def _first_metric_value(payload: dict | None, *keys: str):
+    """Return the first finite scalar metric found in a payload."""
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, (int, float, np.integer, np.floating)) and np.isfinite(float(value)):
+            return float(value)
+    return None
+
+
+def _model_display_name(model_key: str) -> str:
+    """Readable model labels for diagnostics views."""
+    labels = {
+        "win_classifier": "Win Classifier",
+        "classifier": "Win Classifier",
+        "place_classifier": "Place Classifier",
+        "place": "Place Classifier",
+        "ranker": "Race Ranker",
+    }
+    return labels.get(model_key, model_key.replace("_", " ").title())
+
+
+def _calibration_metric_cards(payload: dict | None) -> list[tuple[str, float | None, str]]:
+    """Return a consistent set of top-line calibration metrics for a sub-model."""
+    return [
+        ("ECE", _first_metric_value(payload, "ece"), ".4f"),
+        ("Brier", _first_metric_value(payload, "brier_score", "brier_calibrated"), ".4f"),
+        ("Raw Brier", _first_metric_value(payload, "brier_raw"), ".4f"),
+        ("Log Loss", _first_metric_value(payload, "log_loss", "log_loss_raw"), ".4f"),
+    ]
+
+
+def _gap_status(risk_gap: float) -> str:
+    """Bucket a direction-aware generalization gap into a compact status."""
+    if risk_gap >= 0.15:
+        return "High"
+    if risk_gap >= 0.08:
+        return "Moderate"
+    if risk_gap >= 0.03:
+        return "Watch"
+    return "Healthy"
+
+
+def _build_generalization_frame(train_metrics: dict | None, test_metrics: dict | None) -> pd.DataFrame:
+    """Return one row per comparable metric with direction-aware gap scores."""
+    rows: list[dict] = []
+    train_metrics = train_metrics or {}
+    test_metrics = test_metrics or {}
+    model_keys = sorted(set(train_metrics) | set(test_metrics))
+
+    for model_key in model_keys:
+        train_model = train_metrics.get(model_key, {})
+        test_model = test_metrics.get(model_key, {})
+        if not isinstance(train_model, dict) or not isinstance(test_model, dict):
+            continue
+
+        for metric_name, test_value in test_model.items():
+            train_value = train_model.get(metric_name)
+            if not _is_diagnostic_metric(metric_name):
+                continue
+            if not isinstance(test_value, (int, float, np.integer, np.floating)):
+                continue
+            if not isinstance(train_value, (int, float, np.integer, np.floating)):
+                continue
+            if pd.isna(test_value) or pd.isna(train_value):
+                continue
+
+            direction = _metric_direction(metric_name)
+            raw_gap = float(train_value) - float(test_value)
+            risk_gap = raw_gap * direction
+
+            rows.append({
+                "model_key": model_key,
+                "sub_model": _model_display_name(model_key),
+                "metric_key": metric_name,
+                "metric": _metric_label(metric_name),
+                "family": _metric_family(metric_name),
+                "OOF": float(train_value),
+                "Validation": float(test_value),
+                "raw_gap": raw_gap,
+                "risk_gap": risk_gap,
+                "abs_gap": abs(risk_gap),
+                "status": _gap_status(risk_gap),
+            })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(["risk_gap", "abs_gap"], ascending=[False, False]).reset_index(drop=True)
+    return df
+
+
+def _resolve_model_metric_payload(metrics_payload: dict | None, *model_keys: str) -> tuple[str | None, dict]:
+    """Return the first matching model metrics payload from a saved metrics dict."""
+    if not isinstance(metrics_payload, dict):
+        return None, {}
+
+    for model_key in model_keys:
+        payload = metrics_payload.get(model_key)
+        if isinstance(payload, dict):
+            return model_key, payload
+
+    return None, {}
+
+
+def _build_model_tradeoff_frame(
+    metrics_payload: dict | None,
+    left_model_keys: tuple[str, ...],
+    right_model_keys: tuple[str, ...],
+) -> tuple[pd.DataFrame, str, str]:
+    """Return a direction-aware comparison frame between two sub-models."""
+    left_key, left_payload = _resolve_model_metric_payload(metrics_payload, *left_model_keys)
+    right_key, right_payload = _resolve_model_metric_payload(metrics_payload, *right_model_keys)
+    left_label = _model_display_name(left_key or left_model_keys[0])
+    right_label = _model_display_name(right_key or right_model_keys[0])
+
+    if not left_key or not right_key:
+        return pd.DataFrame(), left_label, right_label
+
+    rows: list[dict] = []
+    for metric_name in sorted(set(left_payload) & set(right_payload)):
+        if not _is_diagnostic_metric(metric_name):
+            continue
+
+        left_value = left_payload.get(metric_name)
+        right_value = right_payload.get(metric_name)
+        if not isinstance(left_value, (int, float, np.integer, np.floating)):
+            continue
+        if not isinstance(right_value, (int, float, np.integer, np.floating)):
+            continue
+        if pd.isna(left_value) or pd.isna(right_value):
+            continue
+
+        direction = _metric_direction(metric_name)
+        edge = (float(left_value) - float(right_value)) * direction
+        rows.append({
+            "metric_key": metric_name,
+            "metric": _metric_label(metric_name),
+            "family": _metric_family(metric_name),
+            "left_value": float(left_value),
+            "right_value": float(right_value),
+            "edge": float(edge),
+            "abs_edge": abs(float(edge)),
+            "leader": (
+                left_label if edge > 1e-12 else
+                right_label if edge < -1e-12 else
+                "Tie"
+            ),
+        })
+
+    if not rows:
+        return pd.DataFrame(), left_label, right_label
+
+    tradeoff_df = pd.DataFrame(rows)
+    tradeoff_df = tradeoff_df.sort_values(["abs_edge", "edge"], ascending=[False, False]).reset_index(drop=True)
+    return tradeoff_df, left_label, right_label
+
+
+def _build_metric_snapshot_frame(metrics_payload: dict | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return compact full-field and selected-bet metric tables by model."""
+    if not isinstance(metrics_payload, dict):
+        return pd.DataFrame(), pd.DataFrame()
+
+    model_groups = [
+        ("win_classifier", "classifier"),
+        ("ranker",),
+        ("place_classifier", "place"),
+    ]
+
+    full_rows: list[dict] = []
+    value_rows: list[dict] = []
+
+    for model_keys in model_groups:
+        resolved_key, payload = _resolve_model_metric_payload(metrics_payload, *model_keys)
+        if not resolved_key or not isinstance(payload, dict):
+            continue
+
+        label = _model_display_name(resolved_key)
+
+        full_row = {
+            "Model": label,
+            "Brier": _first_metric_value(payload, "brier_score", "brier_calibrated"),
+            "Log Loss": _first_metric_value(payload, "log_loss", "log_loss_raw"),
+            "ECE": _first_metric_value(payload, "ece"),
+            "Top-1 Accuracy": _first_metric_value(payload, "top1_accuracy", "rank_top1_accuracy", "accuracy"),
+            "Winner in Top 3": _first_metric_value(payload, "win_in_top3"),
+            "RPS": _first_metric_value(payload, "rps"),
+        }
+        if any(v is not None for k, v in full_row.items() if k != "Model"):
+            full_rows.append(full_row)
+
+        value_row = {
+            "Model": label,
+            "Value Bets": _first_metric_value(payload, "value_bets"),
+            "VB Strike Rate": _first_metric_value(payload, "value_bet_sr"),
+            "VB Brier": _first_metric_value(payload, "value_bet_brier"),
+            "VB Log Loss": _first_metric_value(payload, "value_bet_log_loss"),
+            "Avg Edge": _first_metric_value(payload, "avg_edge"),
+            "Avg CLV": _first_metric_value(payload, "value_bet_avg_clv"),
+            "Exp ROI": _first_metric_value(payload, "value_bet_exp_roi_pct"),
+            "ROI": _first_metric_value(payload, "value_bet_roi"),
+        }
+        if any(v is not None for k, v in value_row.items() if k != "Model"):
+            value_rows.append(value_row)
+
+    return pd.DataFrame(full_rows), pd.DataFrame(value_rows)
+
+
+def _build_ranker_selector_explainer(metrics_payload: dict | None) -> dict:
+    """Return compact diagnostics explaining why ranker ROI can diverge."""
+    _, ranker_payload = _resolve_model_metric_payload(metrics_payload, "ranker")
+    _, win_payload = _resolve_model_metric_payload(metrics_payload, "win_classifier", "classifier")
+    if not ranker_payload or not win_payload:
+        return {}
+
+    def _delta(metric_name: str, higher_is_better: bool) -> float | None:
+        ranker_value = _first_metric_value(ranker_payload, metric_name)
+        win_value = _first_metric_value(win_payload, metric_name)
+        if ranker_value is None or win_value is None:
+            return None
+        raw = float(ranker_value) - float(win_value)
+        return raw if higher_is_better else -raw
+
+    return {
+        "full_brier_edge": _delta("brier_score", higher_is_better=False),
+        "full_log_loss_edge": _delta("log_loss", higher_is_better=False),
+        "selected_brier_edge": _delta("value_bet_brier", higher_is_better=False),
+        "selected_log_loss_edge": _delta("value_bet_log_loss", higher_is_better=False),
+        "roi_edge": _delta("value_bet_roi", higher_is_better=True),
+        "bet_count_delta": _delta("value_bets", higher_is_better=True),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def _build_generalization_trend_chart(trend_key: tuple, model_key: str, metric_key: str) -> dict:
+    """Build a cross-run OOF vs validation trend chart for one metric."""
+    rows: list[dict] = []
+    for run_id, name, timestamp, mk, metric_name, oof_value, val_value in trend_key:
+        if mk != model_key or metric_name != metric_key:
+            continue
+        if oof_value is None or val_value is None:
+            continue
+        direction = _metric_direction(metric_name)
+        risk_gap = (float(oof_value) - float(val_value)) * direction
+        rows.append({
+            "Run": name or run_id,
+            "Date": timestamp[:16].replace("T", " "),
+            "OOF": float(oof_value),
+            "Validation": float(val_value),
+            "Risk Gap": float(risk_gap),
+        })
+
+    if len(rows) < 2:
+        return {"fig": None, "df": pd.DataFrame(rows)}
+
+    trend_df = pd.DataFrame(rows)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=trend_df["Date"], y=trend_df["OOF"],
+        mode="lines+markers", name="OOF",
+        line=dict(color="#3b82f6"),
+    ))
+    fig.add_trace(go.Scatter(
+        x=trend_df["Date"], y=trend_df["Validation"],
+        mode="lines+markers", name="Validation",
+        line=dict(color="#22c55e"),
+    ))
+    fig.add_trace(go.Bar(
+        x=trend_df["Date"], y=trend_df["Risk Gap"],
+        name="Risk Gap",
+        marker_color="rgba(239,68,68,0.35)",
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        height=380,
+        title=f"{_model_display_name(model_key)} — {_metric_label(metric_key)} across runs",
+        yaxis=dict(title=_metric_label(metric_key)),
+        yaxis2=dict(title="Risk Gap", overlaying="y", side="right"),
+        legend=dict(x=0.02, y=0.98),
+    )
+    return {"fig": fig, "df": trend_df}
 
 
 @st.cache_resource(show_spinner=False)
@@ -835,15 +1599,6 @@ _DEFAULTS = {
     "autotune_featured_data": None,
     "autotune_processed_data": None,
     "autotune_dataset_meta": None,
-    "h2o_featured_data": None,
-    "h2o_processed_data": None,
-    "h2o_dataset_meta": None,
-    "h2o_automl_result": None,
-    "h2o_saved_model_path": None,
-    "flaml_featured_data": None,
-    "flaml_processed_data": None,
-    "flaml_dataset_meta": None,
-    "flaml_automl_result": None,
     "model_featured_data": None,
     "model_dataset_meta": None,
     "metrics": None,
@@ -853,6 +1608,8 @@ _DEFAULTS = {
     "value_config": {
         "staking_mode": "flat",
         "value_threshold": 0.05,
+        "value_min_odds": 1.0,
+        "value_max_odds": 101.0,
         "kelly_fraction": 0.25,
         "bankroll": 100.0,
         "ew_enabled": True,
@@ -895,10 +1652,100 @@ def _cached_load_df(path: str, _mtime: float) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+@st.cache_data(show_spinner=False)
+def _cached_load_history_context(path: str, _mtime: float) -> tuple[pd.DataFrame, object]:
+    """Load processed history and cache its last available race date."""
+    hist = _cached_load_df(path, _mtime)
+    if hist is None or hist.empty or "race_date" not in hist.columns:
+        return hist, None
+
+    race_dates = hist["race_date"]
+    if not pd.api.types.is_datetime64_any_dtype(race_dates):
+        race_dates = pd.to_datetime(race_dates, errors="coerce")
+    last_hist = race_dates.max()
+    return hist, last_hist.date() if pd.notna(last_hist) else None
+
+
 @st.cache_data(show_spinner="Rebuilding featured dataset for active run …")
 def _cached_build_featured_from_processed(path: str, _mtime: float) -> pd.DataFrame:
     processed = _cached_load_df(path, _mtime)
     return engineer_features(processed.copy(), save=False)
+
+
+def _predictor_runtime_token(predictor: TripleEnsemblePredictor | None) -> str:
+    if predictor is None:
+        return "no-predictor"
+    model_path = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
+    model_mtime = os.path.getmtime(model_path) if os.path.exists(model_path) else 0.0
+    return f"{id(predictor)}:{model_mtime:.6f}"
+
+
+def _frame_signature(df: pd.DataFrame | None) -> str:
+    if df is None or df.empty:
+        return "empty"
+    hashed = pd.util.hash_pandas_object(df, index=True).values.tobytes()
+    return hashlib.sha1(hashed).hexdigest()[:20]
+
+
+def _prediction_cache_get(cache_key: tuple) -> pd.DataFrame | None:
+    cache = st.session_state.setdefault("_prediction_result_cache", {})
+    cached = cache.get(cache_key)
+    return cached.copy() if isinstance(cached, pd.DataFrame) else None
+
+
+def _prediction_cache_set(cache_key: tuple, value: pd.DataFrame) -> pd.DataFrame:
+    cache = st.session_state.setdefault("_prediction_result_cache", {})
+    order = st.session_state.setdefault("_prediction_result_cache_order", [])
+    cache[cache_key] = value.copy()
+    if cache_key in order:
+        order.remove(cache_key)
+    order.append(cache_key)
+    while len(order) > 4:
+        old_key = order.pop(0)
+        cache.pop(old_key, None)
+    return value
+
+
+def _predict_featured_frame(
+    predictor: TripleEnsemblePredictor,
+    feature_df: pd.DataFrame,
+    *,
+    ew_fraction: float | None = None,
+) -> pd.DataFrame:
+    cache_key = (
+        _predictor_runtime_token(predictor),
+        round(float(ew_fraction), 6) if ew_fraction is not None else None,
+        _frame_signature(feature_df),
+    )
+    cached = _prediction_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    if hasattr(predictor, "predict_races") and "race_id" in feature_df.columns:
+        preds = predictor.predict_races(feature_df, ew_fraction=ew_fraction)
+        preds = _attach_pace_diagnostics(preds, feature_df)
+        preds = _attach_ranker_diagnostics(preds, predictor, feature_df)
+        return _prediction_cache_set(cache_key, preds)
+
+    if "race_id" not in feature_df.columns:
+        preds = predictor.predict_race(feature_df, ew_fraction=ew_fraction)
+        preds = _attach_pace_diagnostics(preds, feature_df)
+        preds = _attach_ranker_diagnostics(preds, predictor, feature_df)
+        return _prediction_cache_set(cache_key, preds)
+
+    all_preds: list[pd.DataFrame] = []
+    for race_id in feature_df["race_id"].unique() if "race_id" in feature_df.columns else []:
+        feat_slice = feature_df[feature_df["race_id"] == race_id].copy()
+        if feat_slice.empty:
+            continue
+        preds = predictor.predict_race(feat_slice, ew_fraction=ew_fraction)
+        preds = _attach_pace_diagnostics(preds, feat_slice)
+        preds = _attach_ranker_diagnostics(preds, predictor, feat_slice)
+        preds["race_id"] = race_id
+        all_preds.append(preds)
+
+    combined = pd.concat(all_preds, ignore_index=True) if all_preds else pd.DataFrame()
+    return _prediction_cache_set(cache_key, combined)
 
 
 def _global_featured_dataset_path() -> str | None:
@@ -929,6 +1776,138 @@ def _global_processed_dataset_path() -> str | None:
     if os.path.exists(csv_path):
         return csv_path
     return None
+
+
+def _fmt_age_from_ts(ts: float | None) -> str:
+    if ts is None:
+        return "—"
+    age_seconds = max(time.time() - float(ts), 0.0)
+    if age_seconds < 60:
+        return f"{int(age_seconds)}s ago"
+    if age_seconds < 3600:
+        return f"{int(age_seconds // 60)}m ago"
+    if age_seconds < 86400:
+        return f"{int(age_seconds // 3600)}h ago"
+    return f"{int(age_seconds // 86400)}d ago"
+
+
+def _dir_health(path: str, *, suffix: str | None = None) -> dict[str, object]:
+    if not os.path.isdir(path):
+        return {"exists": False, "count": 0, "latest_mtime": None}
+    files = [
+        entry.path for entry in os.scandir(path)
+        if entry.is_file() and (suffix is None or entry.name.endswith(suffix))
+    ]
+    latest_mtime = max((os.path.getmtime(fp) for fp in files), default=None)
+    return {
+        "exists": True,
+        "count": len(files),
+        "latest_mtime": latest_mtime,
+    }
+
+
+def _dataframe_missing_pct(df: pd.DataFrame | None, col: str) -> float | None:
+    if df is None or df.empty or col not in df.columns:
+        return None
+    series = df[col]
+    if pd.api.types.is_numeric_dtype(series):
+        missing = series.isna()
+    else:
+        missing = series.isna() | series.astype(str).str.strip().eq("")
+    return float(missing.mean() * 100.0)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _build_prediction_data_health(featured_path: str | None, featured_mtime: float | None) -> dict:
+    db = _cached_db_stats()
+    processed_path = _global_processed_dataset_path()
+    processed_mtime = os.path.getmtime(processed_path) if processed_path and os.path.exists(processed_path) else None
+    racecards_cache = _dir_health(os.path.join(config.DATA_DIR, "racecards_cache"), suffix=".csv")
+    live_feature_cache = _dir_health(os.path.join(config.PROCESSED_DATA_DIR, "live_feature_cache"))
+    lookahead_cache = _dir_health(os.path.join(config.PROCESSED_DATA_DIR, "lookahead_cache"))
+    return {
+        "db": db,
+        "featured_path": featured_path,
+        "featured_mtime": featured_mtime,
+        "processed_path": processed_path,
+        "processed_mtime": processed_mtime,
+        "racecards_cache": racecards_cache,
+        "live_feature_cache": live_feature_cache,
+        "lookahead_cache": lookahead_cache,
+    }
+
+
+def _render_prediction_data_health(model_df: pd.DataFrame | None) -> None:
+    featured_path = _global_featured_dataset_path()
+    featured_mtime = os.path.getmtime(featured_path) if featured_path and os.path.exists(featured_path) else None
+    health = _build_prediction_data_health(featured_path, featured_mtime)
+    db_latest = (health.get("db") or {}).get("latest_date")
+    db_latest_delta = "—"
+    if db_latest:
+        try:
+            db_latest_dt = pd.to_datetime(db_latest, errors="coerce")
+            if pd.notna(db_latest_dt):
+                db_latest_delta = f"{max((datetime.now().date() - db_latest_dt.date()).days, 0)}d lag"
+        except Exception:
+            db_latest_delta = "—"
+
+    latest_race_date = None
+    if model_df is not None and not model_df.empty and "race_date" in model_df.columns:
+        race_dates = pd.to_datetime(model_df["race_date"], errors="coerce")
+        if race_dates.notna().any():
+            latest_race_date = race_dates.max()
+
+    jockey_missing = _dataframe_missing_pct(model_df, "jockey")
+    trainer_missing = _dataframe_missing_pct(model_df, "trainer")
+    odds_missing = _dataframe_missing_pct(model_df, "odds")
+    required_cols = ["race_id", "horse_name", "race_date"]
+    missing_required = [col for col in required_cols if model_df is None or col not in model_df.columns]
+
+    with st.expander("🩺 Data Health", expanded=False):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric(
+            "DB Latest",
+            str(db_latest or "—"),
+            db_latest_delta,
+        )
+        c2.metric(
+            "Featured Cache",
+            "Present" if health.get("featured_path") else "Missing",
+            _fmt_age_from_ts(health.get("featured_mtime")),
+        )
+        c3.metric(
+            "Racecards Cache",
+            str((health.get("racecards_cache") or {}).get("count", 0)),
+            _fmt_age_from_ts((health.get("racecards_cache") or {}).get("latest_mtime")),
+        )
+        c4.metric(
+            "Lookahead Cache",
+            str((health.get("lookahead_cache") or {}).get("count", 0)),
+            _fmt_age_from_ts((health.get("lookahead_cache") or {}).get("latest_mtime")),
+        )
+
+        if latest_race_date is not None:
+            st.caption(f"Loaded featured data latest race date: {latest_race_date.date().isoformat()}")
+        if missing_required:
+            st.warning(f"Missing required prediction columns: {', '.join(missing_required)}")
+
+        issues: list[str] = []
+        if jockey_missing is not None and jockey_missing > 5.0:
+            issues.append(f"Jockey missing: {jockey_missing:.1f}%")
+        if trainer_missing is not None and trainer_missing > 5.0:
+            issues.append(f"Trainer missing: {trainer_missing:.1f}%")
+        if odds_missing is not None and odds_missing > 10.0:
+            issues.append(f"Odds missing: {odds_missing:.1f}%")
+        if not health.get("featured_path"):
+            issues.append("No featured dataset found on disk")
+        if not (health.get("racecards_cache") or {}).get("exists"):
+            issues.append("Racecards cache directory missing")
+
+        if issues:
+            for issue in issues:
+                st.caption(f"• {issue}")
+        else:
+            st.caption("No obvious data-health issues detected in the current prediction state.")
 
 
 def _dataset_cache_paths(data_source: str, days_back: int | None) -> dict[str, str | None]:
@@ -985,6 +1964,8 @@ def _set_training_dataset(
     processed_df: pd.DataFrame | None = None,
     dataset_meta: dict[str, object] | None = None,
 ) -> None:
+    featured_df = _compact_numeric_dtypes(featured_df, label="training featured")
+    processed_df = _compact_numeric_dtypes(processed_df, label="training processed")
     st.session_state.featured_data = featured_df
     st.session_state.train_processed_data = processed_df
     st.session_state.train_dataset_meta = dataset_meta or None
@@ -1146,31 +2127,11 @@ def _set_autotune_dataset(
     processed_df: pd.DataFrame | None = None,
     dataset_meta: dict[str, object] | None = None,
 ) -> None:
+    featured_df = _compact_numeric_dtypes(featured_df, label="autotune featured")
+    processed_df = _compact_numeric_dtypes(processed_df, label="autotune processed")
     st.session_state.autotune_featured_data = featured_df
     st.session_state.autotune_processed_data = processed_df
     st.session_state.autotune_dataset_meta = dataset_meta or None
-
-
-def _set_h2o_dataset(
-    featured_df: pd.DataFrame | None,
-    *,
-    processed_df: pd.DataFrame | None = None,
-    dataset_meta: dict[str, object] | None = None,
-) -> None:
-    st.session_state.h2o_featured_data = featured_df
-    st.session_state.h2o_processed_data = processed_df
-    st.session_state.h2o_dataset_meta = dataset_meta or None
-
-
-def _set_flaml_dataset(
-    featured_df: pd.DataFrame | None,
-    *,
-    processed_df: pd.DataFrame | None = None,
-    dataset_meta: dict[str, object] | None = None,
-) -> None:
-    st.session_state.flaml_featured_data = featured_df
-    st.session_state.flaml_processed_data = processed_df
-    st.session_state.flaml_dataset_meta = dataset_meta or None
 
 
 def _set_model_dataset(
@@ -1178,6 +2139,7 @@ def _set_model_dataset(
     *,
     dataset_meta: dict[str, object] | None = None,
 ) -> None:
+    featured_df = _compact_numeric_dtypes(featured_df, label="prediction featured")
     st.session_state.model_featured_data = featured_df
     st.session_state.model_dataset_meta = dataset_meta or None
 
@@ -1289,12 +2251,11 @@ def _get_processed_history_context() -> tuple[pd.DataFrame | None, dict[str, obj
         _snap = get_run_processed_path(_run_id)
         if _snap and os.path.exists(_snap):
             _mtime = os.path.getmtime(_snap)
-            _hist = _cached_load_df(_snap, _mtime)
-            _last_hist = pd.to_datetime(_hist["race_date"], errors="coerce").max() if _hist is not None and not _hist.empty else None
+            _hist, _last_hist_date = _cached_load_history_context(_snap, _mtime)
             return _hist, {
                 "path": _snap,
                 "mtime": _mtime,
-                "last_hist_date": _last_hist.date() if pd.notna(_last_hist) else None,
+                "last_hist_date": _last_hist_date,
             }
 
     pq_path = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.parquet")
@@ -1303,12 +2264,11 @@ def _get_processed_history_context() -> tuple[pd.DataFrame | None, dict[str, obj
     if not os.path.exists(path):
         return None, {"path": None, "mtime": None, "last_hist_date": None}
     mtime = os.path.getmtime(path)
-    hist = _cached_load_df(path, mtime)
-    last_hist = pd.to_datetime(hist["race_date"], errors="coerce").max() if hist is not None and not hist.empty else None
+    hist, last_hist_date = _cached_load_history_context(path, mtime)
     return hist, {
         "path": path,
         "mtime": mtime,
-        "last_hist_date": last_hist.date() if pd.notna(last_hist) else None,
+        "last_hist_date": last_hist_date,
     }
 
 
@@ -1771,6 +2731,96 @@ def _apply_runtime_linear_tree_flags(
         _cfg["linear_tree"] = bool(_val)
 
 
+def _mask_token(token: str | None) -> str:
+    if not token:
+        return ""
+    if len(token) <= 8:
+        return token
+    return f"{token[:4]}...{token[-4:]}"
+
+
+def _matchbook_events_table(events: list[dict]) -> pd.DataFrame:
+    rows: list[dict] = []
+    for event in events:
+        meta_tags = event.get("meta-tags")
+        country = None
+        if isinstance(meta_tags, dict):
+            country = meta_tags.get("COUNTRY")
+        elif isinstance(meta_tags, list):
+            for item in meta_tags:
+                if isinstance(item, dict):
+                    if item.get("type") == "COUNTRY":
+                        country = item.get("name") or item.get("value")
+                        break
+                    if "COUNTRY" in item:
+                        country = item.get("COUNTRY")
+                        break
+        rows.append({
+            "event_id": event.get("id"),
+            "name": event.get("name"),
+            "start": event.get("start"),
+            "status": event.get("status"),
+            "country": country,
+        })
+    return pd.DataFrame(rows)
+
+
+def _matchbook_markets_table(markets: list[dict]) -> pd.DataFrame:
+    rows: list[dict] = []
+    for market in markets:
+        runners = market.get("runners") or []
+        top_runner = runners[0] if runners else {}
+        prices = top_runner.get("prices") or []
+        best_back = next((p for p in prices if str(p.get("side", "")).lower() in {"back", "win"}), None)
+        best_lay = next((p for p in prices if str(p.get("side", "")).lower() in {"lay", "lose"}), None)
+        rows.append({
+            "market_id": market.get("id"),
+            "market_name": market.get("name"),
+            "market_type": market.get("market-type") or market.get("type"),
+            "status": market.get("status"),
+            "runner_count": len(runners),
+            "sample_runner": top_runner.get("name"),
+            "best_back": None if best_back is None else best_back.get("odds"),
+            "best_lay": None if best_lay is None else best_lay.get("odds"),
+        })
+    return pd.DataFrame(rows)
+
+
+def _build_matchbook_predictions_for_date(date_str: str) -> pd.DataFrame:
+    if st.session_state.predictor is None:
+        if os.path.exists(_ENSEMBLE_MODEL_PATH):
+            load_existing_model()
+            load_model_data(force=True)
+        else:
+            raise MatchbookAPIError("No trained model is available. Train or load a model first.")
+
+    cache = st.session_state.setdefault("matchbook_prediction_cache", {})
+    cached = cache.get(date_str)
+    if isinstance(cached, pd.DataFrame) and not cached.empty:
+        return cached
+
+    cards_df = get_scraped_racecards(date_str=date_str)
+    if cards_df is None or cards_df.empty:
+        raise MatchbookAPIError(f"No Sporting Life racecards were found for {date_str}.")
+
+    cards = cards_df.copy()
+    cards["won"] = 0
+    cards["finish_position"] = 0
+    cards["finish_time_secs"] = 0.0
+    cards["lengths_behind"] = np.nan
+
+    processed = process_data(df=cards, save=False)
+    featured = feature_engineer_with_history(processed)
+    preds = _predict_featured_frame(
+        st.session_state.predictor,
+        featured,
+        ew_fraction=st.session_state.value_config.get("ew_fraction"),
+    )
+    cache[date_str] = preds
+    st.session_state["matchbook_prediction_cache"] = cache
+    return preds
+
+
 # ── Sidebar ──────────────────────────────────────────────────────────
 st.sidebar.title("🏇 Horse Race Predictor")
 st.sidebar.caption("v5.0 — 3-Model Pipeline")
@@ -1781,12 +2831,10 @@ page = st.sidebar.radio(
     [
         "🎓 Train & Tune",
         "🧭 Autotune",
-        "🤖 H2O AutoML",
-        "🤖 FLAML",
-        "🧪 Experiments",
+        " Experiments",
         "🔮 Predict",
         "💰 Today's Picks",
-        "🔁 Backtest",
+        "🔌 Matchbook API",
         "🔎 Shortcomings",
         "⚖️ Strategy Calibrator",
         "📈 Model Insights",
@@ -1877,7 +2925,7 @@ if _sidebar_runs_with_model:
     if st.session_state.predictor is not None:
         _p = st.session_state.predictor
         _mtype = type(_p).__name__
-        _label = "2-Model Pipeline" if _mtype == "TripleEnsemblePredictor" else _mtype
+        _label = "3-Model Pipeline" if _mtype == "TripleEnsemblePredictor" else _mtype
         st.sidebar.success(f"✅ **{_label}**")
     else:
         # Model file exists on disk but isn't loaded yet
@@ -1891,7 +2939,7 @@ elif os.path.exists(_ENSEMBLE_MODEL_PATH):
     if st.session_state.predictor is not None:
         _p = st.session_state.predictor
         _mtype = type(_p).__name__
-        _label = "2-Model Pipeline" if _mtype == "TripleEnsemblePredictor" else _mtype
+        _label = "3-Model Pipeline" if _mtype == "TripleEnsemblePredictor" else _mtype
         st.sidebar.success(f"✅ **{_label}** loaded")
     elif st.sidebar.button("Load Saved Model", key="sidebar_load_legacy"):
         if load_existing_model():
@@ -1919,6 +2967,7 @@ if isinstance(_pending_vc, dict):
     st.session_state.value_config.update(_pending_vc)
     st.session_state["_g_staking_mode"] = st.session_state.value_config.get("staking_mode", "flat")
     st.session_state["_g_value_threshold"] = float(st.session_state.value_config.get("value_threshold", 0.05))
+    st.session_state["_g_value_odds_range"] = _value_odds_range(st.session_state.value_config)
     st.session_state["_g_kelly_fraction"] = float(st.session_state.value_config.get("kelly_fraction", 0.25))
     st.session_state["_g_bankroll"] = float(st.session_state.value_config.get("bankroll", 100.0))
     st.session_state["_g_ew_enabled"] = bool(st.session_state.value_config.get("ew_enabled", True))
@@ -1954,6 +3003,15 @@ with st.sidebar.expander("⚙️ Value Strategy", expanded=False):
             "Minimum *model_prob − implied_prob* edge required "
             "before placing a value bet (base — dynamically scaled by odds)."
         ),
+    )
+    _g_value_odds_range = st.slider(
+        "Win value odds range",
+        min_value=1.0,
+        max_value=101.0,
+        value=_value_odds_range(st.session_state.value_config),
+        step=1.0,
+        key="_g_value_odds_range",
+        help="Only flag win value bets in this odds range. This is a strong ROI lever for longshot control.",
     )
     if _g_staking == "kelly":
         _g_kelly = st.slider(
@@ -2025,6 +3083,8 @@ with st.sidebar.expander("⚙️ Value Strategy", expanded=False):
     st.session_state.value_config = {
         "staking_mode": _g_staking,
         "value_threshold": _g_threshold,
+        "value_min_odds": _g_value_odds_range[0],
+        "value_max_odds": _g_value_odds_range[1],
         "kelly_fraction": _g_kelly,
         "bankroll": _g_bankroll,
         "ew_enabled": _g_ew_enabled,
@@ -2051,12 +3111,13 @@ if page == "🎓 Train & Tune":
     # ── Ensemble overview ────────────────────────────────────────────
     with st.expander("ℹ️ About the Models", expanded=False):
         st.markdown(
-            "The system uses **2 task-specific classifiers**, each optimised for its betting strategy:\n\n"
+            "The system uses **3 coordinated models**:\n\n"
             "| Model | Objective | Task |\n"
             "|-------|-----------|------|\n"
             "| **Win Classifier** | Log-loss / focal | Value Bets — calibrated P(win) for edge detection |\n"
+            "| **Race Ranker** | LambdaRank | Learns within-race ordering and is blended into win scoring |\n"
             "| **Place Classifier** | Log-loss / focal | Each-Way — calibrated P(place) for EW value |\n\n"
-            "Win classifier probabilities are calibrated via Platt scaling. "
+            "Win probabilities are calibrated via Platt scaling after blending the win classifier with the race ranker. "
             "Place classifier uses separate Platt calibration on P(place)."
         )
 
@@ -2130,23 +3191,6 @@ if page == "🎓 Train & Tune":
             "a more realistic view of predictive power."
         ),
     )
-
-    # Columns derived from the raw 'odds' column.  When the user
-    # disables odds these are dropped before training so the model
-    # never sees any market information.
-    _ODDS_DERIVED_COLS = [
-        "implied_prob", "norm_implied_prob", "odds_rank",
-        "is_favourite", "log_odds", "odds_vs_field", "overround",
-        "odds_cv", "implied_prob_vs_base",
-        # Interaction features that incorporate odds data
-        "jockey_elo_x_fav",
-        "mkt_x_win_rate", "logodds_x_elo",
-        "odds_field_x_dropped", "mkt_x_speed",
-        "odds_field_x_jock_elo",
-        "odds_vs_elo_rank",
-        # Historical odds signals (previous race favourite status)
-        "beaten_fav_last",
-    ]
 
     # ── Dataset cache status ─────────────────────────────────────────
     _cache_dir = os.path.join(config.PROCESSED_DATA_DIR, "cache")
@@ -2276,6 +3320,20 @@ if page == "🎓 Train & Tune":
     if _do_prepare:
         _prep_progress = st.progress(0, text="Starting data pipeline …")
 
+        _prep_total_steps = 4 + (3 if data_source != "sample" else 0)
+        _prep_started_at = time.time()
+        _prep_state = {"step": None, "step_started_at": _prep_started_at}
+
+        def _update_prep_progress(step_num: int, text: str, stage_progress: float = 0.0) -> None:
+            _step = min(max(int(step_num), 1), _prep_total_steps)
+            _stage = min(max(float(stage_progress), 0.0), 1.0)
+            if _prep_state["step"] != _step:
+                _prep_state["step"] = _step
+                _prep_state["step_started_at"] = time.time()
+            _overall = ((_step - 1) + _stage) / _prep_total_steps
+            _timing = _progress_timing_text(_prep_started_at, _prep_state["step_started_at"], _stage)
+            _prep_progress.progress(_overall, text=f"Step {_step}/{_prep_total_steps} · {text} · {_timing}")
+
         _cache_paths = _dataset_cache_paths(data_source, int(days_back) if data_source != "sample" else None)
         _cache_key = _cache_paths.get("cache_key")
         _cache_path = _cache_paths.get("featured")
@@ -2283,7 +3341,7 @@ if page == "🎓 Train & Tune":
         _cache_hit = False
 
         if data_source != "sample" and _cache_path and os.path.exists(_cache_path):
-            _prep_progress.progress(10, text="📦 Loading cached dataset …")
+            _update_prep_progress(1, "📦 Loading cached dataset …")
             with st.spinner("Loading cached dataset …"):
                 featured = _cached_load_df(_cache_path, os.path.getmtime(_cache_path))
                 processed = (
@@ -2310,7 +3368,7 @@ if page == "🎓 Train & Tune":
 
         if not _cache_hit:
             # ── Step 1: Collect historical data ──────────────────────
-            _prep_progress.progress(10, text="📊 Collecting historical data …")
+            _update_prep_progress(1, "📊 Collecting historical data …")
             with st.spinner("Collecting data …"):
                 if data_source in ("database", "scrape"):
                     raw_data = collect_data(source=data_source, days_back=days_back)
@@ -2321,7 +3379,7 @@ if page == "🎓 Train & Tune":
 
             # ── Step 1b: Incremental RTV backfill for this window ───
             if data_source != "sample":
-                _prep_progress.progress(15, text="🏇 Updating RTV cache for missing races …")
+                _update_prep_progress(2, "🏇 Updating RTV cache for missing races …")
                 with st.spinner("Checking/fetching missing RTV metrics for this window …"):
                     try:
                         _rtv_stats = backfill_rtv_metrics_for_races(
@@ -2353,7 +3411,7 @@ if page == "🎓 Train & Tune":
             # ── Step 2: Fetch racecards for next 7 days ──────────────
             _future_card_sigs: dict[str, str] = {}  # date_str → signature
             if data_source != "sample":
-                _prep_progress.progress(20, text="🗓️ Fetching racecards for next 7 days …")
+                _update_prep_progress(3, "🗓️ Fetching racecards for next 7 days …")
                 _card_frames: list[pd.DataFrame] = []
                 _today = datetime.now().date()
                 for _offset in range(1, 8):
@@ -2371,13 +3429,15 @@ if page == "🎓 Train & Tune":
                             _card_frames.append(_cards)
                     except Exception as _card_exc:
                         logger.warning("Failed to fetch racecards for %s: %s", _target_str, _card_exc)
+                    _update_prep_progress(3, f"🗓️ Fetching racecards for next 7 days … ({_offset}/7)", _offset / 7)
                 if _card_frames:
                     _future_raw = pd.concat(_card_frames, ignore_index=True)
                     st.success(f"✅ Fetched {len(_future_raw):,} future racecard entries")
                     raw_data = pd.concat([raw_data, _future_raw], ignore_index=True, sort=False)
 
             # ── Step 3: Process combined dataset ─────────────────────
-            _prep_progress.progress(35, text="🔧 Processing combined dataset …")
+            _process_step = 4 if data_source != "sample" else 2
+            _update_prep_progress(_process_step, "🔧 Processing combined dataset …")
             with st.spinner("Cleaning …"):
                 combined_processed = process_data(df=raw_data, save=False)
 
@@ -2393,11 +3453,14 @@ if page == "🎓 Train & Tune":
             st.success(f"✅ {combined_processed.shape[0]:,} records, {combined_processed.shape[1]} columns")
 
             # ── Step 4: Feature-engineer combined dataset (one pass) ─
-            _prep_progress.progress(55, text="⚙️ Engineering features …")
+            _feature_step = 5 if data_source != "sample" else 3
+            _update_prep_progress(_feature_step, "⚙️ Engineering features …")
             with st.spinner("Feature engineering …"):
                 combined_featured = engineer_features(combined_processed, save=False)
 
             # ── Step 5: Split historical vs future ───────────────────
+            _finalise_step = 6 if data_source != "sample" else 4
+            _update_prep_progress(_finalise_step, "🧾 Finalising training dataset …")
             if "_is_future" in combined_featured.columns:
                 future_featured = combined_featured[combined_featured["_is_future"] == 1].copy()
                 featured = combined_featured[combined_featured["_is_future"] == 0].copy()
@@ -2452,13 +3515,17 @@ if page == "🎓 Train & Tune":
                 st.caption(f"💾 Dataset cached as `{_cache_key}`")
 
             # ── Step 6: Store future rows as lookahead cache ─────────
+            if data_source != "sample":
+                _lookahead_step = 7
+                _update_prep_progress(_lookahead_step, "🔮 Updating lookahead cache …")
+
             if not future_featured.empty:
-                _prep_progress.progress(90, text="🔮 Saving lookahead cache …")
                 clear_lookahead_cache()
                 _future_dates = pd.to_datetime(
                     future_featured["race_date"], errors="coerce"
                 ).dt.strftime("%Y-%m-%d").unique()
-                for _fd in sorted(_future_dates):
+                _sorted_future_dates = sorted(_future_dates)
+                for _idx, _fd in enumerate(_sorted_future_dates, start=1):
                     _fd_mask = (
                         pd.to_datetime(future_featured["race_date"], errors="coerce")
                         .dt.strftime("%Y-%m-%d") == _fd
@@ -2466,11 +3533,18 @@ if page == "🎓 Train & Tune":
                     _fd_rows = future_featured[_fd_mask]
                     _fd_sig = _future_card_sigs.get(_fd, cards_signature(_fd_rows))
                     save_lookahead_cache(_fd, _fd_rows, _fd_sig)
-                st.caption(f"🔮 Lookahead cached: {', '.join(sorted(_future_dates))}")
+                    if data_source != "sample":
+                        _update_prep_progress(
+                            _lookahead_step,
+                            f"🔮 Saving lookahead cache … ({_idx}/{len(_sorted_future_dates)})",
+                            _idx / max(len(_sorted_future_dates), 1),
+                        )
+                st.caption(f"🔮 Lookahead cached: {', '.join(_sorted_future_dates)}")
             elif data_source != "sample":
                 st.caption("🔮 No upcoming racecards found for lookahead.")
 
-        _prep_progress.progress(100, text="✅ Data ready!")
+        _prep_elapsed = _format_duration_compact(time.time() - _prep_started_at)
+        _prep_progress.progress(1.0, text=f"✅ Data ready! · elapsed {_prep_elapsed}")
         st.rerun()
 
     st.markdown("---")
@@ -2499,6 +3573,10 @@ if page == "🎓 Train & Tune":
                 index=_framework_options.index(_def_fw) if _def_fw in _framework_options else 0,
                 key=f"fw_{_mk}",
             )
+    if getattr(config, "TRAIN_RANKER", False):
+        st.info(
+            "Race Ranker is enabled for training. It uses **LightGBM LambdaRank** and can now be autotuned as a dedicated study as well."
+        )
 
     st.markdown("---")
 
@@ -2506,23 +3584,24 @@ if page == "🎓 Train & Tune":
     st.subheader("3️⃣ Hyperparameters")
     st.caption(
         "Set hyperparameters per sub-model manually, or let Optuna "
-        "find the best settings for each enabled model automatically."
+        "results from the dedicated Autotune page drive training."
     )
+    if getattr(config, "TRAIN_RANKER", False):
+        st.caption(
+            f"The race ranker is not exposed as a separate manual UI control yet. It is trained automatically alongside the classifier and place model, and saved autotune sessions can now tune it with a dedicated ranker objective. The configured blend weight remains {float(getattr(config, 'RANKER_BLEND_WEIGHT', 0.0)):.2f}."
+        )
 
     tune_mode = st.radio(
         "Tuning mode",
-        ["⚙️ Manual", "📦 Saved Autotune", "🔍 Auto (Optuna)"],
+        ["⚙️ Manual", "📦 Saved Autotune"],
         horizontal=True,
         help=(
             "**Manual** — choose hyperparameters per sub-model with sliders.\n\n"
-            "**Saved Autotune** — reuse persisted Optuna results from the dedicated autotune page.\n\n"
-            "**Auto** — Optuna searches automatically for each enabled "
-            "sub-model, minimising RPS on a validation fold."
+            "**Saved Autotune** — reuse persisted Optuna results from the dedicated Autotune page."
         ),
     )
 
     custom_hp: dict[str, dict] | None = None
-    auto_n_trials: int = 30
     _saved_autotune_session: dict | None = None
 
     if tune_mode == "⚙️ Manual":
@@ -2554,57 +3633,11 @@ if page == "🎓 Train & Tune":
                 prefix=f"hp_{_mk}",
                 hp=custom_hp.get(_mk, {}),
             )
-    elif tune_mode == "🔍 Auto (Optuna)":
-        ac1, ac2 = st.columns([2, 3])
-        with ac1:
-            auto_n_trials = st.slider(
-                "Optuna trials per model", 5, 200, 30, 5,
-                key="auto_trials",
-                help=(
-                    "More trials = better search but slower.  "
-                    "5 is enough for a smoke test; 30 is a good default; 100+ for thorough search.  "
-                    "Each enabled model gets its own Optuna study."
-                ),
-            )
-        with ac2:
-            st.caption(
-                "Optuna will create a temporal train/validation split "
-                "and search hyperparameter combinations per sub-model, "
-                "optimising each model's own metric (LogLoss).  "
-                "The best params for each model are then used to "
-                "retrain on the full training set."
-            )
-        with st.expander("Search space", expanded=False):
-            for _mk, _label in _TASK_MODELS.items():
-                _fw = _frameworks.get(_mk, "lgbm")
-                _specs = get_autotune_search_space(_mk, _fw, include_recency=True)
-                _rows = []
-                for _spec in _specs:
-                    if _spec.get("kind") == "fixed":
-                        _rows.append({
-                            "Parameter": _spec["name"],
-                            "Distribution": "fixed",
-                            "Range / Value": str(_spec.get("value")),
-                        })
-                    else:
-                        _range = f"{_spec.get('low')} → {_spec.get('high')}"
-                        if _spec.get("step") is not None:
-                            _range += f" (step {_spec.get('step')})"
-                        _dist = "log-uniform" if _spec.get("log") else "uniform"
-                        if _spec.get("kind") == "int":
-                            _dist = f"int {_dist}"
-                        _rows.append({
-                            "Parameter": _spec["name"],
-                            "Distribution": _dist,
-                            "Range / Value": _range,
-                        })
-                st.markdown(f"**{_label}** via `{_fw}`")
-                st.dataframe(pd.DataFrame(_rows), width="stretch", hide_index=True)
     else:
         _autotune_sessions = list_autotune_sessions()
         if not _autotune_sessions:
             st.warning(
-                "No saved autotune sessions found yet. Use the 🧭 Autotune page first, or switch to Manual/Auto."
+                "No saved autotune sessions found yet. Use the 🧭 Autotune page first, or switch to Manual."
             )
         else:
             _labels = []
@@ -2664,7 +3697,7 @@ if page == "🎓 Train & Tune":
         days_back=(_name_days if _name_days is not None else None),
         include_odds=bool(include_odds),
         tune_mode_label=tune_mode,
-        auto_trials=auto_n_trials,
+        auto_trials=0,
     )
     exp_name = st.text_input(
         "Experiment name (optional)",
@@ -2807,8 +3840,7 @@ if page == "🎓 Train & Tune":
 
         # Drop odds-derived features if the user opted out
         if not include_odds:
-            _to_drop = [c for c in _ODDS_DERIVED_COLS if c in featured.columns]
-            featured = featured.drop(columns=_to_drop)
+            featured, _to_drop = _drop_market_feature_columns(featured)
             st.info(
                 f"🚫 Odds features disabled — dropped {len(_to_drop)} "
                 f"market columns (form-only model)"
@@ -2827,16 +3859,26 @@ if page == "🎓 Train & Tune":
 
         t0 = time.time()
         progress = st.progress(0, text="Starting training …")
+        _train_total_steps = 1 if skip_wf else 2
+        _train_state = {"step": None, "step_started_at": t0}
+
+        def _update_train_progress(step_num: int, text: str, stage_progress: float = 0.0) -> None:
+            _step = min(max(int(step_num), 1), _train_total_steps)
+            _stage = min(max(float(stage_progress), 0.0), 1.0)
+            if _train_state["step"] != _step:
+                _train_state["step"] = _step
+                _train_state["step_started_at"] = time.time()
+            _overall = ((_step - 1) + _stage) / _train_total_steps
+            _timing = _progress_timing_text(t0, _train_state["step_started_at"], _stage)
+            progress.progress(_overall, text=f"Step {_step}/{_train_total_steps} · {text} · {_timing}")
 
         if not skip_wf:
             # ── Walk-forward backtest ────────────────────────────────
-            progress.progress(5, text="🔁 Starting walk-forward validation …")
+            _update_train_progress(1, "🔁 Starting walk-forward validation …")
             _vc = _value_config or {}
 
             def _wf_progress_cb(msg: str, pct: float) -> None:
-                """Map WF progress (0-1) into the 5-55% range of overall progress."""
-                overall = 0.05 + pct * 0.50
-                progress.progress(min(overall, 0.55), text=f"🔁 {msg}")
+                _update_train_progress(1, f"🔁 {msg}", pct)
 
             wf_report = walk_forward_validation(
                 featured,
@@ -2852,42 +3894,38 @@ if page == "🎓 Train & Tune":
             st.session_state.wf_report = wf_report
 
             n_folds = len(wf_report.get("folds", []))
-            progress.progress(60, text=f"✅ {n_folds} folds complete — retraining final model …")
+            _update_train_progress(
+                1,
+                f"✅ Walk-forward complete ({n_folds} folds)",
+                1.0,
+            )
         else:
             st.session_state.wf_report = None
-            progress.progress(5, text="⏭️ Skipping walk-forward — training final model …")
+            _update_train_progress(1, "⏭️ Walk-forward skipped — starting final model calibration and training …")
 
         # ── Retrain final model on ALL data for live predictions ─────
-        _auto_tune_cfg: dict | None = None
-        if tune_mode == "🔍 Auto (Optuna)":
-            _auto_tune_cfg = {"n_trials": auto_n_trials}
-            st.info(
-                f"🔍 Optuna will auto-tune each enabled sub-model "
-                f"({auto_n_trials} trials per model) during final retraining."
-            )
-        elif tune_mode == "📦 Saved Autotune" and not custom_hp:
+        if tune_mode == "📦 Saved Autotune" and not custom_hp:
             st.error("The selected autotune session does not contain usable best parameters.")
             st.stop()
 
         def _training_cb(msg: str, pct: float) -> None:
-            if skip_wf:
-                overall = 0.05 + pct * 0.90
-            else:
-                overall = 0.60 + pct * 0.35
-            progress.progress(min(overall, 0.95), text=f"🤖 {msg}")
+            _train_step = 1 if skip_wf else 2
+            _update_train_progress(_train_step, f"🤖 {msg}", pct)
+
+        if not skip_wf:
+            _update_train_progress(2, "🤖 Starting final model calibration and training …")
 
         predictor = TripleEnsemblePredictor(frameworks=_frameworks)
         metrics = predictor.train(
             featured, params=custom_hp, progress_callback=_training_cb,
             value_config=_value_config,
-            auto_tune=_auto_tune_cfg,
         )
 
         elapsed = time.time() - t0
         st.session_state.predictor = predictor
         st.session_state.metrics = metrics
 
-        progress.progress(100, text="✅ Complete!")
+        progress.progress(1.0, text=f"✅ Complete! · elapsed {_format_duration_compact(time.time() - t0)}")
 
         # ── Results ──────────────────────────────────────────────────
         st.markdown("### 📊 Results")
@@ -2984,6 +4022,7 @@ if page == "🎓 Train & Tune":
 
         _model_display = {
             "win_classifier": ("Win Classifier (Value)", predictor.frameworks.get("classifier", "?").upper()),
+            "ranker": ("Race Ranker (LambdaRank)", "LGBM"),
             "place_classifier": ("Place Classifier (EW)", predictor.frameworks.get("place", "?").upper()),
         }
 
@@ -3001,6 +4040,12 @@ if page == "🎓 Train & Tune":
                 row["VB Exp ROI %"] = m.get("value_bet_exp_roi_pct")
                 row["VB Brier"] = m.get("value_bet_brier")
                 row["Avg Edge"] = m.get("avg_edge")
+            elif mk == "ranker":
+                row["Brier Score"] = m.get("brier_score")
+                row["ECE"] = m.get("ece")
+                row["RPS"] = m.get("rps")
+                row["NDCG@1"] = m.get("ndcg_at_1")
+                row["Top-1"] = m.get("top1_accuracy")
             elif mk == "place_classifier":
                 row["Brier (cal)"] = m.get("brier_calibrated")
                 row["Brier (raw)"] = m.get("brier_raw")
@@ -3387,8 +4432,8 @@ if page == "🎓 Train & Tune":
             "wf_min_train_months": int(wf_min_train),
             "wf_fast_fold": bool(wf_fast_fold),
             "include_odds": bool(include_odds),
-            "tuning_mode": "auto" if tune_mode == "🔍 Auto (Optuna)" else ("saved" if tune_mode == "📦 Saved Autotune" else "manual"),
-            "auto_tune_trials": int(auto_n_trials) if tune_mode == "🔍 Auto (Optuna)" else None,
+            "tuning_mode": "saved" if tune_mode == "📦 Saved Autotune" else "manual",
+            "auto_tune_trials": None,
             "saved_autotune_session_id": (_saved_autotune_session or {}).get("session_id"),
             "saved_autotune_session_name": (_saved_autotune_session or {}).get("name"),
             "frameworks": dict(_frameworks),
@@ -3411,7 +4456,7 @@ if page == "🎓 Train & Tune":
             "data_source": _train_ds_meta.get("data_source", data_source),
             "data_rows": len(featured),
             "n_features": len(get_feature_columns(featured)),
-            "tuning_mode": "auto" if tune_mode == "🔍 Auto (Optuna)" else ("saved" if tune_mode == "📦 Saved Autotune" else "manual"),
+            "tuning_mode": "saved" if tune_mode == "📦 Saved Autotune" else "manual",
             "hyperparameters": custom_hp if custom_hp else {},
             "metrics": {
                 k: round(v, 4) if isinstance(v, float) else v
@@ -3434,11 +4479,7 @@ if page == "🎓 Train & Tune":
                 "value_pnl": round(float(_wf_s["value_pnl"].sum()), 2),
                 "ew_pnl": round(float(_wf_s["ew_pnl"].sum()), 2),
             }
-        if _auto_tune_cfg is not None:
-            exp_entry["auto_tune"] = {
-                "n_trials": _auto_tune_cfg.get("n_trials"),
-            }
-        elif _saved_autotune_session is not None:
+        if _saved_autotune_session is not None:
             exp_entry["saved_autotune"] = {
                 "session_id": _saved_autotune_session.get("session_id"),
                 "name": _saved_autotune_session.get("name"),
@@ -3453,11 +4494,7 @@ if page == "🎓 Train & Tune":
         )
 
         _auto_info = None
-        if _auto_tune_cfg is not None:
-            _auto_info = {
-                "n_trials": _auto_tune_cfg.get("n_trials"),
-            }
-        elif _saved_autotune_session is not None:
+        if _saved_autotune_session is not None:
             _auto_info = {
                 "mode": "saved",
                 "session_id": _saved_autotune_session.get("session_id"),
@@ -3591,6 +4628,12 @@ elif page == "🧭 Autotune":
     st.markdown("---")
     st.subheader("2️⃣ Study Setup")
     _task_models = {"classifier": "Win Classifier", "place": "Place Classifier"}
+    if getattr(config, "TRAIN_RANKER", False):
+        _task_models["ranker"] = "Race Ranker"
+        st.info(
+            "The dedicated Autotune page can now tune the race ranker as its own LightGBM LambdaRank study. "
+            "Because the objective family changed, older autotune sessions cannot be resumed into this build."
+        )
     _at_name = st.text_input(
         "Study name",
         value=f"autotune_{datetime.now():%m%d_%H%M}",
@@ -3605,26 +4648,45 @@ elif page == "🧭 Autotune":
     )
     _setup_c1, _setup_c2 = st.columns(2)
     with _setup_c1:
-        _at_trials = st.slider("Trials per model", 5, 200, 40, 5, key="_autotune_trials")
+        _at_trials = st.slider("Trials per model", 1, 200, 40, 5, key="_autotune_trials")
     with _setup_c2:
-        _at_folds = st.slider("Purged walk-forward folds", 1, 5, 3, 1, key="_autotune_folds")
+        _at_folds = st.slider("Purged walk-forward folds", 1, 5, 2, 1, key="_autotune_folds")
+    _at_include_odds = st.checkbox(
+        "Include odds / market features",
+        value=False,
+        key="_autotune_include_odds",
+        help=(
+            "Same behavior as Train & Tune. Disable this to drop all odds-derived "
+            "market columns before autotuning so the study is run on a form-only feature set."
+        ),
+    )
+    st.caption("When starting a new session this is the initial trial count per model. When resuming, it adds this many extra trials per model.")
     if _at_folds == 1:
         st.caption("Single split: the training window is used as-is with a purged validation window at the end. Faster but less robust.")
     else:
         st.caption("Optuna scores each trial by averaging the objective over purged walk-forward folds built from the outer training split.")
 
     _at_frameworks: dict[str, str] = {}
-    _fw_cols = st.columns(2)
+    _fw_cols = st.columns(len(_task_models))
     _fw_defaults = dict(getattr(config, "SUB_MODEL_FRAMEWORKS", {}))
     for _idx, (_mk, _label) in enumerate(_task_models.items()):
         with _fw_cols[_idx]:
-            _def_fw = _fw_defaults.get(_mk, "lgbm")
-            _at_frameworks[_mk] = st.selectbox(
-                _label,
-                options=["lgbm", "xgb", "cat"],
-                index=["lgbm", "xgb", "cat"].index(_def_fw) if _def_fw in ["lgbm", "xgb", "cat"] else 0,
-                key=f"_autotune_fw_{_mk}",
-            )
+            if _mk == "ranker":
+                _at_frameworks[_mk] = st.selectbox(
+                    _label,
+                    options=["lgbm"],
+                    index=0,
+                    key=f"_autotune_fw_{_mk}",
+                    help="The ranker uses LightGBM LambdaRank.",
+                )
+            else:
+                _def_fw = _fw_defaults.get(_mk, "lgbm")
+                _at_frameworks[_mk] = st.selectbox(
+                    _label,
+                    options=["lgbm", "xgb", "cat"],
+                    index=["lgbm", "xgb", "cat"].index(_def_fw) if _def_fw in ["lgbm", "xgb", "cat"] else 0,
+                    key=f"_autotune_fw_{_mk}",
+                )
 
     st.markdown("#### Search Space")
     st.caption(
@@ -3664,10 +4726,14 @@ elif page == "🧭 Autotune":
                 })
 
             st.dataframe(pd.DataFrame(_rows), width="stretch", hide_index=True)
+            _objective_label = AUTOTUNE_MODEL_INFO.get(_mk, {}).get("training_metric", "Hybrid objective")
+            _objective_summary = AUTOTUNE_MODEL_INFO.get(_mk, {}).get("objective_summary", "")
             if _at_folds == 1:
-                st.caption(f"Objective for this model: LogLoss on a single purged validation split.")
+                st.caption(f"Objective for this model: {_objective_label} on a single purged validation split.")
             else:
-                st.caption(f"Objective for this model: mean LogLoss across {_at_folds} purged walk-forward folds.")
+                st.caption(f"Objective for this model: mean {_objective_label} across {_at_folds} purged walk-forward folds.")
+            if _objective_summary:
+                st.caption(_objective_summary)
 
     _progress_box = st.empty()
     _progress_bar = st.progress(0, text="Idle")
@@ -3690,7 +4756,7 @@ elif page == "🧭 Autotune":
         if stage == "setup":
             _progress_bar.progress(0.05, text="Preparing purged walk-forward folds")
             _progress_box.info(
-                f"{payload.get('message', 'Preparing autotune splits')} · target folds {payload.get('target_folds', _at_folds)}"
+                f"{payload.get('message', 'Preparing autotune splits')} · target folds {payload.get('target_folds', _at_folds)} · +{payload.get('requested_trials', _at_trials)} trials/model"
             )
             return
 
@@ -3739,9 +4805,13 @@ elif page == "🧭 Autotune":
         if not _at_models:
             st.error("Select at least one model to tune.")
             st.stop()
+        _at_featured_run = _at_featured.copy()
+        if not _at_include_odds:
+            _at_featured_run, _dropped = _drop_market_feature_columns(_at_featured_run)
+            st.info(f"🚫 Odds features disabled — dropped {len(_dropped)} market columns before autotuning.")
         _new_session = create_autotune_session(
             name=_at_name.strip() or f"autotune_{datetime.now():%Y%m%d_%H%M%S}",
-            dataset_meta=_at_meta,
+            dataset_meta={**_at_meta, "include_odds": bool(_at_include_odds)},
             frameworks=_at_frameworks,
             models=_at_models,
             n_trials=int(_at_trials),
@@ -3749,15 +4819,17 @@ elif page == "🧭 Autotune":
         )
         _manifest = run_autotune_session(
             session_id=_new_session["session_id"],
-            featured_df=_at_featured.copy(),
+            featured_df=_at_featured_run,
             frameworks=_at_frameworks,
             models=_at_models,
             n_trials=int(_at_trials),
             n_folds=int(_at_folds),
             progress_callback=_render_autotune_progress,
         )
+        st.session_state["_autotune_focus_session_id"] = _manifest.get("session_id")
         _progress_bar.progress(1.0, text="Autotune complete")
         _progress_box.success(f"Saved autotune session {_manifest.get('name')} ({_manifest.get('session_id')}).")
+        st.rerun()
 
     if _resume_clicked and _resume_target:
         if not isinstance(_at_featured, pd.DataFrame):
@@ -3767,17 +4839,24 @@ elif page == "🧭 Autotune":
         if _resume_manifest is None:
             st.error("Selected autotune session could not be loaded.")
             st.stop()
+        _resume_include_odds = bool((_resume_manifest.get("dataset_meta") or {}).get("include_odds", True))
+        _at_featured_run = _at_featured.copy()
+        if not _resume_include_odds:
+            _at_featured_run, _dropped = _drop_market_feature_columns(_at_featured_run)
+            st.info(f"🚫 Odds features disabled — dropped {len(_dropped)} market columns before resuming autotune.")
         _manifest = run_autotune_session(
             session_id=_resume_target,
-            featured_df=_at_featured.copy(),
+            featured_df=_at_featured_run,
             frameworks=dict(_resume_manifest.get("frameworks") or {}),
             models=list(_resume_manifest.get("models") or []),
             n_trials=int(_at_trials),
             n_folds=int(_resume_manifest.get("target_folds") or _at_folds),
             progress_callback=_render_autotune_progress,
         )
+        st.session_state["_autotune_focus_session_id"] = _manifest.get("session_id")
         _progress_bar.progress(1.0, text="Autotune resume complete")
         _progress_box.success(f"Resumed autotune session {_manifest.get('name')} ({_manifest.get('session_id')}).")
+        st.rerun()
 
     st.markdown("---")
     st.subheader("3️⃣ Saved Sessions")
@@ -3785,17 +4864,25 @@ elif page == "🧭 Autotune":
     if not _at_sessions:
         st.info("No autotune sessions saved yet.")
     else:
-        _session_labels = []
-        _session_lookup = {}
-        for _session in _at_sessions:
-            _meta = _session.get("dataset_meta") or {}
-            _label = (
-                f"{_session.get('name', _session.get('session_id'))} · {_session.get('status', 'unknown')} · "
-                f"{_meta.get('data_source', '?')} {_meta.get('actual_days') or '—'}d · {_session.get('updated_at', '')[:16]}"
-            )
-            _session_labels.append(_label)
-            _session_lookup[_label] = _session
-        _selected_session = _session_lookup[st.selectbox("Saved sessions", _session_labels, key="_autotune_session_picker")]
+        _session_lookup = {_session.get("session_id"): _session for _session in _at_sessions}
+        _focus_session_id = st.session_state.pop("_autotune_focus_session_id", None)
+        if _focus_session_id in _session_lookup:
+            st.session_state["_autotune_session_picker"] = _focus_session_id
+        elif st.session_state.get("_autotune_session_picker") not in _session_lookup:
+            st.session_state["_autotune_session_picker"] = _at_sessions[0].get("session_id")
+
+        _selected_session_id = st.selectbox(
+            "Saved sessions",
+            options=list(_session_lookup.keys()),
+            format_func=lambda sid: (
+                f"{_session_lookup[sid].get('name', sid)} · {_session_lookup[sid].get('status', 'unknown')} · "
+                f"{(_session_lookup[sid].get('dataset_meta') or {}).get('data_source', '?')} "
+                f"{((_session_lookup[sid].get('dataset_meta') or {}).get('actual_days') or '—')}d · "
+                f"{_session_lookup[sid].get('updated_at', '')[:16]}"
+            ),
+            key="_autotune_session_picker",
+        )
+        _selected_session = _session_lookup[_selected_session_id]
         _sel_meta = _selected_session.get("dataset_meta") or {}
         _s1, _s2, _s3, _s4 = st.columns(4)
         _s1.metric("Status", _selected_session.get("status", "—"))
@@ -3867,611 +4954,108 @@ elif page == "🧭 Autotune":
                 import optuna
 
                 _trial_df = _study.trials_dataframe().drop(
-                    columns=[c for c in _study.trials_dataframe().columns if c.startswith("user_attrs_") or c.startswith("system_attrs_")],
+                    columns=[c for c in _study.trials_dataframe().columns if c.startswith("system_attrs_")],
                     errors="ignore",
                 )
+                _completed_trials = _study.get_trials(states=(optuna.trial.TrialState.COMPLETE,), deepcopy=False)
+                _shared_search_space = optuna.search_space.intersection_search_space(_completed_trials)
+                _shared_params = set(_shared_search_space.keys())
+                _param_names = sorted({key for trial in _completed_trials for key in trial.params.keys()})
+                _varying_params = []
+                _constant_params = []
+                for _param_name in _param_names:
+                    _values = {
+                        trial.params[_param_name]
+                        for trial in _completed_trials
+                        if _param_name in trial.params
+                    }
+                    if len(_values) >= 2:
+                        _varying_params.append(_param_name)
+                    else:
+                        _constant_params.append(_param_name)
+                _stable_varying_params = [p for p in _varying_params if p in _shared_params]
+                _dynamic_only_params = [p for p in _varying_params if p not in _shared_params]
+
+                _best_attrs = {
+                    k: v for k, v in (_study.best_trial.user_attrs or {}).items()
+                    if isinstance(v, (int, float))
+                }
+                _objective_name = _study.user_attrs.get("objective_name") or AUTOTUNE_MODEL_INFO.get(_viz_model, {}).get("training_metric", "Objective")
+
+                st.markdown(f"#### {AUTOTUNE_MODEL_INFO.get(_viz_model, {}).get('label', _viz_model)} Study")
+                _ov1, _ov2, _ov3, _ov4 = st.columns(4)
+                _ov1.metric("Objective", _objective_name)
+                _ov2.metric("Direction", str(_study.user_attrs.get("objective_direction", "maximize")).title())
+                _ov3.metric("Trials", len(_study.trials))
+                _ov4.metric("Best Score", f"{_study.best_value:.4f}")
+                if _best_attrs:
+                    _attrs_df = pd.DataFrame(
+                        [{"Metric": _metric_label(k) if _is_diagnostic_metric(k) else k.replace("_", " ").title(), "Value": v} for k, v in _best_attrs.items()]
+                    )
+                    with st.expander("Best trial components", expanded=False):
+                        st.dataframe(_attrs_df, width="stretch", hide_index=True)
 
                 _vt1, _vt2 = st.tabs(["Charts", "Trials"])
                 with _vt1:
                     st.plotly_chart(optuna.visualization.plot_optimization_history(_study), width="stretch")
                     _c1, _c2 = st.columns(2)
                     with _c1:
-                        st.plotly_chart(optuna.visualization.plot_param_importances(_study), width="stretch")
+                        if _stable_varying_params:
+                            st.plotly_chart(
+                                optuna.visualization.plot_param_importances(_study, params=_stable_varying_params),
+                                width="stretch",
+                            )
+                        else:
+                            st.info("Parameter importance becomes available once at least one shared tuned parameter varies across completed trials.")
                     with _c2:
-                        st.plotly_chart(optuna.visualization.plot_parallel_coordinate(_study), width="stretch")
+                        if _stable_varying_params:
+                            st.plotly_chart(
+                                optuna.visualization.plot_parallel_coordinate(_study, params=_stable_varying_params),
+                                width="stretch",
+                            )
+                        else:
+                            st.info("Parallel-coordinate plots need at least one parameter with multiple tested values.")
+                    if _constant_params:
+                        st.caption(
+                            "Omitted constant parameters from charts: "
+                            + ", ".join(_constant_params[:12])
+                            + (" ..." if len(_constant_params) > 12 else "")
+                        )
+                    if _dynamic_only_params:
+                        st.caption(
+                            "Omitted dynamic-space parameters from Optuna charts: "
+                            + ", ".join(_dynamic_only_params[:12])
+                            + (" ..." if len(_dynamic_only_params) > 12 else "")
+                        )
                     if len(_trial_df) >= 2:
-                        st.plotly_chart(optuna.visualization.plot_slice(_study), width="stretch")
+                        _c3, _c4 = st.columns(2)
+                        with _c3:
+                            if _stable_varying_params:
+                                st.plotly_chart(optuna.visualization.plot_slice(_study, params=_stable_varying_params), width="stretch")
+                        with _c4:
+                            try:
+                                if len(_stable_varying_params) >= 2:
+                                    st.plotly_chart(
+                                        optuna.visualization.plot_contour(_study, params=_stable_varying_params[:6]),
+                                        width="stretch",
+                                    )
+                            except Exception:
+                                pass
+                        _c5, _c6 = st.columns(2)
+                        with _c5:
+                            try:
+                                st.plotly_chart(optuna.visualization.plot_edf(_study), width="stretch")
+                            except Exception:
+                                pass
+                        with _c6:
+                            try:
+                                st.plotly_chart(optuna.visualization.plot_timeline(_study), width="stretch")
+                            except Exception:
+                                pass
                 with _vt2:
                     st.dataframe(_trial_df, width="stretch", hide_index=True)
             except Exception as exc:
                 st.warning(f"Could not render Optuna visualisations for this study: {exc}")
-
-
-# =====================================================================
-#  H2O AUTOML
-# =====================================================================
-elif page == "🤖 H2O AutoML":
-    st.title("🤖 H2O AutoML")
-    st.caption(
-        "Run fast multi-model experiments with H2O AutoML using the same leak-safe dataset split as your main training pipeline."
-    )
-
-    _h2o_ok, _h2o_err = h2o_is_available()
-    if not _h2o_ok:
-        st.error("H2O is not installed in this environment.")
-        st.code("pip install h2o", language="bash")
-        st.caption(f"Import error: {_h2o_err}")
-        st.stop()
-
-    st.markdown("---")
-    st.subheader("1️⃣ Dataset")
-    _h2o_dataset_mode = st.radio(
-        "Dataset source",
-        ["Use current Train & Tune dataset", "Load latest featured dataset", "Build fresh dataset"],
-        horizontal=True,
-        key="_h2o_dataset_mode",
-    )
-
-    if _h2o_dataset_mode == "Use current Train & Tune dataset":
-        if st.session_state.featured_data is not None:
-            if st.button("Use loaded training dataset", key="_h2o_use_train_ds"):
-                _set_h2o_dataset(
-                    st.session_state.featured_data.copy(),
-                    processed_df=st.session_state.get("train_processed_data"),
-                    dataset_meta=dict(st.session_state.get("train_dataset_meta") or {}),
-                )
-                st.session_state.h2o_automl_result = None
-                st.success("Current training dataset copied into the H2O workspace.")
-        else:
-            st.warning("No training dataset is loaded yet. Prepare one on Train & Tune, load latest featured data, or build fresh here.")
-    elif _h2o_dataset_mode == "Load latest featured dataset":
-        _global_featured = _global_featured_dataset_path()
-        if _global_featured and os.path.exists(_global_featured):
-            if st.button("Load latest featured dataset from disk", key="_h2o_load_global"):
-                _featured = _cached_load_df(_global_featured, os.path.getmtime(_global_featured))
-                _set_h2o_dataset(
-                    _featured,
-                    dataset_meta=_dataset_meta_from_frame(
-                        _featured,
-                        data_source="disk",
-                        requested_days=None,
-                        featured_path=_global_featured,
-                        origin="h2o_global_featured",
-                    ),
-                )
-                st.session_state.h2o_automl_result = None
-                st.success("Loaded the latest featured dataset from disk.")
-        else:
-            st.warning("No global featured dataset file found yet.")
-    else:
-        _hd1, _hd2 = st.columns([2, 2])
-        with _hd1:
-            _h2o_source = st.selectbox("Data source", ["database", "scrape", "sample"], key="_h2o_source")
-        with _hd2:
-            if _h2o_source == "sample":
-                _h2o_num_races = st.slider("Sample races", 500, 5000, 1500, 100, key="_h2o_num_races")
-                _h2o_days_back = None
-            else:
-                _h2o_num_races = 1500
-                _h2o_days_back = st.slider("Days of history", 1, 2000, 90, 7, key="_h2o_days_back")
-        if st.button("📦 Prepare H2O dataset", type="secondary", key="_h2o_prepare"):
-            _prep = st.progress(0, text="Preparing H2O dataset …")
-            _prep.progress(10, text="Collecting and processing data …")
-            _featured, _processed, _meta = build_autotune_dataset(
-                data_source=_h2o_source,
-                days_back=_h2o_days_back,
-                num_races=_h2o_num_races,
-            )
-            _prep.progress(100, text="Dataset ready")
-            _set_h2o_dataset(_featured, processed_df=_processed, dataset_meta=_meta)
-            st.session_state.h2o_automl_result = None
-            st.success(f"Prepared {_meta.get('rows', 0):,} rows for H2O AutoML.")
-
-    _h2o_featured = st.session_state.get("h2o_featured_data")
-    _h2o_meta = st.session_state.get("h2o_dataset_meta") or {}
-    if isinstance(_h2o_featured, pd.DataFrame):
-        st.success(
-            f"H2O dataset ready: {_h2o_meta.get('rows', len(_h2o_featured)):,} rows · "
-            f"{_h2o_meta.get('months') or '—'} months · {_h2o_meta.get('date_start') or '?'} → {_h2o_meta.get('date_end') or '?'}"
-        )
-    else:
-        st.info("Load or prepare a dataset to run H2O AutoML.")
-
-    st.markdown("---")
-    st.subheader("2️⃣ AutoML Setup")
-    _hs1, _hs2, _hs3 = st.columns(3)
-    with _hs1:
-        _h2o_target = st.selectbox(
-            "Target",
-            options=["won", "placed"],
-            format_func=lambda x: "Winner (won)" if x == "won" else "Placed (placed)",
-            key="_h2o_target",
-        )
-    with _hs2:
-        _h2o_max_models = st.slider("Max models", 5, 100, 25, 5, key="_h2o_max_models")
-    with _hs3:
-        _h2o_max_runtime = st.slider(
-            "Max runtime (seconds, 0 = unlimited)",
-            0,
-            7200,
-            900,
-            60,
-            key="_h2o_max_runtime",
-        )
-
-    _hs4, _hs5 = st.columns(2)
-    with _hs4:
-        _h2o_sort_metric = st.selectbox(
-            "Sort metric",
-            options=["AUC", "logloss", "mean_per_class_error", "AUCPR"],
-            key="_h2o_sort_metric",
-        )
-    with _hs5:
-        _h2o_balance = st.checkbox("Balance classes", value=True, key="_h2o_balance")
-
-    _h2o_exclude = st.multiselect(
-        "Exclude algorithms (optional)",
-        options=["DeepLearning", "DRF", "GBM", "GLM", "XGBoost", "StackedEnsemble", "XRT"],
-        default=[],
-        key="_h2o_exclude_algos",
-    )
-
-    st.markdown("#### Stacking & Blending")
-    _sb1, _sb2, _sb3 = st.columns(3)
-    with _sb1:
-        _h2o_enable_stacking = st.checkbox(
-            "Enable stacked ensembles",
-            value=True,
-            key="_h2o_enable_stacking",
-            help="Allow AutoML to build StackedEnsemble models (BestOfFamily / AllModels).",
-        )
-    with _sb2:
-        _h2o_use_blending = st.checkbox(
-            "Use blending holdout",
-            value=False,
-            key="_h2o_use_blending",
-            help="Use a dedicated holdout inside training for ensemble metalearner fitting.",
-        )
-    with _sb3:
-        _h2o_nfolds = st.slider(
-            "CV folds (nfolds)",
-            min_value=0,
-            max_value=10,
-            value=5,
-            step=1,
-            key="_h2o_nfolds",
-            help="Cross-validation folds for base learners. When blending is enabled, this is forced to 0.",
-        )
-
-    _h2o_blend_frac = 0.15
-    if _h2o_use_blending:
-        _h2o_blend_frac = st.slider(
-            "Blending holdout fraction",
-            min_value=0.05,
-            max_value=0.40,
-            value=0.15,
-            step=0.05,
-            key="_h2o_blend_frac",
-            help="Fraction of the training split reserved as blending frame.",
-        )
-        if not _h2o_enable_stacking:
-            st.info("Blending is mainly useful for stacked ensembles. Consider enabling stacked ensembles.")
-
-    if st.button("🚀 Run H2O AutoML", type="primary", width="stretch", key="_h2o_run"):
-        if not isinstance(_h2o_featured, pd.DataFrame):
-            st.error("Prepare a dataset first.")
-            st.stop()
-
-        with st.spinner("Running H2O AutoML on the current pipeline split …"):
-            try:
-                _h2o_result = run_h2o_automl(
-                    _h2o_featured.copy(),
-                    target=_h2o_target,
-                    max_models=int(_h2o_max_models),
-                    max_runtime_secs=(None if int(_h2o_max_runtime) == 0 else int(_h2o_max_runtime)),
-                    sort_metric=_h2o_sort_metric,
-                    seed=getattr(config, "RANDOM_SEED", 42),
-                    balance_classes=bool(_h2o_balance),
-                    exclude_algos=list(_h2o_exclude),
-                    nfolds=int(_h2o_nfolds),
-                    use_blending=bool(_h2o_use_blending),
-                    blending_fraction=float(_h2o_blend_frac),
-                    include_stacked_ensembles=bool(_h2o_enable_stacking),
-                )
-                st.session_state.h2o_automl_result = _h2o_result
-                st.success("H2O AutoML run complete.")
-            except Exception as _h2o_exc:
-                st.error(f"H2O AutoML failed: {_h2o_exc}")
-
-    _h2o_result = st.session_state.get("h2o_automl_result")
-    if isinstance(_h2o_result, dict):
-        st.markdown("---")
-        st.subheader("3️⃣ Results")
-        _m = _h2o_result.get("metrics") or {}
-
-        def _fmt_metric(v, pct: bool = False) -> str:
-            if v is None:
-                return "—"
-            try:
-                fv = float(v)
-            except Exception:
-                return "—"
-            return f"{fv:.1%}" if pct else f"{fv:.4f}"
-
-        _r1, _r2, _r3, _r4 = st.columns(4)
-        _r1.metric("Leader Model", str(_h2o_result.get("leader_model_id", "—")))
-        _r2.metric("Brier", _fmt_metric(_m.get("brier")))
-        _r3.metric("LogLoss", _fmt_metric(_m.get("log_loss")))
-        _r4.metric("ROC AUC", _fmt_metric(_m.get("roc_auc")))
-
-        _r5, _r6, _r7, _r8 = st.columns(4)
-        _r5.metric("Accuracy", _fmt_metric(_m.get("accuracy"), pct=True))
-        _r6.metric("Top-1 Accuracy", _fmt_metric(_m.get("top1_accuracy"), pct=True))
-        _r7.metric("NDCG@1", _fmt_metric(_m.get("ndcg_at_1")))
-        _r8.metric("Precision", _fmt_metric(_m.get("precision"), pct=True))
-
-        st.caption(
-            f"Train rows: {_h2o_result.get('n_train_rows', 0):,} · "
-            f"Test rows: {_h2o_result.get('n_test_rows', 0):,} · "
-            f"Features: {_h2o_result.get('n_features', 0):,}"
-        )
-        _h2o_settings = _h2o_result.get("settings") or {}
-        st.caption(
-            f"Stacking: {'on' if _h2o_settings.get('include_stacked_ensembles', True) else 'off'} · "
-            f"Blending: {'on' if _h2o_settings.get('use_blending') else 'off'} · "
-            f"nfolds: {_h2o_settings.get('nfolds', '—')} · "
-            f"Effective train rows: {_h2o_result.get('n_train_rows_effective', _h2o_result.get('n_train_rows', 0)):,}"
-            + (
-                f" · Blending rows: {_h2o_result.get('n_blending_rows', 0):,}"
-                if int(_h2o_result.get('n_blending_rows', 0) or 0) > 0
-                else ""
-            )
-        )
-
-        _leader_id = str(_h2o_result.get("leader_model_id", ""))
-        _leader_is_stack = _leader_id.lower().startswith("stackedensemble")
-        _lt_col1, _lt_col2 = st.columns([1, 3])
-        with _lt_col1:
-            _lt_label = "Stacked Ensemble" if _leader_is_stack else "Base Model"
-            st.metric("Leader Type", _lt_label)
-        with _lt_col2:
-            if _h2o_settings.get("include_stacked_ensembles", True):
-                if _leader_is_stack:
-                    st.success("Leader is an ensemble model (StackedEnsemble).")
-                else:
-                    st.info(
-                        "Stacking was enabled, but the best model for this run is still an individual base model. "
-                        "This can happen when ensembling does not improve the selected metric."
-                    )
-
-        _leaderboard = _h2o_result.get("leaderboard")
-        if isinstance(_leaderboard, pd.DataFrame) and not _leaderboard.empty:
-            _lb = _leaderboard.copy()
-            _lb["model_family"] = _lb["model_id"].astype(str).str.split("_").str[0]
-
-            _stack_rows = _lb[_lb["model_family"].str.lower() == "stackedensemble"]
-            _base_rows = _lb[_lb["model_family"].str.lower() != "stackedensemble"]
-
-            _c1, _c2, _c3 = st.columns(3)
-            _c1.metric("Total Models", int(len(_lb)))
-            _c2.metric("Stacked Ensembles", int(len(_stack_rows)))
-            _c3.metric("Base Models", int(len(_base_rows)))
-
-            if not _stack_rows.empty and not _base_rows.empty:
-                _best_stack = _stack_rows.iloc[0]
-                _best_base = _base_rows.iloc[0]
-                _cmp1, _cmp2 = st.columns(2)
-                with _cmp1:
-                    st.caption("Best base model")
-                    st.write(str(_best_base.get("model_id", "—")))
-                with _cmp2:
-                    st.caption("Best stacked ensemble")
-                    st.write(str(_best_stack.get("model_id", "—")))
-
-            _fam_counts = (
-                _lb["model_family"]
-                .value_counts()
-                .rename_axis("Model Family")
-                .reset_index(name="Count")
-            )
-            with st.expander("Model family breakdown", expanded=False):
-                st.dataframe(_fam_counts, width="stretch", hide_index=True)
-
-            _preferred_cols = [
-                "model_id",
-                "model_family",
-                "auc",
-                "logloss",
-                "mean_per_class_error",
-                "rmse",
-                "mse",
-            ]
-            _show_cols = [c for c in _preferred_cols if c in _lb.columns]
-            st.markdown("#### Leaderboard")
-            st.dataframe(_lb[_show_cols] if _show_cols else _lb, width="stretch", hide_index=True)
-
-        _save_col1, _save_col2 = st.columns([1, 3])
-        with _save_col1:
-            if st.button("💾 Save Leader", key="_h2o_save_leader"):
-                try:
-                    _save_dir = os.path.join(config.MODELS_DIR, "h2o")
-                    os.makedirs(_save_dir, exist_ok=True)
-                    _saved_path = save_h2o_leader_model(_h2o_result.get("leader"), _save_dir)
-                    st.session_state.h2o_saved_model_path = _saved_path
-                    st.success(f"Saved leader model to {_saved_path}")
-                except Exception as _save_exc:
-                    st.error(f"Could not save leader model: {_save_exc}")
-        with _save_col2:
-            if st.session_state.get("h2o_saved_model_path"):
-                st.caption(f"Latest saved leader: {st.session_state.get('h2o_saved_model_path')}")
-
-
-# =====================================================================
-#  FLAML
-# =====================================================================
-elif page == "🤖 FLAML":
-    st.title("🤖 FLAML AutoML")
-    st.caption(
-        "Run FLAML for classification or ranking on the same leak-safe dataset split used by your core pipeline."
-    )
-
-    _flaml_ok, _flaml_err = flaml_is_available()
-    if not _flaml_ok:
-        st.error("FLAML is not installed in this environment.")
-        st.code("pip install flaml[automl]", language="bash")
-        st.caption(f"Import error: {_flaml_err}")
-        st.stop()
-
-    st.markdown("---")
-    st.subheader("1️⃣ Dataset")
-    _fl_dataset_mode = st.radio(
-        "Dataset source",
-        ["Use current Train & Tune dataset", "Load latest featured dataset", "Build fresh dataset"],
-        horizontal=True,
-        key="_fl_dataset_mode",
-    )
-
-    if _fl_dataset_mode == "Use current Train & Tune dataset":
-        if st.session_state.featured_data is not None:
-            if st.button("Use loaded training dataset", key="_fl_use_train_ds"):
-                _set_flaml_dataset(
-                    st.session_state.featured_data.copy(),
-                    processed_df=st.session_state.get("train_processed_data"),
-                    dataset_meta=dict(st.session_state.get("train_dataset_meta") or {}),
-                )
-                st.session_state.flaml_automl_result = None
-                st.success("Current training dataset copied into the FLAML workspace.")
-        else:
-            st.warning("No training dataset is loaded yet. Prepare one on Train & Tune, load latest featured data, or build fresh here.")
-    elif _fl_dataset_mode == "Load latest featured dataset":
-        _global_featured = _global_featured_dataset_path()
-        if _global_featured and os.path.exists(_global_featured):
-            if st.button("Load latest featured dataset from disk", key="_fl_load_global"):
-                _featured = _cached_load_df(_global_featured, os.path.getmtime(_global_featured))
-                _set_flaml_dataset(
-                    _featured,
-                    dataset_meta=_dataset_meta_from_frame(
-                        _featured,
-                        data_source="disk",
-                        requested_days=None,
-                        featured_path=_global_featured,
-                        origin="flaml_global_featured",
-                    ),
-                )
-                st.session_state.flaml_automl_result = None
-                st.success("Loaded the latest featured dataset from disk.")
-        else:
-            st.warning("No global featured dataset file found yet.")
-    else:
-        _fd1, _fd2 = st.columns([2, 2])
-        with _fd1:
-            _fl_source = st.selectbox("Data source", ["database", "scrape", "sample"], key="_fl_source")
-        with _fd2:
-            if _fl_source == "sample":
-                _fl_num_races = st.slider("Sample races", 500, 5000, 1500, 100, key="_fl_num_races")
-                _fl_days_back = None
-            else:
-                _fl_num_races = 1500
-                _fl_days_back = st.slider("Days of history", 1, 2000, 90, 7, key="_fl_days_back")
-        if st.button("📦 Prepare FLAML dataset", type="secondary", key="_fl_prepare"):
-            _prep = st.progress(0, text="Preparing FLAML dataset …")
-            _prep.progress(10, text="Collecting and processing data …")
-            _featured, _processed, _meta = build_autotune_dataset(
-                data_source=_fl_source,
-                days_back=_fl_days_back,
-                num_races=_fl_num_races,
-            )
-            _prep.progress(100, text="Dataset ready")
-            _set_flaml_dataset(_featured, processed_df=_processed, dataset_meta=_meta)
-            st.session_state.flaml_automl_result = None
-            st.success(f"Prepared {_meta.get('rows', 0):,} rows for FLAML AutoML.")
-
-    _fl_featured = st.session_state.get("flaml_featured_data")
-    _fl_meta = st.session_state.get("flaml_dataset_meta") or {}
-    if isinstance(_fl_featured, pd.DataFrame):
-        st.success(
-            f"FLAML dataset ready: {_fl_meta.get('rows', len(_fl_featured)):,} rows · "
-            f"{_fl_meta.get('months') or '—'} months · {_fl_meta.get('date_start') or '?'} → {_fl_meta.get('date_end') or '?'}"
-        )
-    else:
-        st.info("Load or prepare a dataset to run FLAML AutoML.")
-
-    st.markdown("---")
-    st.subheader("2️⃣ FLAML Setup")
-    _f1, _f2, _f3 = st.columns(3)
-    with _f1:
-        _fl_mode = st.selectbox(
-            "Task mode",
-            options=["classification", "ranking"],
-            format_func=lambda x: "Classification" if x == "classification" else "Ranking (race ordering)",
-            key="_fl_mode",
-        )
-    with _f2:
-        _fl_target = st.selectbox(
-            ("Target" if _fl_mode == "classification" else "Evaluation target"),
-            options=["won", "placed"],
-            format_func=lambda x: "Winner (won)" if x == "won" else "Placed (placed)",
-            key="_fl_target",
-        )
-    with _f3:
-        _fl_time_budget = st.slider("Time budget (seconds)", 30, 7200, 600, 30, key="_fl_time_budget")
-
-    if _fl_mode == "ranking":
-        st.info(
-            "Ranking mode trains on race ordering relevance labels (1st=5, 2nd=2, 3rd=1, else=0). "
-            "The evaluation target above is used for calibration/binary diagnostics only."
-        )
-
-    _f4, _f5 = st.columns(2)
-    with _f4:
-        if _fl_mode == "classification":
-            _fl_metric = st.selectbox(
-                "Metric",
-                options=["log_loss", "roc_auc", "f1", "accuracy"],
-                index=0,
-                key="_fl_metric_cls",
-            )
-        else:
-            _fl_metric = st.selectbox(
-                "Metric",
-                options=["ndcg", "map"],
-                index=0,
-                key="_fl_metric_rank",
-                help="Ranking objective metric for FLAML task=rank.",
-            )
-    with _f5:
-        _fl_estimators = st.text_input(
-            "Estimators (comma-separated, optional)",
-            value="",
-            key="_fl_estimators",
-            help="Leave blank for sensible defaults. Example: lgbm,xgboost,xgb_limitdepth",
-        )
-
-    st.markdown("#### Run Logging")
-    _fl_log_c1, _fl_log_c2, _fl_log_c3 = st.columns(3)
-    with _fl_log_c1:
-        _fl_enable_logs = st.checkbox(
-            "Write FLAML log file",
-            value=True,
-            key="_fl_enable_logs",
-            help="Writes FLAML trial progress to a file under data/flaml_logs.",
-        )
-    with _fl_log_c2:
-        _fl_verbose = st.selectbox(
-            "Verbose level",
-            options=[0, 1, 2, 3],
-            index=2,
-            key="_fl_verbose",
-            help="Higher values print more FLAML progress to the Streamlit terminal logs.",
-        )
-    with _fl_log_c3:
-        _fl_log_training_metric = st.checkbox(
-            "Log training metric",
-            value=True,
-            key="_fl_log_training_metric",
-        )
-
-    if st.button("🚀 Run FLAML AutoML", type="primary", width="stretch", key="_fl_run"):
-        if not isinstance(_fl_featured, pd.DataFrame):
-            st.error("Prepare a dataset first.")
-            st.stop()
-
-        _est_list = [x.strip() for x in str(_fl_estimators).split(",") if x.strip()]
-        if not _est_list:
-            _est_list = None
-
-        _fl_log_file = None
-        if _fl_enable_logs:
-            _fl_log_dir = os.path.join(config.DATA_DIR, "flaml_logs")
-            os.makedirs(_fl_log_dir, exist_ok=True)
-            _fl_log_file = os.path.join(_fl_log_dir, f"flaml_{datetime.now():%Y%m%d_%H%M%S}.log")
-
-        with st.spinner("Running FLAML AutoML on the current pipeline split …"):
-            try:
-                _fl_result = run_flaml_automl(
-                    _fl_featured.copy(),
-                    mode=_fl_mode,
-                    target=_fl_target,
-                    time_budget=int(_fl_time_budget),
-                    metric=str(_fl_metric or "auto"),
-                    estimator_list=_est_list,
-                    verbose=int(_fl_verbose),
-                    log_file_name=_fl_log_file,
-                    log_training_metric=bool(_fl_log_training_metric),
-                )
-                st.session_state.flaml_automl_result = _fl_result
-                st.success("FLAML AutoML run complete.")
-            except Exception as _fl_exc:
-                st.error(f"FLAML AutoML failed: {_fl_exc}")
-
-    _fl_result = st.session_state.get("flaml_automl_result")
-    if isinstance(_fl_result, dict):
-        st.markdown("---")
-        st.subheader("3️⃣ Results")
-        _m = _fl_result.get("metrics") or {}
-
-        def _fmt_metric(v, pct: bool = False) -> str:
-            if v is None:
-                return "—"
-            try:
-                fv = float(v)
-            except Exception:
-                return "—"
-            return f"{fv:.1%}" if pct else f"{fv:.4f}"
-
-        _r1, _r2, _r3, _r4 = st.columns(4)
-        _r1.metric("Best Estimator", str(_fl_result.get("best_estimator", "—")))
-        _r2.metric("Best Loss", _fmt_metric(_fl_result.get("best_loss")))
-        _r3.metric("Brier", _fmt_metric(_m.get("brier")))
-        _r4.metric("ROC AUC", _fmt_metric(_m.get("roc_auc")))
-
-        _r5, _r6, _r7, _r8 = st.columns(4)
-        _r5.metric("Accuracy", _fmt_metric(_m.get("accuracy"), pct=True))
-        _r6.metric("Top-1 Accuracy", _fmt_metric(_m.get("top1_accuracy"), pct=True))
-        _r7.metric("NDCG@1", _fmt_metric(_m.get("ndcg_at_1")))
-        _r8.metric("Precision", _fmt_metric(_m.get("precision"), pct=True))
-
-        if _fl_result.get("mode") == "ranking":
-            _rr1, _rr2, _rr3 = st.columns(3)
-            _rr1.metric("Rank Top-1", _fmt_metric(_m.get("rank_top1_accuracy"), pct=True))
-            _rr2.metric("Rank NDCG@1", _fmt_metric(_m.get("rank_ndcg_at_1")))
-            _rr3.metric("Rank NDCG@3", _fmt_metric(_m.get("rank_ndcg_at_3")))
-
-        _fl_settings = _fl_result.get("settings") or {}
-        st.caption(
-            f"Mode: {_fl_result.get('mode', '—')} · Target: {_fl_result.get('target', '—')} · "
-            f"Task: {_fl_settings.get('task', '—')} · Metric: {_fl_settings.get('metric', '—')}"
-        )
-        if _fl_result.get("mode") == "ranking":
-            st.caption("Training target: relevance labels grouped by race (ranking task).")
-        st.caption(
-            f"Train rows: {_fl_result.get('n_train_rows', 0):,} · "
-            f"Test rows: {_fl_result.get('n_test_rows', 0):,} · "
-            f"Features: {_fl_result.get('n_features', 0):,}"
-        )
-
-        _fl_log_file = _fl_result.get("log_file_name")
-        if _fl_log_file:
-            st.caption(f"FLAML log file: {_fl_log_file}")
-            if os.path.exists(_fl_log_file):
-                with st.expander("FLAML log tail", expanded=False):
-                    try:
-                        with open(_fl_log_file, "r", encoding="utf-8", errors="ignore") as _fh:
-                            _lines = _fh.readlines()
-                        _tail = "".join(_lines[-200:]) if _lines else "(log file exists but is currently empty)"
-                        st.text(_tail)
-                    except Exception as _log_exc:
-                        st.warning(f"Could not read log file: {_log_exc}")
-
-        _best_est_table = _fl_result.get("best_estimator_table")
-        if isinstance(_best_est_table, pd.DataFrame) and not _best_est_table.empty:
-            st.markdown("#### Estimator Summary")
-            st.dataframe(_best_est_table, width="stretch", hide_index=True)
-
-        _best_cfg = _fl_result.get("best_config")
-        if isinstance(_best_cfg, dict) and _best_cfg:
-            with st.expander("Best config", expanded=False):
-                st.json(_best_cfg)
 
 
 # =====================================================================
@@ -4684,8 +5268,13 @@ elif page == "🧪 Experiments":
             "win_classifier/value_bet_roi",
             "win_classifier/value_bet_sr",
             "win_classifier/avg_edge",
+            "ranker/rps",
+            "ranker/brier_score",
+            "ranker/ndcg_at_1",
+            "ranker/top1_accuracy",
             "place_classifier/brier_calibrated",
             "place_classifier/brier_raw",
+            "place_classifier/top3_accuracy",
             "place_classifier/place_precision",
         ]
         _ordered_metrics = [c for c in _priority if c in _metric_cols] + sorted(
@@ -5393,6 +5982,8 @@ elif page == "🔮 Predict":
             "**🔄 Activate This Model** on any saved run."
         )
 
+    _render_prediction_data_health(_model_df)
+
     tabs = st.tabs(
         ["🏇 Race Day", "📋 From Dataset", "✏️ Custom Entry"]
     )
@@ -5540,7 +6131,8 @@ elif page == "🔮 Predict":
                         feat = feat.reset_index(drop=True)
                         if feat.empty:
                             continue
-                        preds = st.session_state.predictor.predict_race(
+                        preds = _predict_featured_frame(
+                            st.session_state.predictor,
                             feat,
                             ew_fraction=st.session_state.value_config.get("ew_fraction"),
                         )
@@ -5574,6 +6166,9 @@ elif page == "🔮 Predict":
                         else:
                             preds = result
                             _ew_cfg = st.session_state.value_config
+                            _render_ranker_consensus_badge(preds)
+                            _render_pace_panel(preds, key=f"live_pace_{rid}")
+                            _render_ranker_disagreement_panel(preds, key=f"live_ranker_{rid}")
                             for _, row in preds.iterrows():
                                 rank = int(row["predicted_rank"])
                                 emoji = (
@@ -5587,6 +6182,12 @@ elif page == "🔮 Predict":
                                 c1.markdown(f"**{emoji}**")
                                 _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
                                 c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
+                                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
+                                    c2.caption("Split top pick")
+                                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
+                                    c2.caption(
+                                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
+                                    )
                                 c3.metric(
                                     "Win Prob",
                                     f"{row['win_probability']:.1%}",
@@ -5601,13 +6202,18 @@ elif page == "🔮 Predict":
                                 _badges = []
                                 _vt_base = _ew_cfg["value_threshold"]
                                 _row_odds = float(row.get("odds", 3.0)) if pd.notna(row.get("odds")) else 3.0
+                                _value_min_odds, _value_max_odds = _value_odds_range(_ew_cfg)
                                 _dyn_vt = _vt_base * np.sqrt(_row_odds / 3.0)
                                 if (
                                     "value_score" in row
                                     and pd.notna(row["value_score"])
                                     and row["value_score"] > _dyn_vt
+                                    and _value_min_odds <= _row_odds <= _value_max_odds
                                 ):
                                     _badges.append(f"⭐ **+{row['value_score']:.1%}** win")
+                                    _conf_label, _ = _bet_confidence_state(row)
+                                    if _conf_label:
+                                        _badges.append(_conf_label)
                                 # EW value badge
                                 if (
                                     _ew_cfg.get("ew_enabled", True)
@@ -5619,13 +6225,15 @@ elif page == "🔮 Predict":
                                         _badges.append(
                                             f"🔀 **+{row['place_edge']:.1%}** EW"
                                         )
+                                        _conf_label, _ = _bet_confidence_state(row)
+                                        if _conf_label and _conf_label not in _badges:
+                                            _badges.append(_conf_label)
                                 if _badges:
                                     c5.markdown(" · ".join(_badges))
 
                             # Summaries
                             if "value_score" in preds.columns and "odds" in preds.columns:
-                                _vt_dyn = _ew_cfg["value_threshold"] * np.sqrt(preds["odds"].clip(lower=1.0) / 3.0)
-                                vb = preds[preds["value_score"] > _vt_dyn]
+                                vb = preds[_value_bet_mask(preds, _ew_cfg)]
                                 if not vb.empty:
                                     st.success(
                                         "💰 Value picks: "
@@ -5678,7 +6286,8 @@ elif page == "🔮 Predict":
 
         if st.button("🔮 Predict", key="pred_data", type="primary"):
             race_data = df[df["race_id"] == selected_race].copy()
-            predictions = st.session_state.predictor.predict_race(
+            predictions = _predict_featured_frame(
+                st.session_state.predictor,
                 race_data,
                 ew_fraction=st.session_state.value_config.get("ew_fraction"),
             )
@@ -5692,6 +6301,9 @@ elif page == "🔮 Predict":
                 )
 
             st.markdown("### 🏆 Predictions")
+            _render_ranker_consensus_badge(predictions)
+            _render_pace_panel(predictions, key="dataset_pace")
+            _render_ranker_disagreement_panel(predictions, key="dataset_ranker")
             for _, row in predictions.iterrows():
                 rank = int(row["predicted_rank"])
                 emoji = (
@@ -5703,6 +6315,12 @@ elif page == "🔮 Predict":
                 c1.markdown(f"**{emoji}**")
                 _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
                 c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
+                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
+                    c2.caption("Split top pick")
+                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
+                    c2.caption(
+                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
+                    )
                 c3.metric("Win Prob", f"{row['win_probability']:.1%}")
                 if "odds" in row:
                     c4.metric("Odds", f"{row['odds']:.1f}")
@@ -5716,9 +6334,7 @@ elif page == "🔮 Predict":
 
             if "value_score" in predictions.columns and "odds" in predictions.columns:
                 _pvc = st.session_state.value_config
-                _p_thresh = _pvc["value_threshold"]
-                _p_dyn_thresh = _p_thresh * np.sqrt(predictions["odds"].clip(lower=1.0) / 3.0)
-                vb = predictions[predictions["value_score"] > _p_dyn_thresh]
+                vb = predictions[_value_bet_mask(predictions, _pvc)]
                 if not vb.empty:
                     st.markdown("### 💰 Value Bets")
                     for _, row in vb.iterrows():
@@ -5727,11 +6343,15 @@ elif page == "🔮 Predict":
                         _ks = f" · Kelly {_k_label} **{_kf*100:.1f}%**" if _kf > 0.001 else ""
                         _clv = row['win_probability'] * row['odds']
                         _clv_str = f" · CLV **{_clv:.3f}x**" if _clv > 1.0 else ""
+                        _conf_label, _conf_detail = _bet_confidence_state(row)
+                        _conf_str = f" · {_conf_label}" if _conf_label else ""
+                        _conf_detail_str = f"  \n_{_conf_detail}_" if _conf_detail else ""
                         st.info(
                             f"**{row['horse_name']}** — "
                             f"Model: {row['win_probability']:.1%} vs "
                             f"Market: {row['implied_prob']:.1%} — "
-                            f"Value: +{row['value_score']:.1%}{_ks}{_clv_str}"
+                            f"Value: +{row['value_score']:.1%}{_ks}{_clv_str}{_conf_str}"
+                            f"{_conf_detail_str}"
                         )
 
             # ── Each-Way Value Bets ──────────────────────────────
@@ -5766,14 +6386,17 @@ elif page == "🔮 Predict":
                             f" · EW Kelly {_pvc2['kelly_fraction']:.0%} **{_ew_k['ew_kelly']*100:.1f}%**"
                             if _ew_k["ew_kelly"] > 0.001 else ""
                         )
+                        _conf_label, _conf_detail = _bet_confidence_state(row)
+                        _conf_str = f" · {_conf_label}" if _conf_label else ""
                         _terms_str = f"{int(row['ew_places'])} places at {row['ew_fraction_str']}"
                         st.success(
                             f"**{row['horse_name']}** @ {row['odds']:.1f} — "
                             f"{_place_str} — "
                             f"Edge: +{row['place_edge']:.1%} · "
-                            f"EW EV: {row['ew_ev']:+.1%}{_ew_kelly_str}\n\n"
+                            f"EW EV: {row['ew_ev']:+.1%}{_ew_kelly_str}{_conf_str}\n\n"
                             f"<small>Terms: {_terms_str} · "
-                            f"Place odds: {row['place_odds']:.2f}</small>",
+                            f"Place odds: {row['place_odds']:.2f}"
+                            f"{' · ' + _conf_detail if _conf_detail else ''}</small>",
                             icon="🔀",
                         )
 
@@ -5939,12 +6562,16 @@ elif page == "🔮 Predict":
             featured_custom = feature_engineer_with_history(
                 processed_custom,
             )
-            predictions = st.session_state.predictor.predict_race(
+            predictions = _predict_featured_frame(
+                st.session_state.predictor,
                 featured_custom,
                 ew_fraction=st.session_state.value_config.get("ew_fraction"),
             )
 
             st.markdown("### 🏆 Custom Race Prediction")
+            _render_ranker_consensus_badge(predictions)
+            _render_pace_panel(predictions, key="custom_pace")
+            _render_ranker_disagreement_panel(predictions, key="custom_ranker")
             for _, row in predictions.iterrows():
                 rank = int(row["predicted_rank"])
                 emoji = (
@@ -5956,6 +6583,12 @@ elif page == "🔮 Predict":
                 c1.markdown(f"**{emoji}**")
                 _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
                 c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
+                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
+                    c2.caption("Split top pick")
+                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
+                    c2.caption(
+                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
+                    )
                 c3.metric("Win Prob", f"{row['win_probability']:.1%}")
                 if "odds" in row:
                     c4.metric("Odds", f"{row['odds']:.1f}")
@@ -6114,11 +6747,16 @@ elif page == "💰 Today's Picks":
     _picks_model_fp = (
         st.session_state.get("active_run_id", ""),
     )
+    _cached_pick_preds = st.session_state.get("picks_preds")
+    _cached_pick_feat = st.session_state.get("picks_featured", {}).get(_picks_date_str)
     _has_preds = "picks_preds" in st.session_state and st.session_state["picks_preds"] is not None
     _preds_stale = _has_preds and st.session_state.get("picks_model_fp") != _picks_model_fp
+    _pace_stale = (_has_preds and not _has_pace_diagnostics(_cached_pick_preds)) or (
+        _cached_pick_feat is not None and not _cached_pick_feat.empty and not _has_pace_diagnostics(_cached_pick_feat)
+    )
 
     # ── Determine if predictions need to run ─────────────────────
-    _needs_preds = not _has_preds or _preds_stale or _odds_refresh
+    _needs_preds = not _has_preds or _preds_stale or _odds_refresh or _pace_stale
 
     if _needs_preds:
         cards_df = cards_df.reset_index(drop=True)
@@ -6134,14 +6772,18 @@ elif page == "💰 Today's Picks":
         # 1. In-memory cache
         if _picks_date_str in _feat_cache and not _odds_refresh:
             all_feat = _feat_cache[_picks_date_str]
-            progress.progress(50, text="⚡ Using cached features …")
+            if _has_pace_diagnostics(all_feat):
+                progress.progress(50, text="⚡ Using cached features …")
+            else:
+                all_feat = None
 
         # 2. Lookahead cache
         if all_feat is None and _has_lookahead:
             _lookahead_feat = load_lookahead_cache(_picks_date_str, current_cards_sig=None)
             if _lookahead_feat is not None and not _lookahead_feat.empty:
-                all_feat = _lookahead_feat
-                progress.progress(50, text="⚡ Loaded lookahead cache …")
+                if _has_pace_diagnostics(_lookahead_feat):
+                    all_feat = _lookahead_feat
+                    progress.progress(50, text="⚡ Loaded lookahead cache …")
 
         # 3. Live feature cache on disk — scan for any cached file for this date
         if all_feat is None:
@@ -6155,7 +6797,7 @@ elif page == "💰 Today's Picks":
                 if _pq_files:
                     try:
                         _loaded = pd.read_parquet(_pq_files[0].path, engine="pyarrow")
-                        if not _loaded.empty:
+                        if not _loaded.empty and _has_pace_diagnostics(_loaded):
                             all_feat = _loaded
                             progress.progress(50, text="⚡ Loaded live feature cache …")
                     except Exception:
@@ -6176,6 +6818,14 @@ elif page == "💰 Today's Picks":
                     if not _date_slice.empty:
                         all_feat = _date_slice.copy()
                         progress.progress(50, text="⚡ Loaded from featured dataset …")
+
+        if all_feat is not None and not all_feat.empty and not _has_pace_diagnostics(all_feat):
+            progress.empty()
+            st.warning(
+                "Cached features for this date were built before the new pace diagnostics were added. "
+                "Rebuild the featured/live cache for this date and rerun picks."
+            )
+            st.stop()
 
         if all_feat is None or all_feat.empty:
             progress.empty()
@@ -6231,7 +6881,8 @@ elif page == "💰 Today's Picks":
         try:
             if hasattr(st.session_state.predictor, "predict_races") and "race_id" in all_feat.columns:
                 progress.progress(100, text=f"Predicting {race_meta_df.shape[0]} races …")
-                full_preds = st.session_state.predictor.predict_races(
+                full_preds = _predict_featured_frame(
+                    st.session_state.predictor,
                     all_feat,
                     ew_fraction=st.session_state.value_config.get("ew_fraction"),
                 )
@@ -6247,7 +6898,8 @@ elif page == "💰 Today's Picks":
                     if feat_slice.empty:
                         _skip_reasons.append(f"race {rid}: feature slice empty after engineering")
                         continue
-                    preds = st.session_state.predictor.predict_race(
+                    preds = _predict_featured_frame(
+                        st.session_state.predictor,
                         feat_slice,
                         ew_fraction=st.session_state.value_config.get("ew_fraction"),
                     )
@@ -6362,15 +7014,14 @@ elif page == "💰 Today's Picks":
 
         # ── identify value bets (odds-dependent threshold) ─────
         if "value_score" in full_preds.columns and "odds" in full_preds.columns:
-            full_preds["dyn_threshold"] = (
-                base_thresh * np.sqrt(full_preds["odds"] / 3.0)
-            )
-            full_preds["is_value"] = (
-                full_preds["value_score"] > full_preds["dyn_threshold"]
-            )
+            full_preds["dyn_threshold"] = base_thresh * np.sqrt(full_preds["odds"] / 3.0)
+            _value_min_odds, _value_max_odds = _value_odds_range(st.session_state.value_config)
+            full_preds["is_value"] = _value_bet_mask(full_preds, st.session_state.value_config)
+            full_preds["value_odds_in_range"] = full_preds["odds"].between(_value_min_odds, _value_max_odds, inclusive="both")
             value_df = full_preds[full_preds["is_value"]].copy()
         else:
             full_preds["is_value"] = False
+            full_preds["value_odds_in_range"] = False
             value_df = pd.DataFrame()
 
         # ── identify EW value bets ────────────────────────────────
@@ -6543,6 +7194,11 @@ elif page == "💰 Today's Picks":
         .race-tbl .badge {font-size:0.7rem;padding:1px 5px;border-radius:3px;margin-left:4px}
         .badge-val {background:#1b5e20;color:#c8e6c9}
         .badge-ew  {background:#0d47a1;color:#bbdefb}
+        .badge-align {background:#1b5e20;color:#e8f5e9}
+        .badge-warn {background:#8d6e63;color:#fff3e0}
+        .badge-pace {background:#4e342e;color:#fbe9e7}
+        .badge-closer {background:#263238;color:#cfd8dc}
+        .pace-summary {font-size:0.82rem;color:#aaa;margin:0.2rem 0 0.5rem 0}
         .settled-won {color:#ffd600;font-weight:700}
         .settled-placed {color:#66bb6a}
         .settled-lost {color:#999}
@@ -6571,6 +7227,7 @@ elif page == "💰 Today's Picks":
                 "<th>Mkt Pl%</th>"
                 "<th>EW Edge</th>"
                 "<th>EW EV</th>"
+                "<th>Pace</th>"
                 "<th>Flags</th>"
             )
             if show_result:
@@ -6642,8 +7299,25 @@ elif page == "💰 Today's Picks":
                         else:
                             _stake_html += " EW"
                         flags.append("<span class='badge badge-ew'>🔀 EW</span>")
+                _conf_label, _conf_detail = _bet_confidence_state(r)
+                if _conf_label == "✅ Aligned" or _conf_label == "✓ Supported":
+                    flags.append(f"<span class='badge badge-align'>{_conf_label}</span>")
+                elif _conf_label:
+                    flags.append(f"<span class='badge badge-warn'>{_conf_label}</span>")
                 if rank == 1:
                     flags.append("🎯")
+
+                pace_bits = []
+                if bool(r.get("lone_speed_flag", False)):
+                    pace_bits.append("<span class='badge badge-pace'>Lone speed</span>")
+                elif bool(r.get("pace_front_runner_flag", False)):
+                    pace_bits.append("<span class='badge badge-pace'>Front</span>")
+                if bool(r.get("pace_closer_flag", False)):
+                    pace_bits.append("<span class='badge badge-closer'>Closer</span>")
+                _cps = pd.to_numeric(pd.Series([r.get("closer_pace_setup")]), errors="coerce").iloc[0]
+                if pd.notna(_cps) and float(_cps) >= 0.08:
+                    pace_bits.append("<span class='badge badge-closer'>Setup</span>")
+                pace_html = " ".join(pace_bits) if pace_bits else "—"
 
                 # Build row
                 row_html = f"<tr class='{_row_cls}'>"
@@ -6661,6 +7335,7 @@ elif page == "💰 Today's Picks":
                 row_html += f"<td>{'%.1f' % mkt_pl_pct + '%' if mkt_pl_pct is not None else '—'}</td>"
                 row_html += f"<td>{_edge_html(ew_edge) if ew_edge is not None else '—'}</td>"
                 row_html += f"<td>{_edge_html(ew_ev) if ew_ev is not None else '—'}</td>"
+                row_html += f"<td>{pace_html}</td>"
                 row_html += f"<td>{' '.join(flags)}</td>"
 
                 if show_result:
@@ -6702,6 +7377,10 @@ elif page == "💰 Today's Picks":
                 f"{len(value_df)} selections where model probability exceeds "
                 "the market-implied probability."
             )
+            if "ranker_disagrees_top_pick" in value_df.columns:
+                _split_n = int(value_df["ranker_disagrees_top_pick"].fillna(False).sum())
+                if _split_n > 0:
+                    st.caption(f"⚠ {_split_n} value pick(s) sit in races where the ranker and win model split on the top pick.")
             _val_display = value_df.sort_values(
                 ["off_time", "value_score"], ascending=[True, False],
             )
@@ -6726,6 +7405,10 @@ elif page == "💰 Today's Picks":
                 f"{len(ew_df)} selections where the place probability "
                 "exceeds the implied place odds from the fixed EW fraction."
             )
+            if "ranker_disagrees_top_pick" in ew_df.columns:
+                _split_ew_n = int(ew_df["ranker_disagrees_top_pick"].fillna(False).sum())
+                if _split_ew_n > 0:
+                    st.caption(f"⚠ {_split_ew_n} EW pick(s) come from split-view races, so treat conviction more cautiously.")
             _ew_display = ew_df.sort_values(
                 ["off_time", "place_edge"], ascending=[True, False],
             )
@@ -6789,6 +7472,13 @@ elif page == "💰 Today's Picks":
                     else:
                         _display_order = race_preds
 
+                    _pace_summary = _pace_race_summary(_display_order)
+                    if _pace_summary:
+                        st.markdown(
+                            f"<div class='pace-summary'>🏇 Pace setup: {_pace_summary}</div>",
+                            unsafe_allow_html=True,
+                        )
+
                     st.markdown(
                         _build_race_table_html(_display_order, show_result=_race_settled),
                         unsafe_allow_html=True,
@@ -6836,187 +7526,294 @@ elif page == "💰 Today's Picks":
                             key_prefix=f"picks_shap_{rid}",
                             model_label=_payload.get("model_label"),
                         )
-
-
 # =====================================================================
-#  BACKTEST
+#  MATCHBOOK API
 # =====================================================================
-elif page == "🔁 Backtest":
-    st.title("🔁 Walk-Forward Backtest")
+elif page == "🔌 Matchbook API":
+    st.title("🔌 Matchbook API")
     st.caption(
-        "Run expanding-window validation on your featured dataset to compare "
-        "Top Pick, Value, and Each-Way strategies across time."
+        "Connectivity harness for Matchbook. This page only reads public market data and tests login/account access; it does not place offers."
     )
 
-    _bt_df = st.session_state.get("model_featured_data")
-    if _bt_df is None:
-        load_model_data()
-        _bt_df = st.session_state.get("model_featured_data")
-    if _bt_df is None:
-        st.warning("No featured data available. Train a model first.")
-        st.stop()
-
-    bt_df = _bt_df.copy()
-    bt_df["race_date"] = pd.to_datetime(bt_df["race_date"], errors="coerce")
-    bt_df = bt_df.dropna(subset=["race_date"]).copy()
-
-    _n_races = int(bt_df["race_id"].nunique()) if "race_id" in bt_df.columns else 0
-    _n_months = int(bt_df["race_date"].dt.to_period("M").nunique())
-
-    st.info(
-        f"Dataset loaded: **{len(bt_df):,} runners** across **{_n_races:,} races** "
-        f"and **{_n_months} months**."
-    )
-    st.caption(
-        "Backtest settles using final SP odds at race-off, which is typically "
-        "more optimistic than pre-race/live execution prices."
-    )
-
-    _model_labels = {
-        "triple_ensemble": "2-Model (Win Clf + Place Clf)",
-    }
-    _model_keys = list(_model_labels.keys())
-
-    c1, c2, c3 = st.columns([1.4, 1.1, 1.1])
-    with c1:
-        bt_model = st.selectbox(
-            "Model",
-            options=_model_keys,
-            index=_model_keys.index("triple_ensemble") if "triple_ensemble" in _model_keys else 0,
-            format_func=lambda k: _model_labels.get(k, k),
-            help="Model used for each fold's train/test step.",
+    with st.expander("ℹ️ Integration Notes", expanded=False):
+        st.markdown(
+            "Use this page to verify public endpoint reachability, horse-racing event/market parsing, and authenticated session access before any live-betting workflow is added."
         )
-    with c2:
-        bt_min_train = st.slider(
-            "Min train months",
-            min_value=1,
-            max_value=max(1, min(24, _n_months - 1 if _n_months > 1 else 1)),
-            value=min(3, max(1, _n_months - 1 if _n_months > 1 else 1)),
-            help="Number of months required before first out-of-sample fold.",
-        )
-    with c3:
-        bt_value_threshold = st.slider(
-            "Value threshold",
-            min_value=0.00,
-            max_value=0.20,
-            value=float(st.session_state.value_config.get("value_threshold", 0.05)),
-            step=0.01,
-            help="Minimum model edge for Value and EW selection rules.",
+        st.code(
+            "MATCHBOOK_USERNAME=...\n"
+            "MATCHBOOK_PASSWORD=...\n"
+            "MATCHBOOK_HORSE_RACING_SPORT_ID=24735152712200",
+            language="bash",
         )
 
-    bt_fast_fold = st.checkbox(
-        "Fast fold (halve tree count)",
-        value=True,
-        key="bt_fast_fold",
-        help="Halve n_estimators per fold for speed. Disable for full HP match.",
-    )
+    with st.form("matchbook_public_probe"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            _mb_hours = st.number_input("Hours ahead", min_value=1, max_value=168, value=24, step=1)
+        with c2:
+            _mb_per_page = st.number_input("Events to fetch", min_value=1, max_value=50, value=8, step=1)
+        with c3:
+            _mb_price_depth = st.number_input("Price depth", min_value=1, max_value=10, value=3, step=1)
+        _mb_public_submit = st.form_submit_button("Fetch horse-racing events", type="primary")
 
-    run_bt = st.button("🚀 Run Backtest", type="primary")
-
-    if run_bt:
-        with st.spinner("Running walk-forward backtest..."):
-            try:
-                st.session_state.bt_report = walk_forward_validation(
-                    bt_df,
-                    model_type=bt_model,
-                    min_train_months=bt_min_train,
-                    value_threshold=bt_value_threshold,
-                    fast_fold=bt_fast_fold,
-                    ew_min_place_edge=float(
-                        st.session_state.value_config.get("ew_min_place_edge", 0.15)
-                    ),
+    if _mb_public_submit:
+        try:
+            client = MatchbookClient()
+            public_payload = client.get_horse_racing_events(
+                hours_ahead=int(_mb_hours),
+                per_page=int(_mb_per_page),
+                include_prices=False,
+                price_depth=int(_mb_price_depth),
+            )
+            events = public_payload.get("events") or []
+            first_event = events[0] if events else None
+            markets_payload = (
+                client.get_event_markets(
+                    first_event["id"],
+                    include_prices=True,
+                    price_depth=int(_mb_price_depth),
+                    per_page=10,
+                    currency=config.MATCHBOOK_DEFAULT_CURRENCY,
                 )
-                st.success("Backtest complete.")
-            except Exception as e:
-                st.session_state.bt_report = None
-                st.error(f"Backtest failed: {e}")
+                if first_event is not None else {"markets": []}
+            )
+            st.session_state["matchbook_public_probe_result"] = {
+                "events": events,
+                "markets": markets_payload.get("markets") or [],
+            }
+            st.success(f"Fetched {len(events)} upcoming horse-racing event(s) from Matchbook.")
+        except MatchbookAPIError as exc:
+            st.session_state["matchbook_public_probe_result"] = None
+            st.error(str(exc))
+        except Exception as exc:
+            st.session_state["matchbook_public_probe_result"] = None
+            st.error(f"Unexpected Matchbook error: {exc}")
 
-    report = st.session_state.bt_report
-    if report:
-        summary_df = report.get("summary", pd.DataFrame())
-        bets_df = report.get("bets", pd.DataFrame())
-        curves_df = report.get("curves", pd.DataFrame())
+    _public_probe = st.session_state.get("matchbook_public_probe_result")
+    if isinstance(_public_probe, dict):
+        _events = _public_probe.get("events") or []
+        _markets = _public_probe.get("markets") or []
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Events", len(_events))
+        m2.metric("Markets", len(_markets))
+        m3.metric("Currency", config.MATCHBOOK_DEFAULT_CURRENCY)
 
-        if not summary_df.empty:
-            st.markdown("### Summary")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Folds", int(len(summary_df)))
-            m2.metric("Avg RPS", f"{summary_df['rps'].mean():.4f}" if 'rps' in summary_df.columns else f"{summary_df['brier_score'].mean():.4f}")
-            m3.metric("Avg NDCG@1", f"{summary_df['ndcg_at_1'].mean():.4f}")
-            m4.metric("Avg Top-1", f"{summary_df['top1_accuracy'].mean():.1%}")
+        if _events:
+            st.markdown("**Upcoming events**")
+            st.dataframe(_matchbook_events_table(_events), hide_index=True, width="stretch")
+        if _markets:
+            st.markdown("**Markets from first returned event**")
+            st.dataframe(_matchbook_markets_table(_markets), hide_index=True, width="stretch")
 
-            p1, p2, p3, p4 = st.columns(4)
-            _tp_pnl = float(summary_df["top_pick_pnl"].sum())
-            _v_pnl = float(summary_df["value_pnl"].sum())
-            _ew_pnl = float(summary_df["ew_pnl"].sum())
-            _combined_pnl = _tp_pnl + _v_pnl + _ew_pnl
-            p1.metric("Top Pick P&L", f"{_tp_pnl:+.2f}u")
-            p2.metric("Value P&L", f"{_v_pnl:+.2f}u")
-            p3.metric("EW P&L", f"{_ew_pnl:+.2f}u")
-            p4.metric("Combined P&L", f"{_combined_pnl:+.2f}u")
+        if _events:
+            _event_lookup = {str(event.get("id")): event for event in _events if event.get("id") is not None}
+            _event_ids = list(_event_lookup.keys())
+            if _event_ids:
+                st.markdown("**Signal table**")
+                se1, se2, se3, se4 = st.columns([3, 1, 1, 1])
+                with se1:
+                    _selected_event_id = st.selectbox(
+                        "Matchbook event",
+                        _event_ids,
+                        format_func=lambda eid: f"{_event_lookup[eid].get('name', eid)}",
+                        key="matchbook_signal_event_id",
+                    )
+                with se2:
+                    _min_back_edge = st.number_input("Min back edge", min_value=0.0, max_value=0.5, value=0.03, step=0.01, key="matchbook_min_back_edge")
+                with se3:
+                    _min_lay_edge = st.number_input("Min lay edge", min_value=0.0, max_value=0.5, value=0.03, step=0.01, key="matchbook_min_lay_edge")
+                with se4:
+                    _min_liquidity = st.number_input("Min liquidity", min_value=0.0, max_value=10000.0, value=10.0, step=5.0, key="matchbook_min_liquidity")
+
+                if st.button("Build signal table", type="primary", key="btn_matchbook_signal_table"):
+                    try:
+                        signal_client = MatchbookClient()
+                        selected_event = _event_lookup[_selected_event_id]
+                        selected_event_markets = signal_client.get_event_markets(
+                            _selected_event_id,
+                            include_prices=True,
+                            price_depth=int(_mb_price_depth),
+                            per_page=20,
+                            currency=config.MATCHBOOK_DEFAULT_CURRENCY,
+                        ).get("markets") or []
+                        selected_preds = build_fake_prediction_frame(
+                            selected_event,
+                            selected_event_markets,
+                        )
+                        signal_df = build_signal_frame(
+                            selected_preds,
+                            selected_event,
+                            selected_event_markets,
+                            min_back_edge=float(_min_back_edge),
+                            min_lay_edge=float(_min_lay_edge),
+                            min_liquidity=float(_min_liquidity),
+                        )
+                        st.session_state["matchbook_signal_result"] = {
+                            "event": selected_event,
+                            "markets": selected_event_markets,
+                            "signals": signal_df,
+                            "source": "fake_model",
+                        }
+                    except MatchbookAPIError as exc:
+                        st.session_state["matchbook_signal_result"] = None
+                        st.error(str(exc))
+                    except Exception as exc:
+                        st.session_state["matchbook_signal_result"] = None
+                        st.error(f"Signal table build failed: {exc}")
+
+    _signal_result = st.session_state.get("matchbook_signal_result")
+    if isinstance(_signal_result, dict):
+        _signal_df = _signal_result.get("signals")
+        _signal_event = _signal_result.get("event") or {}
+        _signal_markets = _signal_result.get("markets") or []
+        st.markdown(f"**Signals for {_signal_event.get('name', 'selected event')}**")
+        if _signal_result.get("source") == "fake_model":
+            st.caption("Using deterministic fake model output derived from Matchbook market runners for fast UI testing.")
+        if isinstance(_signal_df, pd.DataFrame) and not _signal_df.empty:
+            _signal_labels = _signal_df["signal"].fillna("").astype(str)
+            sg1, sg2, sg3 = st.columns(3)
+            sg1.metric("Matched runners", int(len(_signal_df)))
+            sg2.metric("Back candidates", int(_signal_labels.str.contains("BACK", regex=False).sum()))
+            sg3.metric("Lay candidates", int(_signal_labels.str.contains("LAY", regex=False).sum()))
+            pt1, pt2, pt3, pt4 = st.columns([1, 1, 1, 2])
+            with pt1:
+                _paper_stake = st.number_input("Paper stake", min_value=0.1, max_value=1000.0, value=1.0, step=0.5, key="matchbook_paper_stake")
+            with pt2:
+                _log_backs = st.checkbox("Log backs", value=True, key="matchbook_log_backs")
+            with pt3:
+                _log_lays = st.checkbox("Log lays", value=True, key="matchbook_log_lays")
+            with pt4:
+                st.caption("Logs selected signal candidates locally as paper trades using the displayed Matchbook entry prices.")
+
+            if st.button("Log paper trades", key="btn_log_matchbook_paper_trades"):
+                new_trades = build_paper_trades_from_signals(
+                    _signal_df,
+                    event=_signal_event,
+                    stake=float(_paper_stake),
+                    source=str(_signal_result.get("source") or "unknown"),
+                    log_backs=bool(_log_backs),
+                    log_lays=bool(_log_lays),
+                )
+                appended = append_paper_trades(new_trades)
+                if appended > 0:
+                    st.success(f"Logged {appended} paper trade(s).")
+                else:
+                    st.warning("No matching BACK/LAY candidates were selected for logging.")
 
             st.dataframe(
-                summary_df,
-                width="stretch",
+                _signal_df.style.format({
+                    "win_probability": "{:.1%}",
+                    "fair_odds": "{:.2f}",
+                    "best_back_odds": "{:.2f}",
+                    "best_back_available": "{:.2f}",
+                    "best_lay_odds": "{:.2f}",
+                    "best_lay_available": "{:.2f}",
+                    "back_edge_pct": "{:.1%}",
+                    "lay_edge_pct": "{:.1%}",
+                    "spread_pct": "{:.1%}",
+                }),
                 hide_index=True,
+                width="stretch",
             )
+        else:
+            st.warning(
+                "No model runners matched the selected Matchbook event. This usually means the Sporting Life racecards and Matchbook event names did not align on track/off-time yet."
+            )
+        if _signal_markets:
+            with st.expander("Show selected event markets", expanded=False):
+                st.dataframe(_matchbook_markets_table(_signal_markets), hide_index=True, width="stretch")
 
-        if not curves_df.empty:
-            st.markdown("### Cumulative Curves")
-            _strategy_labels = {
-                "top_pick": "Top Pick",
-                "value": "Value",
-                "each_way": "Each-Way",
+    st.markdown("**Paper trade log**")
+    _paper_trades = load_paper_trades()
+    log1, log2, log3 = st.columns([1, 1, 2])
+    with log1:
+        _settle_date = st.date_input("Settle date", value=datetime.now().date(), key="matchbook_settle_date")
+    with log2:
+        if st.button("Settle open trades", key="btn_settle_paper_trades"):
+            with st.spinner(f"Scraping results for {_settle_date.strftime('%Y-%m-%d')} …"):
+                _results_df = scrape_todays_results(date_str=_settle_date.strftime("%Y-%m-%d"))
+            updated = settle_paper_trades(_paper_trades, _results_df)
+            save_paper_trades(updated)
+            _paper_trades = updated
+            _settled_now = int((updated["status"].fillna("") == "SETTLED").sum())
+            st.success(f"Settlement run completed. Total settled trades in log: {_settled_now}.")
+    with log3:
+        if not _paper_trades.empty:
+            _open_count = int((_paper_trades["status"].fillna("OPEN") == "OPEN").sum())
+            _settled_count = int((_paper_trades["status"].fillna("") == "SETTLED").sum())
+            st.caption(f"Open trades: {_open_count} · Settled trades: {_settled_count}")
+
+    if isinstance(_paper_trades, pd.DataFrame) and not _paper_trades.empty:
+        _display_cols = [
+            col for col in [
+                "logged_at", "race_date", "event_name", "horse_name", "side", "stake",
+                "entry_odds", "win_probability", "fair_odds", "back_edge_pct", "lay_edge_pct",
+                "status", "result_finish_position", "result_won", "pnl",
+            ] if col in _paper_trades.columns
+        ]
+        st.dataframe(
+            _paper_trades[_display_cols].sort_values(["logged_at", "event_name", "horse_name"], ascending=[False, True, True]).style.format({
+                "stake": "{:.2f}",
+                "entry_odds": "{:.2f}",
+                "win_probability": "{:.1%}",
+                "fair_odds": "{:.2f}",
+                "back_edge_pct": "{:.1%}",
+                "lay_edge_pct": "{:.1%}",
+                "pnl": "{:.2f}",
+            }),
+            hide_index=True,
+            width="stretch",
+        )
+        st.download_button(
+            "Download paper trades CSV",
+            data=_paper_trades.to_csv(index=False).encode("utf-8"),
+            file_name="matchbook_paper_trades.csv",
+            mime="text/csv",
+            key="dl_matchbook_paper_trades",
+        )
+    else:
+        st.caption("No paper trades logged yet.")
+
+    _default_user = config.MATCHBOOK_USERNAME or ""
+    _default_pass = config.MATCHBOOK_PASSWORD or ""
+    with st.form("matchbook_auth_probe"):
+        a1, a2 = st.columns(2)
+        with a1:
+            _mb_user = st.text_input("Username", value=_default_user)
+        with a2:
+            _mb_pass = st.text_input("Password", value=_default_pass, type="password")
+        _mb_auth_submit = st.form_submit_button("Test account session")
+
+    if _mb_auth_submit:
+        try:
+            auth_client = MatchbookClient(username=_mb_user.strip(), password=_mb_pass)
+            auth_client.login()
+            account = auth_client.get_account()
+            balance = auth_client.get_balance()
+            st.session_state["matchbook_auth_probe_result"] = {
+                "session_token": auth_client.session_token,
+                "account": account,
+                "balance": balance,
             }
-            _curves_plot = curves_df.copy()
-            _curves_plot["strategy"] = _curves_plot["strategy"].map(
-                lambda s: _strategy_labels.get(s, s)
-            )
-            fig_curve = px.line(
-                _curves_plot,
-                x="race_date",
-                y="cum_pnl",
-                color="strategy",
-                title="Cumulative P&L by Strategy",
-                labels={"race_date": "Date", "cum_pnl": "Cumulative P&L"},
-            )
-            fig_curve.update_layout(height=460, legend_title_text="")
-            st.plotly_chart(fig_curve, width="stretch")
+            st.success("Matchbook login succeeded and authenticated account endpoints responded.")
+        except MatchbookAPIError as exc:
+            st.session_state["matchbook_auth_probe_result"] = None
+            st.error(str(exc))
+        except Exception as exc:
+            st.session_state["matchbook_auth_probe_result"] = None
+            st.error(f"Unexpected Matchbook auth error: {exc}")
 
-        st.markdown("### Exports")
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            if not summary_df.empty:
-                st.download_button(
-                    "Download fold summary",
-                    data=summary_df.to_csv(index=False).encode("utf-8"),
-                    file_name="fold_summary.csv",
-                    mime="text/csv",
-                )
-        with d2:
-            if not bets_df.empty:
-                st.download_button(
-                    "Download all bets",
-                    data=bets_df.to_csv(index=False).encode("utf-8"),
-                    file_name="all_bets.csv",
-                    mime="text/csv",
-                )
-        with d3:
-            if not curves_df.empty:
-                st.download_button(
-                    "Download curves",
-                    data=curves_df.to_csv(index=False).encode("utf-8"),
-                    file_name="cumulative_pnl.csv",
-                    mime="text/csv",
-                )
-
-        if not bets_df.empty:
-            with st.expander("View all settled bets"):
-                st.dataframe(
-                    bets_df,
-                    width="stretch",
-                    hide_index=True,
-                )
+    _auth_probe = st.session_state.get("matchbook_auth_probe_result")
+    if isinstance(_auth_probe, dict):
+        st.markdown("**Authenticated probe**")
+        st.write(f"Session token: {_mask_token(_auth_probe.get('session_token'))}")
+        b1, b2 = st.columns(2)
+        with b1:
+            st.markdown("Account")
+            st.json(_auth_probe.get("account") or {})
+        with b2:
+            st.markdown("Balance")
+            st.json(_auth_probe.get("balance") or {})
 
 
 # =====================================================================
@@ -7886,6 +8683,8 @@ elif page == "⚖️ Strategy Calibrator":
                 ):
                     _pending = {
                         "value_threshold": float(best["value_threshold"]),
+                        "value_min_odds": float(best["min_odds"]),
+                        "value_max_odds": float(best["max_odds"]),
                         "ew_min_place_edge": float(best["min_place_edge"]),
                         "ew_min_odds": float(best["min_odds"]),
                         "ew_max_odds": float(best["max_odds"]),
@@ -7960,6 +8759,8 @@ elif page == "⚖️ Strategy Calibrator":
                     ):
                         _pending = {
                             "value_threshold": float(best_oos_params["value_threshold"]),
+                            "value_min_odds": float(best_oos_params["min_odds"]),
+                            "value_max_odds": float(best_oos_params["max_odds"]),
                             "ew_min_place_edge": float(best_oos_params["min_place_edge"]),
                             "ew_min_odds": float(best_oos_params["min_odds"]),
                             "ew_max_odds": float(best_oos_params["max_odds"]),
@@ -8118,10 +8919,9 @@ elif page == "📈 Model Insights":
 
     predictor = st.session_state.predictor
 
-    tab_fi, tab_metrics, tab_overfit = st.tabs(
+    tab_fi, tab_overfit = st.tabs(
         [
             "🔑 Feature Importance",
-            "📊 Metrics & Features",
             "🔬 Overfitting Diagnostics",
         ]
     )
@@ -8131,6 +8931,7 @@ elif page == "📈 Model Insights":
         # Build a map of available sub-models on the predictor
         _fi_model_map = {
             "classifier":("Win Classifier",   getattr(predictor, "clf_model",   None)),
+            "ranker":    ("Race Ranker",      getattr(predictor, "ranker_model", None)),
             "place":     ("Place Classifier",  getattr(predictor, "place_model", None)),
         }
         _fi_available = {k: (label, m) for k, (label, m) in _fi_model_map.items()
@@ -8164,17 +8965,33 @@ elif page == "📈 Model Insights":
             )
             st.plotly_chart(fig, width="stretch")
 
-            # Elo feature breakdown
-            elo_feats = fi[
-                fi["feature"].str.contains("elo", case=False)
-            ]
-            if not elo_feats.empty:
-                st.markdown("#### ⚡ Elo Feature Contributions")
-                st.dataframe(
-                    elo_feats.style.format({"importance": "{:.4f}"}),
-                    width="stretch",
-                    hide_index=True,
-                )
+            _full_importances = get_feature_importance(
+                model_obj, feat_cols, top_n=len(feat_cols),
+            )
+            _conc = _build_concentration_charts(
+                tuple(_full_importances["importance"].tolist()),
+                tuple(_full_importances["feature"].tolist()),
+            )
+
+            st.markdown("### 📐 Feature Importance Concentration")
+            st.caption(
+                "A model that relies heavily on a few features is more brittle. "
+                "The Lorenz curve shows how evenly importance is distributed; "
+                "the closer to the diagonal, the more balanced."
+            )
+            _conc_stats = st.columns(4)
+            _conc_stats[0].metric("Gini", f"{_conc['gini']:.3f}")
+            _conc_stats[1].metric("Top 5 share", f"{_conc['top5']:.1%}")
+            _conc_stats[2].metric("Top 10 share", f"{_conc['top10']:.1%}")
+            _conc_stats[3].metric("Top 20 share", f"{_conc['top20']:.1%}")
+            st.plotly_chart(_conc["lorenz_fig"], width="stretch")
+
+            st.markdown("#### 📋 All Feature Importances")
+            st.dataframe(
+                _full_importances.style.format({"importance": "{:.4f}"}),
+                width="stretch",
+                hide_index=True,
+            )
         else:
             if predictor is None:
                 st.info(
@@ -8187,190 +9004,545 @@ elif page == "📈 Model Insights":
                     "The active model may not support this — try re-training."
                 )
 
-    # ── Metrics & Features ───────────────────────────────────────────
-    with tab_metrics:
-        metrics = st.session_state.metrics
-        if not metrics:
-            # Try loading from latest persisted run
-            _lid = get_latest_run_id()
-            if _lid:
-                try:
-                    _lr = load_run(_lid)
-                    metrics = _lr.get("metrics")
-                    st.session_state.metrics = metrics
-                except Exception:
-                    pass
-
-        if metrics:
-            st.subheader("📊 Last Training Metrics")
-            if isinstance(metrics, dict) and any(
-                isinstance(v, dict) for v in metrics.values()
-            ):
-                mdf = pd.DataFrame(metrics).T
-                _num_cols = mdf.select_dtypes("number").columns.tolist()
-                st.dataframe(
-                    mdf.style.format("{:.4f}", subset=_num_cols),
-                    width="stretch",
-                )
-
-                fig = px.bar(
-                    mdf[_num_cols].reset_index().melt(id_vars="index"),
-                    x="index", y="value", color="variable",
-                    barmode="group", title="Model Comparison",
-                )
-                st.plotly_chart(fig, width="stretch")
-
-        st.subheader("📖 Feature Reference")
-        st.info(
-            "Use this page for feature importance and model diagnostics.  \n"
-            "For equity curves, calibration charts, bet logs, and saved run details, "
-            "visit the **🧪 Experiments** page."
-        )
-
     # ── Overfitting Diagnostics ──────────────────────────────────────
     with tab_overfit:
-        st.subheader("🔬 Overfitting Diagnostics")
+        st.subheader("🔬 Model Health & Diagnostics")
         st.caption(
-            "Compare out-of-fold vs validation performance to spot overfitting. "
-            "Large gaps between OOF and validation metrics indicate the model "
-            "may still be too closely fitted to the development data."
+            "This view separates three different failure modes: generalization gap "
+            "(OOF vs validation), calibration quality, and stability across runs or walk-forward folds."
         )
 
-        # --- Collect train & test metrics from the active run ---------
         _active_rid = st.session_state.get("active_run_id")
-        _run_data_overfit = None
-        _test_metrics_of = st.session_state.get("metrics")
-        _train_metrics_of = None
+        _run_meta_diag = None
+        _run_full_diag = None
+        _test_metrics_diag = st.session_state.get("metrics") or {}
+        _train_metrics_diag = {}
+        _wf_summary_diag = pd.DataFrame()
 
         if _active_rid:
             try:
-                _run_data_overfit = load_run_meta(_active_rid)
-                _train_metrics_of = _run_data_overfit.get("train_metrics")
-                if not _test_metrics_of:
-                    _test_metrics_of = _run_data_overfit.get("metrics")
+                _run_meta_diag = load_run_meta(_active_rid)
+                _train_metrics_diag = _run_meta_diag.get("train_metrics") or {}
+                if not _test_metrics_diag:
+                    _test_metrics_diag = _run_meta_diag.get("metrics") or {}
             except Exception:
-                pass
+                _run_meta_diag = None
 
-        if not _test_metrics_of or not _train_metrics_of:
+            try:
+                _run_full_diag = load_run(_active_rid)
+                _wf_summary_diag = _run_full_diag.get("wf_summary_df")
+                if not isinstance(_wf_summary_diag, pd.DataFrame):
+                    _wf_summary_diag = pd.DataFrame()
+            except Exception:
+                _run_full_diag = None
+                _wf_summary_diag = pd.DataFrame()
+
+        _diag_df = _build_generalization_frame(_train_metrics_diag, _test_metrics_diag)
+
+        if _diag_df.empty and not _test_metrics_diag:
             st.info(
-                "⚠️ OOF vs validation metrics are not available for the current run. "
-                "Re-train the model to generate overfitting diagnostics."
+                "Run diagnostics are not available for the active model yet. "
+                "Train or load a saved run with evaluation metrics to populate this page."
             )
         else:
-            # Cached by run_id only — no json.dumps in the hot path.
-            _of_result = _build_overfit_section_charts(_active_rid or "")
+            _flagged_df = _diag_df[_diag_df["status"] != "Healthy"].copy() if not _diag_df.empty else pd.DataFrame()
+            _worst_gap = float(_diag_df["risk_gap"].max()) if not _diag_df.empty else np.nan
+            _avg_gap = float(_diag_df["risk_gap"].mean()) if not _diag_df.empty else np.nan
+            _validation_eces = []
+            for _mk, _mv in (_test_metrics_diag or {}).items():
+                if isinstance(_mv, dict) and isinstance(_mv.get("ece"), (int, float, np.integer, np.floating)):
+                    _validation_eces.append(float(_mv.get("ece")))
+            _worst_ece = max(_validation_eces) if _validation_eces else np.nan
+            _healthy_share = (
+                float((_diag_df["status"] == "Healthy").mean())
+                if not _diag_df.empty else np.nan
+            )
 
-            if _of_result["overfit_figs"]:
-                # --- 1) OOF vs validation grouped bar chart ----------
-                st.markdown("### 📊 OOF vs Validation — Per Sub-Model")
-                _of_cols = st.columns(min(len(_of_result["overfit_figs"]), 2))
-                for i, fig_of in enumerate(_of_result["overfit_figs"]):
-                    _of_cols[i % 2].plotly_chart(fig_of, width="stretch")
+            _sum_cols = st.columns(4)
+            _sum_cols[0].metric("Worst Risk Gap", "-" if pd.isna(_worst_gap) else f"{_worst_gap:.3f}")
+            _sum_cols[1].metric("Average Gap", "-" if pd.isna(_avg_gap) else f"{_avg_gap:.3f}")
+            _sum_cols[2].metric("Worst Validation ECE", "-" if pd.isna(_worst_ece) else f"{_worst_ece:.4f}")
+            _sum_cols[3].metric("Healthy Metric Share", "-" if pd.isna(_healthy_share) else f"{_healthy_share:.0%}")
 
-                # --- 2) Overfit gap heatmap ---------------------------
-                st.markdown("### 🌡️ Overfit Gap Analysis")
+            _tradeoff_df, _trade_left_label, _trade_right_label = _build_model_tradeoff_frame(
+                _test_metrics_diag,
+                ("ranker",),
+                ("win_classifier", "classifier"),
+            )
+            if not _tradeoff_df.empty:
+                st.markdown("### ⚔️ Race Ranker vs Win Classifier")
                 st.caption(
-                    "**Gap = OOF − Validation.** A gap near 0 is ideal. "
-                    "Gaps above ~0.10 suggest overfitting; "
-                    "negative gaps indicate the model performs better on unseen data (rare but possible)."
+                    "Positive edge means the race ranker is better after adjusting for whether the metric is "
+                    "higher-is-better or lower-is-better. This makes the forecasting vs value-betting tradeoff explicit."
                 )
-                st.plotly_chart(_of_result["heatmap_fig"], width="stretch")
 
-                # --- 3) Summary table with colour-coded flags ---------
-                st.markdown("### 📋 Detailed Comparison")
-                st.dataframe(
-                    _of_result["display_df"].style.format(
-                        {"OOF": "{:.4f}", "Validation": "{:.4f}", "Gap": "{:+.4f}"}
-                    ),
-                    width="stretch",
-                    hide_index=True,
+                _left_wins = int((_tradeoff_df["edge"] > 1e-12).sum())
+                _right_wins = int((_tradeoff_df["edge"] < -1e-12).sum())
+                _value_edge = _tradeoff_df.loc[_tradeoff_df["metric_key"] == "value_bet_roi", "edge"]
+                _predictive = _tradeoff_df[_tradeoff_df["family"].isin(["Calibration", "Generalization"])]
+                _predictive_edge = float(_predictive["edge"].mean()) if not _predictive.empty else np.nan
+                _best_ranker_row = _tradeoff_df.iloc[0]
+                _best_win_row = _tradeoff_df.sort_values("edge", ascending=True).iloc[0]
+
+                _trade_cols = st.columns(4)
+                _trade_cols[0].metric(f"{_trade_left_label} Better On", f"{_left_wins}/{len(_tradeoff_df)}")
+                _trade_cols[1].metric(f"{_trade_right_label} Better On", f"{_right_wins}/{len(_tradeoff_df)}")
+                _trade_cols[2].metric(
+                    "Avg Predictive Edge",
+                    "-" if pd.isna(_predictive_edge) else f"{_predictive_edge:+.4f}",
                 )
+                _trade_cols[3].metric(
+                    "ROI Edge",
+                    "-" if _value_edge.empty else f"{float(_value_edge.iloc[0]):+.2%}",
+                )
+
+                _trade_left, _trade_right = st.columns([1.1, 0.9])
+                with _trade_left:
+                    _plot_df = _tradeoff_df.sort_values("edge", ascending=True).copy()
+                    _plot_df["color_group"] = np.where(_plot_df["edge"] >= 0, _trade_left_label, _trade_right_label)
+                    _trade_fig = px.bar(
+                        _plot_df,
+                        x="edge",
+                        y="metric",
+                        color="color_group",
+                        orientation="h",
+                        hover_data={
+                            "family": True,
+                            "left_value": ":.4f",
+                            "right_value": ":.4f",
+                            "edge": ":.4f",
+                            "color_group": False,
+                        },
+                        color_discrete_map={
+                            _trade_left_label: "#2563eb",
+                            _trade_right_label: "#f59e0b",
+                        },
+                        title="Direction-aware edge by metric",
+                    )
+                    _trade_fig.add_vline(x=0, line_dash="dash", line_color="#94a3b8")
+                    _trade_fig.update_layout(height=420, xaxis_title="Edge", yaxis_title="")
+                    st.plotly_chart(_trade_fig, width="stretch")
+
+                with _trade_right:
+                    st.markdown(
+                        f"**Biggest {_trade_left_label} edge:** {_best_ranker_row['metric']} ({_best_ranker_row['edge']:+.4f})"
+                    )
+                    st.markdown(
+                        f"**Biggest {_trade_right_label} edge:** {_best_win_row['metric']} ({abs(float(_best_win_row['edge'])):+.4f})"
+                    )
+                    st.dataframe(
+                        _tradeoff_df[["metric", "family", "left_value", "right_value", "edge", "leader"]]
+                        .rename(columns={
+                            "metric": "Metric",
+                            "family": "Family",
+                            "left_value": _trade_left_label,
+                            "right_value": _trade_right_label,
+                            "edge": "Edge",
+                            "leader": "Leader",
+                        })
+                        .style.format({
+                            _trade_left_label: "{:.4f}",
+                            _trade_right_label: "{:.4f}",
+                            "Edge": "{:+.4f}",
+                        }),
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+                st.markdown("---")
+
+            _full_snapshot_df, _value_snapshot_df = _build_metric_snapshot_frame(_test_metrics_diag)
+            _selector_explainer = _build_ranker_selector_explainer(_test_metrics_diag)
+            if not _full_snapshot_df.empty or not _value_snapshot_df.empty:
+                st.markdown("### 🎯 Full Field vs Value-Bet Subset")
+                st.caption(
+                    "Full-field metrics score every runner in every race. Value-bet metrics score only the runners that "
+                    "passed the betting threshold. A model can be worse globally but better on the smaller subset it actually bets."
+                )
+
+                _exp_cols = st.columns(4)
+                _exp_cols[0].metric(
+                    "Ranker Full-Field Brier Edge",
+                    _fmt_metric(_selector_explainer.get("full_brier_edge"), "+.4f"),
+                )
+                _exp_cols[1].metric(
+                    "Ranker VB Brier Edge",
+                    _fmt_metric(_selector_explainer.get("selected_brier_edge"), "+.4f"),
+                )
+                _exp_cols[2].metric(
+                    "Ranker ROI Edge",
+                    _fmt_metric(_selector_explainer.get("roi_edge"), "+.2%"),
+                )
+                _exp_cols[3].metric(
+                    "Bet Count Delta",
+                    _fmt_metric(_selector_explainer.get("bet_count_delta"), "+.0f"),
+                )
+
+                _snap_left, _snap_right = st.columns(2)
+                with _snap_left:
+                    st.markdown("#### Forecasting All Runners")
+                    if _full_snapshot_df.empty:
+                        st.info("No full-field metrics available for the active run.")
+                    else:
+                        st.dataframe(
+                            _full_snapshot_df.style.format({
+                                "Brier": "{:.4f}",
+                                "Log Loss": "{:.4f}",
+                                "ECE": "{:.4f}",
+                                "Top-1 Accuracy": "{:.2%}",
+                                "Winner in Top 3": "{:.2%}",
+                                "RPS": "{:.4f}",
+                            }),
+                            width="stretch",
+                            hide_index=True,
+                        )
+
+                with _snap_right:
+                    st.markdown("#### Quality of Selected Bets")
+                    if _value_snapshot_df.empty:
+                        st.info("No value-bet subset metrics available for the active run.")
+                    else:
+                        st.dataframe(
+                            _value_snapshot_df.style.format({
+                                "Value Bets": "{:.0f}",
+                                "VB Strike Rate": "{:.2%}",
+                                "VB Brier": "{:.4f}",
+                                "VB Log Loss": "{:.4f}",
+                                "Avg Edge": "{:+.4f}",
+                                "Avg CLV": "{:.3f}",
+                                "Exp ROI": "{:.1f}%",
+                                "ROI": "{:.2%}",
+                            }),
+                            width="stretch",
+                            hide_index=True,
+                        )
+
+                st.markdown("---")
+
+            _top_left, _top_right = st.columns([1.25, 1.0])
+
+            with _top_left:
+                st.markdown("### 📊 Generalization Map")
+                st.caption(
+                    "Points above the diagonal are better on OOF than validation for higher-is-better metrics; "
+                    "for lower-is-better metrics the risk score already flips that direction internally."
+                )
+                if _diag_df.empty:
+                    st.info("No comparable OOF and validation metrics were found for this run.")
+                else:
+                    _scatter_df = _diag_df.copy()
+                    _scatter_df["hover_label"] = (
+                        _scatter_df["sub_model"] + " • " + _scatter_df["metric"]
+                    )
+                    _scatter_colors = {
+                        "Healthy": "#22c55e",
+                        "Watch": "#f59e0b",
+                        "Moderate": "#ef4444",
+                        "High": "#991b1b",
+                    }
+                    _scatter_fig = px.scatter(
+                        _scatter_df,
+                        x="Validation",
+                        y="OOF",
+                        color="status",
+                        symbol="family",
+                        hover_name="hover_label",
+                        hover_data={
+                            "sub_model": True,
+                            "metric": True,
+                            "family": True,
+                            "risk_gap": ":.4f",
+                            "Validation": ":.4f",
+                            "OOF": ":.4f",
+                            "status": True,
+                            "hover_label": False,
+                        },
+                        color_discrete_map=_scatter_colors,
+                    )
+                    _vals = pd.concat([_scatter_df["Validation"], _scatter_df["OOF"]], ignore_index=True)
+                    _axis_min = float(_vals.min()) if not _vals.empty else 0.0
+                    _axis_max = float(_vals.max()) if not _vals.empty else 1.0
+                    _scatter_fig.add_trace(go.Scatter(
+                        x=[_axis_min, _axis_max],
+                        y=[_axis_min, _axis_max],
+                        mode="lines",
+                        name="Ideal parity",
+                        line=dict(color="#94a3b8", dash="dash"),
+                    ))
+                    _scatter_fig.update_layout(height=430, legend_title_text="")
+                    st.plotly_chart(_scatter_fig, width="stretch")
+
+            with _top_right:
+                st.markdown("### 🌡️ Risk by Model / Metric")
+                st.caption(
+                    "Positive values mean the metric got worse on validation after adjusting for metric direction."
+                )
+                if _diag_df.empty:
+                    st.info("Risk heatmap unavailable for this run.")
+                else:
+                    _heat_df = _diag_df.pivot(index="sub_model", columns="metric", values="risk_gap")
+                    _zmax = float(np.nanmax(np.abs(_heat_df.values))) if _heat_df.size else 0.0
+                    _zmax = max(_zmax, 0.05)
+                    _heat_fig = px.imshow(
+                        _heat_df.values,
+                        x=_heat_df.columns.tolist(),
+                        y=_heat_df.index.tolist(),
+                        color_continuous_scale=["#22c55e", "#f8fafc", "#ef4444"],
+                        zmin=-_zmax,
+                        zmax=_zmax,
+                        text_auto=".3f",
+                        aspect="auto",
+                    )
+                    _heat_fig.update_layout(height=430, coloraxis_colorbar_title="Risk gap")
+                    st.plotly_chart(_heat_fig, width="stretch")
+
+            st.markdown("### 🚩 Flagged Issues")
+            _issue_left, _issue_right = st.columns([1.15, 0.85])
+
+            with _issue_left:
+                if _flagged_df.empty:
+                    st.success("No material generalization gaps are currently flagged for this run.")
+                else:
+                    st.dataframe(
+                        _flagged_df[["sub_model", "metric", "family", "OOF", "Validation", "risk_gap", "status"]]
+                        .rename(columns={
+                            "sub_model": "Sub-Model",
+                            "metric": "Metric",
+                            "family": "Family",
+                            "risk_gap": "Risk Gap",
+                            "status": "Status",
+                        })
+                        .style.format({
+                            "OOF": "{:.4f}",
+                            "Validation": "{:.4f}",
+                            "Risk Gap": "{:.4f}",
+                        }),
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+            with _issue_right:
+                if _diag_df.empty:
+                    st.info("No model summary available.")
+                else:
+                    _model_summary = (
+                        _diag_df.groupby("sub_model", as_index=False)
+                        .agg(
+                            avg_risk_gap=("risk_gap", "mean"),
+                            max_risk_gap=("risk_gap", "max"),
+                            flagged=("status", lambda s: int((s != "Healthy").sum())),
+                        )
+                        .sort_values("max_risk_gap", ascending=False)
+                    )
+                    _model_fig = px.bar(
+                        _model_summary,
+                        x="sub_model",
+                        y="max_risk_gap",
+                        color="flagged",
+                        color_continuous_scale="OrRd",
+                        hover_data={
+                            "avg_risk_gap": ":.4f",
+                            "max_risk_gap": ":.4f",
+                            "flagged": True,
+                        },
+                        title="Worst risk gap by sub-model",
+                    )
+                    _model_fig.update_layout(height=300, xaxis_title="", yaxis_title="Risk gap")
+                    st.plotly_chart(_model_fig, width="stretch")
+
+            st.markdown("---")
+            st.markdown("### 🎯 Calibration Quality")
+            _cal_models = {
+                _mk: _mv for _mk, _mv in (_test_metrics_diag or {}).items()
+                if isinstance(_mv, dict) and (
+                    isinstance(_mv.get("reliability_bins"), list)
+                    or isinstance(_mv.get("decile_calibration"), list)
+                )
+            }
+            if not _cal_models:
+                st.info("Calibration diagnostics are not available for this run.")
             else:
-                st.warning("Could not parse train/test metrics for comparison.")
+                _cal_sel = st.selectbox(
+                    "Calibration sub-model",
+                    options=list(_cal_models.keys()),
+                    format_func=_model_display_name,
+                    key="diag_cal_model",
+                )
+                _cal_payload = _cal_models[_cal_sel]
+                _cal_top = st.columns(4)
+                for _col, (_label, _value, _fmt) in zip(_cal_top, _calibration_metric_cards(_cal_payload)):
+                    _col.metric(_label, _fmt_metric(_value, _fmt))
 
-        # --- 4) Feature importance concentration ----------------------
-        st.markdown("---")
-        st.markdown("### 📐 Feature Importance Concentration")
-        st.caption(
-            "A model that relies heavily on a few features is more brittle. "
-            "The Lorenz curve shows how evenly importance is distributed — "
-            "the closer to the diagonal, the more balanced."
-        )
-        st.markdown(
-            """
-**Optuna** is a Bayesian hyperparameter optimisation framework.
-Instead of grid-searching every combination, it uses past trial
-results to *intelligently propose* the next set of parameters.
+                _secondary_cards: list[tuple[str, float | None, str]] = []
+                _place_precision = _first_metric_value(_cal_payload, "place_precision")
+                if _place_precision is not None:
+                    _secondary_cards.append(("Place Precision", _place_precision, ".3f"))
+                _ndcg1 = _first_metric_value(_cal_payload, "ndcg_at_1")
+                if _ndcg1 is not None:
+                    _secondary_cards.append(("NDCG@1", _ndcg1, ".4f"))
+                _top1 = _first_metric_value(_cal_payload, "top1_accuracy")
+                if _top1 is not None:
+                    _secondary_cards.append(("Top-1 Accuracy", _top1, ".4f"))
 
-**The pipeline:**
+                if _secondary_cards:
+                    _secondary_cols = st.columns(len(_secondary_cards))
+                    for _col, (_label, _value, _fmt) in zip(_secondary_cols, _secondary_cards):
+                        _col.metric(_label, _fmt_metric(_value, _fmt))
 
-1. The training data (excluding the final test set) is split into
-   a **train fold** (80%) and a **validation fold** (20%).
-2. Optuna proposes a set of hyperparameters and trains a model on
-   the train fold.
-3. The model is scored on the validation fold using **NDCG@1**.
-4. Optuna repeats for *N* trials, guided by a Tree-structured
-   Parzen Estimator (TPE) sampler.
-5. The best parameters are used to **retrain on the full training
-   set**, and the final test set produces the reported metrics.
+                _cal_left, _cal_right = st.columns(2)
+                with _cal_left:
+                    _rel_bins = _cal_payload.get("reliability_bins") or []
+                    if _rel_bins:
+                        _rel_df = pd.DataFrame(_rel_bins)
+                        _rel_fig = go.Figure()
+                        _rel_fig.add_trace(go.Scatter(
+                            x=[0, 1], y=[0, 1],
+                            mode="lines", name="Ideal",
+                            line=dict(color="#94a3b8", dash="dash"),
+                        ))
+                        _rel_fig.add_trace(go.Scatter(
+                            x=_rel_df["mean_pred"],
+                            y=_rel_df["obs_rate"],
+                            mode="lines+markers",
+                            name="Observed",
+                            marker=dict(
+                                size=np.clip(np.sqrt(_rel_df["count"].clip(lower=1)) * 1.2, 6, 24),
+                                color="#2563eb",
+                            ),
+                            line=dict(color="#2563eb"),
+                            customdata=np.stack([_rel_df["count"]], axis=1),
+                            hovertemplate="Predicted=%{x:.3f}<br>Observed=%{y:.3f}<br>Count=%{customdata[0]:,.0f}<extra></extra>",
+                        ))
+                        _rel_fig.update_layout(
+                            height=340,
+                            title="Reliability Curve",
+                            xaxis_title="Mean predicted probability",
+                            yaxis_title="Observed win/place rate",
+                        )
+                        st.plotly_chart(_rel_fig, width="stretch")
+                    else:
+                        st.info("Reliability bins are not available for this sub-model.")
 
-**Parameters searched:**
+                with _cal_right:
+                    _decile = _cal_payload.get("decile_calibration") or []
+                    if _decile:
+                        _dec_df = pd.DataFrame(_decile)
+                        _dec_df["calibration_error"] = _dec_df["obs_rate"] - _dec_df["mean_pred"]
+                        _dec_fig = px.bar(
+                            _dec_df,
+                            x="decile",
+                            y="calibration_error",
+                            color="calibration_error",
+                            color_continuous_scale=["#dc2626", "#f8fafc", "#16a34a"],
+                            title="Observed minus predicted by decile",
+                            hover_data={
+                                "mean_pred": ":.4f",
+                                "obs_rate": ":.4f",
+                                "count": True,
+                                "calibration_error": ":.4f",
+                            },
+                        )
+                        _dec_fig.add_hline(y=0, line_dash="dash", line_color="#94a3b8")
+                        _dec_fig.update_layout(height=340, xaxis_title="Decile", yaxis_title="Calibration error")
+                        st.plotly_chart(_dec_fig, width="stretch")
+                    else:
+                        st.info("Per-decile calibration detail is not available for this sub-model.")
 
-| Parameter | Range |
-|---|---|
-| `n_estimators` | 100 – 1,500 |
-| `max_depth` | 3 – 12 |
-| `learning_rate` | 0.005 – 0.3 (log scale) |
-| `subsample` | 0.5 – 1.0 |
-| `colsample_bytree` | 0.3 – 1.0 |
-| `min_child_weight` / `min_child_samples` | 1 – 20 / 5 – 50 |
+            st.markdown("---")
+            _bottom_left, _bottom_right = st.columns(2)
 
-**How many trials?**
+            with _bottom_left:
+                st.markdown("### 🕒 Cross-Run Trend")
+                _saved_runs = list_runs()
+                _trend_rows = []
+                for _run in _saved_runs:
+                    _metrics = _run.get("metrics") or {}
+                    _train = _run.get("train_metrics") or {}
+                    for _mk, _mv in _metrics.items():
+                        _tr_mv = _train.get(_mk, {}) if isinstance(_train.get(_mk, {}), dict) else {}
+                        if not isinstance(_mv, dict):
+                            continue
+                        for _metric_name, _val in _mv.items():
+                            _oof = _tr_mv.get(_metric_name)
+                            if not _is_diagnostic_metric(_metric_name):
+                                continue
+                            if isinstance(_val, (int, float, np.integer, np.floating)) and isinstance(_oof, (int, float, np.integer, np.floating)):
+                                _trend_rows.append((
+                                    _run.get("run_id", ""),
+                                    _run.get("name", _run.get("run_id", "")),
+                                    _run.get("timestamp", ""),
+                                    _mk,
+                                    _metric_name,
+                                    float(_oof),
+                                    float(_val),
+                                ))
 
-| Trials | Quality | Time |
-|---|---|---|
-| 10–20 | Quick scan | ~1 min |
-| 30 (default) | Good balance | ~2 min |
-| 100+ | Thorough | 5–15 min |
+                _metric_options = []
+                if not _diag_df.empty:
+                    _metric_options = list(
+                        _diag_df[["model_key", "metric_key"]]
+                        .drop_duplicates()
+                        .itertuples(index=False, name=None)
+                    )
+                elif _trend_rows:
+                    _metric_options = sorted({(_r[3], _r[4]) for _r in _trend_rows})
 
-> 💡 Each sub-model is tuned via Optuna.
-> The best params are used to retrain on the full training set.
-            """
-        )
+                if not _metric_options:
+                    st.info("Not enough saved-run history for a trend view yet.")
+                else:
+                    _trend_sel = st.selectbox(
+                        "Trend metric",
+                        options=_metric_options,
+                        format_func=lambda item: f"{_model_display_name(item[0])} • {_metric_label(item[1])}",
+                        key="diag_trend_metric",
+                    )
+                    _trend_out = _build_generalization_trend_chart(tuple(_trend_rows), _trend_sel[0], _trend_sel[1])
+                    if _trend_out["fig"] is None:
+                        st.info("Need at least two comparable saved runs to plot a trend.")
+                    else:
+                        st.plotly_chart(_trend_out["fig"], width="stretch")
 
-    st.markdown("---")
+            with _bottom_right:
+                st.markdown("### 🔁 Walk-Forward Stability")
+                if isinstance(_wf_summary_diag, pd.DataFrame) and not _wf_summary_diag.empty:
+                    _wf_metric_options = [
+                        _c for _c in ["ndcg_at_1", "top1_accuracy", "brier_score", "place_precision"]
+                        if _c in _wf_summary_diag.columns
+                    ]
+                    if not _wf_metric_options:
+                        st.info("Walk-forward summary is present, but no recognised diagnostic metrics were found.")
+                    else:
+                        _wf_metric = st.selectbox(
+                            "Walk-forward metric",
+                            options=_wf_metric_options,
+                            format_func=_metric_label,
+                            key="diag_wf_metric",
+                        )
+                        _wf_series = pd.to_numeric(_wf_summary_diag[_wf_metric], errors="coerce").dropna()
+                        _wf_cols = st.columns(4)
+                        _wf_cols[0].metric("Folds", int(len(_wf_series)))
+                        _wf_cols[1].metric("Mean", _fmt_metric(_wf_series.mean(), ".4f"))
+                        _wf_cols[2].metric("Std Dev", _fmt_metric(_wf_series.std(ddof=0), ".4f"))
+                        _wf_cols[3].metric("Range", _fmt_metric(_wf_series.max() - _wf_series.min(), ".4f"))
 
-    # -- Betting strategies --
-    st.header("🎲 Betting Strategies")
+                        _wf_plot = pd.DataFrame({
+                            "Fold": np.arange(1, len(_wf_series) + 1),
+                            "Value": _wf_series.values,
+                        })
+                        _wf_fig = px.line(
+                            _wf_plot,
+                            x="Fold",
+                            y="Value",
+                            markers=True,
+                            title=f"Walk-forward {_metric_label(_wf_metric)} by fold",
+                        )
+                        _wf_fig.update_layout(height=380, xaxis_dtick=1, yaxis_title=_metric_label(_wf_metric))
+                        st.plotly_chart(_wf_fig, width="stretch")
+                else:
+                    st.info(
+                        "Walk-forward stability is only available for runs that were trained with walk-forward validation enabled."
+                    )
 
-    with st.expander("🎯 Top Pick Strategy", expanded=True):
-        st.markdown(
-            """
-**Rule:** Bet 1 unit on the model's **#1 ranked horse** in every
-race.
-
-- Simple, always-on strategy — one bet per race.
-- P&L = (odds − 1) if the pick wins, −1 if it loses.
-- Best for models with high top-1 accuracy at reasonable odds.
-            """
-        )
-
-    with st.expander("💎 Value Strategy"):
-        st.markdown(
-            """
-**Rule:** Bet 1 unit on every horse where
-`model_prob − implied_prob > threshold` (default 0.05).
-
-- May produce **zero or multiple** bets per race.
-- Targets situations where the market under-prices a horse.
-- Often picks at longer odds → lower strike rate but bigger
-  payoffs when they land.
-- The threshold can be tuned on the backtest page.
-            """
-        )
-
-    st.markdown("---")
-    st.caption(
-        "⚠️ This system is for **educational purposes only**. "
-        "Past performance does not guarantee future results."
-    )
+            st.caption(
+                "Feature concentration still matters, but it now lives in the Feature Importance tab so this page can stay focused on model health."
+            )

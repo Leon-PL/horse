@@ -43,7 +43,16 @@ ROLLING_WINDOWS = [3, 5, 10, 20]
 # older than LIVE_FE_HISTORY_MONTHS contributes nothing to live predictions.
 # Increase if you notice stale-looking Elo/form values; decrease to go faster.
 LIVE_FE_HISTORY_MONTHS = 30
-LIVE_FEATURE_CACHE_VERSION = 1
+LIVE_FEATURE_CACHE_VERSION = 2
+
+# --- Matchbook API Settings ---
+MATCHBOOK_EDGE_URL = os.getenv("MATCHBOOK_EDGE_URL", "https://api.matchbook.com/edge/rest")
+MATCHBOOK_BPAPI_URL = os.getenv("MATCHBOOK_BPAPI_URL", "https://api.matchbook.com/bpapi/rest")
+MATCHBOOK_TIMEOUT_SECS = float(os.getenv("MATCHBOOK_TIMEOUT_SECS", "15"))
+MATCHBOOK_HORSE_RACING_SPORT_ID = int(os.getenv("MATCHBOOK_HORSE_RACING_SPORT_ID", "24735152712200"))
+MATCHBOOK_DEFAULT_CURRENCY = os.getenv("MATCHBOOK_DEFAULT_CURRENCY", "GBP")
+MATCHBOOK_USERNAME = os.getenv("MATCHBOOK_USERNAME", "")
+MATCHBOOK_PASSWORD = os.getenv("MATCHBOOK_PASSWORD", "")
 
 # --- Model Settings ---
 MODEL_FILE = os.path.join(MODELS_DIR, "horse_race_model.joblib")
@@ -113,6 +122,18 @@ PLACE_CLASSIFIER_PARAMS = {
     "reg_lambda": 3.0,
 }
 
+RANKER_PARAMS = {
+    "n_estimators": 1200,
+    "max_depth": 6,
+    "learning_rate": 0.03,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_samples": 30,
+    "num_leaves": 63,
+    "reg_alpha": 0.2,
+    "reg_lambda": 2.0,
+}
+
 # --- Softmax Temperature ---
 # Controls sharpness of probability output: <1 = sharper, >1 = softer
 SOFTMAX_TEMPERATURE = 1.0
@@ -124,6 +145,11 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
     "classifier": "lgbm",  # Win classifier
     "place": "lgbm",       # Place classifier
 }
+
+# --- Race Ranker ---
+# LambdaRank learns relative order within each race directly.
+TRAIN_RANKER = True
+RANKER_BLEND_WEIGHT = 0.35
 
 # --- Elo Settings ---
 ELO_K_BASE = 32.0   # K for horses with 0 prior runs

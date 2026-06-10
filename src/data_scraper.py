@@ -512,6 +512,22 @@ class SportingLifeScraper:
         except (KeyError, TypeError, AttributeError) as e:
             logger.warning(f"Error parsing result JSON: {e}")
 
+        # Some Sporting Life "result" URLs occasionally resolve to an
+        # unresolved or non-settled page shape (for example entries-like
+        # pages with all runners at finish_position=0 and blank jockeys).
+        # Those must not be stored as historical results.
+        if runners:
+            settled_count = sum(
+                1 for row in runners
+                if _safe_int(row.get("finish_position", 0)) > 0
+            )
+            if settled_count == 0:
+                logger.warning(
+                    "Skipping unresolved result page with no settled finishers: %s",
+                    race_url,
+                )
+                return []
+
         return runners
 
     # ==================================================================

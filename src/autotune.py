@@ -19,9 +19,23 @@ logger = logging.getLogger(__name__)
 
 AUTOTUNE_DIR = os.path.join(config.DATA_DIR, "autotune")
 AUTOTUNE_MODEL_INFO = {
-    "classifier": {"label": "Win Classifier", "training_metric": "LogLoss"},
-    "place": {"label": "Place Classifier", "training_metric": "LogLoss"},
+    "classifier": {
+        "label": "Win Classifier",
+        "training_metric": "Top1-Calibration Hybrid",
+        "objective_summary": "Higher is better. Rewards top-1 picking, winner-in-top-3, and calibrated probabilities overall plus on the selected-bet subset. Explicit ROI and edge are not part of the objective.",
+    },
+    "place": {
+        "label": "Place Classifier",
+        "training_metric": "Place Top-3 Hybrid",
+        "objective_summary": "Higher is better. Rewards getting the actual top-3 finishers into the model's top-3, while still keeping place precision, calibration Brier, and log loss honest.",
+    },
+    "ranker": {
+        "label": "Race Ranker",
+        "training_metric": "Ranker Top-1 Hybrid",
+        "objective_summary": "Higher is better. Rewards within-race ordering directly via NDCG, top-1, winner-in-top-3, and rank-probability quality across purged walk-forward folds.",
+    },
 }
+AUTOTUNE_OBJECTIVE_VERSION = 7
 
 
 def _ensure_dir(path: str) -> None:
@@ -157,7 +171,7 @@ def create_autotune_session(
     frameworks: dict[str, str],
     models: list[str],
     n_trials: int,
-    n_folds: int = 3,
+    n_folds: int = 2,
 ) -> dict:
     _ensure_dir(AUTOTUNE_DIR)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -168,6 +182,7 @@ def create_autotune_session(
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
         "status": "created",
+        "objective_version": AUTOTUNE_OBJECTIVE_VERSION,
         "dataset_meta": dataset_meta,
         "frameworks": dict(frameworks),
         "models": list(models),
@@ -183,7 +198,7 @@ def create_autotune_session(
 def _build_phase1b_payload(
     featured_df: pd.DataFrame,
     frameworks: dict[str, str],
-    n_folds: int = 3,
+    n_folds: int = 2,
 ) -> tuple[TripleEnsemblePredictor, dict]:
     predictor = TripleEnsemblePredictor(frameworks=dict(frameworks))
     data = prepare_multi_target_data(featured_df)
@@ -191,7 +206,7 @@ def _build_phase1b_payload(
     return predictor, _build_autotune_payload(data, n_folds=n_folds)
 
 
-def _build_autotune_payload(data: dict, n_folds: int = 3) -> dict:
+def _build_autotune_payload(data: dict, n_folds: int = 2) -> dict:
     groups_train = data["groups_train"]
     train_dates = pd.to_datetime(data["train_race_dates"])
     cum_g = np.cumsum(groups_train)
@@ -233,6 +248,7 @@ def _build_autotune_payload(data: dict, n_folds: int = 3) -> dict:
             "fold_index": fold_idx + 1,
             "X_train": data["X_train"][:train_end],
             "X_val": data["X_train"][val_begin:val_end],
+            "eval_df": data["train_df"].iloc[val_begin:val_end].copy(),
             "groups_train": groups_train[:train_races[-1] + 1],
             "groups_val": groups_train[val_races[0]:val_races[-1] + 1],
             "sw_train": data["sample_weight_train"][:train_end],
@@ -246,6 +262,7 @@ def _build_autotune_payload(data: dict, n_folds: int = 3) -> dict:
                 "norm_pos": data["y_train_norm_pos"][:train_end],
                 "fp": data["fp_train"][:train_end],
                 "ip": data["ip_train"][:train_end],
+                "odds": data["odds_train"][:train_end],
             },
             "targets_val": {
                 "rel": data["y_train_rel"][val_begin:val_end],
@@ -256,6 +273,7 @@ def _build_autotune_payload(data: dict, n_folds: int = 3) -> dict:
                 "norm_pos": data["y_train_norm_pos"][val_begin:val_end],
                 "fp": data["fp_train"][val_begin:val_end],
                 "ip": data["ip_train"][val_begin:val_end],
+                "odds": data["odds_train"][val_begin:val_end],
             },
             "summary": {
                 "fold": fold_idx + 1,
@@ -291,12 +309,27 @@ def run_autotune_session(
     frameworks: dict[str, str],
     models: list[str],
     n_trials: int,
-    n_folds: int = 3,
+    n_folds: int = 2,
     progress_callback=None,
 ) -> dict:
     manifest = load_autotune_session(session_id)
     if manifest is None:
         raise FileNotFoundError(f"Unknown autotune session: {session_id}")
+
+    _manifest_version = int(manifest.get("objective_version") or 0)
+    _is_resume = bool(manifest.get("summaries") or manifest.get("best_params") or manifest.get("status") not in {None, "created"})
+    if _is_resume and _manifest_version != AUTOTUNE_OBJECTIVE_VERSION:
+        raise ValueError(
+            f"Autotune session {session_id} uses objective version {_manifest_version}, "
+            f"but the current code expects version {AUTOTUNE_OBJECTIVE_VERSION}. "
+            "Start a new autotune session for the new objective family."
+        )
+
+    _requested_total_trials = int(manifest.get("target_trials") or 0)
+    if _is_resume:
+        _requested_total_trials += int(n_trials)
+    else:
+        _requested_total_trials = int(n_trials)
 
     if progress_callback is not None:
         progress_callback(
@@ -304,6 +337,8 @@ def run_autotune_session(
             {
                 "message": "Building purged walk-forward folds",
                 "target_folds": int(n_folds),
+                "requested_trials": int(n_trials),
+                "requested_total_trials": _requested_total_trials,
             },
         )
 
@@ -316,8 +351,9 @@ def run_autotune_session(
     manifest["status"] = "running"
     manifest["frameworks"] = dict(frameworks)
     manifest["models"] = list(models)
-    manifest["target_trials"] = int(n_trials)
+    manifest["target_trials"] = _requested_total_trials
     manifest["target_folds"] = int(n_folds)
+    manifest["objective_version"] = AUTOTUNE_OBJECTIVE_VERSION
     manifest["split_summary"] = payload["split_summary"]
     manifest["cv_fold_summaries"] = payload.get("cv_fold_summaries", [])
     _write_manifest(manifest)
@@ -327,6 +363,9 @@ def run_autotune_session(
 
     for model_index, model_key in enumerate(models, start=1):
         if model_key not in AUTOTUNE_MODEL_INFO:
+            continue
+        if model_key not in {"classifier", "place", "ranker"}:
+            logger.warning("Skipping unsupported dedicated autotune model: %s", model_key)
             continue
 
         if progress_callback is not None:
@@ -363,6 +402,7 @@ def run_autotune_session(
             anchor_fold["targets_val"],
             anchor_fold["groups_train"],
             anchor_fold["groups_val"],
+            eval_df=anchor_fold.get("eval_df"),
             sw_train=anchor_fold["sw_train"],
             train_dates=anchor_fold["train_dates"],
             n_trials=int(n_trials),
@@ -405,6 +445,7 @@ def build_config_snippet(manifest: dict) -> str:
     model_to_config_key = {
         "classifier": "CLASSIFIER_PARAMS",
         "place": "PLACE_CLASSIFIER_PARAMS",
+        "ranker": "RANKER_PARAMS",
     }
     lines = []
     summaries = manifest.get("summaries") or {}

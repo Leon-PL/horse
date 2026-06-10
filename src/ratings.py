@@ -352,6 +352,9 @@ def compute_elo_features(
     trainer_elo_col = np.full(len(df), np.nan)
     horse_delta_col = np.zeros(len(df))
     jockey_delta_col = np.zeros(len(df))
+    has_horse_elo_col = np.zeros(len(df), dtype=np.int8)
+    has_jockey_elo_col = np.zeros(len(df), dtype=np.int8)
+    has_trainer_elo_col = np.zeros(len(df), dtype=np.int8)
 
     # Momentum Elo: exponential moving average of recent deltas
     horse_momentum: dict[str, float] = defaultdict(float)
@@ -417,43 +420,46 @@ def compute_elo_features(
         # so live racecards get their accumulated Elo ratings.
         for i in idx:
             _hk = _horse_keys[i]
-            if pd.notna(_hk) and horse_race_counts[_hk] > 0:
+            if pd.notna(_hk):
                 horse_elo_col[i] = horse_ratings[_hk]
                 horse_momentum_col[i] = horse_momentum[_hk]
+                has_horse_elo_col[i] = np.int8(horse_race_counts[_hk] > 0)
             # Margin Elo pre-race
-            if pd.notna(_hk) and horse_margin_race_counts[_hk] > 0:
+            if pd.notna(_hk):
                 horse_margin_elo_col[i] = horse_margin_ratings[_hk]
                 horse_margin_momentum_col[i] = horse_margin_momentum[_hk]
-            if has_jockey and pd.notna(_jockey_keys[i]) and jockey_race_counts[_jockey_keys[i]] > 0:
+            if has_jockey and pd.notna(_jockey_keys[i]):
                 jockey_elo_col[i] = jockey_ratings[_jockey_keys[i]]
-            if has_trainer and pd.notna(_trainer_keys[i]) and trainer_race_counts[_trainer_keys[i]] > 0:
+                has_jockey_elo_col[i] = np.int8(jockey_race_counts[_jockey_keys[i]] > 0)
+            if has_trainer and pd.notna(_trainer_keys[i]):
                 trainer_elo_col[i] = trainer_ratings[_trainer_keys[i]]
+                has_trainer_elo_col[i] = np.int8(trainer_race_counts[_trainer_keys[i]] > 0)
 
             # ── Dimensional pre-race ratings ──
             if pd.isna(_hk):
                 continue
-            if _surfaces is not None and pd.notna(_surfaces[i]) and horse_race_counts[_hk] > 0:
+            if _surfaces is not None and pd.notna(_surfaces[i]):
                 _sk = (_hk, _surfaces[i])
                 horse_elo_surf_col[i] = (
                     horse_surf_ratings[_sk]
                     if horse_surf_counts[_sk] >= MIN_DIM_RACES
                     else horse_ratings[_hk]
                 )
-            if _race_types is not None and pd.notna(_race_types[i]) and horse_race_counts[_hk] > 0:
+            if _race_types is not None and pd.notna(_race_types[i]):
                 _rk = (_hk, _race_types[i])
                 horse_elo_rt_col[i] = (
                     horse_rt_ratings[_rk]
                     if horse_rt_counts[_rk] >= MIN_DIM_RACES
                     else horse_ratings[_hk]
                 )
-                if has_jockey and pd.notna(_jockey_keys[i]) and jockey_race_counts[_jockey_keys[i]] > 0:
+                if has_jockey and pd.notna(_jockey_keys[i]):
                     _jrk = (_jockey_keys[i], _race_types[i])
                     jockey_elo_rt_col[i] = (
                         jockey_rt_ratings[_jrk]
                         if jockey_rt_counts[_jrk] >= MIN_DIM_RACES
                         else jockey_ratings[_jockey_keys[i]]
                     )
-            if _dist_cats is not None and np.isfinite(_dist_cats[i]) and horse_race_counts[_hk] > 0:
+            if _dist_cats is not None and np.isfinite(_dist_cats[i]):
                 _dk = (_hk, int(_dist_cats[i]))
                 horse_elo_dc_col[i] = (
                     horse_dc_ratings[_dk]
@@ -676,9 +682,9 @@ def compute_elo_features(
         "horse_elo": horse_elo_col,
         "jockey_elo": jockey_elo_col,
         "trainer_elo": trainer_elo_col,
-        "has_horse_elo": horse_elo.notna().astype(int).to_numpy(),
-        "has_jockey_elo": jockey_elo.notna().astype(int).to_numpy(),
-        "has_trainer_elo": trainer_elo.notna().astype(int).to_numpy(),
+        "has_horse_elo": has_horse_elo_col,
+        "has_jockey_elo": has_jockey_elo_col,
+        "has_trainer_elo": has_trainer_elo_col,
         "horse_elo_delta": horse_delta_col,
         "jockey_elo_delta": jockey_delta_col,
         "horse_elo_momentum": horse_momentum_col,

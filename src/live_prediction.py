@@ -137,37 +137,39 @@ def feature_engineer_with_history_core(
     extra_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Feature-engineer live rows using processed historical context."""
-    hist = None if history_df is None else history_df.copy()
-
+    history_frames: list[pd.DataFrame] = []
+    if history_df is not None and not history_df.empty:
+        history_frames.append(history_df)
     if extra_history is not None and not extra_history.empty:
-        if hist is not None and not hist.empty:
-            hist = pd.concat([hist, extra_history], ignore_index=True, sort=False)
-        else:
-            hist = extra_history.copy()
+        history_frames.append(extra_history)
 
-    if hist is None or hist.empty:
+    if not history_frames:
         logger.warning("No historical processed data found — features will be built from live data only.")
         return engineer_features(live_processed, save=False)
 
-    hist = hist.copy()
-    live = live_processed.copy()
-    hist["_is_live"] = 0
-    live["_is_live"] = 1
-
-    combined = pd.concat([hist, live], ignore_index=True, sort=False)
+    history_rows = sum(len(frame) for frame in history_frames)
+    live_rows = len(live_processed)
+    combined = pd.concat([*history_frames, live_processed], ignore_index=True, sort=False, copy=False)
+    combined["_is_live"] = 0
+    if live_rows > 0:
+        combined.iloc[-live_rows:, combined.columns.get_loc("_is_live")] = 1
 
     no_coerce = {
         "race_id", "horse_name", "jockey", "trainer", "track",
         "race_name", "race_date", "off_time", "region", "form",
         "going", "race_type", "race_class", "surface", "headgear", "sex",
     }
-    for col in combined.columns:
-        if col.startswith("_") or col in no_coerce:
+    object_cols = [
+        col for col in combined.select_dtypes(include=["object"]).columns
+        if not col.startswith("_") and col not in no_coerce
+    ]
+    for col in object_cols:
+        non_null = combined[col].notna().sum()
+        if non_null == 0:
             continue
-        if combined[col].dtype == "object":
-            converted = pd.to_numeric(combined[col], errors="coerce")
-            if converted.notna().sum() > combined[col].notna().sum() * 0.5:
-                combined[col] = converted
+        converted = pd.to_numeric(combined[col], errors="coerce")
+        if converted.notna().sum() > non_null * 0.5:
+            combined[col] = converted
 
     race_level_vars = {"track"}
     for col, freq_col in [
@@ -185,14 +187,14 @@ def feature_engineer_with_history_core(
         "weather_temp_max", "weather_temp_min", "weather_precip_mm",
         "weather_wind_kmh", "weather_precip_prev3",
     }
-    for col in combined.columns:
-        if combined[col].dtype in ("float64", "float32", "int64", "int32") and col not in weather_cols:
-            combined[col] = combined[col].fillna(0)
+    numeric_cols = combined.select_dtypes(include=["number"]).columns.difference(weather_cols)
+    if len(numeric_cols) > 0:
+        combined.loc[:, numeric_cols] = combined.loc[:, numeric_cols].fillna(0)
 
     logger.info(
         "Feature engineering with history: %s historical + %s live = %s total rows",
-        f"{len(hist):,}",
-        f"{len(live):,}",
+        f"{history_rows:,}",
+        f"{live_rows:,}",
         f"{len(combined):,}",
     )
 
@@ -220,6 +222,7 @@ def save_lookahead_cache(
     meta = {
         "date": date_str,
         "cards_sig": cards_sig,
+        "version": int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)),
         "rows": len(featured_df),
         "cols": len(featured_df.columns),
         "built": datetime.now().isoformat(),
@@ -244,6 +247,9 @@ def load_lookahead_cache(
     if current_cards_sig is not None and os.path.exists(paths["meta"]):
         with open(paths["meta"], encoding="utf-8") as fh:
             meta = json.load(fh)
+        if int(meta.get("version", 1)) != int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)):
+            logger.info("Lookahead cache stale for %s (schema version changed)", date_str)
+            return None
         if meta.get("cards_sig") != current_cards_sig:
             logger.info(
                 "Lookahead cache stale for %s (cards changed)", date_str
@@ -263,6 +269,8 @@ def lookahead_cache_valid(date_str: str, current_cards_sig: str | None = None) -
     if current_cards_sig is not None and os.path.exists(paths["meta"]):
         with open(paths["meta"], encoding="utf-8") as fh:
             meta = json.load(fh)
+        if int(meta.get("version", 1)) != int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)):
+            return False
         if meta.get("cards_sig") != current_cards_sig:
             return False
     return True
