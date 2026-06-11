@@ -169,10 +169,10 @@ GLICKO_RD_MIN = 50.0     # floor for well-evidenced horses
 GLICKO_C = 70.0          # RD inflation per sqrt(month) idle
 
 # --- Elo Settings ---
-ELO_K_BASE = 32.0   # K for horses with 0 prior runs
+ELO_K_BASE = 16.0   # K for horses with 0 prior runs (walk-forward swept 2026-06-11)
 ELO_K_MIN = 8.0     # K floor for experienced horses
 ELO_K_DECAY = 0.05  # exponential decay rate per run
-MARGIN_ELO_SCALE = 5.0          # base lengths at which margin score ≈ 0.82
+MARGIN_ELO_SCALE = 3.0          # base lengths at which margin score ≈ 0.82 (walk-forward swept 2026-06-11)
 MARGIN_ELO_REF_DIST = 8.0       # reference distance (furlongs) for scale normalisation
 MARGIN_ELO_DNF_PENALTY = 30.0   # virtual lb for non-finishers
 
@@ -228,7 +228,7 @@ TE_WINDOW_DAYS = 365
 # ~10 races ≈ 90 days for a horse that runs roughly monthly; this gives a
 # smooth exponential decay toward recent form without calendar cliff-edges.
 # Set to 0 to disable.
-TE_EWMA_HALF_LIFE_RACES = 10
+TE_EWMA_HALF_LIFE_RACES = 20  # walk-forward swept 2026-06-11 (was 10)
 # CV_N_FOLDS: purged expanding-window folds for Phase 1 OOF predictions,
 # used to fit the Platt/isotonic calibrators. More folds = more OOF data
 # for calibration, but slower.
