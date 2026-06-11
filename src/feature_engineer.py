@@ -2285,6 +2285,80 @@ def add_prize_money_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_collateral_form_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Collateral form: how did the rivals from this horse's previous race
+    perform in their own NEXT start?
+
+    A horse beaten in a race whose other runners went on to win next time
+    out ran better than the bare result suggests ("key race"). Uses only
+    rival next-out results dated strictly BEFORE the current race, so no
+    future information leaks despite the per-horse forward shift.
+
+    Columns:
+    - ``collateral_n_rivals``        — rivals with a known next-out result
+    - ``collateral_next_win_rate``   — their next-out win rate
+    - ``collateral_next_place_rate`` — their next-out top-3 rate
+    - ``collateral_next_win_rate_vs_field`` — relative to today's field
+    """
+    if not getattr(config, "COLLATERAL_FORM", True):
+        return df
+    if "finish_position" not in df.columns or "race_id" not in df.columns:
+        return df
+    logger.info("Engineering collateral-form features...")
+
+    hkey = _horse_key(df)
+    groups = df.groupby(hkey, sort=False)
+
+    # Each runner row annotated with that horse's NEXT run outcome.
+    # Forward-looking by construction — only consumed under a date guard.
+    next_date = groups["race_date"].shift(-1)
+    next_fp = pd.to_numeric(groups["finish_position"].shift(-1), errors="coerce")
+    rivals = pd.DataFrame({
+        "race_id": df["race_id"].values,
+        "rival_key": df[hkey].values,
+        "next_date": next_date.values,
+        "next_won": (next_fp == 1).astype(float).values,
+        "next_placed": next_fp.between(1, 3).astype(float).values,
+    })
+
+    prev_race_id = groups["race_id"].shift(1)
+    cur = pd.DataFrame({
+        "row": np.arange(len(df)),
+        "prev_race_id": prev_race_id.values,
+        "self_key": df[hkey].values,
+        "cur_date": df["race_date"].values,
+    }).dropna(subset=["prev_race_id"])
+
+    merged = cur.merge(rivals, left_on="prev_race_id", right_on="race_id")
+    merged = merged[
+        (merged["rival_key"] != merged["self_key"])
+        & merged["next_date"].notna()
+        & (merged["next_date"] < merged["cur_date"])
+    ]
+    agg = merged.groupby("row").agg(
+        collateral_n_rivals=("next_won", "size"),
+        collateral_next_win_rate=("next_won", "mean"),
+        collateral_next_place_rate=("next_placed", "mean"),
+    )
+
+    out = agg.reindex(np.arange(len(df)))
+    n_rivals = out["collateral_n_rivals"].fillna(0).astype(np.float32)
+    win_rate = out["collateral_next_win_rate"].astype(np.float32)
+    place_rate = out["collateral_next_place_rate"].astype(np.float32)
+
+    race_ids = df["race_id"].values
+    wr_ser = pd.Series(win_rate.values, index=df.index)
+    wr_field = wr_ser.groupby(race_ids).transform("mean")
+
+    df = pd.concat([df, pd.DataFrame({
+        "collateral_n_rivals": n_rivals.values,
+        "collateral_next_win_rate": win_rate.values,
+        "collateral_next_place_rate": place_rate.values,
+        "collateral_next_win_rate_vs_field": (wr_ser - wr_field).to_numpy(),
+    }, index=df.index)], axis=1)
+    return df
+
+
 def add_trainer_runner_intent_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add trainer multi-runner and first-string intent features."""
     logger.info("Engineering trainer multi-runner intent features...")
@@ -3504,6 +3578,7 @@ def engineer_features(
     df = add_pedigree_features(df)      # sire/dam/damsire edge
     df = add_medical_features(df)       # gelding
     df = add_prize_money_features(df)   # class shifts / purse jumps
+    df = add_collateral_form_features(df)  # prev-race rivals' next-out form
     df = add_jockey_features(df)
     df = add_trainer_features(df)
     df = add_jockey_trainer_features(df)
@@ -3551,10 +3626,12 @@ def engineer_features(
     for c in speed_cols:
         df[c] = df[c].fillna(df[c].median() if df[c].notna().any() else 0)
 
-    # RTV RACEiQ rolling columns: fill with column median (unknown = average)
-    rtv_cols = [c for c in numeric_cols if c.startswith("rtv_")]
-    for c in rtv_cols:
-        df[c] = df[c].fillna(df[c].median() if df[c].notna().any() else 0)
+    # RTV RACEiQ rolling columns: keep NaN (LightGBM handles missing
+    # natively) and expose coverage explicitly. The previous global
+    # median fill made most of rtv_jump_index a constant 6.93, which
+    # the model could only treat as fake signal.
+    if "rtv_top_speed_avg_3" in df.columns:
+        df["has_rtv_history"] = df["rtv_top_speed_avg_3"].notna().astype(np.int8)
 
     # Odds-based columns: fill with field median or neutral values
     odds_fill = {"implied_prob": 0.05, "norm_implied_prob": 0.05,

@@ -167,8 +167,16 @@ GLICKO_ENABLED = True    # adds horse_glicko* features in feature engineering
 GLICKO_RD_INIT = 350.0   # uncertainty for an unraced horse
 GLICKO_RD_MIN = 50.0     # floor for well-evidenced horses
 GLICKO_C = 70.0          # RD inflation per sqrt(month) idle
-GLICKO_JOCKEY_TRAINER = False  # also rate jockeys/trainers (sweep pending)
-GLICKO_DIMENSIONAL = False     # per surface/race-type/dist-cat horse ratings (sweep pending)
+GLICKO_JOCKEY_TRAINER = False  # also rate jockeys/trainers (sweep 2026-06-11: hurt, keep off)
+GLICKO_DIMENSIONAL = False     # per surface/race-type/dist-cat ratings (sweep 2026-06-11: hurt, keep off)
+GLICKO_MARGIN = False          # beaten-lengths-weighted Glicko game scores (sweep pending)
+GLICKO2_ENABLED = False        # Glicko-2 with per-horse volatility (sweep pending)
+GLICKO2_TAU = 0.5              # volatility-change constraint
+TRUESKILL_ENABLED = False      # TrueSkill mu/sigma ratings (sweep pending)
+
+# --- Collateral Form ---
+# Prev-race rivals' next-out results ("key race" signal). Sweep pending.
+COLLATERAL_FORM = False
 
 # --- Elo Settings ---
 ELO_K_BASE = 16.0   # K for horses with 0 prior runs (walk-forward swept 2026-06-11)

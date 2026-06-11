@@ -428,6 +428,14 @@ def process_data(
     if df is None:
         df = load_raw_data()
 
+    # Results/racecard APIs never carry breeding; fill sire/dam/damsire
+    # from the horse_pedigree backfill cache (no-op when cache is empty).
+    try:
+        from src.pedigree_backfill import apply_pedigree
+        df = apply_pedigree(df)
+    except Exception:
+        logger.warning("Pedigree cache unavailable; sire/dam left as-is", exc_info=True)
+
     df = clean_data(df)
 
     # Chronological ordering is required before any cumulative encodings.

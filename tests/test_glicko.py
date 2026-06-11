@@ -165,6 +165,85 @@ class TestJockeyTrainerGlicko:
         assert (last["has_trainer_glicko"] == 0).all()
 
 
+class TestMarginGlicko:
+    def _history(self, lengths):
+        rows = []
+        for k, lb in enumerate(lengths):
+            for horse, fp, lbh in [("A", 1, 0.0), ("B", 2, lb)]:
+                rows.append({
+                    "race_id": f"r{k}", "race_date": f"2025-01-{1 + 7 * k:02d}",
+                    "horse_name": horse, "finish_position": fp,
+                    "lengths_behind": lbh,
+                })
+        rows.extend({
+            "race_id": "r_final", "race_date": "2025-03-01",
+            "horse_name": h, "finish_position": 0, "lengths_behind": float("nan"),
+        } for h in ["A", "B"])
+        return _race_df(rows)
+
+    def test_bigger_margin_bigger_gap(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "GLICKO_MARGIN", True, raising=False)
+        narrow = compute_glicko_features(self._history([0.1, 0.1, 0.1]))
+        wide = compute_glicko_features(self._history([12.0, 12.0, 12.0]))
+        gap = lambda out: (
+            out[out["race_id"] == "r_final"].set_index("horse_name")["horse_glicko_margin"]
+        )
+        narrow_gap = gap(narrow)["A"] - gap(narrow)["B"]
+        wide_gap = gap(wide)["A"] - gap(wide)["B"]
+        assert wide_gap > narrow_gap > 0
+
+    def test_flag_off_no_columns(self):
+        out = compute_glicko_features(self._history([1.0]))
+        assert "horse_glicko_margin" not in out.columns
+
+
+class TestGlicko2:
+    def test_winner_rated_higher_and_vol_tracks_consistency(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "GLICKO2_ENABLED", True, raising=False)
+        rows = []
+        # A wins consistently over B; C alternates wildly vs D
+        for k in range(8):
+            d = f"2025-{1 + k // 4:02d}-{1 + 7 * (k % 4):02d}"
+            rows.append({"race_id": f"ra{k}", "race_date": d,
+                         "horse_name": "A", "finish_position": 1})
+            rows.append({"race_id": f"ra{k}", "race_date": d,
+                         "horse_name": "B", "finish_position": 2})
+            rows.append({"race_id": f"rc{k}", "race_date": d,
+                         "horse_name": "C", "finish_position": 1 + (k % 2)})
+            rows.append({"race_id": f"rc{k}", "race_date": d,
+                         "horse_name": "D", "finish_position": 2 - (k % 2)})
+        for h in ["A", "B", "C", "D"]:
+            rows.append({"race_id": "r_final", "race_date": "2025-03-01",
+                         "horse_name": h, "finish_position": 0})
+        out = compute_glicko_features(_race_df(rows))
+        final = out[out["race_id"] == "r_final"].set_index("horse_name")
+        assert final.loc["A", "horse_glicko2"] > final.loc["B", "horse_glicko2"]
+        # consistent winner's volatility is no higher than the erratic pair's
+        assert final.loc["A", "horse_glicko2_vol"] <= final.loc["C", "horse_glicko2_vol"] + 1e-6
+        assert (final["horse_glicko2_rd"] < GLICKO_RD_INIT).all()
+
+
+class TestTrueSkill:
+    def test_winner_mu_rises_sigma_shrinks(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "TRUESKILL_ENABLED", True, raising=False)
+        rows = []
+        for k in range(3):
+            for horse, fp in [("A", 1), ("B", 2), ("C", 3)]:
+                rows.append({"race_id": f"r{k}", "race_date": f"2025-01-{1 + 7 * k:02d}",
+                             "horse_name": horse, "finish_position": fp})
+        for h in ["A", "B", "C"]:
+            rows.append({"race_id": "r_final", "race_date": "2025-03-01",
+                         "horse_name": h, "finish_position": 0})
+        out = compute_glicko_features(_race_df(rows))
+        final = out[out["race_id"] == "r_final"].set_index("horse_name")
+        assert final.loc["A", "horse_ts_mu"] > final.loc["C", "horse_ts_mu"]
+        first = out[out["race_id"] == "r0"].set_index("horse_name")
+        assert final.loc["A", "horse_ts_sigma"] < first.loc["A", "horse_ts_sigma"]
+
+
 class TestDimensionalGlicko:
     def test_surface_specialist_edge(self, monkeypatch):
         import config

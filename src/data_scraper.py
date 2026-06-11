@@ -772,6 +772,15 @@ class SportingLifeScraper:
                 odds_str = betting.get("current_odds", "")
         odds = _parse_fractional_odds(odds_str)
 
+        # --- opening odds ---
+        # bet_movements carries the opening price as e.g. "op 8/11".
+        # Opening vs final odds = market drift, the raw material for
+        # closing-line-value analysis.
+        opening_odds = float("nan")
+        movements = ride.get("bet_movements", "")
+        if isinstance(movements, str) and movements.strip().lower().startswith("op"):
+            opening_odds = _parse_fractional_odds(movements.strip()[2:].strip())
+
         # --- result-specific fields ---
         finish_pos = 0
         finish_pos_label = ""
@@ -828,6 +837,7 @@ class SportingLifeScraper:
             "form": form,
             "days_since_last_run": days_since,
             "odds": odds,
+            "opening_odds": opening_odds,
             "official_rating": official_rating,
             "finish_position": finish_pos,
             "finish_pos_label": finish_pos_label,

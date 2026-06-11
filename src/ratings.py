@@ -777,6 +777,7 @@ _GLICKO_Q = np.log(10.0) / 400.0
 def _glicko_race_update(
     r: np.ndarray, rd: np.ndarray, fp: np.ndarray,
     exclude: np.ndarray | None = None,
+    S_override: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Vectorised Glicko-1 update for one race.
 
@@ -787,6 +788,8 @@ def _glicko_race_update(
         exclude: optional (m, m) bool matrix of extra pairs to ignore —
             stops an entity with several runners in one race (a trainer,
             occasionally a jockey across re-rides) playing itself.
+        S_override: optional (m, m) actual-score matrix replacing the
+            binary win/tie/loss scores (margin-aware variant).
 
     Returns:
         (new_ratings, new_rds)
@@ -799,8 +802,11 @@ def _glicko_race_update(
     diff = r[:, None] - r[None, :]
     E = 1.0 / (1.0 + 10.0 ** (-(g[None, :] * diff) / 400.0))
     # S[i, j] = actual score of i against j
-    S = np.where(fp[:, None] < fp[None, :], 1.0,
-                 np.where(fp[:, None] == fp[None, :], 0.5, 0.0))
+    if S_override is not None:
+        S = S_override
+    else:
+        S = np.where(fp[:, None] < fp[None, :], 1.0,
+                     np.where(fp[:, None] == fp[None, :], 0.5, 0.0))
 
     off_diag = ~np.eye(m, dtype=bool)
     if exclude is not None:
@@ -821,6 +827,7 @@ def _glicko_pass(
     dates: np.ndarray,
     race_ids_ordered: np.ndarray,
     race_group_indices: dict,
+    margin: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """One chronological Glicko-1 sweep for an arbitrary entity keying.
 
@@ -831,6 +838,11 @@ def _glicko_pass(
             updates are averaged.
         fp: finish positions per row, or None (live rows — no updates).
         dates: race_date per row as datetime64.
+        margin: optional per-row beaten lengths. When given, pairwise
+            game scores become sigmoid((lb_j − lb_i) / MARGIN_SCALE)
+            instead of binary win/lose — a 10-length thrashing moves
+            ratings more than a nose verdict. Pairs with missing lengths
+            fall back to the binary score.
 
     Returns:
         Per-row *pre-race* (rating, rd, has_prior_run, prior_run_count).
@@ -892,7 +904,19 @@ def _glicko_pass(
             karr = np.empty(m, dtype=object)
             karr[:] = ukeys
             exclude = karr[:, None] == karr[None, :]
-        new_r, new_rd = _glicko_race_update(r_arr, rd_arr, fp_arr, exclude=exclude)
+        S_override = None
+        if margin is not None:
+            lb = np.array([float(margin[idx[j]]) for j, _ in upd])
+            both = np.isfinite(lb[:, None]) & np.isfinite(lb[None, :])
+            S_margin = 1.0 / (1.0 + np.exp(
+                -np.clip((np.nan_to_num(lb)[None, :] - np.nan_to_num(lb)[:, None]) / MARGIN_SCALE, -60, 60)
+            ))
+            S_fp = np.where(fp_arr[:, None] < fp_arr[None, :], 1.0,
+                            np.where(fp_arr[:, None] == fp_arr[None, :], 0.5, 0.0))
+            S_override = np.where(both, S_margin, S_fp)
+        new_r, new_rd = _glicko_race_update(
+            r_arr, rd_arr, fp_arr, exclude=exclude, S_override=S_override
+        )
         agg: dict = {}
         for k, nr, nrd in zip(ukeys, new_r, new_rd):
             agg.setdefault(k, []).append((nr, nrd))
@@ -902,6 +926,200 @@ def _glicko_pass(
             last_dt[k] = race_dt
             counts[k] = counts.get(k, 0) + 1
     return r_col, rd_col, has_col, cnt_col
+
+
+# ── Glicko-2 (Glickman 2001) ──────────────────────────────────────────────
+# Adds a per-entity volatility σ: how erratic results have been. High σ
+# horses swing between career-bests and duds — useful signal in itself.
+
+_G2_SCALE = 173.7178
+GLICKO2_SIGMA_INIT = 0.06
+
+
+def _g2_solve_sigma(delta2: float, phi2: float, v: float, sigma: float, tau: float) -> float:
+    """Illinois-method solve for the new volatility (Glickman's step 5)."""
+    a = np.log(sigma ** 2)
+
+    def f(x: float) -> float:
+        ex = np.exp(x)
+        return (
+            ex * (delta2 - phi2 - v - ex) / (2.0 * (phi2 + v + ex) ** 2)
+            - (x - a) / (tau ** 2)
+        )
+
+    A = a
+    if delta2 > phi2 + v:
+        B = np.log(delta2 - phi2 - v)
+    else:
+        k = 1
+        while f(a - k * tau) < 0 and k < 50:
+            k += 1
+        B = a - k * tau
+    fA, fB = f(A), f(B)
+    for _ in range(60):
+        if abs(B - A) <= 1e-6:
+            break
+        C = A + (A - B) * fA / (fB - fA)
+        fC = f(C)
+        if fC * fB <= 0:
+            A, fA = B, fB
+        else:
+            fA = fA / 2.0
+        B, fB = C, fC
+    return float(np.exp(A / 2.0))
+
+
+def _glicko2_pass(
+    keys: list,
+    fp: np.ndarray | None,
+    dates: np.ndarray,
+    race_ids_ordered: np.ndarray,
+    race_group_indices: dict,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Chronological Glicko-2 sweep. Returns per-row pre-race
+    (rating, rd, volatility, has_prior_run) on the Glicko-1 scale."""
+    tau = float(getattr(config, "GLICKO2_TAU", 0.5))
+    phi_init = GLICKO_RD_INIT / _G2_SCALE
+    phi_min = GLICKO_RD_MIN / _G2_SCALE
+
+    mus: dict = {}
+    phis: dict = {}
+    sigmas: dict = {}
+    last_dt: dict = {}
+
+    n = len(keys)
+    r_col = np.full(n, np.nan)
+    rd_col = np.full(n, np.nan)
+    vol_col = np.full(n, np.nan)
+    has_col = np.zeros(n, dtype=np.int8)
+
+    for race_id in race_ids_ordered:
+        idx = race_group_indices[race_id]
+        race_dt = dates[idx[0]]
+
+        for i in idx:
+            k = keys[i]
+            if k is None:
+                continue
+            if k in mus:
+                idle_days = (race_dt - last_dt[k]) / np.timedelta64(1, "D")
+                t = max(float(idle_days), 0.0) / 30.44  # rating periods ≈ months
+                phi_now = min(
+                    float(np.sqrt(phis[k] ** 2 + (sigmas[k] ** 2) * t)), phi_init
+                )
+                phis[k] = phi_now
+                r_col[i] = GLICKO_RATING_INIT + _G2_SCALE * mus[k]
+                rd_col[i] = _G2_SCALE * phi_now
+                vol_col[i] = sigmas[k]
+                has_col[i] = 1
+            else:
+                r_col[i] = GLICKO_RATING_INIT
+                rd_col[i] = GLICKO_RD_INIT
+                vol_col[i] = GLICKO2_SIGMA_INIT
+
+        if fp is None:
+            continue
+        fp_race = fp[idx]
+        valid = np.isfinite(fp_race) & (fp_race > 0)
+        upd = [
+            (j, keys[idx[j]]) for j in range(len(idx))
+            if valid[j] and keys[idx[j]] is not None
+        ]
+        if len(upd) < 2:
+            continue
+        m = len(upd)
+        mu = np.array([mus.get(k, 0.0) for _, k in upd])
+        phi = np.array([phis.get(k, phi_init) for _, k in upd])
+        sigma = np.array([sigmas.get(k, GLICKO2_SIGMA_INIT) for _, k in upd])
+        fp_arr = np.array([float(fp_race[j]) for j, _ in upd])
+
+        g = 1.0 / np.sqrt(1.0 + 3.0 * phi ** 2 / (np.pi ** 2))
+        diff = mu[:, None] - mu[None, :]
+        E = 1.0 / (1.0 + np.exp(-np.clip(g[None, :] * diff, -60, 60)))
+        S = np.where(fp_arr[:, None] < fp_arr[None, :], 1.0,
+                     np.where(fp_arr[:, None] == fp_arr[None, :], 0.5, 0.0))
+        off = ~np.eye(m, dtype=bool)
+        gE = (g[None, :] ** 2) * E * (1.0 - E)
+        v = 1.0 / np.maximum(np.where(off, gE, 0.0).sum(axis=1), 1e-12)
+        score_sum = np.where(off, g[None, :] * (S - E), 0.0).sum(axis=1)
+        delta = v * score_sum
+
+        new_sigma = np.array([
+            _g2_solve_sigma(delta[i] ** 2, phi[i] ** 2, v[i], sigma[i], tau)
+            for i in range(m)
+        ])
+        phi_star = np.sqrt(phi ** 2 + new_sigma ** 2)
+        new_phi = np.clip(
+            1.0 / np.sqrt(1.0 / phi_star ** 2 + 1.0 / v), phi_min, phi_init
+        )
+        new_mu = mu + (new_phi ** 2) * score_sum
+
+        for (j, k), nm, nph, nsg in zip(upd, new_mu, new_phi, new_sigma):
+            mus[k] = float(nm)
+            phis[k] = float(nph)
+            sigmas[k] = float(np.clip(nsg, 0.01, 0.2))
+            last_dt[k] = race_dt
+    return r_col, rd_col, vol_col, has_col
+
+
+# ── TrueSkill ─────────────────────────────────────────────────────────────
+
+def _trueskill_pass(
+    keys: list,
+    fp: np.ndarray | None,
+    dates: np.ndarray,
+    race_ids_ordered: np.ndarray,
+    race_group_indices: dict,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Chronological TrueSkill sweep: each race is an n-way free-for-all.
+
+    Returns per-row pre-race (mu, sigma, has_prior_run). Time dynamics
+    come from the environment's tau (added once per update), not layoffs.
+    """
+    import trueskill
+
+    env = trueskill.TrueSkill(draw_probability=0.001)
+    state: dict = {}
+
+    n = len(keys)
+    mu_col = np.full(n, np.nan)
+    sigma_col = np.full(n, np.nan)
+    has_col = np.zeros(n, dtype=np.int8)
+
+    for race_id in race_ids_ordered:
+        idx = race_group_indices[race_id]
+        for i in idx:
+            k = keys[i]
+            if k is None:
+                continue
+            rating = state.get(k)
+            if rating is not None:
+                mu_col[i] = rating.mu
+                sigma_col[i] = rating.sigma
+                has_col[i] = 1
+            else:
+                mu_col[i] = env.mu
+                sigma_col[i] = env.sigma
+
+        if fp is None:
+            continue
+        fp_race = fp[idx]
+        valid = np.isfinite(fp_race) & (fp_race > 0)
+        upd = [
+            (j, keys[idx[j]]) for j in range(len(idx))
+            if valid[j] and keys[idx[j]] is not None
+        ]
+        if len(upd) < 2:
+            continue
+        groups = [(state.get(k, env.create_rating()),) for _, k in upd]
+        ranks = [int(fp_race[j]) for j, _ in upd]
+        try:
+            new = env.rate(groups, ranks=ranks)
+        except (FloatingPointError, ValueError):
+            continue
+        for (_, k), (rating,) in zip(upd, new):
+            state[k] = rating
+    return mu_col, sigma_col, has_col
 
 
 def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -991,6 +1209,48 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
             cols[f"{ent}_glicko_vs_field"] = (
                 r_s - r_s.groupby(race_ids, sort=False).transform("mean")
             ).to_numpy()
+
+    if getattr(config, "GLICKO_MARGIN", False) and "lengths_behind" in df.columns:
+        lb = pd.to_numeric(df["lengths_behind"], errors="coerce").to_numpy(dtype=float)
+        r, rd, has, _ = _glicko_pass(
+            horse_keys, _finish_pos, _dates, race_ids_ordered,
+            race_group_indices, margin=lb,
+        )
+        r_s = pd.Series(r, index=df.index)
+        cols["horse_glicko_margin"] = r
+        cols["horse_glicko_margin_rd"] = rd
+        cols["horse_glicko_margin_vs_field"] = (
+            r_s - r_s.groupby(race_ids, sort=False).transform("mean")
+        ).to_numpy()
+        cols["horse_glicko_margin_edge"] = r - glicko_col
+
+    if getattr(config, "GLICKO2_ENABLED", False):
+        r, rd, vol, has = _glicko2_pass(
+            horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices
+        )
+        r_s = pd.Series(r, index=df.index)
+        v_s = pd.Series(vol, index=df.index)
+        cols["horse_glicko2"] = r
+        cols["horse_glicko2_rd"] = rd
+        cols["horse_glicko2_vol"] = vol
+        cols["horse_glicko2_vs_field"] = (
+            r_s - r_s.groupby(race_ids, sort=False).transform("mean")
+        ).to_numpy()
+        cols["horse_glicko2_vol_vs_field"] = (
+            v_s - v_s.groupby(race_ids, sort=False).transform("mean")
+        ).to_numpy()
+
+    if getattr(config, "TRUESKILL_ENABLED", False):
+        mu, sg, has = _trueskill_pass(
+            horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices
+        )
+        mu_s = pd.Series(mu, index=df.index)
+        cols["horse_ts_mu"] = mu
+        cols["horse_ts_sigma"] = sg
+        cols["horse_ts_lcb"] = mu - 3.0 * sg
+        cols["horse_ts_mu_vs_field"] = (
+            mu_s - mu_s.groupby(race_ids, sort=False).transform("mean")
+        ).to_numpy()
 
     if getattr(config, "GLICKO_DIMENSIONAL", False):
         MIN_DIM_RACES = 3  # below this, fall back to the global horse rating

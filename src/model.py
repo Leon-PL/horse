@@ -487,6 +487,9 @@ EXCLUDE_COLUMNS = [
     # P&L, equity curves).  Derived odds features (implied_prob,
     # log_odds, etc.) are the actual model inputs.
     "odds",
+    # Opening price from bet_movements — kept for market-drift / CLV
+    # analysis, not a model input.
+    "opening_odds",
     # Real-data identifier / text columns
     "horse_id",
     "jockey_id",
@@ -534,6 +537,18 @@ EXCLUDE_COLUMNS = [
     # jockey_elo_x_fav uses is_favourite which is derived from SP odds.
     # SP is the final market price at race-off — unavailable at bet time.
     "jockey_elo_x_fav",
+    # Scrape-time lifetime totals from the results API — they describe
+    # the horse AFTER the race (a debut winner shows run_count=1,
+    # win_count=1) and leak the outcome.
+    "horse_runs",
+    "horse_wins",
+    "horse_places",
+    # Whole-dataset appearance counts: an entity's total row count
+    # includes its FUTURE races, so high freq ⇒ long career ⇒ quality.
+    "horse_name_freq",
+    "jockey_freq",
+    "trainer_freq",
+    "track_freq",
 ]
 
 # XGB-compatible hyperparameter names (used to filter params for
@@ -637,11 +652,18 @@ def compute_recency_sample_weights(
 
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
-    """Get the list of feature columns (exclude targets and identifiers)."""
+    """Get the list of feature columns (exclude targets and identifiers).
+
+    Accepts every numeric dtype: the previous int64/float64/int32/float32
+    allow-list silently dropped ~160 uint8/int8 columns (one-hot dummies,
+    age, draw, handicap, pace/equipment flags ...) from the model.
+    """
     return [
         col
         for col in df.columns
-        if col not in EXCLUDE_COLUMNS and df[col].dtype in ["int64", "float64", "int32", "float32"]
+        if col not in EXCLUDE_COLUMNS
+        and pd.api.types.is_numeric_dtype(df[col])
+        and not pd.api.types.is_complex_dtype(df[col])
     ]
 
 

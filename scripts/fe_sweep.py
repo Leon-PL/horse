@@ -48,12 +48,16 @@ RATINGS_BINDINGS = {
 }
 
 CANDIDATES: list[tuple[str, dict]] = [
-    # Glicko coverage sweep (2026-06-11): defaults now carry the swept
-    # constants, so baseline = horse-only Glicko.
-    ("baseline (horse glicko)", {}),
-    ("+jockey_trainer_glicko", {"GLICKO_JOCKEY_TRAINER": True}),
-    ("+dimensional_glicko", {"GLICKO_DIMENSIONAL": True}),
-    ("+all_glicko", {"GLICKO_JOCKEY_TRAINER": True, "GLICKO_DIMENSIONAL": True}),
+    # New-family sweep (2026-06-11 PM). Baseline now includes the dtype
+    # fix (~140 extra uint8 features) and RTV NaN handling, so it is NOT
+    # directly comparable with the morning sweep's 0.6941.
+    ("baseline", {}),
+    ("+collateral_form", {"COLLATERAL_FORM": True}),
+    ("+glicko_margin", {"GLICKO_MARGIN": True}),
+    ("+glicko2", {"GLICKO2_ENABLED": True}),
+    ("+trueskill", {"TRUESKILL_ENABLED": True}),
+    ("+all_new", {"COLLATERAL_FORM": True, "GLICKO_MARGIN": True,
+                  "GLICKO2_ENABLED": True, "TRUESKILL_ENABLED": True}),
 ]
 
 _DEFAULTS = {}
@@ -161,7 +165,7 @@ for name, overrides in CANDIDATES:
         gc.collect()
 
 out = pd.DataFrame(results)[["candidate", "ndcg1", "top1", "logloss", "fold_ndcg1", "minutes"]]
-out.to_csv("data/fe_sweep_glicko_results.csv", index=False)
+out.to_csv("data/fe_sweep_newfam_results.csv", index=False)
 print("\n================ FE SWEEP RESULTS (no-market model) ================")
 print(out.sort_values("ndcg1", ascending=False).to_string(index=False))
 sys.stdout.flush()
