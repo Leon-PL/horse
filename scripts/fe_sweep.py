@@ -48,16 +48,12 @@ RATINGS_BINDINGS = {
 }
 
 CANDIDATES: list[tuple[str, dict]] = [
-    ("baseline (defaults + glicko)", {}),
-    ("no_glicko", {"GLICKO_ENABLED": False}),
-    ("ELO_K_BASE=16", {"ELO_K_BASE": 16.0}),
-    ("ELO_K_BASE=64", {"ELO_K_BASE": 64.0}),
-    ("MARGIN_ELO_SCALE=3", {"MARGIN_ELO_SCALE": 3.0}),
-    ("MARGIN_ELO_SCALE=8", {"MARGIN_ELO_SCALE": 8.0}),
-    ("TE_EWMA_HALF_LIFE=5", {"TE_EWMA_HALF_LIFE_RACES": 5}),
-    ("TE_EWMA_HALF_LIFE=20", {"TE_EWMA_HALF_LIFE_RACES": 20}),
-    ("GLICKO_C=40", {"GLICKO_C": 40.0}),
-    ("GLICKO_C=110", {"GLICKO_C": 110.0}),
+    # Glicko coverage sweep (2026-06-11): defaults now carry the swept
+    # constants, so baseline = horse-only Glicko.
+    ("baseline (horse glicko)", {}),
+    ("+jockey_trainer_glicko", {"GLICKO_JOCKEY_TRAINER": True}),
+    ("+dimensional_glicko", {"GLICKO_DIMENSIONAL": True}),
+    ("+all_glicko", {"GLICKO_JOCKEY_TRAINER": True, "GLICKO_DIMENSIONAL": True}),
 ]
 
 _DEFAULTS = {}
@@ -165,7 +161,7 @@ for name, overrides in CANDIDATES:
         gc.collect()
 
 out = pd.DataFrame(results)[["candidate", "ndcg1", "top1", "logloss", "fold_ndcg1", "minutes"]]
-out.to_csv("data/fe_sweep_results.csv", index=False)
+out.to_csv("data/fe_sweep_glicko_results.csv", index=False)
 print("\n================ FE SWEEP RESULTS (no-market model) ================")
 print(out.sort_values("ndcg1", ascending=False).to_string(index=False))
 sys.stdout.flush()

@@ -167,6 +167,8 @@ GLICKO_ENABLED = True    # adds horse_glicko* features in feature engineering
 GLICKO_RD_INIT = 350.0   # uncertainty for an unraced horse
 GLICKO_RD_MIN = 50.0     # floor for well-evidenced horses
 GLICKO_C = 70.0          # RD inflation per sqrt(month) idle
+GLICKO_JOCKEY_TRAINER = False  # also rate jockeys/trainers (sweep pending)
+GLICKO_DIMENSIONAL = False     # per surface/race-type/dist-cat horse ratings (sweep pending)
 
 # --- Elo Settings ---
 ELO_K_BASE = 16.0   # K for horses with 0 prior runs (walk-forward swept 2026-06-11)

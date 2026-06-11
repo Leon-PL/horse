@@ -108,3 +108,90 @@ class TestComputeGlickoFeatures:
         # The horse off for 18 months is far more uncertain than the
         # one that kept racing.
         assert ret.loc["A", "horse_glicko_rd"] > ret.loc["B", "horse_glicko_rd"] + 50
+
+
+class TestJockeyTrainerGlicko:
+    def _build(self):
+        rows = []
+        for k in range(3):
+            for horse, jockey, trainer, fp in [
+                ("A", "J1", "T1", 1),
+                ("B", "J2", "T2", 2),
+                ("C", "J3", "T2", 3),
+            ]:
+                rows.append({
+                    "race_id": f"r{k}", "race_date": f"2025-01-{1 + 7 * k:02d}",
+                    "horse_name": horse, "jockey": jockey, "trainer": trainer,
+                    "finish_position": fp,
+                })
+        return _race_df(rows)
+
+    def test_flag_off_no_columns(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "GLICKO_JOCKEY_TRAINER", False, raising=False)
+        out = compute_glicko_features(self._build())
+        assert "jockey_glicko" not in out.columns
+        assert "trainer_glicko" not in out.columns
+
+    def test_jockey_trainer_rated(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "GLICKO_JOCKEY_TRAINER", True, raising=False)
+        out = compute_glicko_features(self._build())
+        last = out[out["race_id"] == "r2"].set_index("horse_name")
+        # Winning jockey rated above the losers entering race 3
+        assert last.loc["A", "jockey_glicko"] > last.loc["B", "jockey_glicko"]
+        assert last.loc["A", "has_jockey_glicko"] == 1
+        # Winning trainer above the trainer of the two beaten runners
+        assert last.loc["A", "trainer_glicko"] > last.loc["B", "trainer_glicko"]
+        # T2's two runners share one rating
+        assert last.loc["B", "trainer_glicko"] == last.loc["C", "trainer_glicko"]
+
+    def test_trainer_never_plays_itself(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "GLICKO_JOCKEY_TRAINER", True, raising=False)
+        rows = []
+        # Two-horse races where ONE trainer saddles both runners: there is
+        # no opponent, so the trainer's rating must never update.
+        for k in range(2):
+            for horse, fp in [("A", 1), ("B", 2)]:
+                rows.append({
+                    "race_id": f"r{k}", "race_date": f"2025-01-{1 + 7 * k:02d}",
+                    "horse_name": horse, "jockey": f"J{fp}", "trainer": "T1",
+                    "finish_position": fp,
+                })
+        out = compute_glicko_features(_race_df(rows))
+        last = out[out["race_id"] == "r1"]
+        assert (last["trainer_glicko"] == GLICKO_RATING_INIT).all()
+        assert (last["has_trainer_glicko"] == 0).all()
+
+
+class TestDimensionalGlicko:
+    def test_surface_specialist_edge(self, monkeypatch):
+        import config
+        monkeypatch.setattr(config, "GLICKO_DIMENSIONAL", True, raising=False)
+        rows = []
+        dates = iter(pd.date_range("2025-01-01", periods=7, freq="7D"))
+        # A beats B three times on turf, loses to B three times on the AW
+        for surface, a_fp in [("turf", 1)] * 3 + [("aw", 2)] * 3:
+            d = next(dates).strftime("%Y-%m-%d")
+            for horse, fp in [("A", a_fp), ("B", 3 - a_fp)]:
+                rows.append({
+                    "race_id": f"r{d}", "race_date": d, "surface": surface,
+                    "horse_name": horse, "finish_position": fp,
+                })
+        d = next(dates).strftime("%Y-%m-%d")
+        for horse in ["A", "B"]:
+            rows.append({
+                "race_id": "r_final", "race_date": d, "surface": "turf",
+                "horse_name": horse, "finish_position": 0,
+            })
+        out = compute_glicko_features(_race_df(rows))
+        final = out[out["race_id"] == "r_final"].set_index("horse_name")
+        # ≥3 turf runs: turf-specific rating reflects A's turf dominance
+        assert final.loc["A", "horse_glicko_surface_edge"] > 0
+        assert final.loc["B", "horse_glicko_surface_edge"] < 0
+
+        # Cold start (< 3 runs in dimension) falls back to global: edge 0
+        second = out[out["race_id"] == out["race_id"].iloc[2]]
+        assert (second["horse_glicko_surface_edge"] == 0).all()
+        assert (second["horse_glicko_surface"] == second["horse_glicko"]).all()
