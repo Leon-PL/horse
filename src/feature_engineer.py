@@ -2250,13 +2250,18 @@ def add_prize_money_features(df: pd.DataFrame) -> pd.DataFrame:
 
     logger.info("Engineering prize money features...")
     hkey = _horse_key(df)
-    horse_groups = df.groupby(hkey)
-    
-    # Fill NaN with 0
+
+    # Fill NaN with 0 (before grouping so the groupby sees clean values)
     df["prize_money"] = df["prize_money"].fillna(0)
-    
-    # Maximum purse the horse has CONTESTED.
-    df["horse_max_prize_contested"] = horse_groups["prize_money"].cummax().shift(1).fillna(0)
+    horse_groups = df.groupby(hkey)
+
+    # Maximum purse the horse has CONTESTED, excluding the current race.
+    # NB: the shift MUST be inside transform — a bare
+    # groupby().cummax().shift(1) shifts globally across horses and, with
+    # raw rows in finish order, leaks finish position (CLAUDE.md rule 1).
+    df["horse_max_prize_contested"] = horse_groups["prize_money"].transform(
+        lambda x: x.cummax().shift(1)
+    ).fillna(0)
     
     # Cumsum / count to avoid expanding().mean() issues:
     df["_safe_cum_prize"] = horse_groups["prize_money"].cumsum() - df["prize_money"]
