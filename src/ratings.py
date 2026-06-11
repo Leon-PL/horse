@@ -758,6 +758,167 @@ def compute_elo_features(
     return df
 
 
+# ── Glicko-1 ratings ──────────────────────────────────────────────────────
+# Glickman (1999). Adds a per-horse rating deviation (RD): uncertainty
+# that shrinks with evidence and *grows during layoffs* — something the
+# adaptive-K Elo above cannot express (K only decays with run count).
+# Each race is treated as one rating period of n-1 pairwise games.
+
+GLICKO_RATING_INIT = 1500.0
+GLICKO_RD_INIT = getattr(config, "GLICKO_RD_INIT", 350.0)
+GLICKO_RD_MIN = getattr(config, "GLICKO_RD_MIN", 50.0)
+# RD inflation: after t months idle, RD -> sqrt(RD^2 + C^2 * t).
+# C=70 returns a fully-known horse (RD 50) to ~max uncertainty in ~2 years.
+GLICKO_C = getattr(config, "GLICKO_C", 70.0)
+
+_GLICKO_Q = np.log(10.0) / 400.0
+
+
+def _glicko_race_update(
+    r: np.ndarray, rd: np.ndarray, fp: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorised Glicko-1 update for one race.
+
+    Args:
+        r: pre-race ratings (m,)
+        rd: pre-race deviations (m,), already inflated for inactivity.
+        fp: finish positions (m,) — lower is better, ties allowed.
+
+    Returns:
+        (new_ratings, new_rds)
+    """
+    m = len(r)
+    q = _GLICKO_Q
+    g = 1.0 / np.sqrt(1.0 + 3.0 * (q ** 2) * (rd ** 2) / (np.pi ** 2))
+
+    # E[i, j] = expected score of i against j (uses opponent's g)
+    diff = r[:, None] - r[None, :]
+    E = 1.0 / (1.0 + 10.0 ** (-(g[None, :] * diff) / 400.0))
+    # S[i, j] = actual score of i against j
+    S = np.where(fp[:, None] < fp[None, :], 1.0,
+                 np.where(fp[:, None] == fp[None, :], 0.5, 0.0))
+
+    off_diag = ~np.eye(m, dtype=bool)
+    g_sq_E = (g[None, :] ** 2) * E * (1.0 - E)
+    d2_inv = (q ** 2) * np.where(off_diag, g_sq_E, 0.0).sum(axis=1)
+    sum_term = np.where(off_diag, g[None, :] * (S - E), 0.0).sum(axis=1)
+
+    denom = 1.0 / (rd ** 2) + d2_inv
+    new_r = r + (q / denom) * sum_term
+    new_rd = np.sqrt(1.0 / denom)
+    return new_r, np.clip(new_rd, GLICKO_RD_MIN, GLICKO_RD_INIT)
+
+
+def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add Glicko-1 rating + deviation features for horses.
+
+    Processes races chronologically; records each horse's rating and RD
+    *before* the race (no look-ahead), inflating RD for time off the
+    track. New columns:
+
+    - ``horse_glicko``           — rating entering the race
+    - ``horse_glicko_rd``        — rating deviation (uncertainty)
+    - ``horse_glicko_lcb``       — conservative skill (rating − RD)
+    - ``horse_glicko_vs_field``  — rating minus race average
+    - ``horse_glicko_rank``      — rating rank within race
+    - ``horse_glicko_rd_vs_field`` — uncertainty relative to the race
+    """
+    logger.info("Computing Glicko ratings (horse) ...")
+    df["race_date"] = pd.to_datetime(df["race_date"])
+    if "_event_dt" in df.columns:
+        event_dt = pd.to_datetime(df["_event_dt"], errors="coerce")
+    else:
+        event_dt = _event_sort_key(df)
+
+    if not event_dt.is_monotonic_increasing:
+        order = np.argsort(event_dt.values, kind="stable")
+        df = df.iloc[order].reset_index(drop=True)
+
+    ratings: dict[str, float] = {}
+    rds: dict[str, float] = {}
+    last_dt: dict[str, pd.Timestamp] = {}
+
+    n = len(df)
+    glicko_col = np.full(n, np.nan)
+    rd_col = np.full(n, np.nan)
+    has_col = np.zeros(n, dtype=np.int8)
+
+    _horse_keys = _entity_keys(df, id_col="horse_id", name_col="horse_name", prefix="horse")
+    _finish_pos = df["finish_position"].values if "finish_position" in df.columns else None
+    _dates = pd.to_datetime(df["race_date"]).values
+
+    race_ids_ordered = df.drop_duplicates("race_id", keep="first")["race_id"].values
+    _race_groups = df.groupby("race_id", sort=False)
+
+    for race_id in race_ids_ordered:
+        idx = _race_groups.indices[race_id]
+        race_dt = _dates[idx[0]]
+
+        # Pre-race: inflate RD for inactivity, record values
+        for i in idx:
+            hk = _horse_keys[i]
+            if pd.isna(hk):
+                continue
+            if hk in ratings:
+                idle_days = (race_dt - last_dt[hk]) / np.timedelta64(1, "D")
+                months = max(float(idle_days), 0.0) / 30.44
+                rd_now = min(
+                    float(np.sqrt(rds[hk] ** 2 + (GLICKO_C ** 2) * months)),
+                    GLICKO_RD_INIT,
+                )
+                rds[hk] = rd_now
+                glicko_col[i] = ratings[hk]
+                rd_col[i] = rd_now
+                has_col[i] = 1
+            else:
+                glicko_col[i] = GLICKO_RATING_INIT
+                rd_col[i] = GLICKO_RD_INIT
+
+        # Post-race update (finishers only)
+        if _finish_pos is None:
+            continue
+        fp_race = _finish_pos[idx]
+        valid = np.isfinite(fp_race) & (fp_race > 0)
+        keys = [_horse_keys[i] for i in idx]
+        upd = [
+            (j, keys[j]) for j in range(len(idx))
+            if valid[j] and pd.notna(keys[j])
+        ]
+        if len(upd) < 2:
+            continue
+        r_arr = np.array([ratings.get(k, GLICKO_RATING_INIT) for _, k in upd])
+        rd_arr = np.array([rds.get(k, GLICKO_RD_INIT) for _, k in upd])
+        fp_arr = np.array([float(fp_race[j]) for j, _ in upd])
+        new_r, new_rd = _glicko_race_update(r_arr, rd_arr, fp_arr)
+        for (j, k), nr, nrd in zip(upd, new_r, new_rd):
+            ratings[k] = float(nr)
+            rds[k] = float(nrd)
+            last_dt[k] = race_dt
+
+    race_ids = df["race_id"]
+    g_ser = pd.Series(glicko_col, index=df.index)
+    rd_ser = pd.Series(rd_col, index=df.index)
+    g_avg = g_ser.groupby(race_ids, sort=False).transform("mean")
+    rd_avg = rd_ser.groupby(race_ids, sort=False).transform("mean")
+    g_rank = g_ser.groupby(race_ids, sort=False).rank(ascending=False, method="min")
+
+    glicko_frame = pd.DataFrame(
+        {
+            "horse_glicko": glicko_col,
+            "horse_glicko_rd": rd_col,
+            "has_horse_glicko": has_col,
+            "horse_glicko_lcb": glicko_col - rd_col,
+            "horse_glicko_vs_field": (g_ser - g_avg).to_numpy(),
+            "horse_glicko_rank": g_rank.to_numpy(),
+            "horse_glicko_rd_vs_field": (rd_ser - rd_avg).to_numpy(),
+        },
+        index=df.index,
+    )
+    df = pd.concat([df, glicko_frame], axis=1)
+    logger.info("Glicko complete: %d horses rated", len(ratings))
+    return df
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ import numba as nb
 import numpy as np
 import pandas as pd
 
-from src.ratings import compute_elo_features
+from src.ratings import compute_elo_features, compute_glicko_features
 from src.track_config import get_track_config, direction_code, shape_code
 
 import config
@@ -2174,6 +2174,112 @@ def add_market_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate sire, dam, and damsire historical stats (Bayesian shrunk)."""
+    logger.info("Engineering pedigree features...")
+    df = df.copy()
+
+    for col in ["sire", "dam", "damsire"]:
+        if col not in df.columns:
+            continue
+
+        # Race-safe metrics tracking each sire's/dam's progeny performance
+        # We must exclude the current race to prevent data leakage from stable-mates
+        # competing in the same race.
+        # Use existing race-safe cumulative functions from the module!
+        df[f"_safe_{col}_runs"] = _race_safe_cumsum(df, col, "_result_start")
+        df[f"_safe_{col}_wins"] = _race_safe_cumsum(df, col, "won")
+        df[f"_safe_{col}_places"] = _race_safe_cumsum(df, col, "_placed_for_history")
+
+        df[f"{col}_win_rate"] = np.where(
+            df[f"_safe_{col}_runs"] > 0,
+            df[f"_safe_{col}_wins"] / df[f"_safe_{col}_runs"],
+            0.0,
+        )
+        # Bayesian shrink towards typical population prior
+        df[f"{col}_win_rate_shrunk"] = _bayesian_shrink(
+            df[f"{col}_win_rate"], df[f"_safe_{col}_runs"],
+            prior_rate=0.10, prior_strength=20.0,
+        )
+
+        df[f"{col}_place_rate"] = np.where(
+            df[f"_safe_{col}_runs"] > 0,
+            df[f"_safe_{col}_places"] / df[f"_safe_{col}_runs"],
+            0.0,
+        )
+        df[f"{col}_place_rate_shrunk"] = _bayesian_shrink(
+            df[f"{col}_place_rate"], df[f"_safe_{col}_runs"],
+            prior_rate=0.30, prior_strength=20.0,
+        )
+
+        df = df.drop(columns=[f"_safe_{col}_runs", f"_safe_{col}_wins", f"_safe_{col}_places", 
+                     f"{col}_win_rate", f"{col}_place_rate"], errors="ignore")
+
+    return df
+
+
+def add_medical_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive medical procedure flags, e.g., first run since gelding."""
+    if "sex" not in df.columns:
+        return df
+
+    logger.info("Engineering medical procedure features (gelding)...")
+    hkey = _horse_key(df)
+    
+    # Sex is usually "Colt", "Filly", "Mare", "Horse", "Gelding"
+    # First time gelding - looking for transition from Colt/Horse to Gelding
+    df["_is_gelding"] = (df["sex"].astype(str).str.lower() == "gelding").astype(int)
+    
+    horse_groups = df.groupby(hkey)
+    # Track the previous known sex (shifting by 1)
+    df["_prev_is_gelding"] = horse_groups["_is_gelding"].shift(1).fillna(0)
+    
+    # First time gelding is 1 if it is now a gelding but previously was not
+    df["first_time_gelded"] = (
+        (df["_is_gelding"] == 1) & (df["_prev_is_gelding"] == 0) & (df.get("horse_prev_races", 0) > 0)
+    ).astype(np.int8)
+    
+    df = df.drop(columns=["_prev_is_gelding", "_is_gelding"], errors="ignore")
+    return df
+
+
+def add_prize_money_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate prize money features capturing class intent and competition level."""
+    if "prize_money" not in df.columns:
+        return df
+
+    logger.info("Engineering prize money features...")
+    hkey = _horse_key(df)
+    horse_groups = df.groupby(hkey)
+    
+    # Fill NaN with 0
+    df["prize_money"] = df["prize_money"].fillna(0)
+    
+    # Maximum purse the horse has CONTESTED.
+    df["horse_max_prize_contested"] = horse_groups["prize_money"].cummax().shift(1).fillna(0)
+    
+    # Cumsum / count to avoid expanding().mean() issues:
+    df["_safe_cum_prize"] = horse_groups["prize_money"].cumsum() - df["prize_money"]
+    hp_races = df.get("horse_prev_races", pd.Series(0, index=df.index))
+    df["horse_avg_prize_contested"] = np.where(
+        hp_races > 0,
+        df["_safe_cum_prize"] / hp_races,
+        0.0
+    )
+    
+    # Difference vs typical class
+    df["prize_money_change_vs_avg"] = df["prize_money"] - df["horse_avg_prize_contested"]
+    
+    # Flag for severe class jumps based on money
+    df["stepping_up_in_purse"] = (
+        (hp_races > 0) & 
+        (df["prize_money"] > df["horse_max_prize_contested"] * 1.5)
+    ).astype(np.int8)
+    
+    df = df.drop(columns=["_safe_cum_prize"], errors="ignore")
+    return df
+
+
 def add_trainer_runner_intent_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add trainer multi-runner and first-string intent features."""
     logger.info("Engineering trainer multi-runner intent features...")
@@ -3390,6 +3496,9 @@ def engineer_features(
     df = _add_result_history_flags(df)
 
     df = add_horse_features(df)
+    df = add_pedigree_features(df)      # sire/dam/damsire edge
+    df = add_medical_features(df)       # gelding
+    df = add_prize_money_features(df)   # class shifts / purse jumps
     df = add_jockey_features(df)
     df = add_trainer_features(df)
     df = add_jockey_trainer_features(df)
@@ -3401,6 +3510,8 @@ def engineer_features(
     df = add_target_encoded_features(df)  # smoothed entity baselines
     df = add_cross_entity_features(df)    # jockey×going, horse×going, etc.
     df = compute_elo_features(df)
+    if getattr(config, "GLICKO_ENABLED", True):
+        df = compute_glicko_features(df)    # rating + uncertainty (RD)
     df = add_opposition_strength_features(df)  # needs horse_elo
     df = add_headgear_features(df)
     df = add_surface_features(df)

@@ -146,6 +146,14 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
     "place": "lgbm",       # Place classifier
 }
 
+# --- Market Anchor (Benter combination) ---
+# After Platt/isotonic calibration, combine the win classifier with the
+# market via softmax(alpha*log(p_model) + beta*log(p_market)) per race,
+# with (alpha, beta) fitted by maximum likelihood on OOF predictions.
+# beta > 1 also corrects the favourite-longshot bias. Races without
+# complete odds fall back to the unanchored probabilities.
+MARKET_ANCHOR = True
+
 # --- Race Ranker ---
 # LambdaRank learns relative order within each race directly.
 # Diagnostics only — its scores are never blended into win
@@ -153,6 +161,12 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
 # training time. Off by default; enable here or via the Train page
 # toggle when you want the ranker/classifier agreement panels.
 TRAIN_RANKER = False
+
+# --- Glicko Settings ---
+GLICKO_ENABLED = True    # adds horse_glicko* features in feature engineering
+GLICKO_RD_INIT = 350.0   # uncertainty for an unraced horse
+GLICKO_RD_MIN = 50.0     # floor for well-evidenced horses
+GLICKO_C = 70.0          # RD inflation per sqrt(month) idle
 
 # --- Elo Settings ---
 ELO_K_BASE = 32.0   # K for horses with 0 prior runs
