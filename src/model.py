@@ -3506,6 +3506,15 @@ class RacePredictor:
     def _prepare_prediction_frame(self, race_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         predict_df = race_df.reset_index(drop=True).copy()
         missing = [c for c in self.feature_cols if c not in predict_df.columns]
+        if missing:
+            # Zero-filling silently degrades predictions; make schema
+            # drift between training FE and live FE loud.
+            logger.warning(
+                "Prediction frame is missing %d of %d model features "
+                "(zero-filled): %s%s",
+                len(missing), len(self.feature_cols), missing[:10],
+                " …" if len(missing) > 10 else "",
+            )
         for col in missing:
             predict_df[col] = 0
 
