@@ -488,6 +488,42 @@ def _time_window_stats(
     return val_out, cnt_out
 
 
+def _entity_day_start_view(
+    df: pd.DataFrame,
+    key_cols: list,
+    feature_cols: list[str],
+) -> pd.DataFrame:
+    """Make entity-history features date-strict: every run an entity has
+    on one day receives the value computed at the entity's FIRST row of
+    that day — which has seen strictly-earlier days only.
+
+    Without this, a jockey's 14:30 features include his 13:30 result
+    (and same-race stablemate rows, by row order). Those results do not
+    exist at prediction time, so training would be systematically more
+    informed than live serving. Horses essentially never run twice a
+    day, so horse-keyed families don't need this; jockeys and trainers
+    double constantly.
+
+    ``key_cols`` must be the family's full history key (e.g.
+    ``["jockey", "going"]`` for jockey×going stats) so dimensional
+    features keep the current row's dimension.
+    """
+    feature_cols = [c for c in feature_cols if c in df.columns]
+    if not feature_cols or "race_date" not in df.columns:
+        return df
+    keys = [df[k] if isinstance(k, str) else k for k in key_cols]
+    day = pd.to_datetime(df["race_date"]).dt.normalize()
+    pos = pd.Series(np.arange(len(df)), index=df.index)
+    first = pos.groupby([*keys, day], sort=False, dropna=True).transform("min")
+    first = first.fillna(pos).to_numpy().astype(np.int64)
+    if (first == np.arange(len(df))).all():
+        return df
+    for col in feature_cols:
+        arr = df[col].to_numpy()
+        df[col] = arr[first]
+    return df
+
+
 def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate horse-specific historical features.
@@ -881,6 +917,17 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["jockey_hot_vs_30d"] = df["jockey_wr_14d"] - df["jockey_wr_30d"]
     df = df.drop(columns=["jockey_cum_wins", "jockey_cum_places"], errors="ignore")
+    df = _entity_day_start_view(df, ["jockey"], [
+        "jockey_prev_rides", "jockey_win_rate", "jockey_win_rate_shrunk",
+        "jockey_wins_10", "jockey_wins_20", "jockey_avg_pos_10", "jockey_avg_pos_20",
+        "jockey_place_rate", "jockey_place_rate_shrunk",
+        "jockey_wins_14d", "jockey_rides_14d", "jockey_places_14d",
+        "jockey_wr_14d", "jockey_pr_14d",
+        "jockey_wins_30d", "jockey_rides_30d", "jockey_places_30d",
+        "jockey_wr_30d", "jockey_pr_30d",
+        "jockey_wr_14d_delta", "jockey_pr_14d_delta",
+        "jockey_wr_30d_delta", "jockey_pr_30d_delta", "jockey_hot_vs_30d",
+    ])
     return df
 
 
@@ -956,6 +1003,17 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     df["trainer_hot_vs_30d"] = df["trainer_wr_14d"] - df["trainer_wr_30d"]
 
     df = df.drop(columns=["trainer_cum_wins", "trainer_cum_places", "_placed_hist_safe"])
+    df = _entity_day_start_view(df, ["trainer"], [
+        "trainer_prev_runs", "trainer_win_rate", "trainer_win_rate_shrunk",
+        "trainer_wins_10", "trainer_wins_20",
+        "trainer_place_rate", "trainer_place_rate_shrunk",
+        "trainer_wins_14d", "trainer_runs_14d", "trainer_places_14d",
+        "trainer_wr_14d", "trainer_pr_14d",
+        "trainer_wins_30d", "trainer_runs_30d", "trainer_places_30d",
+        "trainer_wr_30d", "trainer_pr_30d",
+        "trainer_wr_14d_delta", "trainer_pr_14d_delta",
+        "trainer_wr_30d_delta", "trainer_pr_30d_delta", "trainer_hot_vs_30d",
+    ])
 
     # --- Trainer at track (race-safe) ---
     if "track" in df.columns:
@@ -967,6 +1025,9 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
             df["trainer_track_runs"] > 0,
             df["trainer_track_wins"] / df["trainer_track_runs"],
             0,
+        )
+        df = _entity_day_start_view(
+            df, ["_tt_key"], ["trainer_track_runs", "trainer_track_win_rate"]
         )
         df = df.drop(columns=["trainer_track_wins", "_tt_key"], errors="ignore")
 
@@ -987,7 +1048,9 @@ def add_jockey_track_features(df: pd.DataFrame) -> pd.DataFrame:
         df["jockey_track_wins"] / df["jockey_track_runs"],
         0,
     )
-
+    df = _entity_day_start_view(
+        df, ["_jt_key"], ["jockey_track_runs", "jockey_track_win_rate"]
+    )
     df = df.drop(columns=["jockey_track_wins", "_jt_key"], errors="ignore")
     return df
 
@@ -1091,6 +1154,10 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
         prior_rate=0.30, prior_strength=5.0,
     )
 
+    df = _entity_day_start_view(df, ["_jt_combo"], [
+        "jt_prev_runs", "jt_win_rate", "jt_win_rate_shrunk",
+        "jt_place_rate", "jt_place_rate_shrunk",
+    ])
     df = df.drop(
         columns=["_jt_combo", "jt_cum_wins", "jt_cum_places", "_placed_hist_safe"],
         errors="ignore",
@@ -1522,6 +1589,9 @@ def add_trainer_specialisation_features(df: pd.DataFrame) -> pd.DataFrame:
             df["_tdc_wins"] / df["trainer_dist_cat_runs"],
             0,
         )
+        df = _entity_day_start_view(
+            df, ["_tdc_key"], ["trainer_dist_cat_runs", "trainer_dist_cat_wr"]
+        )
         df = df.drop(columns=["_dc_str", "_tdc_wins", "_tdc_key"], errors="ignore")
 
     # --- Trainer × going (race-safe) ---
@@ -1533,6 +1603,9 @@ def add_trainer_specialisation_features(df: pd.DataFrame) -> pd.DataFrame:
             df["trainer_going_runs"] > 2,
             df["_tg_wins"] / df["trainer_going_runs"],
             0,
+        )
+        df = _entity_day_start_view(
+            df, ["_tg_key"], ["trainer_going_runs", "trainer_going_wr"]
         )
         df = df.drop(columns=["_tg_wins", "_tg_key"], errors="ignore")
 
@@ -2883,6 +2956,28 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
         if "going" in df.columns:
             _te_ewma("going", "going", race_safe=True)
 
+    # Date-strict views: entities that appear several times per day
+    # (jockeys/trainers/combos — and shared context keys like track and
+    # going) must not see same-day earlier results in their encodings.
+    _te_w_str = str(getattr(config, "TE_WINDOW_DAYS", 365))
+    _suffixes = ["_te_norm_pos", f"_te_norm_pos_{_te_w_str}d", "_te_ewma"]
+
+    def _te_cols(prefix: str) -> list[str]:
+        return [f"{prefix}{s}" for s in _suffixes]
+
+    if "jockey" in df.columns:
+        df = _entity_day_start_view(df, ["jockey"], _te_cols("jockey"))
+    if "trainer" in df.columns:
+        df = _entity_day_start_view(df, ["trainer"], _te_cols("trainer"))
+    if "jockey" in df.columns and "trainer" in df.columns:
+        df["_jt_combo"] = df["jockey"].astype(str) + "_" + df["trainer"].astype(str)
+        df = _entity_day_start_view(df, ["_jt_combo"], _te_cols("jt"))
+        df = df.drop(columns=["_jt_combo"], errors="ignore")
+    if "track" in df.columns:
+        df = _entity_day_start_view(df, ["track"], _te_cols("track"))
+    if "going" in df.columns:
+        df = _entity_day_start_view(df, ["going"], _te_cols("going"))
+
     df = df.drop(columns=["_norm_pos", "_norm_pos_safe", "_norm_pos_weight"], errors="ignore")
     return df
 
@@ -2983,6 +3078,9 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
             df["_jg_w"] / df["jockey_going_runs"],
             0,
         )
+        df = _entity_day_start_view(
+            df, ["jockey", "going"], ["jockey_going_runs", "jockey_going_wr"]
+        )
         df = df.drop(columns=["_jg_w"], errors="ignore")
 
     # --- Jockey × distance category ---
@@ -2995,6 +3093,9 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
             df["jockey_dist_cat_runs"] > 2,
             df["_jdc_w"] / df["jockey_dist_cat_runs"],
             0,
+        )
+        df = _entity_day_start_view(
+            df, ["jockey", "_dc_str"], ["jockey_dist_cat_runs", "jockey_dist_cat_wr"]
         )
         df = df.drop(columns=["_dc_str", "_jdc_w"], errors="ignore")
 
@@ -3032,6 +3133,9 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
             df["trainer_class_runs"] > 2,
             df["_tc_w"] / df["trainer_class_runs"],
             0,
+        )
+        df = _entity_day_start_view(
+            df, ["_tc_key"], ["trainer_class_runs", "trainer_class_wr"]
         )
         df = df.drop(columns=["_tc_w", "_tc_key"], errors="ignore")
 

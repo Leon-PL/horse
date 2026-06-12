@@ -105,6 +105,26 @@ K_DECAY = getattr(config, "ELO_K_DECAY", 0.05)
 MOMENTUM_ALPHA = getattr(config, "ELO_MOMENTUM_ALPHA", 0.3)  # EMA smoothing for momentum
 
 
+def _day_start_gather(values: np.ndarray, keys: list, dates: np.ndarray) -> np.ndarray:
+    """Start-of-day view of per-row entity state.
+
+    Returns ``values`` with every row replaced by the value at the
+    entity's first row of that calendar day. Ratings recorded for an
+    entity's later races on a day embed the day's earlier results —
+    information that cannot exist at prediction time. Rows with a null
+    key keep their own value.
+    """
+    n = len(values)
+    pos = pd.Series(np.arange(n))
+    key_series = [pd.Series(np.asarray(k, dtype=object)) for k in keys]
+    day = pd.Series(pd.to_datetime(dates)).dt.normalize()
+    first = pos.groupby([*key_series, day], sort=False, dropna=True).transform("min")
+    first = first.fillna(pos).to_numpy().astype(np.int64)
+    if (first == np.arange(n)).all():
+        return values
+    return np.asarray(values)[first]
+
+
 def _adaptive_k(n_races: int) -> float:
     """
     Compute an adaptive K-factor based on experience.
@@ -660,6 +680,25 @@ def compute_elo_features(
                         trainer_race_counts[tname] += 1
 
     race_ids = df["race_id"]
+
+    # Date-strict view for entities that run several times a day:
+    # all of a jockey's/trainer's rides on one day must carry the
+    # rating recorded at their FIRST ride of the day — later rides'
+    # ratings embed same-day results that don't exist at prediction
+    # time. (Horses essentially never run twice a day.)
+    _day_dates = pd.to_datetime(df["race_date"]).values
+    if has_jockey:
+        jockey_elo_col = _day_start_gather(jockey_elo_col, [_jockey_keys], _day_dates)
+        has_jockey_elo_col = _day_start_gather(has_jockey_elo_col, [_jockey_keys], _day_dates)
+        jockey_elo_rt_col = _day_start_gather(
+            jockey_elo_rt_col,
+            [_jockey_keys, _race_types if _race_types is not None else np.zeros(len(df))],
+            _day_dates,
+        )
+    if has_trainer:
+        trainer_elo_col = _day_start_gather(trainer_elo_col, [_trainer_keys], _day_dates)
+        has_trainer_elo_col = _day_start_gather(has_trainer_elo_col, [_trainer_keys], _day_dates)
+
     horse_elo = pd.Series(horse_elo_col, index=df.index)
     jockey_elo = pd.Series(jockey_elo_col, index=df.index)
     trainer_elo = pd.Series(trainer_elo_col, index=df.index)
@@ -1202,6 +1241,10 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
             r, rd, has, _ = _glicko_pass(
                 keys, _finish_pos, _dates, race_ids_ordered, race_group_indices
             )
+            # Jockeys/trainers ride several races a day: start-of-day view
+            r = _day_start_gather(r, [keys], _dates)
+            rd = _day_start_gather(rd, [keys], _dates)
+            has = _day_start_gather(has, [keys], _dates)
             r_s = pd.Series(r, index=df.index)
             cols[f"{ent}_glicko"] = r
             cols[f"{ent}_glicko_rd"] = rd
