@@ -377,6 +377,15 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
                 backfill_weather_in_db(dates=scraped_dates)
             except Exception as e:
                 logger.warning(f"⚠️ Weather backfill for new rows failed: {e}")
+
+        # Fetch pedigree for first-time runners (one profile request per
+        # horse not yet in horse_pedigree; no-op when none are new).
+        if inserted > 0:
+            try:
+                from src.pedigree_backfill import backfill_pedigree
+                backfill_pedigree()
+            except Exception as e:
+                logger.warning(f"⚠️ Pedigree backfill for new horses failed: {e}")
     else:
         logger.info("  No new runners found for missing dates")
 
