@@ -234,9 +234,13 @@ def load_existing_model():
 
 
 
-@st.cache_data(show_spinner=False)
 def _cached_load_history_context(path: str, _mtime: float) -> tuple[pd.DataFrame, object]:
-    """Load processed history and cache its last available race date."""
+    """Load processed history and its last available race date.
+
+    Not cached itself: _cached_load_df already caches the heavy read
+    (an extra cache_data layer here used to deep-copy the whole history
+    frame on every call), and the max-date scan is milliseconds.
+    """
     hist = _cached_load_df(path, _mtime)
     if hist is None or hist.empty or "race_date" not in hist.columns:
         return hist, None
@@ -248,7 +252,7 @@ def _cached_load_history_context(path: str, _mtime: float) -> tuple[pd.DataFrame
     return hist, last_hist.date() if pd.notna(last_hist) else None
 
 
-@st.cache_data(show_spinner="Rebuilding featured dataset for active run …")
+@st.cache_resource(show_spinner="Rebuilding featured dataset for active run …")
 def _cached_build_featured_from_processed(path: str, _mtime: float) -> pd.DataFrame:
     processed = _cached_load_df(path, _mtime)
     return engineer_features(processed.copy(), save=False)

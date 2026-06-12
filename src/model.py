@@ -34,10 +34,43 @@ from sklearn.metrics import (
     ndcg_score,
 )
 from sklearn.model_selection import GroupShuffleSplit
-from xgboost import XGBRegressor, XGBClassifier
-from lightgbm import LGBMRegressor, LGBMClassifier, LGBMRanker
+# Gradient-boosting frameworks are imported lazily: importing lightgbm
+# alone can take 10-30 seconds on Windows (DLL scanning), and the
+# Streamlit app imports this module at startup. Training/prediction
+# entry points call _ensure_lightgbm()/_ensure_xgboost() before use.
+LGBMRegressor = None
+LGBMClassifier = None
+LGBMRanker = None
+XGBRegressor = None
+XGBClassifier = None
 CatBoostRegressor = None
 CatBoostClassifier = None
+
+
+def _ensure_lightgbm() -> None:
+    global LGBMRegressor, LGBMClassifier, LGBMRanker
+    if LGBMClassifier is None:
+        import lightgbm as lgb
+        LGBMRegressor = lgb.LGBMRegressor
+        LGBMClassifier = lgb.LGBMClassifier
+        LGBMRanker = lgb.LGBMRanker
+
+
+def _ensure_xgboost() -> None:
+    global XGBRegressor, XGBClassifier
+    if XGBClassifier is None:
+        import xgboost as xgb
+        XGBRegressor = xgb.XGBRegressor
+        XGBClassifier = xgb.XGBClassifier
+
+
+def __getattr__(name: str):
+    """PEP 562 lazy attributes — keeps ``from src.model import
+    _FocalLGBMClassifier`` (used by pickled models) working without
+    paying the lightgbm import at module load."""
+    if name == "_FocalLGBMClassifier":
+        return _get_focal_lgbm_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 Pool = None
 
 import config
@@ -435,35 +468,51 @@ def _unpickle_focal_lgbm_classifier(state):
     return obj
 
 
-class _FocalLGBMClassifier(LGBMClassifier):
-    """LGBMClassifier with sigmoid-corrected ``predict_proba``.
+_focal_lgbm_cls = None
+
+
+def _get_focal_lgbm_class():
+    """Build (once) the LGBMClassifier subclass with sigmoid-corrected
+    ``predict_proba``.
 
     When a custom objective (e.g. focal loss) is used, the LightGBM
-    booster returns raw logits.  This subclass applies the sigmoid
-    link so ``predict_proba`` returns valid probabilities.
+    booster returns raw logits; the subclass applies the sigmoid link so
+    ``predict_proba`` returns valid probabilities. Defined lazily so
+    importing src.model does not import lightgbm; unpickling reaches it
+    through the module-level ``__getattr__``.
     """
+    global _focal_lgbm_cls
+    if _focal_lgbm_cls is not None:
+        return _focal_lgbm_cls
+    _ensure_lightgbm()
 
-    def predict_proba(self, X, **kwargs):
-        # Go directly to the booster to avoid LGBMClassifier.predict →
-        # predict_proba recursion loop.
-        raw = self.booster_.predict(X, raw_score=True)
-        p = 1.0 / (1.0 + np.exp(-np.asarray(raw, dtype=np.float64)))
-        return np.column_stack([1 - p, p])
+    class _FocalLGBMClassifier(LGBMClassifier):
+        def predict_proba(self, X, **kwargs):
+            # Go directly to the booster to avoid LGBMClassifier.predict →
+            # predict_proba recursion loop.
+            raw = self.booster_.predict(X, raw_score=True)
+            p = 1.0 / (1.0 + np.exp(-np.asarray(raw, dtype=np.float64)))
+            return np.column_stack([1 - p, p])
 
-    def __copy__(self):
-        # copy.copy() is called by LGBMClassifier.get_params() — must not
-        # go through __reduce__ which triggers a module re-import chain.
-        cls = type(self)
-        obj = cls.__new__(cls)
-        obj.__dict__.update(self.__dict__)
-        return obj
+        def __copy__(self):
+            # copy.copy() is called by LGBMClassifier.get_params() — must not
+            # go through __reduce__ which triggers a module re-import chain.
+            cls = type(self)
+            obj = cls.__new__(cls)
+            obj.__dict__.update(self.__dict__)
+            return obj
 
-    def __reduce__(self):
-        # Use the stable module-level reconstructor instead of the class
-        # reference directly — prevents PicklingError when Streamlit reloads
-        # src.model between training and the joblib.dump call.
-        state = self.__getstate__() if hasattr(self, "__getstate__") else self.__dict__.copy()
-        return (_unpickle_focal_lgbm_classifier, (state,))
+        def __reduce__(self):
+            # Use the stable module-level reconstructor instead of the class
+            # reference directly — prevents PicklingError when Streamlit reloads
+            # src.model between training and the joblib.dump call.
+            state = self.__getstate__() if hasattr(self, "__getstate__") else self.__dict__.copy()
+            return (_unpickle_focal_lgbm_classifier, (state,))
+
+    _FocalLGBMClassifier.__module__ = __name__
+    _FocalLGBMClassifier.__qualname__ = "_FocalLGBMClassifier"
+    _focal_lgbm_cls = _FocalLGBMClassifier
+    return _focal_lgbm_cls
 
 
 # Columns to exclude from features (identifiers, targets, leaky features)
@@ -765,6 +814,7 @@ def _prune_features_quick(
     X = train_df[feature_cols].values
     y = train_df["won"].fillna(0).values.astype(int)
 
+    _ensure_lightgbm()
     pilot = LGBMClassifier(
         n_estimators=60,
         max_depth=5,
@@ -827,6 +877,7 @@ def _quick_prune_mask(
     if n_feats < 2 or len(X) < 2:
         return mask
 
+    _ensure_lightgbm()
     pilot = LGBMClassifier(
         n_estimators=60, max_depth=5, learning_rate=0.1,
         subsample=0.7, colsample_bytree=0.7, min_child_samples=30,
@@ -2671,6 +2722,8 @@ class RacePredictor:
         return pipe.predict_proba(cls._sanitise_for_linear(X))[:, 1]
 
     def _train_classifier(self, X, y, scale_pos_weight=1.0, params=None, sample_weight=None, eval_set=None):
+        _ensure_lightgbm()
+        _ensure_xgboost()
         _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
         fw = self.frameworks.get("classifier", "xgb")
         hp = {
@@ -2690,7 +2743,7 @@ class RacePredictor:
                 bool(hp.get("linear_tree", False)),
             )
             hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
-            model = _FocalLGBMClassifier(
+            model = _get_focal_lgbm_class()(
                 objective=_focal_binary_objective,
                 **hp,
                 subsample_freq=1,
@@ -2754,6 +2807,8 @@ class RacePredictor:
         Without reweighting the model trains 300-900 trees and achieves
         significantly better logloss (0.284 vs 0.328).
         """
+        _ensure_lightgbm()
+        _ensure_xgboost()
         _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
         fw = self.frameworks.get("classifier", "lgbm")
         hp = {
@@ -2835,6 +2890,8 @@ class RacePredictor:
         down-weights easy examples which hurts performance when classes
         are balanced.
         """
+        _ensure_lightgbm()
+        _ensure_xgboost()
         _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
         fw = self.frameworks.get("place", "xgb")
         hp = {
@@ -2909,6 +2966,7 @@ class RacePredictor:
 
     def _train_ranker(self, X, y, groups, params=None, sample_weight=None, eval_set=None):
         """Train a LightGBM LambdaRank model on per-race relevance labels."""
+        _ensure_lightgbm()
         fw = self.frameworks.get("ranker", "lgbm")
         if fw != "lgbm":
             logger.warning(

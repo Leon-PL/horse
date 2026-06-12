@@ -364,12 +364,15 @@ def list_runs() -> list[dict]:
     return _raw_list_runs()
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+# Run snapshots are immutable once written (rename/delete clear these
+# caches explicitly), so a long TTL avoids re-decompressing zstd
+# snapshots every minute while browsing the Experiments pages.
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_run(run_id: str) -> dict:
     return _raw_load_run(run_id)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_run_meta(run_id: str) -> dict:
     return _raw_load_run_meta(run_id)
 
@@ -444,6 +447,7 @@ def _invalidate_run_caches():
     """Call after saving a new run or deleting one."""
     list_runs.clear()
     load_run.clear()
+    load_run_meta.clear()
     _build_overfit_section_charts.clear()
     _build_trend_chart.clear()
     # Clear cached predictions so a model switch takes effect immediately
@@ -1555,9 +1559,16 @@ def _log_experiment(entry: dict):
     _save_experiments(exps)
 
 
-@st.cache_data(show_spinner="Loading data …")
+@st.cache_resource(show_spinner="Loading data …")
 def _cached_load_df(path: str, _mtime: float) -> pd.DataFrame:
-    """Read Parquet (or legacy CSV) — cached by path + modification time."""
+    """Read Parquet (or legacy CSV) — cached by path + modification time.
+
+    ``cache_resource`` (not ``cache_data``): featured datasets run to
+    gigabytes, and cache_data deep-copies the value on EVERY call, which
+    made each rerun pay seconds of copying and doubled memory. The
+    returned frame is shared — treat it as read-only and ``.copy()``
+    before mutating.
+    """
     if path.endswith(".parquet"):
         return pd.read_parquet(path, engine="pyarrow")
     return pd.read_csv(path)
