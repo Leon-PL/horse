@@ -169,13 +169,14 @@ GLICKO_RD_MIN = 50.0     # floor for well-evidenced horses
 GLICKO_C = 70.0          # RD inflation per sqrt(month) idle
 GLICKO_JOCKEY_TRAINER = False  # also rate jockeys/trainers (sweep 2026-06-11: hurt, keep off)
 GLICKO_DIMENSIONAL = False     # per surface/race-type/dist-cat ratings (sweep 2026-06-11: hurt, keep off)
-GLICKO_MARGIN = False          # beaten-lengths-weighted Glicko game scores (sweep pending)
-GLICKO2_ENABLED = False        # Glicko-2 with per-horse volatility (sweep pending)
+GLICKO_MARGIN = False          # beaten-lengths Glicko scores (sweep 2026-06-12: hurt, keep off)
+GLICKO2_ENABLED = False        # Glicko-2 volatility (sweep 2026-06-12: neutral, keep off)
 GLICKO2_TAU = 0.5              # volatility-change constraint
-TRUESKILL_ENABLED = False      # TrueSkill mu/sigma ratings (sweep pending)
+TRUESKILL_ENABLED = True       # TrueSkill mu/sigma (sweep 2026-06-12: best candidate, on)
 
 # --- Collateral Form ---
-# Prev-race rivals' next-out results ("key race" signal). Sweep pending.
+# Prev-race rivals' next-out results ("key race" signal).
+# Sweep 2026-06-12: unstable across folds (0.714/0.667), keep off.
 COLLATERAL_FORM = False
 
 # --- Elo Settings ---
