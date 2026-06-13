@@ -169,21 +169,32 @@ def get_ew_terms(
     if num_runners <= 4:
         return EachWayTerms(places_paid=0, fraction=0.0, eligible=False)
 
+    # Standard UK each-way terms. The odds fraction is 1/4 only for small
+    # fields (5-7) and large handicaps (12+ runners); 8+ non-handicaps and
+    # small handicaps pay 1/5. Defaulting everything to 1/4 (the previous
+    # behaviour) over-pays the place leg by 25% on a large share of races
+    # and inflates both backtest ROI and live EV.
     if num_runners <= 7:
         places = 2
+        fraction = 0.25
     elif num_runners <= 11:
         places = 3
+        fraction = 0.20  # 1/5 — both handicap and non-handicap
     elif num_runners <= 15:
         places = 3
+        fraction = 0.25 if is_handicap else 0.20
     else:
         # 16+ runners
         if is_handicap:
             places = 4
+            fraction = 0.25
         else:
             places = 3
+            fraction = 0.20
 
     places += extra_places
-    fraction = fraction_override if fraction_override is not None else 0.25
+    if fraction_override is not None:
+        fraction = fraction_override
 
     return EachWayTerms(places_paid=places, fraction=fraction, eligible=True)
 

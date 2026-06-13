@@ -14,21 +14,28 @@ from src.each_way import (
 
 class TestEwTerms:
     @pytest.mark.parametrize(
-        "runners,is_handicap,places,eligible",
+        "runners,is_handicap,places,fraction,eligible",
         [
-            (4, False, 0, False),
-            (5, False, 2, True),
-            (7, False, 2, True),
-            (8, False, 3, True),
-            (15, False, 3, True),
-            (16, False, 3, True),
-            (16, True, 4, True),
+            (4, False, 0, 0.0, False),
+            (5, False, 2, 0.25, True),     # small field: 1/4
+            (7, True, 2, 0.25, True),
+            (8, False, 3, 0.20, True),     # 8+ non-handicap: 1/5
+            (10, True, 3, 0.20, True),     # small handicap: 1/5
+            (15, False, 3, 0.20, True),
+            (14, True, 3, 0.25, True),     # 12-15 handicap: 1/4
+            (16, False, 3, 0.20, True),
+            (16, True, 4, 0.25, True),     # big handicap: 4 places, 1/4
         ],
     )
-    def test_standard_uk_terms(self, runners, is_handicap, places, eligible):
+    def test_standard_uk_terms(self, runners, is_handicap, places, fraction, eligible):
         terms = get_ew_terms(runners, is_handicap=is_handicap)
         assert terms.eligible is eligible
         assert terms.places_paid == places
+        assert terms.fraction == pytest.approx(fraction)
+
+    def test_fraction_override(self):
+        terms = get_ew_terms(8, is_handicap=False, fraction_override=0.25)
+        assert terms.fraction == pytest.approx(0.25)
 
     def test_place_odds(self):
         # 10/1 at 1/4 terms → place leg pays 10/4 → decimal 3.5
@@ -37,7 +44,7 @@ class TestEwTerms:
 
 class TestEwValue:
     def test_positive_place_edge(self):
-        terms = get_ew_terms(12)
+        terms = get_ew_terms(12, is_handicap=True)  # 1/4 terms
         result = ew_value(win_prob=0.10, place_prob=0.45, win_odds=11.0, ew_terms=terms)
         # implied place prob = 1/3.5 ≈ 0.2857 → edge ≈ 0.1643
         assert result["place_odds"] == pytest.approx(3.5)
@@ -53,7 +60,7 @@ class TestEwValue:
 
 class TestKellyEw:
     def test_matches_manual_kelly(self):
-        terms = get_ew_terms(12)
+        terms = get_ew_terms(12, is_handicap=True)  # 1/4 terms
         out = kelly_ew(win_prob=0.2, place_prob=0.5, win_odds=6.0, ew_terms=terms, fraction=1.0)
         # win leg: b=5, k=(5*0.2-0.8)/5 = 0.04
         assert out["win_kelly"] == pytest.approx(0.04)
@@ -61,7 +68,7 @@ class TestKellyEw:
         assert out["place_kelly"] == pytest.approx(0.1)
 
     def test_quarter_kelly_scaling(self):
-        terms = get_ew_terms(12)
+        terms = get_ew_terms(12, is_handicap=True)
         full = kelly_ew(0.2, 0.5, 6.0, terms, fraction=1.0)
         quarter = kelly_ew(0.2, 0.5, 6.0, terms, fraction=0.25)
         assert quarter["ew_kelly"] == pytest.approx(full["ew_kelly"] * 0.25)
