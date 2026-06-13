@@ -69,6 +69,24 @@ def _horse_key(df: pd.DataFrame) -> str:
     return "horse_name"
 
 
+def _defrag(df: pd.DataFrame, max_blocks: int = 16) -> pd.DataFrame:
+    """Consolidate a fragmented DataFrame when needed.
+
+    Each ``df[col] = ...`` adds one block to the BlockManager; the
+    pipeline's stages add hundreds of columns this way. Past ~100 blocks
+    pandas raises PerformanceWarning and every further insert degrades to
+    O(n_blocks). Called between stages, this keeps the base block count
+    low so no single stage's inserts can run the total up to the warning
+    threshold mid-stage. Stages that already return a consolidated frame
+    (built via ``pd.concat``) fall under *max_blocks* and skip the copy.
+    """
+    try:
+        n_blocks = len(df._mgr.blocks)
+    except Exception:
+        return df
+    return df.copy() if n_blocks > max_blocks else df
+
+
 def _add_result_history_flags(df: pd.DataFrame) -> pd.DataFrame:
     """Annotate finished results, non-finishers, and pending racecards."""
     finish_pos = pd.to_numeric(df.get("finish_position", 0), errors="coerce").fillna(0)
@@ -3678,46 +3696,56 @@ def engineer_features(
     df = df.sort_values(["_event_dt", "race_id"]).copy()
     df = _add_result_history_flags(df)
 
-    df = add_horse_features(df)
-    df = add_pedigree_features(df)      # sire/dam/damsire edge
-    df = add_medical_features(df)       # gelding
-    df = add_prize_money_features(df)   # class shifts / purse jumps
-    df = add_collateral_form_features(df)  # prev-race rivals' next-out form
-    df = add_jockey_features(df)
-    df = add_trainer_features(df)
-    df = add_jockey_trainer_features(df)
-    df = add_jockey_track_features(df)
-    df = add_track_features(df)
-    df = add_course_distance_features(df)
-    df = add_class_change_features(df)
-    df = add_distance_change_features(df)
-    df = add_target_encoded_features(df)  # smoothed entity baselines
-    df = add_cross_entity_features(df)    # jockey×going, horse×going, etc.
-    df = compute_elo_features(df)
+    # Pipeline stages run in order; each must see the columns its
+    # predecessors added (dependency notes kept beside the entries).
+    # _defrag between stages keeps the BlockManager from fragmenting as
+    # each stage inserts its columns one-by-one.
+    stages = [
+        add_horse_features,
+        add_pedigree_features,         # sire/dam/damsire edge
+        add_medical_features,          # gelding
+        add_prize_money_features,      # class shifts / purse jumps
+        add_collateral_form_features,  # prev-race rivals' next-out form
+        add_jockey_features,
+        add_trainer_features,
+        add_jockey_trainer_features,
+        add_jockey_track_features,
+        add_track_features,
+        add_course_distance_features,
+        add_class_change_features,
+        add_distance_change_features,
+        add_target_encoded_features,   # smoothed entity baselines
+        add_cross_entity_features,     # jockey×going, horse×going, etc.
+        compute_elo_features,
+    ]
     if getattr(config, "GLICKO_ENABLED", True):
-        df = compute_glicko_features(df)    # rating + uncertainty (RD)
-    df = add_opposition_strength_features(df)  # needs horse_elo
-    df = add_headgear_features(df)
-    df = add_surface_features(df)
-    df = add_trainer_specialisation_features(df)  # needs dist_category
-    df = add_speed_figure_features(df)
-    df = add_rtv_features(df)
-    df = add_market_features(df)
-    df = add_trainer_runner_intent_features(df)  # stable pecking-order / intent
-    df = add_jockey_intent_features(df)     # needs is_favourite + jockey_elo
-    df = add_race_context_features(df)
-    df = add_pace_style_features(df)   # needs RTV history + draw/field context
-    df = add_field_quality_features(df)
-    df = add_track_config_features(df)  # static venue data
-    df = add_weather_features(df)       # Open-Meteo historical weather
-    df = add_supplementary_features(df) # consistency, class, campaign, seasonal
-    df = add_race_relative_signal_features(df)
-    df = add_interaction_features(df)
-    df = apply_conditional_feature_masks(df)  # zero irrelevant features
+        stages.append(compute_glicko_features)  # rating + uncertainty (RD)
+    stages += [
+        add_opposition_strength_features,  # needs horse_elo
+        add_headgear_features,
+        add_surface_features,
+        add_trainer_specialisation_features,  # needs dist_category
+        add_speed_figure_features,
+        add_rtv_features,
+        add_market_features,
+        add_trainer_runner_intent_features,  # stable pecking-order / intent
+        add_jockey_intent_features,        # needs is_favourite + jockey_elo
+        add_race_context_features,
+        add_pace_style_features,           # needs RTV history + draw/field context
+        add_field_quality_features,
+        add_track_config_features,         # static venue data
+        add_weather_features,              # Open-Meteo historical weather
+        add_supplementary_features,        # consistency, class, campaign, seasonal
+        add_race_relative_signal_features,
+        add_interaction_features,
+        apply_conditional_feature_masks,   # zero irrelevant features
+    ]
+    for stage in stages:
+        df = stage(df)
+        df = _defrag(df)
 
-    # Defragment — the sub-functions above each add many columns
-    # one-by-one, leaving the DataFrame highly fragmented in memory.
-    df = df.copy()
+    # Final consolidation before the NaN-handling block below.
+    df = _defrag(df, max_blocks=0)
 
     # ── Feature-specific NaN handling ────────────────────────────
     # Prefer semantic defaults where they truly exist, and otherwise leave

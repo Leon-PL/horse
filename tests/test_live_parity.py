@@ -106,6 +106,21 @@ def parity_frames():
     return feat_train, train_day, feat_live, last_date
 
 
+def test_no_dataframe_fragmentation():
+    """The FE pipeline must not fragment the DataFrame (column-by-column
+    inserts past ~100 blocks trigger pandas PerformanceWarning and O(n)
+    inserts). _defrag between stages keeps the block count low."""
+    import warnings
+
+    from pandas.errors import PerformanceWarning
+
+    raw = _synthetic_raw(n_days=30)
+    proc = process_data(raw, save=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PerformanceWarning)
+        engineer_features(proc, save=False)
+
+
 def test_live_rows_complete(parity_frames):
     _, train_day, feat_live, _ = parity_frames
     assert len(feat_live) == len(train_day) > 0
