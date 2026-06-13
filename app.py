@@ -2795,12 +2795,13 @@ if page == "🎓 Train & Tune":
                     f"Kelly {_vc_info.get('kelly_fraction', 0.25):.0%}"
                     if _is_kelly else "flat 1-unit stakes"
                 )
+                _curve_markers = len(curves) <= 400
                 with eq1:
                     fig_pnl = px.line(
                         curves,
                         x="race_date", y="cum_pnl",
                         color="strategy",
-                        markers=True,
+                        markers=_curve_markers,
                         title=f"Cumulative P&L ({_staking_label})",
                         hover_data=_hover_cols,
                         labels={
@@ -2820,7 +2821,7 @@ if page == "🎓 Train & Tune":
                         curves,
                         x="race_date", y="cum_roi_pct",
                         color="strategy",
-                        markers=True,
+                        markers=_curve_markers,
                         title="Cumulative ROI %",
                         hover_data=_hover_cols,
                         labels={
@@ -4114,11 +4115,15 @@ elif page == "🧪 Experiments":
                 f"Cumulative P&L (Kelly {_evc2.get('kelly_fraction', 0.25):.0%})"
                 if _ek else "Cumulative P&L (flat 1-unit stakes)"
             )
+            # Per-point markers over thousands of bets render tens of
+            # thousands of SVG nodes and hang the browser; only show them
+            # for short curves.
+            _eq_markers = len(r_curves) <= 400
             eq1, eq2 = st.columns(2)
             with eq1:
                 fig_pnl = px.line(
                     r_curves, x="race_date", y="cum_pnl",
-                    color="strategy", markers=True,
+                    color="strategy", markers=_eq_markers,
                     title=_eq_title,
                     hover_data=_r_hover,
                     labels={"race_date": "Date", "cum_pnl": "P&L (units)", "bet_number": "Bet #"},
@@ -4129,7 +4134,7 @@ elif page == "🧪 Experiments":
             with eq2:
                 fig_roi = px.line(
                     r_curves, x="race_date", y="cum_roi_pct",
-                    color="strategy", markers=True,
+                    color="strategy", markers=_eq_markers,
                     title="Cumulative ROI %",
                     hover_data=_r_hover,
                     labels={"race_date": "Date", "cum_roi_pct": "ROI (%)", "bet_number": "Bet #"},
@@ -4175,12 +4180,13 @@ elif page == "🧪 Experiments":
 
             # WF equity curves
             if r_wf_curves is not None and not r_wf_curves.empty:
+                _wf_markers = len(r_wf_curves) <= 400
                 wf_eq1, wf_eq2 = st.columns(2)
                 with wf_eq1:
                     _wf_hover = [c for c in ["bet_number", "horse_name", "odds", "pnl"] if c in r_wf_curves.columns]
                     fig_wf_pnl = px.line(
                         r_wf_curves, x="race_date", y="cum_pnl",
-                        color="strategy", markers=True,
+                        color="strategy", markers=_wf_markers,
                         title="Walk-Forward Cumulative P&L",
                         hover_data=_wf_hover,
                         labels={"race_date": "Date", "cum_pnl": "P&L (units)"},
@@ -4191,7 +4197,7 @@ elif page == "🧪 Experiments":
                 with wf_eq2:
                     fig_wf_roi = px.line(
                         r_wf_curves, x="race_date", y="cum_roi_pct",
-                        color="strategy", markers=True,
+                        color="strategy", markers=_wf_markers,
                         title="Walk-Forward Cumulative ROI %",
                         hover_data=_wf_hover,
                         labels={"race_date": "Date", "cum_roi_pct": "ROI (%)"},
@@ -4522,7 +4528,7 @@ elif page == "🧪 Experiments":
                     _ov_hover = [c for c in ["bet_number", "horse_name", "odds", "stake", "pnl"] if c in _overlay.columns]
                     fig_overlay = px.line(
                         _overlay, x="race_date", y="cum_pnl",
-                        color="label", markers=True,
+                        color="label", markers=len(_overlay) <= 400,
                         title="Cumulative P&L Comparison",
                         hover_data=_ov_hover,
                         labels={"race_date": "Date", "cum_pnl": "P&L (units)", "bet_number": "Bet #"},
