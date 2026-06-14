@@ -111,6 +111,50 @@ class FeatureStore:
             return pickle.load(fh)
 
     # ── persistence helpers ───────────────────────────────────────────
+    @staticmethod
+    def _with_dist_category(df: pd.DataFrame) -> pd.DataFrame:
+        """Add ``dist_category`` (a pure bin of distance_furlongs).
+
+        The rating sweeps read it, but in the full pipeline it is added
+        mid-way by ``add_course_distance_features``. Mirror that one-liner
+        so a standalone rating sweep produces identical dimensional Elo.
+        """
+        if "distance_furlongs" in df.columns and "dist_category" not in df.columns:
+            df = df.copy()
+            df["dist_category"] = (
+                pd.cut(
+                    df["distance_furlongs"], bins=[0, 6.5, 8.5, 11.5, 50],
+                    labels=[0, 1, 2, 3], include_lowest=True,
+                ).astype(float).fillna(1)
+            )
+        return df
+
+    def _seeded_rating_frame(
+        self, new_proc: pd.DataFrame, seed: dict | None
+    ) -> tuple[pd.DataFrame, list[str], dict]:
+        """Compute rating columns for *new_proc* from seeded state.
+
+        Returns ``(rating_df, rating_cols, new_state)`` where ``rating_df``
+        holds the merge keys plus every rating column, in the same order as
+        a full sweep would produce for these rows.
+        """
+        seed = seed or {}
+        work = self._with_dist_category(new_proc)
+        base_cols = set(work.columns)
+        rated, elo_state = compute_elo_features(
+            work, elo_state=seed.get("elo"), return_state=True
+        )
+        glicko_state = None
+        if getattr(config, "GLICKO_ENABLED", True):
+            rated, glicko_state = compute_glicko_features(
+                rated, glicko_state=seed.get("glicko"), return_state=True
+            )
+        rating_cols = [
+            c for c in rated.columns if c not in base_cols and c != "_event_dt"
+        ]
+        keyed = rated[["race_id", "horse_name"] + rating_cols].copy()
+        return keyed, rating_cols, {"elo": elo_state, "glicko": glicko_state}
+
     def _compute_ratings_state(
         self, processed: pd.DataFrame, seed: dict | None = None
     ) -> dict:
@@ -121,6 +165,10 @@ class FeatureStore:
         seed they build from scratch over the full history.
         """
         seed = seed or {}
+        # dist_category is added mid-pipeline but the dimensional Elo/Glicko
+        # read it; add it here so the persisted state accumulates the
+        # dimensional counts exactly as the full pipeline does.
+        processed = self._with_dist_category(processed)
         _, elo_state = compute_elo_features(
             processed.copy(), elo_state=seed.get("elo"), return_state=True
         )
@@ -160,12 +208,62 @@ class FeatureStore:
         logger.info("FeatureStore built: %d featured rows", len(featured))
         return featured
 
-    def append(self, processed_new: pd.DataFrame) -> pd.DataFrame:
+    def _fast_featurize(
+        self, processed_hist: pd.DataFrame, new: pd.DataFrame
+    ) -> tuple[pd.DataFrame, dict]:
+        """Incremental featurise: sweep ratings only over the new rows
+        (seeded from persisted state, ~47% of FE time), then run the rest of
+        the pipeline with ``skip_ratings=True``.
+
+        History rows carry their stored rating columns so the few stages
+        that read prior-row ratings (e.g. ``jockey_elo_change``) stay
+        correct; within-race rating features for new rows come from their
+        own (all-new) racemates. Correctness is enforced against a full
+        rebuild by tests/test_feature_store.py.
+        """
+        seed = self.load_state()
+        keyed_ratings, rating_cols, advanced = self._seeded_rating_frame(new, seed)
+
+        # Attach rating columns to new rows (by key) and to history rows
+        # (from the stored featured frame).
+        new_rated = new.merge(keyed_ratings, on=["race_id", "horse_name"], how="left")
+
+        hist_featured = self.load_featured()
+        hist_rating_cols = [c for c in rating_cols if c in hist_featured.columns]
+        missing = set(rating_cols) - set(hist_rating_cols)
+        if missing:
+            logger.warning(
+                "Stored featured frame missing %d rating cols (%s…) — "
+                "fast append may diverge; rebuild the store.",
+                len(missing), sorted(missing)[:3],
+            )
+        hist_rated = processed_hist.merge(
+            hist_featured[["race_id", "horse_name"] + hist_rating_cols],
+            on=["race_id", "horse_name"], how="left",
+        )
+
+        combined = pd.concat([hist_rated, new_rated], ignore_index=True, sort=False)
+        featured_all_new = engineer_features(combined, save=False, skip_ratings=True)
+
+        new_keys = set(zip(new["race_id"].astype(str), new["horse_name"].astype(str)))
+        mask = [
+            (str(r), str(h)) in new_keys
+            for r, h in zip(featured_all_new["race_id"], featured_all_new["horse_name"])
+        ]
+        featured_new = featured_all_new[pd.Series(mask, index=featured_all_new.index)].copy()
+        return featured_new, advanced
+
+    def append(self, processed_new: pd.DataFrame, *, fast: bool = False) -> pd.DataFrame:
         """Feature-engineer and append new race dates.
 
         Only rows strictly after the store's ``last_date`` are taken (the
         store holds settled history; re-appending the same dates is a
         no-op). Returns the newly appended featured rows.
+
+        With ``fast=True`` the rating sweeps run only over the new rows
+        (seeded from persisted state) instead of the whole history; the rest
+        of the pipeline still runs over history+new. Both paths are
+        parity-tested against a full rebuild.
         """
         if not self.exists():
             raise RuntimeError("FeatureStore is empty; call build() first.")
@@ -179,8 +277,12 @@ class FeatureStore:
             logger.info("FeatureStore.append: no rows after %s — nothing to do", last)
             return new
 
-        # Correct re-featuring against full history (parity-tested path).
-        featured_new = feature_engineer_with_history_core(processed_hist, new)
+        if fast:
+            featured_new, advanced = self._fast_featurize(processed_hist, new)
+        else:
+            # Correct re-featuring against full history (parity-tested path).
+            featured_new = feature_engineer_with_history_core(processed_hist, new)
+            advanced = self._compute_ratings_state(new, seed=self.load_state())
 
         # Persist: append featured + processed, advance + save rating state.
         featured_all = pd.concat(
@@ -192,7 +294,6 @@ class FeatureStore:
         _stringify_objects(featured_all).to_parquet(self.featured_path, index=False, engine="pyarrow")
         _stringify_objects(processed_all).to_parquet(self.processed_path, index=False, engine="pyarrow")
 
-        advanced = self._compute_ratings_state(new, seed=self.load_state())
         self._save_state(advanced)
         self._write_meta(processed_all, featured_all, op="appended")
         logger.info(

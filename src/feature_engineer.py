@@ -15,6 +15,7 @@ Features include:
 
 import logging
 import ast
+import os
 
 import numba as nb
 import numpy as np
@@ -3674,6 +3675,8 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
 def engineer_features(
     df: pd.DataFrame,
     save: bool = True,
+    *,
+    skip_ratings: bool = False,
 ) -> pd.DataFrame:
     """
     Full feature engineering pipeline.
@@ -3681,6 +3684,13 @@ def engineer_features(
     Args:
         df: Processed DataFrame from data_processor
         save: Whether to save the feature-engineered data
+        skip_ratings: When True, the Elo/Glicko rating *sweeps* are not run
+            and the rating columns are expected to already be present on
+            ``df`` (attached by the caller from persisted state). Used by
+            the incremental feature store to avoid re-sweeping ratings over
+            the full history on every append (the sweeps are ~47% of FE).
+            Downstream rating-dependent stages then read those columns
+            directly.
 
     Returns:
         DataFrame with all engineered features
@@ -3716,10 +3726,11 @@ def engineer_features(
         add_distance_change_features,
         add_target_encoded_features,   # smoothed entity baselines
         add_cross_entity_features,     # jockey×going, horse×going, etc.
-        compute_elo_features,
     ]
-    if getattr(config, "GLICKO_ENABLED", True):
-        stages.append(compute_glicko_features)  # rating + uncertainty (RD)
+    if not skip_ratings:
+        stages.append(compute_elo_features)
+        if getattr(config, "GLICKO_ENABLED", True):
+            stages.append(compute_glicko_features)  # rating + uncertainty (RD)
     stages += [
         add_opposition_strength_features,  # needs horse_elo
         add_headgear_features,
@@ -3740,9 +3751,24 @@ def engineer_features(
         add_interaction_features,
         apply_conditional_feature_masks,   # zero irrelevant features
     ]
-    for stage in stages:
-        df = stage(df)
-        df = _defrag(df)
+    _profile = os.environ.get("FE_PROFILE")
+    if _profile:
+        import time as _t
+        _timings = []
+        for stage in stages:
+            _t0 = _t.perf_counter()
+            df = stage(df)
+            df = _defrag(df)
+            _timings.append((stage.__name__, _t.perf_counter() - _t0))
+        _timings.sort(key=lambda x: -x[1])
+        _total = sum(t for _, t in _timings)
+        logger.warning("FE stage profile (rows=%d, total=%.2fs):", len(df), _total)
+        for _name, _sec in _timings:
+            logger.warning("  %6.2fs  %5.1f%%  %s", _sec, 100 * _sec / _total, _name)
+    else:
+        for stage in stages:
+            df = stage(df)
+            df = _defrag(df)
 
     # Final consolidation before the NaN-handling block below.
     df = _defrag(df, max_blocks=0)
@@ -3814,7 +3840,6 @@ def engineer_features(
     ], errors="ignore")
 
     if save:
-        import os
         output_path = os.path.join(
             config.PROCESSED_DATA_DIR, "featured_races.parquet"
         )
