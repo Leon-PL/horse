@@ -2007,13 +2007,19 @@ if page == "🎓 Train & Tune":
                         logger.warning("RTV incremental backfill failed: %s", _rtv_exc)
                         st.caption("RTV incremental backfill skipped due to an error (continuing build)")
 
-            # ── Step 2: Fetch racecards for next 7 days ──────────────
+            # ── Step 2: Fetch racecards for the build day + next 7 days ──
+            # Offset 0 (the build day) is included so the current date is
+            # never a blind spot: the historical results scrape only has
+            # settled races (≤ yesterday), and without offset 0 the lookahead
+            # window would start at tomorrow, leaving today uncovered.
+            _LOOKAHEAD_OFFSETS = range(0, 8)  # today … +7
+            _n_offsets = len(_LOOKAHEAD_OFFSETS)
             _future_card_sigs: dict[str, str] = {}  # date_str → signature
             if data_source != "sample":
-                _update_prep_progress(3, "🗓️ Fetching racecards for next 7 days …")
+                _update_prep_progress(3, "🗓️ Fetching racecards for today + next 7 days …")
                 _card_frames: list[pd.DataFrame] = []
                 _today = datetime.now().date()
-                for _offset in range(1, 8):
+                for _i, _offset in enumerate(_LOOKAHEAD_OFFSETS, start=1):
                     _target = _today + timedelta(days=_offset)
                     _target_str = _target.strftime("%Y-%m-%d")
                     try:
@@ -2028,11 +2034,19 @@ if page == "🎓 Train & Tune":
                             _card_frames.append(_cards)
                     except Exception as _card_exc:
                         logger.warning("Failed to fetch racecards for %s: %s", _target_str, _card_exc)
-                    _update_prep_progress(3, f"🗓️ Fetching racecards for next 7 days … ({_offset}/7)", _offset / 7)
+                    _update_prep_progress(3, f"🗓️ Fetching racecards for today + next 7 days … ({_i}/{_n_offsets})", _i / _n_offsets)
                 if _card_frames:
                     _future_raw = pd.concat(_card_frames, ignore_index=True)
-                    st.success(f"✅ Fetched {len(_future_raw):,} future racecard entries")
-                    raw_data = pd.concat([raw_data, _future_raw], ignore_index=True, sort=False)
+                    # The build day (offset 0) can overlap races already scraped
+                    # as settled history (if run after some races have results).
+                    # Keep the settled copy; drop the duplicate pre-race card rows
+                    # so the combined FE pass never sees a race twice.
+                    if "race_id" in raw_data.columns and "race_id" in _future_raw.columns:
+                        _existing_rids = set(raw_data["race_id"].astype(str))
+                        _future_raw = _future_raw[~_future_raw["race_id"].astype(str).isin(_existing_rids)]
+                    if not _future_raw.empty:
+                        st.success(f"✅ Fetched {len(_future_raw):,} future racecard entries")
+                        raw_data = pd.concat([raw_data, _future_raw], ignore_index=True, sort=False)
 
             # ── Step 3: Process combined dataset ─────────────────────
             _process_step = 4 if data_source != "sample" else 2
@@ -4732,80 +4746,124 @@ elif page == "💰 Today's Picks":
     if _needs_preds:
         cards_df = cards_df.reset_index(drop=True)
 
-        # ── Load featured data from cache hierarchy ──────────────
+        # ── Load featured data from the cache hierarchy ──────────
+        # The predictions page must NEVER feature-engineer on the fly:
+        # Prepare Data / Train pre-computes features for the next 7 days
+        # (the lookahead cache) over the identical training code path.
+        # Each tier records why it missed, so a total miss is surfaced as
+        # a loud, actionable error rather than a silent dead end.
         _feat_cache = st.session_state.get("picks_featured", {})
-
         _has_lookahead = lookahead_cache_valid(_picks_date_str, current_cards_sig=None)
 
         all_feat = None
+        _feat_source = None
+        _cache_diag: list[str] = []
         progress = st.progress(10, text="Loading features …")
 
-        # 1. In-memory cache
-        if _picks_date_str in _feat_cache and not _odds_refresh:
-            all_feat = _feat_cache[_picks_date_str]
-            if _has_pace_diagnostics(all_feat):
+        # 1. In-memory cache (this session)
+        if _odds_refresh:
+            _cache_diag.append("in-memory cache: skipped (odds refresh forces a reload)")
+        elif _picks_date_str in _feat_cache:
+            if _has_pace_diagnostics(_feat_cache[_picks_date_str]):
+                all_feat = _feat_cache[_picks_date_str]
+                _feat_source = "in-memory cache (this session)"
                 progress.progress(50, text="⚡ Using cached features …")
             else:
-                all_feat = None
+                _cache_diag.append("in-memory cache: present but predates pace diagnostics")
+        else:
+            _cache_diag.append("in-memory cache: nothing for this date this session")
 
-        # 2. Lookahead cache
-        if all_feat is None and _has_lookahead:
-            _lookahead_feat = load_lookahead_cache(_picks_date_str, current_cards_sig=None)
-            if _lookahead_feat is not None and not _lookahead_feat.empty:
-                if _has_pace_diagnostics(_lookahead_feat):
+        # 2. Lookahead cache (built by Prepare Data / Train, 7 days ahead)
+        if all_feat is None:
+            if _has_lookahead:
+                _lookahead_feat = load_lookahead_cache(_picks_date_str, current_cards_sig=None)
+                if _lookahead_feat is None or _lookahead_feat.empty:
+                    _cache_diag.append("lookahead cache: file present but empty/unreadable")
+                elif not _has_pace_diagnostics(_lookahead_feat):
+                    _cache_diag.append("lookahead cache: present but predates pace diagnostics — rebuild needed")
+                else:
                     all_feat = _lookahead_feat
+                    _feat_source = "lookahead cache (7-day pre-build)"
                     progress.progress(50, text="⚡ Loaded lookahead cache …")
+            else:
+                _cache_diag.append(
+                    "lookahead cache: no entry for this date "
+                    "(outside the 7-day build window, or Prepare Data not run yet)"
+                )
 
         # 3. Live feature cache on disk — scan for any cached file for this date
         if all_feat is None:
             _date_cache_dir = os.path.join(config.PROCESSED_DATA_DIR, "live_feature_cache", _picks_date_str)
+            _pq_files = []
             if os.path.isdir(_date_cache_dir):
                 _pq_files = sorted(
                     (f for f in os.scandir(_date_cache_dir) if f.name.endswith(".parquet")),
                     key=lambda f: f.stat().st_mtime,
                     reverse=True,
                 )
-                if _pq_files:
-                    try:
-                        _loaded = pd.read_parquet(_pq_files[0].path, engine="pyarrow")
-                        if not _loaded.empty and _has_pace_diagnostics(_loaded):
-                            all_feat = _loaded
-                            progress.progress(50, text="⚡ Loaded live feature cache …")
-                    except Exception:
-                        pass
+            if _pq_files:
+                try:
+                    _loaded = pd.read_parquet(_pq_files[0].path, engine="pyarrow")
+                    if _loaded.empty or not _has_pace_diagnostics(_loaded):
+                        _cache_diag.append("live feature cache: file present but empty or predates pace diagnostics")
+                    else:
+                        all_feat = _loaded
+                        _feat_source = "live feature cache (disk fallback)"
+                        progress.progress(50, text="⚡ Loaded live feature cache …")
+                except Exception as _lfc_exc:
+                    _cache_diag.append(f"live feature cache: failed to read ({_lfc_exc})")
+            else:
+                _cache_diag.append("live feature cache: no file on disk for this date")
 
-        # 4. Global featured dataset (today/past)
-        if all_feat is None and _picks_date <= datetime.now().date():
-            _gfp = _global_featured_dataset_path()
-            if _gfp:
-                progress.progress(20, text="Loading featured dataset …")
-                _full_feat = _cached_load_df(_gfp, os.path.getmtime(_gfp))
-                if _full_feat is not None and "race_date" in _full_feat.columns:
-                    _date_mask = (
-                        pd.to_datetime(_full_feat["race_date"], errors="coerce")
-                        .dt.strftime("%Y-%m-%d") == _picks_date_str
-                    )
-                    _date_slice = _full_feat.loc[_date_mask]
-                    if not _date_slice.empty:
-                        all_feat = _date_slice.copy()
-                        progress.progress(50, text="⚡ Loaded from featured dataset …")
-
-        if all_feat is not None and not all_feat.empty and not _has_pace_diagnostics(all_feat):
-            progress.empty()
-            st.warning(
-                "Cached features for this date were built before the new pace diagnostics were added. "
-                "Rebuild the featured/live cache for this date and rerun picks."
-            )
-            st.stop()
+        # 4. Global featured dataset (today/past only)
+        if all_feat is None:
+            if _picks_date > datetime.now().date():
+                _cache_diag.append(
+                    "global featured dataset: skipped (date is in the future — "
+                    "only the lookahead cache covers future dates)"
+                )
+            else:
+                _gfp = _global_featured_dataset_path()
+                if not _gfp:
+                    _cache_diag.append("global featured dataset: none built yet")
+                else:
+                    progress.progress(20, text="Loading featured dataset …")
+                    _full_feat = _cached_load_df(_gfp, os.path.getmtime(_gfp))
+                    if _full_feat is None or "race_date" not in _full_feat.columns:
+                        _cache_diag.append("global featured dataset: unreadable or missing race_date")
+                    else:
+                        _date_mask = (
+                            pd.to_datetime(_full_feat["race_date"], errors="coerce")
+                            .dt.strftime("%Y-%m-%d") == _picks_date_str
+                        )
+                        _date_slice = _full_feat.loc[_date_mask]
+                        if _date_slice.empty:
+                            _cache_diag.append("global featured dataset: no rows for this date")
+                        else:
+                            all_feat = _date_slice.copy()
+                            _feat_source = "global featured dataset"
+                            progress.progress(50, text="⚡ Loaded from featured dataset …")
 
         if all_feat is None or all_feat.empty:
             progress.empty()
-            st.warning(
-                f"No featured data available for {_picks_date_str}. "
-                "Please run **Prepare Data** or **Train** first to build "
-                "the featured dataset for this date."
+            st.error(
+                f"🚩 **No featured data found for {_picks_date_str}.**\n\n"
+                "This page never feature-engineers on the fly — it reads the "
+                "cache that **Prepare Data / Train** builds (which pre-computes "
+                "features for the next 7 days). A total miss means the cache is "
+                "missing, stale, or this date is outside the build window."
             )
+            with st.expander("🔍 Why each cache tier missed", expanded=True):
+                for _d in _cache_diag:
+                    st.caption(f"• {_d}")
+                st.markdown(
+                    "**Fix:** run **🎓 Train & Tune → Prepare Data** to rebuild "
+                    "the featured dataset and refresh the 7-day lookahead cache, "
+                    "then reload this page."
+                )
             st.stop()
+
+        st.session_state["picks_feat_source"] = _feat_source
 
         # ── Merge fresh odds from racecards ──────────────────────
         _match_cols = ["race_id", "horse_name"]
@@ -4909,7 +4967,9 @@ elif page == "💰 Today's Picks":
             st.rerun()
         else:
             _used_label = st.session_state.get("picks_model_label", "Win + Place models")
-            st.caption(f"ℹ️ Predictions computed with: **{_used_label}**")
+            _feat_src = st.session_state.get("picks_feat_source")
+            _src_str = f" · features from **{_feat_src}**" if _feat_src else ""
+            st.caption(f"ℹ️ Predictions computed with: **{_used_label}**{_src_str}")
 
         full_preds = st.session_state["picks_preds"]
         race_meta = st.session_state["picks_meta"]
