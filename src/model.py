@@ -235,7 +235,16 @@ def _compute_shap_matrix(
         method_label = "Kernel SHAP"
     else:
         explainer = shap.TreeExplainer(model)
-        shap_values = explainer.shap_values(X_scaled)
+        with warnings.catch_warnings():
+            # Benign: SHAP warns that binary-classifier TreeExplainer output is
+            # now a list of ndarray (one per class). The list/ndim-3 handling
+            # below already selects the positive class, so this is just noise.
+            warnings.filterwarnings(
+                "ignore",
+                message="LightGBM binary classifier with TreeExplainer.*",
+                category=UserWarning,
+            )
+            shap_values = explainer.shap_values(X_scaled)
         method_label = "Tree SHAP"
 
     if isinstance(shap_values, list):
