@@ -315,7 +315,10 @@ def _update_margin_elo_for_race(
 def compute_elo_features(
     df: pd.DataFrame,
     k: float = K_FACTOR,
-) -> pd.DataFrame:
+    *,
+    elo_state: dict | None = None,
+    return_state: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
     """
     Add Elo rating features to the DataFrame.
 
@@ -356,15 +359,32 @@ def compute_elo_features(
     has_jockey = "jockey" in df.columns
     has_trainer = "trainer" in df.columns
 
+    # Optionally seed the rating state from a prior incremental run so the
+    # chronological sweep continues from where it left off instead of
+    # restarting from DEFAULT_RATING. The end-state is returned when
+    # return_state=True so a feature store can persist it and re-feed it on
+    # the next append — making the sweep process only the new rows while
+    # producing byte-identical pre-race ratings.
+    _seed_state = elo_state or {}
+
+    def _seed(name: str, factory):
+        d = defaultdict(factory)
+        prior = _seed_state.get(name)
+        if prior:
+            d.update(prior)
+        return d
+
+    _R = lambda: DEFAULT_RATING  # noqa: E731 — rating default factory
+
     # Rating dictionaries — persist across all races
-    horse_ratings: dict[str, float] = defaultdict(lambda: DEFAULT_RATING)
-    jockey_ratings: dict[str, float] = defaultdict(lambda: DEFAULT_RATING)
-    trainer_ratings: dict[str, float] = defaultdict(lambda: DEFAULT_RATING)
+    horse_ratings: dict[str, float] = _seed("horse_ratings", _R)
+    jockey_ratings: dict[str, float] = _seed("jockey_ratings", _R)
+    trainer_ratings: dict[str, float] = _seed("trainer_ratings", _R)
 
     # Race-count dictionaries for adaptive K-factor
-    horse_race_counts: dict[str, int] = defaultdict(int)
-    jockey_race_counts: dict[str, int] = defaultdict(int)
-    trainer_race_counts: dict[str, int] = defaultdict(int)
+    horse_race_counts: dict[str, int] = _seed("horse_race_counts", int)
+    jockey_race_counts: dict[str, int] = _seed("jockey_race_counts", int)
+    trainer_race_counts: dict[str, int] = _seed("trainer_race_counts", int)
 
     # Columns to populate
     horse_elo_col = np.full(len(df), np.nan)
@@ -377,7 +397,7 @@ def compute_elo_features(
     has_trainer_elo_col = np.zeros(len(df), dtype=np.int8)
 
     # Momentum Elo: exponential moving average of recent deltas
-    horse_momentum: dict[str, float] = defaultdict(float)
+    horse_momentum: dict[str, float] = _seed("horse_momentum", float)
     horse_momentum_col = np.full(len(df), np.nan)
 
     # Group by race (preserving chronological order)
@@ -402,15 +422,15 @@ def compute_elo_features(
     has_dist_cat = "dist_category" in df.columns
 
     # Rating dicts: key = (entity_name, dim_value)
-    horse_surf_ratings: dict = defaultdict(lambda: DEFAULT_RATING)
-    horse_rt_ratings: dict = defaultdict(lambda: DEFAULT_RATING)
-    horse_dc_ratings: dict = defaultdict(lambda: DEFAULT_RATING)
-    jockey_rt_ratings: dict = defaultdict(lambda: DEFAULT_RATING)
+    horse_surf_ratings: dict = _seed("horse_surf_ratings", _R)
+    horse_rt_ratings: dict = _seed("horse_rt_ratings", _R)
+    horse_dc_ratings: dict = _seed("horse_dc_ratings", _R)
+    jockey_rt_ratings: dict = _seed("jockey_rt_ratings", _R)
 
-    horse_surf_counts: dict = defaultdict(int)
-    horse_rt_counts: dict = defaultdict(int)
-    horse_dc_counts: dict = defaultdict(int)
-    jockey_rt_counts: dict = defaultdict(int)
+    horse_surf_counts: dict = _seed("horse_surf_counts", int)
+    horse_rt_counts: dict = _seed("horse_rt_counts", int)
+    horse_dc_counts: dict = _seed("horse_dc_counts", int)
+    jockey_rt_counts: dict = _seed("jockey_rt_counts", int)
 
     horse_elo_surf_col = np.full(len(df), np.nan)
     horse_elo_rt_col = np.full(len(df), np.nan)
@@ -423,9 +443,9 @@ def compute_elo_features(
 
     # ── Margin Elo state ─────────────────────────────────────────────
     # Separate rating pool: penalises for beaten lengths and DNF.
-    horse_margin_ratings: dict[str, float] = defaultdict(lambda: DEFAULT_RATING)
-    horse_margin_race_counts: dict[str, int] = defaultdict(int)
-    horse_margin_momentum: dict[str, float] = defaultdict(float)
+    horse_margin_ratings: dict[str, float] = _seed("horse_margin_ratings", _R)
+    horse_margin_race_counts: dict[str, int] = _seed("horse_margin_race_counts", int)
+    horse_margin_momentum: dict[str, float] = _seed("horse_margin_momentum", float)
     horse_margin_elo_col = np.full(len(df), np.nan)
     horse_margin_delta_col = np.zeros(len(df))
     horse_margin_momentum_col = np.full(len(df), np.nan)
@@ -794,6 +814,29 @@ def compute_elo_features(
         f"{n_trainers} trainers rated ({_n_dims} dimensional splits)"
     )
 
+    if return_state:
+        out_state = {
+            "horse_ratings": dict(horse_ratings),
+            "jockey_ratings": dict(jockey_ratings),
+            "trainer_ratings": dict(trainer_ratings),
+            "horse_race_counts": dict(horse_race_counts),
+            "jockey_race_counts": dict(jockey_race_counts),
+            "trainer_race_counts": dict(trainer_race_counts),
+            "horse_momentum": dict(horse_momentum),
+            "horse_surf_ratings": dict(horse_surf_ratings),
+            "horse_rt_ratings": dict(horse_rt_ratings),
+            "horse_dc_ratings": dict(horse_dc_ratings),
+            "jockey_rt_ratings": dict(jockey_rt_ratings),
+            "horse_surf_counts": dict(horse_surf_counts),
+            "horse_rt_counts": dict(horse_rt_counts),
+            "horse_dc_counts": dict(horse_dc_counts),
+            "jockey_rt_counts": dict(jockey_rt_counts),
+            "horse_margin_ratings": dict(horse_margin_ratings),
+            "horse_margin_race_counts": dict(horse_margin_race_counts),
+            "horse_margin_momentum": dict(horse_margin_momentum),
+        }
+        return df, out_state
+
     return df
 
 
@@ -867,7 +910,10 @@ def _glicko_pass(
     race_ids_ordered: np.ndarray,
     race_group_indices: dict,
     margin: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    *,
+    state: dict | None = None,
+    return_state: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     """One chronological Glicko-1 sweep for an arbitrary entity keying.
 
     Args:
@@ -885,11 +931,19 @@ def _glicko_pass(
 
     Returns:
         Per-row *pre-race* (rating, rd, has_prior_run, prior_run_count).
+        When ``return_state`` is set, also returns the carried state dict so
+        an incremental run can re-seed and sweep only new rows.
     """
-    ratings: dict = {}
-    rds: dict = {}
-    last_dt: dict = {}
-    counts: dict = {}
+    if state is not None:
+        ratings: dict = dict(state.get("ratings", {}))
+        rds: dict = dict(state.get("rds", {}))
+        last_dt: dict = dict(state.get("last_dt", {}))
+        counts: dict = dict(state.get("counts", {}))
+    else:
+        ratings = {}
+        rds = {}
+        last_dt = {}
+        counts = {}
 
     n = len(keys)
     r_col = np.full(n, np.nan)
@@ -964,6 +1018,10 @@ def _glicko_pass(
             rds[k] = float(np.mean([v[1] for v in vals]))
             last_dt[k] = race_dt
             counts[k] = counts.get(k, 0) + 1
+
+    if return_state:
+        out = {"ratings": ratings, "rds": rds, "last_dt": last_dt, "counts": counts}
+        return r_col, rd_col, has_col, cnt_col, out
     return r_col, rd_col, has_col, cnt_col
 
 
@@ -1014,17 +1072,26 @@ def _glicko2_pass(
     dates: np.ndarray,
     race_ids_ordered: np.ndarray,
     race_group_indices: dict,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    *,
+    state: dict | None = None,
+    return_state: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     """Chronological Glicko-2 sweep. Returns per-row pre-race
     (rating, rd, volatility, has_prior_run) on the Glicko-1 scale."""
     tau = float(getattr(config, "GLICKO2_TAU", 0.5))
     phi_init = GLICKO_RD_INIT / _G2_SCALE
     phi_min = GLICKO_RD_MIN / _G2_SCALE
 
-    mus: dict = {}
-    phis: dict = {}
-    sigmas: dict = {}
-    last_dt: dict = {}
+    if state is not None:
+        mus: dict = dict(state.get("mus", {}))
+        phis: dict = dict(state.get("phis", {}))
+        sigmas: dict = dict(state.get("sigmas", {}))
+        last_dt: dict = dict(state.get("last_dt", {}))
+    else:
+        mus = {}
+        phis = {}
+        sigmas = {}
+        last_dt = {}
 
     n = len(keys)
     r_col = np.full(n, np.nan)
@@ -1098,6 +1165,10 @@ def _glicko2_pass(
             phis[k] = float(nph)
             sigmas[k] = float(np.clip(nsg, 0.01, 0.2))
             last_dt[k] = race_dt
+
+    if return_state:
+        out = {"mus": mus, "phis": phis, "sigmas": sigmas, "last_dt": last_dt}
+        return r_col, rd_col, vol_col, has_col, out
     return r_col, rd_col, vol_col, has_col
 
 
@@ -1109,7 +1180,10 @@ def _trueskill_pass(
     dates: np.ndarray,
     race_ids_ordered: np.ndarray,
     race_group_indices: dict,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    *,
+    state: dict | None = None,
+    return_state: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Chronological TrueSkill sweep: each race is an n-way free-for-all.
 
     Returns per-row pre-race (mu, sigma, has_prior_run). Time dynamics
@@ -1118,7 +1192,7 @@ def _trueskill_pass(
     import trueskill
 
     env = trueskill.TrueSkill(draw_probability=0.001)
-    state: dict = {}
+    ts_ratings: dict = dict(state.get("ratings", {})) if state is not None else {}
 
     n = len(keys)
     mu_col = np.full(n, np.nan)
@@ -1131,7 +1205,7 @@ def _trueskill_pass(
             k = keys[i]
             if k is None:
                 continue
-            rating = state.get(k)
+            rating = ts_ratings.get(k)
             if rating is not None:
                 mu_col[i] = rating.mu
                 sigma_col[i] = rating.sigma
@@ -1150,18 +1224,26 @@ def _trueskill_pass(
         ]
         if len(upd) < 2:
             continue
-        groups = [(state.get(k, env.create_rating()),) for _, k in upd]
+        groups = [(ts_ratings.get(k, env.create_rating()),) for _, k in upd]
         ranks = [int(fp_race[j]) for j, _ in upd]
         try:
             new = env.rate(groups, ranks=ranks)
         except (FloatingPointError, ValueError):
             continue
         for (_, k), (rating,) in zip(upd, new):
-            state[k] = rating
+            ts_ratings[k] = rating
+
+    if return_state:
+        return mu_col, sigma_col, has_col, {"ratings": ts_ratings}
     return mu_col, sigma_col, has_col
 
 
-def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_glicko_features(
+    df: pd.DataFrame,
+    *,
+    glicko_state: dict | None = None,
+    return_state: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict]:
     """Add Glicko-1 rating + deviation features.
 
     Processes races chronologically; records each entity's rating and RD
@@ -1204,11 +1286,28 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
     def _clean(arr) -> list:
         return [k if pd.notna(k) else None for k in arr]
 
+    # Each chronological pass carries its own dict state. Thread per-pass
+    # state (keyed by label) in and out so an incremental run re-seeds and
+    # sweeps only the new rows. _run hides the variable return arity.
+    _in = glicko_state or {}
+    _out: dict = {}
+
+    def _run(passfn, label, *args, **kwargs):
+        res = passfn(
+            *args, state=_in.get(label), return_state=return_state, **kwargs
+        )
+        if return_state:
+            *cols_, st = res
+            _out[label] = st
+            return tuple(cols_)
+        return res
+
     horse_keys = _clean(
         _entity_keys(df, id_col="horse_id", name_col="horse_name", prefix="horse")
     )
-    glicko_col, rd_col, has_col, _ = _glicko_pass(
-        horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices
+    glicko_col, rd_col, has_col, _ = _run(
+        _glicko_pass, "horse",
+        horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices,
     )
 
     race_ids = df["race_id"]
@@ -1238,8 +1337,9 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
             keys = _clean(
                 _entity_keys(df, id_col=id_col, name_col=name_col, prefix=ent)
             )
-            r, rd, has, _ = _glicko_pass(
-                keys, _finish_pos, _dates, race_ids_ordered, race_group_indices
+            r, rd, has, _ = _run(
+                _glicko_pass, ent,
+                keys, _finish_pos, _dates, race_ids_ordered, race_group_indices,
             )
             # Jockeys/trainers ride several races a day: start-of-day view
             r = _day_start_gather(r, [keys], _dates)
@@ -1255,7 +1355,8 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
 
     if getattr(config, "GLICKO_MARGIN", False) and "lengths_behind" in df.columns:
         lb = pd.to_numeric(df["lengths_behind"], errors="coerce").to_numpy(dtype=float)
-        r, rd, has, _ = _glicko_pass(
+        r, rd, has, _ = _run(
+            _glicko_pass, "margin",
             horse_keys, _finish_pos, _dates, race_ids_ordered,
             race_group_indices, margin=lb,
         )
@@ -1268,8 +1369,9 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
         cols["horse_glicko_margin_edge"] = r - glicko_col
 
     if getattr(config, "GLICKO2_ENABLED", False):
-        r, rd, vol, has = _glicko2_pass(
-            horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices
+        r, rd, vol, has = _run(
+            _glicko2_pass, "glicko2",
+            horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices,
         )
         r_s = pd.Series(r, index=df.index)
         v_s = pd.Series(vol, index=df.index)
@@ -1284,8 +1386,9 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
         ).to_numpy()
 
     if getattr(config, "TRUESKILL_ENABLED", False):
-        mu, sg, has = _trueskill_pass(
-            horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices
+        mu, sg, has = _run(
+            _trueskill_pass, "trueskill",
+            horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices,
         )
         mu_s = pd.Series(mu, index=df.index)
         cols["horse_ts_mu"] = mu
@@ -1311,8 +1414,9 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
                 (hk, v) if hk is not None and pd.notna(v) else None
                 for hk, v in zip(horse_keys, vals)
             ]
-            r, rd, _, cnt = _glicko_pass(
-                keys, _finish_pos, _dates, race_ids_ordered, race_group_indices
+            r, rd, _, cnt = _run(
+                _glicko_pass, f"dim_{suffix}",
+                keys, _finish_pos, _dates, race_ids_ordered, race_group_indices,
             )
             use_dim = (cnt >= MIN_DIM_RACES) & np.isfinite(r)
             r_eff = np.where(use_dim, r, glicko_col)
@@ -1323,6 +1427,8 @@ def compute_glicko_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df = pd.concat([df, pd.DataFrame(cols, index=df.index)], axis=1)
     logger.info("Glicko complete: %d feature columns", len(cols))
+    if return_state:
+        return df, _out
     return df
 
 
