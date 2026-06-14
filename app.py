@@ -17,6 +17,14 @@ Run with:
 import hashlib
 import json
 import os
+
+# Limit numpy/BLAS threads to prevent ReleaseSemaphore crashes in Streamlit threadpool
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
 import sys
 import time
 import logging
@@ -1417,7 +1425,7 @@ page = st.sidebar.radio(
     [
         "🎓 Train & Tune",
         "🧭 Autotune",
-        " Experiments",
+        "🧪 Experiments",
         "🔮 Predict",
         "💰 Today's Picks",
         "🔌 Matchbook API",
