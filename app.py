@@ -1426,7 +1426,6 @@ page = st.sidebar.radio(
         "🎓 Train & Tune",
         "🧭 Autotune",
         "🧪 Experiments",
-        "🔮 Predict",
         "💰 Today's Picks",
         "🔌 Matchbook API",
         "🔎 Shortcomings",
@@ -4578,679 +4577,6 @@ elif page == "🧪 Experiments":
 
 
 # =====================================================================
-#  PREDICT
-# =====================================================================
-elif page == "🔮 Predict":
-    st.title("🔮 Predictions")
-
-    if st.session_state.predictor is None:
-        if os.path.exists(_ENSEMBLE_MODEL_PATH):
-            load_existing_model()
-            load_model_data(force=True)
-        else:
-            st.warning(
-                "⚠️ No model available. Train one on the "
-                "**Train & Tune** page."
-            )
-            st.stop()
-
-    _model_df = st.session_state.get("model_featured_data")
-    if _model_df is None:
-        load_model_data()
-        _model_df = st.session_state.get("model_featured_data")
-        if _model_df is None:
-            st.warning("⚠️ No data available. Train a model first.")
-            st.stop()
-
-    # ── Active model info ────────────────────────────────────────
-    _pred = st.session_state.predictor
-    _model_name = type(_pred).__name__
-    _w = getattr(_pred, "weights", None)
-    _rid = st.session_state.get("active_run_id")
-
-    with st.expander("ℹ️ Active Model", expanded=False):
-        mi1, mi2 = st.columns([1, 2])
-        with mi1:
-            st.markdown(f"**Type:** {_model_name}")
-            if _rid:
-                st.markdown(f"**Run:** `{_rid}`")
-            else:
-                st.markdown("**Run:** _not tracked_")
-        with mi2:
-            _fw_info = getattr(_pred, "frameworks", {})
-            if _fw_info:
-                parts = [f"{k}: {v}" for k, v in sorted(_fw_info.items())]
-                st.markdown(f"**Frameworks:** {' · '.join(parts)}")
-        st.caption(
-            "This is the model used for all predictions below. "
-            "To switch, go to **🧪 Experiments** and click "
-            "**🔄 Activate This Model** on any saved run."
-        )
-
-    _render_prediction_data_health(_model_df)
-
-    tabs = st.tabs(
-        ["🏇 Race Day", "📋 From Dataset", "✏️ Custom Entry"]
-    )
-
-    # ── Today's Races ────────────────────────────────────────────────
-    with tabs[0]:
-        _dc1, _dc2 = st.columns([2, 3])
-        with _dc1:
-            _pred_date = st.date_input(
-                "📅 Race date",
-                value=datetime.now().date(),
-                key="pred_race_date",
-            )
-        _pred_date_str = _pred_date.strftime("%Y-%m-%d")
-        _is_today = _pred_date == datetime.now().date()
-
-        with _dc2:
-            st.subheader(
-                "🏇 UK & Ireland Racecards"
-                + ("" if _is_today else f" — {_pred_date_str}")
-            )
-        st.caption(
-            "Racecards are automatically fetched and cached. "
-            "Click **Refresh** to re-scrape from Sporting Life."
-        )
-
-        # Detect date change → clear stale cards
-        if st.session_state.get("_pred_date_prev") != _pred_date_str:
-            st.session_state["live_cards"] = None
-            st.session_state["live_preds"] = None
-            st.session_state["_pred_date_prev"] = _pred_date_str
-
-        # --- auto-load from cache / scrape once ----------------
-        force_refresh = st.button(
-            "🔄 Refresh Racecards", type="secondary",
-        )
-
-        if (
-            "live_cards" not in st.session_state
-            or st.session_state["live_cards"] is None
-            or force_refresh
-        ):
-            _scrape_prog = st.progress(
-                0, text=f"Loading races for {_pred_date_str} …",
-            )
-            _scrape_status = st.empty()
-
-            def _scrape_cb(current, total, track):
-                _scrape_prog.progress(
-                    current / total,
-                    text=f"Scraping race {current}/{total} — {track} …",
-                )
-
-            cards_df = get_scraped_racecards(
-                date_str=_pred_date_str,
-                progress_callback=_scrape_cb,
-                force_refresh=force_refresh,
-            )
-            _scrape_prog.empty()
-            _scrape_status.empty()
-
-            if cards_df is None or cards_df.empty:
-                st.warning(
-                    f"No racecards found for {_pred_date_str}. "
-                    "Cards may not be published this far in advance."
-                )
-            else:
-                source = "Refreshed" if force_refresh else "Loaded"
-                st.success(
-                    f"{source} {len(cards_df)} entries across "
-                    f"{cards_df['race_id'].nunique()} races"
-                )
-                st.session_state["live_cards"] = cards_df
-
-        if (
-            "live_cards" in st.session_state
-            and st.session_state["live_cards"] is not None
-        ):
-            cards = st.session_state["live_cards"]
-            tracks_today = (
-                sorted(cards["track"].unique())
-                if "track" in cards.columns else []
-            )
-            if tracks_today:
-                st.markdown(f"**Venues:** {', '.join(tracks_today)}")
-
-            # --- batch predict (button-triggered) ---------------
-            _run_preds = st.button(
-                "▶️ Run Predictions",
-                type="primary",
-                key="btn_run_live_preds",
-            )
-
-            if (
-                _run_preds
-                or force_refresh
-            ):
-                _pred_prog = st.progress(0, text="Processing runners …")
-                all_live_preds: dict[str, pd.DataFrame] = {}
-                race_ids = cards["race_id"].unique()
-
-                # ── Batch process + feature-engineer WITH history ──
-                _all_cards = cards.copy()
-                _all_cards["won"] = 0
-                _all_cards["finish_position"] = 0
-                _all_cards["finish_time_secs"] = 0.0
-                _all_cards["lengths_behind"] = np.nan
-
-                _pred_prog.progress(10, text="Processing data …")
-                try:
-                    _all_proc = process_data(df=_all_cards, save=False)
-                except Exception as e:
-                    st.error(f"Processing failed: {e}")
-                    st.stop()
-
-                # ── Gap-fill: scrape missing intermediate results ──
-                _gap_extra = None
-                if not _is_today:
-                    _pred_prog.progress(20, text="Checking for date gaps …")
-                    try:
-                        def _gap_cb(cur, tot, ds):
-                            _pred_prog.progress(
-                                20 + int(10 * cur / tot),
-                                text=f"Gap-fill: scraping results for {ds} ({cur}/{tot}) …",
-                            )
-                        _gap_extra = scrape_gap_fill(_pred_date_str, progress_fn=_gap_cb)
-                    except Exception as e:
-                        logger.warning(f"Gap-fill failed: {e}")
-
-                _pred_prog.progress(30, text="Engineering features (with history) …")
-                try:
-                    _all_feat = feature_engineer_with_history(_all_proc, extra_history=_gap_extra)
-                except Exception as e:
-                    st.error(f"Feature engineering failed: {e}")
-                    st.stop()
-
-                for idx, rid in enumerate(race_ids):
-                    _pred_prog.progress(
-                        50 + int(50 * (idx + 1) / len(race_ids)),
-                        text=f"Predicting race {idx+1}/{len(race_ids)} …",
-                    )
-
-                    try:
-                        feat = _all_feat[_all_feat["race_id"] == rid].copy()
-                        feat = feat.reset_index(drop=True)
-                        if feat.empty:
-                            continue
-                        preds = _predict_featured_frame(
-                            st.session_state.predictor,
-                            feat,
-                            ew_fraction=st.session_state.value_config.get("ew_fraction"),
-                        )
-                        all_live_preds[rid] = preds
-                    except Exception as e:
-                        all_live_preds[rid] = f"Error: {e}"
-
-                _pred_prog.empty()
-                st.session_state["live_preds"] = all_live_preds
-
-            # --- display results --------------------------------
-            if "live_preds" in st.session_state and st.session_state["live_preds"]:
-                live_preds = st.session_state["live_preds"]
-
-                for rid in cards["race_id"].unique():
-                    race_slice = cards[cards["race_id"] == rid]
-                    track = race_slice["track"].iloc[0] if "track" in race_slice.columns else "?"
-                    off_time = race_slice["off_time"].iloc[0] if "off_time" in race_slice.columns else ""
-                    race_name = race_slice["race_name"].iloc[0] if "race_name" in race_slice.columns else ""
-
-                    header = (
-                        f"🏟️ {track} — {off_time} — {race_name} "
-                        f"({len(race_slice)} runners)"
-                    )
-                    with st.expander(header):
-                        result = live_preds.get(rid)
-                        if result is None:
-                            st.info("Click **▶️ Run Predictions** above.")
-                        elif isinstance(result, str):
-                            st.error(result)
-                        else:
-                            preds = result
-                            _ew_cfg = st.session_state.value_config
-                            _render_ranker_consensus_badge(preds)
-                            _render_pace_panel(preds, key=f"live_pace_{rid}")
-                            _render_ranker_disagreement_panel(preds, key=f"live_ranker_{rid}")
-                            for _, row in preds.iterrows():
-                                rank = int(row["predicted_rank"])
-                                emoji = (
-                                    "🥇" if rank == 1 else
-                                    "🥈" if rank == 2 else
-                                    "🥉" if rank == 3 else f"#{rank}"
-                                )
-                                c1, c2, c3, c4, c5 = st.columns(
-                                    [1, 3, 2, 2, 2],
-                                )
-                                c1.markdown(f"**{emoji}**")
-                                _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
-                                c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
-                                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
-                                    c2.caption("Split top pick")
-                                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
-                                    c2.caption(
-                                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
-                                    )
-                                c3.metric(
-                                    "Win Prob",
-                                    f"{row['win_probability']:.1%}",
-                                )
-                                if (
-                                    "odds" in row
-                                    and pd.notna(row["odds"])
-                                ):
-                                    c4.metric("Odds", f"{row['odds']:.1f}")
-
-                                # Win value badge
-                                _badges = []
-                                _vt_base = _ew_cfg["value_threshold"]
-                                _row_odds = float(row.get("odds", 3.0)) if pd.notna(row.get("odds")) else 3.0
-                                _value_min_odds, _value_max_odds = _value_odds_range(_ew_cfg)
-                                _dyn_vt = dynamic_value_threshold(_vt_base, _row_odds)
-                                if (
-                                    "value_score" in row
-                                    and pd.notna(row["value_score"])
-                                    and row["value_score"] > _dyn_vt
-                                    and _value_min_odds <= _row_odds <= _value_max_odds
-                                ):
-                                    _badges.append(f"⭐ **+{row['value_score']:.1%}** win")
-                                    _conf_label, _ = _bet_confidence_state(row)
-                                    if _conf_label:
-                                        _badges.append(_conf_label)
-                                # EW value badge
-                                if (
-                                    _ew_cfg.get("ew_enabled", True)
-                                    and row.get("place_value", False)
-                                ):
-                                    _ew_edge_base = _ew_cfg.get("ew_min_place_edge", 0.05)
-                                    _ew_dyn = dynamic_value_threshold(_ew_edge_base, _row_odds)
-                                    if row.get("place_edge", 0) > _ew_dyn:
-                                        _badges.append(
-                                            f"🔀 **+{row['place_edge']:.1%}** EW"
-                                        )
-                                        _conf_label, _ = _bet_confidence_state(row)
-                                        if _conf_label and _conf_label not in _badges:
-                                            _badges.append(_conf_label)
-                                if _badges:
-                                    c5.markdown(" · ".join(_badges))
-
-                            # Summaries
-                            if "value_score" in preds.columns and "odds" in preds.columns:
-                                vb = preds[_value_bet_mask(preds, _ew_cfg)]
-                                if not vb.empty:
-                                    st.success(
-                                        "💰 Value picks: "
-                                        f"{', '.join(vb['horse_name'])}"
-                                    )
-                            if (
-                                _ew_cfg.get("ew_enabled", True)
-                                and "ew_value" in preds.columns
-                            ):
-                                ew_bets = ew_value_bets(
-                                    preds,
-                                    min_place_edge=_ew_cfg.get("ew_min_place_edge", 0.05),
-                                    min_odds=_ew_cfg.get("ew_min_odds", 4.0),
-                                    max_odds=_ew_cfg.get("ew_max_odds", 51.0),
-                                )
-                                if not ew_bets.empty:
-                                    _ew_names = ", ".join(ew_bets["horse_name"])
-                                    st.info(f"🔀 EW value: {_ew_names}")
-            else:
-                st.info("Press **▶️ Run Predictions** to analyse all races.")
-
-    # ── From Dataset ─────────────────────────────────────────────────
-    with tabs[1]:
-        st.subheader("📋 Predict from Loaded Data")
-        df = _model_df.copy()
-        df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
-
-        races = (
-            df.groupby("race_id")
-            .agg(
-                date=("race_date", "first"),
-                track=("track", "first"),
-                runners=("horse_name", "count"),
-            )
-            .reset_index()
-            .sort_values("date", ascending=False)
-        )
-
-        selected_race = st.selectbox(
-            "Select Race",
-            races["race_id"].values,
-            format_func=lambda x: (
-                f"{x} — "
-                f"{races.loc[races['race_id']==x, 'track'].values[0]}"
-                f" — "
-                f"{races.loc[races['race_id']==x, 'runners'].values[0]}"
-                " runners"
-            ),
-        )
-
-        if st.button("🔮 Predict", key="pred_data", type="primary"):
-            race_data = df[df["race_id"] == selected_race].copy()
-            predictions = _predict_featured_frame(
-                st.session_state.predictor,
-                race_data,
-                ew_fraction=st.session_state.value_config.get("ew_fraction"),
-            )
-
-            if "finish_position" in race_data.columns:
-                actual = race_data[
-                    ["horse_name", "finish_position"]
-                ].copy()
-                predictions = predictions.merge(
-                    actual, on="horse_name", how="left",
-                )
-
-            st.markdown("### 🏆 Predictions")
-            _render_ranker_consensus_badge(predictions)
-            _render_pace_panel(predictions, key="dataset_pace")
-            _render_ranker_disagreement_panel(predictions, key="dataset_ranker")
-            for _, row in predictions.iterrows():
-                rank = int(row["predicted_rank"])
-                emoji = (
-                    "🥇" if rank == 1 else
-                    "🥈" if rank == 2 else
-                    "🥉" if rank == 3 else f"#{rank}"
-                )
-                c1, c2, c3, c4, c5 = st.columns([1, 3, 2, 2, 2])
-                c1.markdown(f"**{emoji}**")
-                _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
-                c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
-                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
-                    c2.caption("Split top pick")
-                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
-                    c2.caption(
-                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
-                    )
-                c3.metric("Win Prob", f"{row['win_probability']:.1%}")
-                if "odds" in row:
-                    c4.metric("Odds", f"{row['odds']:.1f}")
-                if (
-                    "finish_position" in row
-                    and pd.notna(row["finish_position"])
-                ):
-                    c5.metric(
-                        "Actual", f"#{int(row['finish_position'])}",
-                    )
-
-            if "value_score" in predictions.columns and "odds" in predictions.columns:
-                _pvc = st.session_state.value_config
-                vb = predictions[_value_bet_mask(predictions, _pvc)]
-                if not vb.empty:
-                    st.markdown("### 💰 Value Bets")
-                    for _, row in vb.iterrows():
-                        _kf = kelly_criterion(row['win_probability'], row['odds'], fraction=_pvc["kelly_fraction"])
-                        _k_label = f"{_pvc['kelly_fraction']:.0%}"
-                        _ks = f" · Kelly {_k_label} **{_kf*100:.1f}%**" if _kf > 0.001 else ""
-                        _clv = row['win_probability'] * row['odds']
-                        _clv_str = f" · CLV **{_clv:.3f}x**" if _clv > 1.0 else ""
-                        _conf_label, _conf_detail = _bet_confidence_state(row)
-                        _conf_str = f" · {_conf_label}" if _conf_label else ""
-                        _conf_detail_str = f"  \n_{_conf_detail}_" if _conf_detail else ""
-                        st.info(
-                            f"**{row['horse_name']}** — "
-                            f"Model: {row['win_probability']:.1%} vs "
-                            f"Market: {row['implied_prob']:.1%} — "
-                            f"Value: +{row['value_score']:.1%}{_ks}{_clv_str}{_conf_str}"
-                            f"{_conf_detail_str}"
-                        )
-
-            # ── Each-Way Value Bets ──────────────────────────────
-            _pvc2 = st.session_state.value_config
-            if (
-                _pvc2.get("ew_enabled", True)
-                and "ew_value" in predictions.columns
-            ):
-                ew_bets = ew_value_bets(
-                    predictions,
-                    min_place_edge=_pvc2.get("ew_min_place_edge", 0.05),
-                    min_odds=_pvc2.get("ew_min_odds", 4.0),
-                    max_odds=_pvc2.get("ew_max_odds", 51.0),
-                )
-                if not ew_bets.empty:
-                    st.markdown("### 🔀 Each-Way Value Bets")
-                    for _, row in ew_bets.iterrows():
-                        _ew_k = kelly_ew(
-                            row["win_probability"], row["place_probability"],
-                            row["odds"],
-                            get_ew_terms(
-                                int(row.get("num_runners", 8)),
-                                is_handicap=bool(row.get("handicap", 0)),
-                            ),
-                            fraction=_pvc2["kelly_fraction"],
-                        )
-                        _place_str = (
-                            f"Place prob: **{row['place_probability']:.1%}** vs "
-                            f"implied {1/row['place_odds']:.1%}"
-                        )
-                        _ew_kelly_str = (
-                            f" · EW Kelly {_pvc2['kelly_fraction']:.0%} **{_ew_k['ew_kelly']*100:.1f}%**"
-                            if _ew_k["ew_kelly"] > 0.001 else ""
-                        )
-                        _conf_label, _conf_detail = _bet_confidence_state(row)
-                        _conf_str = f" · {_conf_label}" if _conf_label else ""
-                        _terms_str = f"{int(row['ew_places'])} places at {row['ew_fraction_str']}"
-                        st.success(
-                            f"**{row['horse_name']}** @ {row['odds']:.1f} — "
-                            f"{_place_str} — "
-                            f"Edge: +{row['place_edge']:.1%} · "
-                            f"EW EV: {row['ew_ev']:+.1%}{_ew_kelly_str}{_conf_str}\n\n"
-                            f"<small>Terms: {_terms_str} · "
-                            f"Place odds: {row['place_odds']:.2f}"
-                            f"{' · ' + _conf_detail if _conf_detail else ''}</small>",
-                            icon="🔀",
-                        )
-
-            # ── SHAP explanation ─────────────────────────────────
-            try:
-                expl = st.session_state.predictor.explain_race(
-                    race_data,
-                )
-                _render_shap_explanation(
-                    expl, predictions, key_prefix="shap_dataset",
-                )
-            except Exception as e:
-                st.warning(f"SHAP explanation unavailable: {e}")
-
-    # ── Custom Entry ─────────────────────────────────────────────────
-    with tabs[2]:
-        st.subheader("✏️ Enter race details manually")
-
-        if _model_df is not None:
-            _df = _model_df
-            track_opts = sorted(
-                _df["track"].dropna().unique().tolist(),
-            )
-            going_opts = (
-                sorted(_df["going"].dropna().unique().tolist())
-                if "going" in _df.columns
-                else ["Good", "Soft", "Heavy", "Firm"]
-            )
-            class_opts = (
-                sorted(_df["race_class"].dropna().unique().tolist())
-                if "race_class" in _df.columns
-                else [f"Class {i}" for i in range(1, 6)]
-            )
-            type_opts = (
-                sorted(_df["race_type"].dropna().unique().tolist())
-                if "race_type" in _df.columns
-                else ["Flat", "Hurdle", "Chase"]
-            )
-        else:
-            track_opts = [
-                "Ascot", "Cheltenham", "Newmarket", "York", "Aintree",
-            ]
-            going_opts = [
-                "Good", "Good To Firm", "Good To Soft",
-                "Soft", "Heavy", "Firm",
-            ]
-            class_opts = [f"Class {i}" for i in range(1, 6)]
-            type_opts = ["Flat", "Hurdle", "Chase", "NH Flat"]
-
-        rc1, rc2, rc3 = st.columns(3)
-        with rc1:
-            track = st.selectbox("Track", track_opts)
-            going = st.selectbox("Going", going_opts)
-        with rc2:
-            race_class = st.selectbox("Race Class", class_opts)
-            race_type = st.selectbox("Race Type", type_opts)
-        with rc3:
-            distance = st.selectbox(
-                "Distance (f)",
-                [5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32],
-            )
-            num_runners = st.number_input("Runners", 2, 20, 8)
-
-        # ── Race-level extras ────────────────────────────────────
-        rx1, rx2 = st.columns(2)
-        with rx1:
-            is_handicap = st.checkbox("Handicap?", value=True, key="c_hcap")
-            prize_money = st.number_input(
-                "Prize money (£)", 1000, 1_000_000, 10_000, 1000, key="c_prize",
-            )
-        with rx2:
-            surface = st.selectbox(
-                "Surface", ["Turf", "All Weather"], key="c_surface",
-            )
-
-        st.markdown("#### Horse Details")
-        horses_data = []
-        for i in range(num_runners):
-            with st.expander(f"Horse {i+1}", expanded=i < 3):
-                hc1, hc2, hc3, hc4 = st.columns([2, 2, 2, 1.5])
-                with hc1:
-                    name = st.text_input(
-                        "Name", f"Horse {i+1}", key=f"cn_{i}",
-                    )
-                    jockey = st.text_input(
-                        "Jockey", f"Jockey {i+1}", key=f"cj_{i}",
-                    )
-                    trainer = st.text_input(
-                        "Trainer", f"Trainer {i+1}", key=f"ct_{i}",
-                    )
-                with hc2:
-                    age = st.number_input(
-                        "Age", 2, 12, 4, key=f"ca_{i}",
-                    )
-                    weight = st.number_input(
-                        "Weight (lbs)", 112, 175, 130, key=f"cw_{i}",
-                    )
-                    odds = st.number_input(
-                        "Odds", 1.1, 200.0, 5.0, key=f"co_{i}",
-                    )
-                with hc3:
-                    official_rating = st.number_input(
-                        "Official Rating", 0, 180, 0, key=f"cor_{i}",
-                        help="0 = unknown (will use race median)",
-                    )
-                    days_since = st.number_input(
-                        "Days since last run", 0, 999, 30, key=f"cd_{i}",
-                    )
-                    form_str = st.text_input(
-                        "Form", "", key=f"cf_{i}",
-                        help="e.g. 1-3-2-5 (most recent last)",
-                    )
-                with hc4:
-                    draw = st.number_input(
-                        "Draw", 1, 30, i + 1, key=f"cdr_{i}",
-                    )
-                    sex = st.selectbox(
-                        "Sex", ["Gelding", "Colt", "Filly", "Mare", "Horse"],
-                        key=f"cs_{i}",
-                    )
-                    headgear = st.selectbox(
-                        "Headgear", ["", "b", "v", "t", "p", "h"],
-                        key=f"ch_{i}",
-                        help="b=blinkers, v=visor, t=tongue tie, p=cheekpieces, h=hood",
-                    )
-
-                horses_data.append({
-                    "horse_name": name,
-                    "jockey": jockey,
-                    "trainer": trainer,
-                    "track": track,
-                    "going": going,
-                    "race_class": race_class,
-                    "race_type": race_type,
-                    "distance_furlongs": distance,
-                    "num_runners": num_runners,
-                    "age": age,
-                    "weight_lbs": weight,
-                    "odds": odds,
-                    "draw": draw,
-                    "prize_money": prize_money,
-                    "official_rating": official_rating,
-                    "days_since_last_run": days_since,
-                    "form": form_str if form_str else "",
-                    "headgear": headgear,
-                    "sex": sex,
-                    "surface": surface,
-                    "handicap": 1 if is_handicap else 0,
-                })
-
-        if st.button("🔮 Predict Custom Race", type="primary"):
-            custom_df = pd.DataFrame(horses_data)
-            custom_df["race_id"] = "CUSTOM_001"
-            custom_df["race_date"] = pd.Timestamp.now().strftime(
-                "%Y-%m-%d",
-            )
-            custom_df["won"] = 0
-            custom_df["finish_position"] = 0
-            custom_df["finish_time_secs"] = 0
-            custom_df["lengths_behind"] = np.nan
-
-            processed_custom = process_data(df=custom_df, save=False)
-            featured_custom = feature_engineer_with_history(
-                processed_custom,
-            )
-            predictions = _predict_featured_frame(
-                st.session_state.predictor,
-                featured_custom,
-                ew_fraction=st.session_state.value_config.get("ew_fraction"),
-            )
-
-            st.markdown("### 🏆 Custom Race Prediction")
-            _render_ranker_consensus_badge(predictions)
-            _render_pace_panel(predictions, key="custom_pace")
-            _render_ranker_disagreement_panel(predictions, key="custom_ranker")
-            for _, row in predictions.iterrows():
-                rank = int(row["predicted_rank"])
-                emoji = (
-                    "🥇" if rank == 1 else
-                    "🥈" if rank == 2 else
-                    "🥉" if rank == 3 else f"#{rank}"
-                )
-                c1, c2, c3, c4 = st.columns([1, 3, 2, 2])
-                c1.markdown(f"**{emoji}**")
-                _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
-                c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
-                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
-                    c2.caption("Split top pick")
-                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
-                    c2.caption(
-                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
-                    )
-                c3.metric("Win Prob", f"{row['win_probability']:.1%}")
-                if "odds" in row:
-                    c4.metric("Odds", f"{row['odds']:.1f}")
-
-            # ── SHAP explanation ─────────────────────────────────
-            try:
-                expl = st.session_state.predictor.explain_race(
-                    featured_custom,
-                )
-                _render_shap_explanation(
-                    expl, predictions, key_prefix="shap_custom",
-                )
-            except Exception as e:
-                st.warning(f"SHAP explanation unavailable: {e}")
-
-
-# =====================================================================
 #  TODAY'S PICKS
 # =====================================================================
 elif page == "💰 Today's Picks":
@@ -6165,6 +5491,367 @@ elif page == "💰 Today's Picks":
                             key_prefix=f"picks_shap_{rid}",
                             model_label=_payload.get("model_label"),
                         )
+
+    # ── Other prediction tools (folded in from the former Predict page) ──
+    st.markdown("---")
+    st.markdown("### 🔧 Other prediction tools")
+    _model_df = st.session_state.get("model_featured_data")
+    if _model_df is None:
+        load_model_data()
+        _model_df = st.session_state.get("model_featured_data")
+    _other_tabs = st.tabs(["📋 From Dataset", "✏️ Custom Entry"])
+    with _other_tabs[0]:
+        st.subheader("📋 Predict from Loaded Data")
+        if _model_df is None or _model_df.empty:
+            st.info("Activate a model run with a saved dataset to use this tool.")
+            st.stop()
+        df = _model_df.copy()
+        df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
+
+        races = (
+            df.groupby("race_id")
+            .agg(
+                date=("race_date", "first"),
+                track=("track", "first"),
+                runners=("horse_name", "count"),
+            )
+            .reset_index()
+            .sort_values("date", ascending=False)
+        )
+
+        selected_race = st.selectbox(
+            "Select Race",
+            races["race_id"].values,
+            format_func=lambda x: (
+                f"{x} — "
+                f"{races.loc[races['race_id']==x, 'track'].values[0]}"
+                f" — "
+                f"{races.loc[races['race_id']==x, 'runners'].values[0]}"
+                " runners"
+            ),
+        )
+
+        if st.button("🔮 Predict", key="pred_data", type="primary"):
+            race_data = df[df["race_id"] == selected_race].copy()
+            predictions = _predict_featured_frame(
+                st.session_state.predictor,
+                race_data,
+                ew_fraction=st.session_state.value_config.get("ew_fraction"),
+            )
+
+            if "finish_position" in race_data.columns:
+                actual = race_data[
+                    ["horse_name", "finish_position"]
+                ].copy()
+                predictions = predictions.merge(
+                    actual, on="horse_name", how="left",
+                )
+
+            st.markdown("### 🏆 Predictions")
+            _render_ranker_consensus_badge(predictions)
+            _render_pace_panel(predictions, key="dataset_pace")
+            _render_ranker_disagreement_panel(predictions, key="dataset_ranker")
+            for _, row in predictions.iterrows():
+                rank = int(row["predicted_rank"])
+                emoji = (
+                    "🥇" if rank == 1 else
+                    "🥈" if rank == 2 else
+                    "🥉" if rank == 3 else f"#{rank}"
+                )
+                c1, c2, c3, c4, c5 = st.columns([1, 3, 2, 2, 2])
+                c1.markdown(f"**{emoji}**")
+                _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
+                c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
+                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
+                    c2.caption("Split top pick")
+                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
+                    c2.caption(
+                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
+                    )
+                c3.metric("Win Prob", f"{row['win_probability']:.1%}")
+                if "odds" in row:
+                    c4.metric("Odds", f"{row['odds']:.1f}")
+                if (
+                    "finish_position" in row
+                    and pd.notna(row["finish_position"])
+                ):
+                    c5.metric(
+                        "Actual", f"#{int(row['finish_position'])}",
+                    )
+
+            if "value_score" in predictions.columns and "odds" in predictions.columns:
+                _pvc = st.session_state.value_config
+                vb = predictions[_value_bet_mask(predictions, _pvc)]
+                if not vb.empty:
+                    st.markdown("### 💰 Value Bets")
+                    for _, row in vb.iterrows():
+                        _kf = kelly_criterion(row['win_probability'], row['odds'], fraction=_pvc["kelly_fraction"])
+                        _k_label = f"{_pvc['kelly_fraction']:.0%}"
+                        _ks = f" · Kelly {_k_label} **{_kf*100:.1f}%**" if _kf > 0.001 else ""
+                        _clv = row['win_probability'] * row['odds']
+                        _clv_str = f" · CLV **{_clv:.3f}x**" if _clv > 1.0 else ""
+                        _conf_label, _conf_detail = _bet_confidence_state(row)
+                        _conf_str = f" · {_conf_label}" if _conf_label else ""
+                        _conf_detail_str = f"  \n_{_conf_detail}_" if _conf_detail else ""
+                        st.info(
+                            f"**{row['horse_name']}** — "
+                            f"Model: {row['win_probability']:.1%} vs "
+                            f"Market: {row['implied_prob']:.1%} — "
+                            f"Value: +{row['value_score']:.1%}{_ks}{_clv_str}{_conf_str}"
+                            f"{_conf_detail_str}"
+                        )
+
+            # ── Each-Way Value Bets ──────────────────────────────
+            _pvc2 = st.session_state.value_config
+            if (
+                _pvc2.get("ew_enabled", True)
+                and "ew_value" in predictions.columns
+            ):
+                ew_bets = ew_value_bets(
+                    predictions,
+                    min_place_edge=_pvc2.get("ew_min_place_edge", 0.05),
+                    min_odds=_pvc2.get("ew_min_odds", 4.0),
+                    max_odds=_pvc2.get("ew_max_odds", 51.0),
+                )
+                if not ew_bets.empty:
+                    st.markdown("### 🔀 Each-Way Value Bets")
+                    for _, row in ew_bets.iterrows():
+                        _ew_k = kelly_ew(
+                            row["win_probability"], row["place_probability"],
+                            row["odds"],
+                            get_ew_terms(
+                                int(row.get("num_runners", 8)),
+                                is_handicap=bool(row.get("handicap", 0)),
+                            ),
+                            fraction=_pvc2["kelly_fraction"],
+                        )
+                        _place_str = (
+                            f"Place prob: **{row['place_probability']:.1%}** vs "
+                            f"implied {1/row['place_odds']:.1%}"
+                        )
+                        _ew_kelly_str = (
+                            f" · EW Kelly {_pvc2['kelly_fraction']:.0%} **{_ew_k['ew_kelly']*100:.1f}%**"
+                            if _ew_k["ew_kelly"] > 0.001 else ""
+                        )
+                        _conf_label, _conf_detail = _bet_confidence_state(row)
+                        _conf_str = f" · {_conf_label}" if _conf_label else ""
+                        _terms_str = f"{int(row['ew_places'])} places at {row['ew_fraction_str']}"
+                        st.success(
+                            f"**{row['horse_name']}** @ {row['odds']:.1f} — "
+                            f"{_place_str} — "
+                            f"Edge: +{row['place_edge']:.1%} · "
+                            f"EW EV: {row['ew_ev']:+.1%}{_ew_kelly_str}{_conf_str}\n\n"
+                            f"<small>Terms: {_terms_str} · "
+                            f"Place odds: {row['place_odds']:.2f}"
+                            f"{' · ' + _conf_detail if _conf_detail else ''}</small>",
+                            icon="🔀",
+                        )
+
+            # ── SHAP explanation ─────────────────────────────────
+            try:
+                expl = st.session_state.predictor.explain_race(
+                    race_data,
+                )
+                _render_shap_explanation(
+                    expl, predictions, key_prefix="shap_dataset",
+                )
+            except Exception as e:
+                st.warning(f"SHAP explanation unavailable: {e}")
+
+    # ── Custom Entry ─────────────────────────────────────────────────
+    with _other_tabs[1]:
+        st.subheader("✏️ Enter race details manually")
+
+        if _model_df is not None:
+            _df = _model_df
+            track_opts = sorted(
+                _df["track"].dropna().unique().tolist(),
+            )
+            going_opts = (
+                sorted(_df["going"].dropna().unique().tolist())
+                if "going" in _df.columns
+                else ["Good", "Soft", "Heavy", "Firm"]
+            )
+            class_opts = (
+                sorted(_df["race_class"].dropna().unique().tolist())
+                if "race_class" in _df.columns
+                else [f"Class {i}" for i in range(1, 6)]
+            )
+            type_opts = (
+                sorted(_df["race_type"].dropna().unique().tolist())
+                if "race_type" in _df.columns
+                else ["Flat", "Hurdle", "Chase"]
+            )
+        else:
+            track_opts = [
+                "Ascot", "Cheltenham", "Newmarket", "York", "Aintree",
+            ]
+            going_opts = [
+                "Good", "Good To Firm", "Good To Soft",
+                "Soft", "Heavy", "Firm",
+            ]
+            class_opts = [f"Class {i}" for i in range(1, 6)]
+            type_opts = ["Flat", "Hurdle", "Chase", "NH Flat"]
+
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            track = st.selectbox("Track", track_opts)
+            going = st.selectbox("Going", going_opts)
+        with rc2:
+            race_class = st.selectbox("Race Class", class_opts)
+            race_type = st.selectbox("Race Type", type_opts)
+        with rc3:
+            distance = st.selectbox(
+                "Distance (f)",
+                [5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 32],
+            )
+            num_runners = st.number_input("Runners", 2, 20, 8)
+
+        # ── Race-level extras ────────────────────────────────────
+        rx1, rx2 = st.columns(2)
+        with rx1:
+            is_handicap = st.checkbox("Handicap?", value=True, key="c_hcap")
+            prize_money = st.number_input(
+                "Prize money (£)", 1000, 1_000_000, 10_000, 1000, key="c_prize",
+            )
+        with rx2:
+            surface = st.selectbox(
+                "Surface", ["Turf", "All Weather"], key="c_surface",
+            )
+
+        st.markdown("#### Horse Details")
+        horses_data = []
+        for i in range(num_runners):
+            with st.expander(f"Horse {i+1}", expanded=i < 3):
+                hc1, hc2, hc3, hc4 = st.columns([2, 2, 2, 1.5])
+                with hc1:
+                    name = st.text_input(
+                        "Name", f"Horse {i+1}", key=f"cn_{i}",
+                    )
+                    jockey = st.text_input(
+                        "Jockey", f"Jockey {i+1}", key=f"cj_{i}",
+                    )
+                    trainer = st.text_input(
+                        "Trainer", f"Trainer {i+1}", key=f"ct_{i}",
+                    )
+                with hc2:
+                    age = st.number_input(
+                        "Age", 2, 12, 4, key=f"ca_{i}",
+                    )
+                    weight = st.number_input(
+                        "Weight (lbs)", 112, 175, 130, key=f"cw_{i}",
+                    )
+                    odds = st.number_input(
+                        "Odds", 1.1, 200.0, 5.0, key=f"co_{i}",
+                    )
+                with hc3:
+                    official_rating = st.number_input(
+                        "Official Rating", 0, 180, 0, key=f"cor_{i}",
+                        help="0 = unknown (will use race median)",
+                    )
+                    days_since = st.number_input(
+                        "Days since last run", 0, 999, 30, key=f"cd_{i}",
+                    )
+                    form_str = st.text_input(
+                        "Form", "", key=f"cf_{i}",
+                        help="e.g. 1-3-2-5 (most recent last)",
+                    )
+                with hc4:
+                    draw = st.number_input(
+                        "Draw", 1, 30, i + 1, key=f"cdr_{i}",
+                    )
+                    sex = st.selectbox(
+                        "Sex", ["Gelding", "Colt", "Filly", "Mare", "Horse"],
+                        key=f"cs_{i}",
+                    )
+                    headgear = st.selectbox(
+                        "Headgear", ["", "b", "v", "t", "p", "h"],
+                        key=f"ch_{i}",
+                        help="b=blinkers, v=visor, t=tongue tie, p=cheekpieces, h=hood",
+                    )
+
+                horses_data.append({
+                    "horse_name": name,
+                    "jockey": jockey,
+                    "trainer": trainer,
+                    "track": track,
+                    "going": going,
+                    "race_class": race_class,
+                    "race_type": race_type,
+                    "distance_furlongs": distance,
+                    "num_runners": num_runners,
+                    "age": age,
+                    "weight_lbs": weight,
+                    "odds": odds,
+                    "draw": draw,
+                    "prize_money": prize_money,
+                    "official_rating": official_rating,
+                    "days_since_last_run": days_since,
+                    "form": form_str if form_str else "",
+                    "headgear": headgear,
+                    "sex": sex,
+                    "surface": surface,
+                    "handicap": 1 if is_handicap else 0,
+                })
+
+        if st.button("🔮 Predict Custom Race", type="primary"):
+            custom_df = pd.DataFrame(horses_data)
+            custom_df["race_id"] = "CUSTOM_001"
+            custom_df["race_date"] = pd.Timestamp.now().strftime(
+                "%Y-%m-%d",
+            )
+            custom_df["won"] = 0
+            custom_df["finish_position"] = 0
+            custom_df["finish_time_secs"] = 0
+            custom_df["lengths_behind"] = np.nan
+
+            processed_custom = process_data(df=custom_df, save=False)
+            featured_custom = feature_engineer_with_history(
+                processed_custom,
+            )
+            predictions = _predict_featured_frame(
+                st.session_state.predictor,
+                featured_custom,
+                ew_fraction=st.session_state.value_config.get("ew_fraction"),
+            )
+
+            st.markdown("### 🏆 Custom Race Prediction")
+            _render_ranker_consensus_badge(predictions)
+            _render_pace_panel(predictions, key="custom_pace")
+            _render_ranker_disagreement_panel(predictions, key="custom_ranker")
+            for _, row in predictions.iterrows():
+                rank = int(row["predicted_rank"])
+                emoji = (
+                    "🥇" if rank == 1 else
+                    "🥈" if rank == 2 else
+                    "🥉" if rank == 3 else f"#{rank}"
+                )
+                c1, c2, c3, c4 = st.columns([1, 3, 2, 2])
+                c1.markdown(f"**{emoji}**")
+                _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
+                c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
+                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
+                    c2.caption("Split top pick")
+                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
+                    c2.caption(
+                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
+                    )
+                c3.metric("Win Prob", f"{row['win_probability']:.1%}")
+                if "odds" in row:
+                    c4.metric("Odds", f"{row['odds']:.1f}")
+
+            # ── SHAP explanation ─────────────────────────────────
+            try:
+                expl = st.session_state.predictor.explain_race(
+                    featured_custom,
+                )
+                _render_shap_explanation(
+                    expl, predictions, key_prefix="shap_custom",
+                )
+            except Exception as e:
+                st.warning(f"SHAP explanation unavailable: {e}")
+
+
 # =====================================================================
 #  MATCHBOOK API
 # =====================================================================
