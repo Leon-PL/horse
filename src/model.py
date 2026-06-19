@@ -78,6 +78,7 @@ from src.bet_settlement import value_bet_selection as _value_bet_selection
 # Re-exported for backwards compatibility — the betting simulation now
 # lives in src.bet_analysis.
 from src.bet_analysis import analyse_test_set, max_drawdown as _max_drawdown  # noqa: F401
+from src.betfair import attach_bsp, bsp_implied_prob, load_bsp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1000,6 +1001,14 @@ def prepare_multi_target_data(
     logger.info(f"Using {len(feature_cols)} features")
 
     df = df.copy()
+    # Attach Betfair BSP for the BSP-preferred distillation teacher. Done while
+    # race_date is still a YYYY-MM-DD string (the join key). No-op (bsp=NaN)
+    # when the parquet is absent or a race is uncovered (pre-2025), in which
+    # case the teacher falls back to the SP-implied probability below.
+    if bool(getattr(config, "WIN_SOFT_LABEL_DISTILL", False)) and "bsp" not in df.columns:
+        _bsp = load_bsp()
+        if _bsp is not None and {"track", "off_time", "horse_name"}.issubset(df.columns):
+            df = attach_bsp(df, _bsp, cols=("bsp",))
     df["race_date"] = pd.to_datetime(df["race_date"])
     df["_event_dt"] = _event_sort_key(df)
     # Sort by horse_name within each race to break the finish_position
@@ -1171,6 +1180,25 @@ def prepare_multi_target_data(
     ip_tr = normalise_implied_prob_by_race(train_df)
     ip_te = normalise_implied_prob_by_race(test_df)
 
+    # BSP-preferred distillation teacher: the overround-normalised Betfair BSP
+    # implied probability where BSP is present (sharper, lower-variance), else
+    # the SP-implied probability (ip_tr) — preserving the pre-2025 history and
+    # any uncovered race. Used only as the win-model soft target, never a
+    # feature, so inference stays odds-free.
+    def _bsp_preferred(part_df, ip_sp):
+        if "bsp" not in part_df.columns:
+            return ip_sp
+        bsp_p = bsp_implied_prob(
+            part_df["bsp"].to_numpy(), part_df["race_id"].to_numpy()
+        )
+        return np.where(np.isfinite(bsp_p), bsp_p, ip_sp).astype(np.float32)
+
+    win_teacher_tr = _bsp_preferred(train_df, ip_tr)
+    win_teacher_te = _bsp_preferred(test_df, ip_te)
+    if "bsp" in train_df.columns:
+        _bsp_cov = float(np.isfinite(train_df["bsp"].to_numpy()).mean())
+        logger.info("BSP-preferred teacher: BSP covers %.1f%% of train rows", 100 * _bsp_cov)
+
     y_train_resid = y_train_won.astype(np.float32) - ip_tr
     y_test_resid = y_test_won.astype(np.float32) - ip_te
 
@@ -1244,6 +1272,8 @@ def prepare_multi_target_data(
         "fp_train": fp_train,
         "fp_test": fp_test,
         "ip_train": ip_tr,
+        "win_teacher_train": win_teacher_tr,
+        "win_teacher_test": win_teacher_te,
         "odds_train": train_df["odds"].fillna(0.0).values.astype(np.float32) if "odds" in train_df.columns else np.zeros(len(train_df), dtype=np.float32),
         "groups_train": groups_train,
         "groups_test": groups_test,
@@ -1605,11 +1635,12 @@ class RacePredictor:
         _win_soft_full = None
         if bool(getattr(config, "WIN_SOFT_LABEL_DISTILL", False)):
             _blend = float(getattr(config, "WIN_SOFT_LABEL_BLEND", 1.0))
-            _ip = np.asarray(data["ip_train"], dtype=float)
+            # BSP-preferred teacher (BSP-implied where present, else SP-implied).
+            _ip = np.asarray(data.get("win_teacher_train", data["ip_train"]), dtype=float)
             _hard = np.asarray(data["y_train_won"], dtype=float)
             _win_soft_full = np.where(_ip > 0, _blend * _ip + (1.0 - _blend) * _hard, _hard)
             logger.info(
-                "Win soft-label distillation ON (blend=%.2f, odds coverage=%.1f%%)",
+                "Win soft-label distillation ON (blend=%.2f, teacher coverage=%.1f%%)",
                 _blend, 100.0 * float((_ip > 0).mean()),
             )
 

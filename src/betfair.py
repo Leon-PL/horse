@@ -90,9 +90,12 @@ def attach_bsp(
             out[c] = np.nan
         return out
 
+    def _date10(s):
+        return pd.to_datetime(s, errors="coerce").dt.strftime("%Y-%m-%d")
+
     left_keys = pd.DataFrame(
         {
-            "race_date": out[date_col].astype(str),
+            "race_date": _date10(out[date_col]),
             "track_key": out[track_col].map(bf_track_key),
             "off_key": out[off_col].map(normalise_off_time_key),
             "horse_key": out[horse_col].map(bf_horse_key),
@@ -101,6 +104,7 @@ def attach_bsp(
     # Recompute the right-side track key from the raw course name so aliases
     # apply on both sides regardless of what was stored in the parquet.
     right = bsp[["race_date", "track", "off_key", "horse_key", *cols]].copy()
+    right["race_date"] = _date10(right["race_date"])
     right["track_key"] = right["track"].map(bf_track_key)
     right = right[["race_date", "track_key", "off_key", "horse_key", *cols]].drop_duplicates(
         subset=["race_date", "track_key", "off_key", "horse_key"]
