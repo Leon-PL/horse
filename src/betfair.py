@@ -40,6 +40,8 @@ _PUNCT_RE = re.compile(r"[^a-z0-9 ]")
 _TRACK_ALIASES = {
     "epsom downs": "epsom",
     "royal ascot": "ascot",
+    "ballinarobe": "ballinrobe",      # Betfair misspells Ballinrobe
+    "bangor on dee": "bangor-on-dee",  # Betfair drops the hyphens
 }
 
 
