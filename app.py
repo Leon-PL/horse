@@ -95,7 +95,6 @@ logger = logging.getLogger(__name__)
 
 from src.app_helpers import (  # noqa: F401
     EXPERIMENTS_FILE,
-    _ODDS_DERIVED_COLS,
     _PACE_DISPLAY_COLUMNS,
     _PACE_REQUIRED_COLUMNS,
     _add_shortcomings_bands,
@@ -118,7 +117,6 @@ from src.app_helpers import (  # noqa: F401
     _cached_load_df,
     _calibration_metric_cards,
     _calibration_signature,
-    _drop_market_feature_columns,
     _first_metric_value,
     _flatten_numeric_metrics,
     _fmt_metric,
@@ -1776,18 +1774,19 @@ if page == "🎓 Train & Tune":
     )
 
     include_odds = st.checkbox(
-        "Include odds / market features",
+        "Blend market odds (market anchor)",
         value=False,
         help=(
-            "When **enabled**, the model uses Starting Price (SP) odds "
-            "to derive features like implied probability, favourite "
-            "status, and market overround.  \n\n"
-            "**⚠️ SP is only known at race-off** — backtest results "
-            "will be optimistic vs. live betting where only early "
-            "prices are available.  \n\n"
-            "**Disable** this to train a purely form-based model "
-            "that doesn't rely on market information at all, giving "
-            "a more realistic view of predictive power."
+            "Odds are **never** fed to the model as features — the "
+            "LightGBM/CatBoost models are always purely form-based.  \n\n"
+            "When **enabled**, the form model's probabilities are blended "
+            "with the market price via the Benter market anchor "
+            "(`softmax(α·log p_model + β·log p_market)`), fitted on "
+            "out-of-fold predictions.  \n\n"
+            "**⚠️ SP is only known at race-off** — anchored backtest "
+            "metrics will look optimistic vs. live betting.  \n\n"
+            "**Disable** for the pure form model with no market "
+            "information at all — the honest view of predictive power."
         ),
     )
 
@@ -2458,13 +2457,15 @@ if page == "🎓 Train & Tune":
         featured = st.session_state.featured_data.copy()
         _train_ds_meta = st.session_state.get("train_dataset_meta") or {}
 
-        # Drop odds-derived features if the user opted out
-        if not include_odds:
-            featured, _to_drop = _drop_market_feature_columns(featured)
+        # Odds are never model features (always excluded in get_feature_columns);
+        # the toggle only controls whether the market-anchor blend is applied.
+        if include_odds:
             st.info(
-                f"🚫 Odds features disabled — dropped {len(_to_drop)} "
-                f"market columns (form-only model)"
+                "🎯 Market anchor **on** — form-model probabilities will be "
+                "blended with market odds (odds are still not model features)."
             )
+        else:
+            st.info("📐 Pure form model — no market blend.")
 
         if isinstance(custom_hp, dict):
             for _mk in list(custom_hp.keys()):
@@ -2539,6 +2540,7 @@ if page == "🎓 Train & Tune":
         metrics = predictor.train(
             featured, params=custom_hp, progress_callback=_training_cb,
             value_config=_value_config,
+            blend_market_odds=bool(include_odds),
         )
 
         elapsed = time.time() - t0
@@ -3270,14 +3272,10 @@ elif page == "🧭 Autotune":
         _at_trials = st.slider("Trials per model", 1, 200, 40, 5, key="_autotune_trials")
     with _setup_c2:
         _at_folds = st.slider("Purged walk-forward folds", 1, 5, 2, 1, key="_autotune_folds")
-    _at_include_odds = st.checkbox(
-        "Include odds / market features",
-        value=False,
-        key="_autotune_include_odds",
-        help=(
-            "Same behavior as Train & Tune. Disable this to drop all odds-derived "
-            "market columns before autotuning so the study is run on a form-only feature set."
-        ),
+    st.caption(
+        "Autotune always optimises the **form-only** model — odds are never "
+        "model features. The market-odds blend is a train-time choice on the "
+        "**Train & Tune** page, not part of hyperparameter search."
     )
     st.caption("When starting a new session this is the initial trial count per model. When resuming, it adds this many extra trials per model.")
     if _at_folds == 1:
@@ -3425,12 +3423,11 @@ elif page == "🧭 Autotune":
             st.error("Select at least one model to tune.")
             st.stop()
         _at_featured_run = _at_featured.copy()
-        if not _at_include_odds:
-            _at_featured_run, _dropped = _drop_market_feature_columns(_at_featured_run)
-            st.info(f"🚫 Odds features disabled — dropped {len(_dropped)} market columns before autotuning.")
+        # Odds-derived columns are excluded by get_feature_columns, so the
+        # study is always form-only — no explicit drop needed.
         _new_session = create_autotune_session(
             name=_at_name.strip() or f"autotune_{datetime.now():%Y%m%d_%H%M%S}",
-            dataset_meta={**_at_meta, "include_odds": bool(_at_include_odds)},
+            dataset_meta={**_at_meta, "include_odds": False},
             frameworks=_at_frameworks,
             models=_at_models,
             n_trials=int(_at_trials),
@@ -3458,11 +3455,8 @@ elif page == "🧭 Autotune":
         if _resume_manifest is None:
             st.error("Selected autotune session could not be loaded.")
             st.stop()
-        _resume_include_odds = bool((_resume_manifest.get("dataset_meta") or {}).get("include_odds", True))
         _at_featured_run = _at_featured.copy()
-        if not _resume_include_odds:
-            _at_featured_run, _dropped = _drop_market_feature_columns(_at_featured_run)
-            st.info(f"🚫 Odds features disabled — dropped {len(_dropped)} market columns before resuming autotune.")
+        # Form-only by construction (odds excluded in get_feature_columns).
         _manifest = run_autotune_session(
             session_id=_resume_target,
             featured_df=_at_featured_run,
@@ -3756,7 +3750,7 @@ elif page == "🧪 Experiments":
             "WF": _wf_label,
             "WF Folds": tc.get("wf_folds"),
             "WF Fast": "On" if tc.get("wf_fast_fold") is True else ("Off" if tc.get("wf_fast_fold") is False else "—"),
-            "Odds Feats": "On" if tc.get("include_odds") is True else ("Off" if tc.get("include_odds") is False else "—"),
+            "Mkt Blend": "On" if tc.get("include_odds") is True else ("Off" if tc.get("include_odds") is False else "—"),
             "Tuning": _tune_label,
             "Linear Trees": _lt_label,
             "ES Rounds": tc.get("early_stopping_rounds"),

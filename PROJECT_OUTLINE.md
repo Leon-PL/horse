@@ -33,7 +33,6 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
 *   **Description:** Extracts race results and live racecards. Includes caching logic (`data/raw/`, `data/racecards_cache/`) to limit network usage and API bans.
 *   **Notable modules:** `rtv_scraper.py` handles Racing TV data; `database.py` manages historical data access.
 *   **Pedigree:** the results/racecard APIs never include breeding, so the `sire`/`dam`/`damsire` columns in `results` are always null at scrape time. `src/pedigree_backfill.py` fills a `horse_pedigree` table from Sporting Life horse *profile* pages (keyed by horse_id; pedigree stored by NAME because the profile JSON's nested ids are buggy). `data_processor.process_data` joins it in; `sync_database` fetches profiles for first-time runners automatically. Full historical backfill completed 2026-06-12 (70k+ horses).
-*   **Opening odds:** result pages carry the opening price in `bet_movements` ("op 8/11"); the scraper stores it as `opening_odds` (analysis-only column for market-drift / closing-line-value work — never a model feature). `scripts/backfill_opening_odds.py` UPDATEs it onto already-stored rows.
 
 ### 2.3 Feature Engineering & Ratings (`src/feature_engineer.py`, `src/ratings.py`, `src/data_processor.py`)
 *   **Status:** Active Development / Needs careful handling.
@@ -68,7 +67,7 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
 
 ## 4. Potential Areas for Improvement
 *   **Each-way edge validation:** test-set simulations repeatedly show EW ROI > +100% on ~130-bet samples — the only strategy consistent with a small model edge, since it exploits mechanical 1/4-odds place terms. A monthly walk-forward (`scripts/wf_each_way.py`) exists to confirm/refute across folds before real money.
-*   **Closing-line value:** `opening_odds` is now collected and backfilled; compare model-flagged bets' opening vs SP prices to measure whether the model beats the *early* market (the realistic edge, vs out-informing SP).
+*   **Closing-line value:** Sporting Life only exposes the opening price live (it is stripped from archived racecard/result pages), so durable CLV needs an external early-price source (Betfair/Matchbook historical API) rather than SL.
 *   **Pedigree feature depth:** breeding data only became real on 2026-06-12; sire/damsire aptitude features (going/trip/all-weather) are most valuable in low-information races (2yos, maidens).
 *   **Matchbook Automation:** Enhancing the robustness of live trading rules, handling API rate limits, and improving liquidity estimations strings.
 *   **UI Responsiveness:** Caching more heavy Streamlit functions to keep UI fast while computing inference.

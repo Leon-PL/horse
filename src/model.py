@@ -545,9 +545,6 @@ EXCLUDE_COLUMNS = [
     # P&L, equity curves).  Derived odds features (implied_prob,
     # log_odds, etc.) are the actual model inputs.
     "odds",
-    # Opening price from bet_movements — kept for market-drift / CLV
-    # analysis, not a model input.
-    "opening_odds",
     # Real-data identifier / text columns
     "horse_id",
     "jockey_id",
@@ -609,6 +606,37 @@ EXCLUDE_COLUMNS = [
     "track_freq",
 ]
 
+# Market/odds-derived columns. Policy: market information is NEVER fed to
+# the LightGBM/CatBoost models directly — it enters ONLY via the optional
+# market anchor (Benter blend), toggled per-train via train(blend_market_odds).
+# These columns stay in the DataFrame (the anchor and betting analysis read
+# the raw ``odds``), but are always excluded from the model feature set.
+ODDS_DERIVED_COLUMNS = [
+    # Opening price: scraping was removed, but stale datasets / the DB
+    # column still carry it — exclude defensively so it can never leak in
+    # as a feature (it was the dominant feature in a "pure form" run).
+    "opening_odds",
+    "implied_prob", "norm_implied_prob", "odds_rank",
+    "is_favourite", "log_odds", "odds_vs_field", "overround",
+    "odds_cv", "implied_prob_vs_base",
+    "jockey_elo_x_fav",
+    "mkt_x_win_rate", "logodds_x_elo",
+    "odds_field_x_dropped", "mkt_x_speed",
+    "odds_field_x_jock_elo",
+    "odds_vs_elo_rank",
+    "trainer_runner_rank_by_odds",
+    "trainer_first_string_by_odds",
+    "trainer_odds_vs_stablemate_best",
+    "trainer_stable_market_share",
+    "trainer_first_string_odds_or_agree",
+    "trainer_first_string_odds_elo_agree",
+    "trainer_string_disagreement_or_odds",
+    "trainer_string_disagreement_elo_odds",
+    "trainer_first_string_stable_jockey",
+    "beaten_fav_last",
+]
+EXCLUDE_COLUMNS += [c for c in ODDS_DERIVED_COLUMNS if c not in EXCLUDE_COLUMNS]
+
 # XGB-compatible hyperparameter names (used to filter params for
 # classifier sub-models that may receive tuned dicts)
 _XGB_VALID_HP = {
@@ -658,6 +686,35 @@ def normalise_implied_prob_by_race(df: pd.DataFrame) -> np.ndarray:
         lambda odds: (1.0 / odds).sum(),
     ).values.astype(np.float32)
     return raw_ip / np.maximum(overround, 1e-9)
+
+
+class _SoftLabelClassifier:
+    """Adapter exposing a classifier ``predict_proba`` over an LGBMRegressor
+    trained with the cross-entropy objective on soft [0,1] targets.
+
+    Used for market-probability distillation: the win model learns the
+    market-implied win probability (a low-noise teacher) instead of the
+    0/1 outcome, which improves calibration/log-loss. Inference stays
+    odds-free — odds are only the training *target*, never a feature.
+    """
+
+    def __init__(self, reg):
+        self.reg = reg
+
+    def predict_proba(self, X):
+        p = np.clip(self.reg.predict(X), 1e-7, 1 - 1e-7)
+        return np.column_stack([1.0 - p, p])
+
+    def predict(self, X):
+        return (np.asarray(self.reg.predict(X)) >= 0.5).astype(int)
+
+    @property
+    def feature_importances_(self):
+        return self.reg.feature_importances_
+
+    @property
+    def booster_(self):
+        return self.reg.booster_
 
 
 def compute_recency_sample_weights(
@@ -1522,6 +1579,7 @@ class RacePredictor:
         progress_callback: "Callable[[str, float], None] | None" = None,
         value_config: dict | None = None,
         auto_tune: dict | None = None,
+        blend_market_odds: bool | None = None,
         **_ignored,
     ) -> dict:
         """Train two task-specific models:
@@ -1537,6 +1595,23 @@ class RacePredictor:
 
         self.feature_cols = data["feature_cols"]
         self.scaler = data["scaler"]
+
+        # ── Market-probability distillation target (opt-in) ────────────
+        # When enabled, the win classifier trains on the market-implied
+        # win probability (blended with the hard outcome) instead of the
+        # 0/1 label. Aligned to X_train rows; rows without usable odds keep
+        # the hard label. Threaded (sliced positionally) into every win-
+        # classifier fit below. Default blend = pure probability target.
+        _win_soft_full = None
+        if bool(getattr(config, "WIN_SOFT_LABEL_DISTILL", False)):
+            _blend = float(getattr(config, "WIN_SOFT_LABEL_BLEND", 1.0))
+            _ip = np.asarray(data["ip_train"], dtype=float)
+            _hard = np.asarray(data["y_train_won"], dtype=float)
+            _win_soft_full = np.where(_ip > 0, _blend * _ip + (1.0 - _blend) * _hard, _hard)
+            logger.info(
+                "Win soft-label distillation ON (blend=%.2f, odds coverage=%.1f%%)",
+                _blend, 100.0 * float((_ip > 0).mean()),
+            )
 
         X_train = data["X_train"]
         X_test = data["X_test"]
@@ -1666,23 +1741,26 @@ class RacePredictor:
                 if int(getattr(config, "EARLY_STOPPING_ROUNDS", 0)) > 0
                 else None
             )
+            _soft_f = _win_soft_full[:tr_end] if _win_soft_full is not None else None
             if _f_es is not None:
                 _f_tr_end, _f_vl_beg = _f_es
                 _f_X, _f_sw = X_f_tr[:_f_tr_end], sw_f[:_f_tr_end]
                 _f_eval_w = [(X_f_tr[_f_vl_beg:], y_won_f[_f_vl_beg:])]
                 _f_eval_p = [(X_f_tr[_f_vl_beg:], y_placed_f[_f_vl_beg:])]
                 _f_y_won, _f_y_placed = y_won_f[:_f_tr_end], y_placed_f[:_f_tr_end]
+                _f_soft = _soft_f[:_f_tr_end] if _soft_f is not None else None
             else:
                 _f_X, _f_sw = X_f_tr, sw_f
                 _f_eval_w = _f_eval_p = None
                 _f_y_won, _f_y_placed = y_won_f, y_placed_f
+                _f_soft = _soft_f
 
             n_pos_w = max(int(_f_y_won.sum()), 1)
             self.clf_model = self._train_win_classifier(
                 _f_X, _f_y_won,
                 scale_pos_weight=(len(_f_y_won) - n_pos_w) / n_pos_w,
                 params=_p.get("classifier"), sample_weight=_f_sw,
-                eval_set=_f_eval_w,
+                eval_set=_f_eval_w, soft_y=_f_soft,
             )
             n_pp = max(int(_f_y_placed.sum()), 1)
             self.place_model = self._train_place_classifier(
@@ -1936,6 +2014,7 @@ class RacePredictor:
                 scale_pos_weight=n_neg_w / max(n_pos_w, 1),
                 params=_p.get("classifier"), sample_weight=_sw_clf_es,
                 eval_set=[(X_es_vl, y_es_won_vl)],
+                soft_y=(_win_soft_full[:es_tr_end] if _win_soft_full is not None else None),
             )
         else:
             n_pos_w = int(data["y_train_won"].sum())
@@ -1944,6 +2023,7 @@ class RacePredictor:
                 X_train, data["y_train_won"],
                 scale_pos_weight=n_neg_w / max(n_pos_w, 1),
                 params=_p.get("classifier"), sample_weight=_sw_clf_full,
+                soft_y=_win_soft_full,
             )
 
         # 2) Place Classifier (EW model)
@@ -2012,9 +2092,17 @@ class RacePredictor:
             logger.info("  Training-slab calibration unavailable; using OOF calibration from Phase 1.")
 
         # ── Market anchor (Benter combination) fitted on OOF ─────
+        # Market info enters the model ONLY here, never as a feature.
+        # Gated by blend_market_odds (the "include odds" toggle); falls
+        # back to config.MARKET_ANCHOR when the caller doesn't specify.
         self.market_anchor = None
+        _use_anchor = (
+            bool(getattr(config, "MARKET_ANCHOR", False))
+            if blend_market_odds is None
+            else bool(blend_market_odds)
+        )
         if (
-            getattr(config, "MARKET_ANCHOR", False)
+            _use_anchor
             and not _oof_df.empty
             and "odds" in _oof_df.columns
         ):
@@ -2806,7 +2894,7 @@ class RacePredictor:
         logger.info(f"Win Classifier ({fw.upper()}) training complete")
         return model
 
-    def _train_win_classifier(self, X, y, scale_pos_weight=1.0, params=None, sample_weight=None, eval_set=None):
+    def _train_win_classifier(self, X, y, scale_pos_weight=1.0, params=None, sample_weight=None, eval_set=None, soft_y=None):
         """Train a binary classifier predicting P(win).
 
         Uses standard binary logloss without class reweighting.
@@ -2833,6 +2921,33 @@ class RacePredictor:
         if "num_leaves" in config.CLASSIFIER_PARAMS:
             hp["num_leaves"] = config.CLASSIFIER_PARAMS["num_leaves"]
         hp.update(self._filter_params(params, fw))
+
+        # ── Market-probability distillation (soft labels) ──────────────
+        # Train on the market-implied win probability (a low-noise teacher)
+        # via cross-entropy instead of the 0/1 outcome. LGBM only; odds are
+        # the training target, never an inference feature.
+        if soft_y is not None and fw != "lgbm":
+            logger.warning(
+                "Soft-label distillation is supported only for the LGBM classifier; "
+                "using hard labels for framework '%s'.", fw,
+            )
+            soft_y = None
+        if soft_y is not None:
+            hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
+            from lightgbm import LGBMRegressor, early_stopping as _lgb_es
+            reg = LGBMRegressor(
+                objective="cross_entropy", **hp, subsample_freq=1,
+                random_state=config.RANDOM_SEED, n_jobs=self._autotune_njobs, verbose=-1,
+            )
+            fit_kw = {"sample_weight": sample_weight}
+            if eval_set is not None:
+                fit_kw["eval_set"] = eval_set
+                fit_kw["eval_metric"] = "cross_entropy"
+                fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
+            reg.fit(X, np.clip(np.asarray(soft_y, dtype=float), 0.0, 1.0), **fit_kw)
+            logger.info("Win classifier: LGBM cross-entropy distillation on market-prob soft labels")
+            return _SoftLabelClassifier(reg)
+
         if fw == "lgbm":
             logger.info(
                 "Training win classifier with linear_tree=%s",

@@ -499,7 +499,6 @@ def _build_run_name(
 # Columns derived from the raw 'odds' column. When odds are disabled these
 # are dropped before training/autotuning so the model never sees market data.
 _ODDS_DERIVED_COLS = [
-    "opening_odds",
     "implied_prob", "norm_implied_prob", "odds_rank",
     "is_favourite", "log_odds", "odds_vs_field", "overround",
     "odds_cv", "implied_prob_vs_base",

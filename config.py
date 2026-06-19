@@ -154,6 +154,19 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
 # complete odds fall back to the unanchored probabilities.
 MARKET_ANCHOR = True
 
+# --- Win-model market-probability distillation ---
+# When True, the win classifier trains on the market-implied win
+# probability (a low-noise teacher) via cross-entropy instead of the 0/1
+# outcome, which improves calibration/log-loss. Odds are used only as the
+# training *target* — never an inference feature, so the model stays
+# odds-free at predict time. LGBM classifier only.
+# WIN_SOFT_LABEL_BLEND: target = blend*market_prob + (1-blend)*won
+#   1.0 = pure probability target; 0.5 = even blend (best-calibrated in tests).
+# Validated gain on the full dataset was small (~-0.0013 log-loss) and
+# improves accuracy only — it does NOT create a betting edge.
+WIN_SOFT_LABEL_DISTILL = True
+WIN_SOFT_LABEL_BLEND = 1.0
+
 # --- Race Ranker ---
 # LambdaRank learns relative order within each race directly.
 # Diagnostics only — its scores are never blended into win
