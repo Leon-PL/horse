@@ -352,19 +352,42 @@ class SportingLifeScraper:
 
     # -- network helpers ---------------------------------------------------
 
-    def _get(self, url: str) -> requests.Response:
-        """Rate-limited GET request (thread-safe)."""
-        with self._req_sem:
-            # Enforce minimum gap between requests across all threads
-            with self._req_lock:
-                elapsed = time.time() - self._last_req_time
-                if elapsed < REQUEST_DELAY:
-                    time.sleep(REQUEST_DELAY - elapsed)
-                self._last_req_time = time.time()
-            logger.debug(f"  GET {url}")
-            resp = self.session.get(url, timeout=30)
-            resp.raise_for_status()
-            return resp
+    def _get(self, url: str, *, max_retries: int = 4) -> requests.Response:
+        """Rate-limited GET with retry/backoff (thread-safe).
+
+        Retries transient failures — timeouts, connection errors and HTTP
+        429/5xx — with exponential backoff. Without this, a single transient
+        failure silently dropped a race during backfill (the cause of the
+        Irish/late-meeting gaps the Betfair cross-reference exposed).
+        """
+        last_exc: Exception | None = None
+        for attempt in range(max_retries):
+            with self._req_sem:
+                with self._req_lock:
+                    elapsed = time.time() - self._last_req_time
+                    if elapsed < REQUEST_DELAY:
+                        time.sleep(REQUEST_DELAY - elapsed)
+                    self._last_req_time = time.time()
+                logger.debug(f"  GET {url}")
+                try:
+                    resp = self.session.get(url, timeout=30)
+                    if resp.status_code == 429 or resp.status_code >= 500:
+                        raise requests.HTTPError(
+                            f"HTTP {resp.status_code}", response=resp
+                        )
+                    resp.raise_for_status()
+                    return resp
+                except requests.RequestException as exc:
+                    last_exc = exc
+            # backoff outside the semaphore so we don't hold the rate-limit slot
+            if attempt < max_retries - 1:
+                backoff = 2.0 ** attempt
+                logger.warning(
+                    "GET failed (%s), retry %d/%d in %.1fs: %s",
+                    type(last_exc).__name__, attempt + 1, max_retries - 1, backoff, url,
+                )
+                time.sleep(backoff)
+        raise last_exc  # type: ignore[misc]
 
     def _fetch_next_data(self, url: str) -> Optional[dict]:
         """Fetch a page and return the embedded ``__NEXT_DATA__`` dict."""
