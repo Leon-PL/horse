@@ -189,9 +189,11 @@ def process_tar(path: str, limit: int | None = None) -> list[dict]:
     rows: list[dict] = []
     n_files = n_markets = n_bad = 0
     t0 = time.time()
-    # ignore_zeros: these libarchive-written tars carry zero-block padding
-    # mid-archive that Python's tarfile otherwise misreads as EOF, truncating
-    # the run (lost ~4% of members on tars 1 & 3 without this).
+    # These libarchive-written tars end with a malformed/short trailing block
+    # that makes Python's tarfile raise mid-iteration. Verified harmless: the
+    # ReadError fires AFTER the last market file (the per-tar market-file counts
+    # reconcile exactly with system `tar`), so no market data is lost. The
+    # ignore_zeros + graceful iterator-stop below are belt-and-braces.
     tf = tarfile.open(path, "r:", ignore_zeros=True)
     try:
         member_iter = iter(tf)
