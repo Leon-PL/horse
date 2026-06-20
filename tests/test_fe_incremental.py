@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from src.feature_engineer import _race_safe_cumsum
-from src.fe_incremental import CountsAccumulator
+from src.fe_incremental import CountsAccumulator, cumulative_counts
 
 
 def _frame(seed: int = 0) -> pd.DataFrame:
@@ -74,6 +74,28 @@ def test_seeded_append_matches_full_recompute():
     acc.transform(hist["trainer"], hist["race_id"], hist["won"])      # advance state
     got_new = acc.transform(new["trainer"], new["race_id"], new["won"])
     assert np.allclose(got_new, full[df["race_id"] > cut])
+
+
+def test_cumulative_counts_multi_metric_and_seed():
+    # The class-C stage API: several metrics for one entity, full and seeded.
+    df = _frame(5)
+    metrics = {"runs": df["ran"].to_numpy(), "wins": df["won"].to_numpy()}
+    full, _ = cumulative_counts(df["trainer"], df["race_id"], metrics)
+    assert np.allclose(full["runs"], _race_safe_cumsum(df, "trainer", "ran").to_numpy())
+    assert np.allclose(full["wins"], _race_safe_cumsum(df, "trainer", "won").to_numpy())
+
+    cut = sorted(df["race_id"].unique())[len(df["race_id"].unique()) // 2]
+    h, n = df["race_id"] <= cut, df["race_id"] > cut
+    _, state = cumulative_counts(
+        df.loc[h, "trainer"], df.loc[h, "race_id"],
+        {k: v[h.to_numpy()] for k, v in metrics.items()},
+    )
+    new, _ = cumulative_counts(
+        df.loc[n, "trainer"], df.loc[n, "race_id"],
+        {k: v[n.to_numpy()] for k, v in metrics.items()}, state=state,
+    )
+    assert np.allclose(new["runs"], full["runs"][n.to_numpy()])
+    assert np.allclose(new["wins"], full["wins"][n.to_numpy()])
 
 
 def test_state_is_json_serialisable_and_reloadable():

@@ -74,3 +74,32 @@ class CountsAccumulator:
         for k, t in totals.items():
             self.state[k] = self.state.get(k, 0.0) + float(t)
         return out
+
+
+def cumulative_counts(
+    keys,
+    race_ids,
+    metrics: dict[str, object],
+    *,
+    state: dict | None = None,
+) -> tuple[dict[str, np.ndarray], dict]:
+    """Compute several prior-only race-safe cumulative metrics for one entity.
+
+    The reusable API the class-C stages call to become seed-aware: pass the
+    entity key, race ids, and a ``{out_column: value_array}`` mapping; get back
+    ``({out_column: array}, new_state)``. With ``state=None`` (a full build) the
+    output is identical to the inline ``groupby(entity)[v].cumsum() - v`` /
+    ``_race_safe_cumsum`` the stages use today; with a seeded ``state`` (an
+    append) it equals a full recompute for the new rows.
+
+    ``state`` / ``new_state`` are ``{out_column: accumulator_state}`` and are
+    JSON-serialisable for persistence in the FeatureStore.
+    """
+    state = state or {}
+    out: dict[str, np.ndarray] = {}
+    new_state: dict = {}
+    for col, values in metrics.items():
+        acc = CountsAccumulator(state.get(col))
+        out[col] = acc.transform(keys, race_ids, values)
+        new_state[col] = acc.to_state()
+    return out, new_state
