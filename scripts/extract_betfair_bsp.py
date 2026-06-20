@@ -22,11 +22,14 @@ tracks/days), so every market is parsed purely from its own
 ``marketDefinition`` (``eventName``/``marketTime``), never the path.
 
 Usage:
-    python scripts/extract_betfair_bsp.py --tar "data/betfair/data (1).tar" \
-        --out data/processed/betfair_bsp.parquet
-    python scripts/extract_betfair_bsp.py --tar "data/betfair/data (1).tar" \
-        --tar "data/betfair/data (2).tar" --tar "data/betfair/data (3).tar" \
-        --out data/processed/betfair_bsp.parquet --validate
+    # Full rebuild from every tar:
+    python scripts/extract_betfair_bsp.py --tar "data/betfair/2025.tar" \
+        --tar "data/betfair/2026.tar" --out data/processed/betfair_bsp.parquet --validate
+
+    # Incremental: process ONLY the new tar and merge it into the existing
+    # parquet (seconds, not a full rebuild):
+    python scripts/extract_betfair_bsp.py --tar "data/betfair/2022-06to07.tar" \
+        --out data/processed/betfair_bsp.parquet --append --validate
 """
 
 from __future__ import annotations
@@ -314,6 +317,9 @@ def main() -> None:
     ap.add_argument("--out", default="data/processed/betfair_bsp.parquet")
     ap.add_argument("--limit", type=int, default=None, help="cap market files per tar (debug)")
     ap.add_argument("--validate", action="store_true")
+    ap.add_argument("--append", action="store_true",
+                    help="merge the given tar(s) into the existing --out parquet "
+                         "instead of rebuilding from scratch (process only new files)")
     args = ap.parse_args()
 
     all_rows: list[dict] = []
@@ -334,6 +340,14 @@ def main() -> None:
     for _c in ("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_last"):
         if _c in df.columns:
             df[_c] = pd.to_numeric(df[_c], errors="coerce")
+    # Incremental update: merge into the existing parquet instead of rebuilding
+    # from every tar. The same race's BSP is identical across downloads, so the
+    # dedup below collapses overlaps — only the new tar(s) need processing.
+    if args.append and os.path.exists(args.out):
+        prev = pd.read_parquet(args.out)
+        print(f"append: merging {len(df):,} new rows into existing {len(prev):,}",
+              flush=True)
+        df = pd.concat([prev, df], ignore_index=True)
     # Drop exact dup runners (a market can appear in >1 archive); keep best-priced.
     df = df.sort_values("bsp", na_position="last").drop_duplicates(
         subset=["race_date", "track_key", "off_key", "horse_key"], keep="first"
