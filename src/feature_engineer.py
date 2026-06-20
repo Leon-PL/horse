@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 from src.ratings import compute_elo_features, compute_glicko_features
+from src.fe_incremental import cumulative_counts
 from src.track_config import get_track_config, direction_code, shape_code
 
 import config
@@ -562,12 +563,28 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     placed_hist = df["_placed_for_history"].fillna(0.0)
     finish_pos_hist = df["_finish_pos_for_history"].fillna(0.0)
 
-    # Number of previous races
-    df["horse_prev_races"] = result_start_flag.groupby(df[hkey], sort=False).cumsum() - result_start_flag
-    df["horse_prev_finishes"] = finished_flag.groupby(df[hkey], sort=False).cumsum() - finished_flag
+    # Cumulative (prior-only, race-safe) career counts via the incremental
+    # primitive. With state=None (a full build) this is identical to the
+    # historical ``groupby(hkey)[v].cumsum() - v`` formula; the FeatureStore
+    # append path can seed it from carried state so it never recomputes
+    # history. Class C — see docs/FE_TAXONOMY.md. (Horses run once per race, so
+    # race-safe == plain cumsum-minus-current here.)
+    _counts, _ = cumulative_counts(
+        df[hkey].to_numpy(), df["race_id"].to_numpy(),
+        {
+            "horse_prev_races": result_start_flag.to_numpy(),
+            "horse_prev_finishes": finished_flag.to_numpy(),
+            "horse_cum_wins": df["won"].to_numpy(),
+            "horse_cum_places": placed_hist.to_numpy(),
+            "horse_cum_non_finishes": non_finisher_flag.to_numpy(),
+            "horse_cum_pos_sum": finish_pos_hist.to_numpy(),
+        },
+    )
+    df["horse_prev_races"] = _counts["horse_prev_races"].astype(np.int64)
+    df["horse_prev_finishes"] = _counts["horse_prev_finishes"].astype(np.int64)
 
     # Cumulative win rate (vectorised — avoids lambda overhead)
-    df["horse_cum_wins"] = horse_groups["won"].cumsum() - df["won"]
+    df["horse_cum_wins"] = _counts["horse_cum_wins"].astype(np.int64)
     df["horse_win_rate"] = np.where(
         df["horse_prev_races"] > 0,
         df["horse_cum_wins"] / df["horse_prev_races"],
@@ -580,7 +597,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Cumulative place rate (top 3)
-    df["horse_cum_places"] = placed_hist.groupby(df[hkey], sort=False).cumsum() - placed_hist
+    df["horse_cum_places"] = _counts["horse_cum_places"].astype(np.float32)
     df["horse_place_rate"] = np.where(
         df["horse_prev_races"] > 0,
         df["horse_cum_places"] / df["horse_prev_races"],
@@ -592,9 +609,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         prior_rate=0.30, prior_strength=8.0,
     )
 
-    df["horse_cum_non_finishes"] = (
-        non_finisher_flag.groupby(df[hkey], sort=False).cumsum() - non_finisher_flag
-    )
+    df["horse_cum_non_finishes"] = _counts["horse_cum_non_finishes"].astype(np.int64)
     df["horse_non_finish_rate"] = np.where(
         df["horse_prev_races"] > 0,
         df["horse_cum_non_finishes"] / df["horse_prev_races"],
@@ -616,7 +631,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     df["horse_places"] = df["horse_cum_places"].astype(int)
 
     # Cumulative average finishing position
-    df["horse_cum_pos_sum"] = finish_pos_hist.groupby(df[hkey], sort=False).cumsum() - finish_pos_hist
+    df["horse_cum_pos_sum"] = _counts["horse_cum_pos_sum"].astype(np.float64)
     df["horse_avg_position"] = np.where(
         df["horse_prev_finishes"] > 0,
         df["horse_cum_pos_sum"] / df["horse_prev_finishes"],
