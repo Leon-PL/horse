@@ -328,6 +328,11 @@ def main() -> None:
         return
 
     df = pd.DataFrame(all_rows)
+    # Older (2022) streams occasionally encode prices as strings; coerce so the
+    # sort/dedup and downstream maths stay numeric.
+    for _c in ("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_last"):
+        if _c in df.columns:
+            df[_c] = pd.to_numeric(df[_c], errors="coerce")
     # Drop exact dup runners (a market can appear in >1 archive); keep best-priced.
     df = df.sort_values("bsp", na_position="last").drop_duplicates(
         subset=["race_date", "track_key", "off_key", "horse_key"], keep="first"
