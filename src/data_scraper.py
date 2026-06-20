@@ -198,14 +198,17 @@ def _parse_lengths_behind(dist_str: str) -> float:
 
     s = str(dist_str).strip().lower()
 
-    # Named distances
+    # Named margins (no numeric part). Match the whole token, longest code
+    # first, so "snk" isn't shadowed by "nk" and a stray substring never
+    # matches (the old `if k in s` returned nk=0.3 for "snk").
     named = {
         "dht": 0.0, "nse": 0.05, "shd": 0.1, "sh": 0.1,
         "hd": 0.2, "nk": 0.3, "sn": 0.1, "snk": 0.2,
     }
-    for k, v in named.items():
-        if k in s:
-            return v
+    s_compact = s.replace(" ", "")
+    for k in sorted(named, key=len, reverse=True):
+        if s_compact == k:
+            return named[k]
 
     # Unicode fractions
     frac_map = {"½": 0.5, "¼": 0.25, "¾": 0.75, "⅓": 0.33, "⅔": 0.67}
@@ -534,6 +537,23 @@ class SportingLifeScraper:
 
         except (KeyError, TypeError, AttributeError) as e:
             logger.warning(f"Error parsing result JSON: {e}")
+
+        # Purebred Arabian races are a different breed with different form
+        # dynamics and must not pollute the Thoroughbred dataset. Sporting
+        # Life suffixes Arabian horses with "(A)" and broadcasts some on
+        # feed-only channels mislabelled as the course (e.g. "RMG Extras").
+        if runners:
+            _rn = str(race_name).lower()
+            is_arabian = (
+                str(course_name).strip().endswith("Extras")
+                or "arab race" in _rn
+                or "(arab" in _rn
+                or any(str(r.get("horse_name", "")).strip().endswith("(A)")
+                       for r in runners)
+            )
+            if is_arabian:
+                logger.info("Skipping Purebred Arabian race: %s", race_url)
+                return []
 
         # Some Sporting Life "result" URLs occasionally resolve to an
         # unresolved or non-settled page shape (for example entries-like
