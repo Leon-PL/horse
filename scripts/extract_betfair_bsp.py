@@ -52,8 +52,9 @@ from src.utils import (  # noqa: E402
 
 KEEP_COUNTRIES = {"GB", "IE"}
 MARKET_FILE_RE = re.compile(r"(?:^|/)1\.\d+\.bz2$")
-# "Nottingham 1st Jun" -> "Nottingham"; "Chelmsford City 1st Jun" -> "Chelmsford City"
-TRACK_DATE_RE = re.compile(r"\s+\d{1,2}(?:st|nd|rd|th)\s+\w{3,}\s*$", re.IGNORECASE)
+# "Nottingham 1st Jun" -> "Nottingham"; "Chelmsford City 1st Jun" -> "Chelmsford City".
+# Month is optional so a malformed "Newton Abbot 16th" (no month) still strips.
+TRACK_DATE_RE = re.compile(r"\s+\d{1,2}(?:st|nd|rd|th)(?:\s+\w{3,})?\s*$", re.IGNORECASE)
 COUNTRY_SUFFIX_RE = re.compile(r"\s*\([A-Z]{2,3}\)\s*$")
 CLOTH_PREFIX_RE = re.compile(r"^\s*\d+\.\s*")
 

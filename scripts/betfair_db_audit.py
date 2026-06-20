@@ -1,11 +1,14 @@
 """
-Audit DB race completeness against Betfair (which has near-complete GB/IE WIN
-coverage). Produces a backfill worklist: every GB/IE race present on Betfair but
-absent from ``data/races.db``, plus a coverage summary by track.
+Two-directional integrity check between Betfair and ``data/races.db``.
 
-Direction that matters: Betfair-present / DB-absent => races the scraper dropped.
-We only flag races whose track is one the DB already knows (so these are genuine
-gaps, not out-of-scope courses).
+A) Betfair-present / DB-absent  -> the SCRAPER missed a race (backfill worklist,
+   ``missing_races.csv``). Only races on DB-known tracks are flagged.
+
+B) DB-present / Betfair-absent, scoped to meetings Betfair already covers
+   (same date+track) -> a BETFAIR gap or a join/alias problem
+   (``db_races_not_in_betfair.csv``). Scoping to covered meetings avoids
+   false-flagging the truncated back-half of each year and tracks Betfair
+   never carries (Galway/Laytown). Should be ~0 when joins are clean.
 
 Usage:
     python scripts/betfair_db_audit.py \
@@ -93,6 +96,39 @@ def main() -> None:
     partial = missing[missing["meeting"].isin(db_meetings)]
     print(f"\nof missing races: {len(whole):,} are in meetings ENTIRELY absent from DB, "
           f"{len(partial):,} are missing races from PARTIALLY-scraped meetings")
+
+    # ── Direction B: DB races Betfair lacks, within meetings Betfair covers ──
+    bf_race_keys = set(bf_races["key"])
+    bf_meetings = set(zip(bf_races["race_date"], bf_races["track_key"]))
+    res = res.copy()
+    res["key"] = list(zip(res["race_date"], res["track_key"], res["off_key"]))
+    res["meeting"] = list(zip(res["race_date"], res["track_key"]))
+    # DB races whose meeting Betfair covers, but the specific race is absent.
+    db_gap = res[res["meeting"].isin(bf_meetings) & ~res["key"].isin(bf_race_keys)]
+    db_gap = db_gap.drop_duplicates(subset=["race_date", "track_key", "off_key"])
+
+    print("\n" + "=" * 60)
+    print("Direction B — DB races MISSING from Betfair (within covered meetings):")
+    print(f"  flagged: {len(db_gap):,}  (Betfair gap or unfixed join/alias)")
+    if len(db_gap):
+        print("  by track:")
+        for t, n in db_gap.groupby("track").size().sort_values(ascending=False).head(20).items():
+            print(f"    {t:<16} {n:>4}")
+        db_gap.sort_values(["race_date", "track", "off_time"])[
+            ["race_date", "track", "off_time"]
+        ].to_csv("data/processed/db_races_not_in_betfair.csv", index=False)
+        print("  wrote data/processed/db_races_not_in_betfair.csv")
+
+    # Meetings on Betfair-covered DATES that Betfair lacks entirely (e.g. tracks
+    # Betfair never carries — informational, usually not actionable).
+    bf_dates = set(bf_races["race_date"])
+    db_on_cov = res[res["race_date"].isin(bf_dates)]
+    absent_meetings = sorted(set(db_on_cov["meeting"]) - bf_meetings)
+    if absent_meetings:
+        from collections import Counter
+        trk = Counter(t for _d, t in absent_meetings)
+        print(f"\n  (info) {len(absent_meetings)} DB meetings on Betfair-covered dates "
+              f"are absent from Betfair entirely — top tracks: {trk.most_common(8)}")
 
 
 if __name__ == "__main__":

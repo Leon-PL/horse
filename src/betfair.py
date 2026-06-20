@@ -42,6 +42,7 @@ _TRACK_ALIASES = {
     "royal ascot": "ascot",
     "ballinarobe": "ballinrobe",      # Betfair misspells Ballinrobe
     "bangor on dee": "bangor-on-dee",  # Betfair drops the hyphens
+    "bangor": "bangor-on-dee",         # ...and sometimes uses the bare name
 }
 
 
