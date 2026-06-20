@@ -1655,9 +1655,11 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
             df["finish_position"].fillna(0).astype(int) >= 1
         )
 
-    # Lengths per furlong — normalised for distance
+    # Lengths normalized for distance with non-linear power-law scaling (2c)
+    # This reflects that margin dispersion does not scale linearly with distance;
+    # 1 length in a 5f sprint requires more energy/speed output difference than in a 24f chase.
     safe_dist = df["distance_furlongs"].replace(0, np.nan).fillna(8.0)
-    df["_lb_per_furlong"] = _lb_for_speed.fillna(np.nan) / safe_dist
+    df["_lb_per_furlong"] = _lb_for_speed.fillna(np.nan) / np.power(safe_dist, 0.6)
 
     # Per-race relative performance: horse vs race median (neg = better)
     race_median_lpf = df.groupby("race_id")["_lb_per_furlong"].transform("median")
@@ -1687,7 +1689,11 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
             errors="coerce",
         ).fillna(5)
         _quality = (1.0 - (_class_num - 1) * 0.1).clip(0.4, 1.0)
-        df["_adj_lpf"] = df["_lb_per_furlong"].fillna(0) * (2.0 - _quality)
+        # Additive class-based penalty instead of multiplicative adjustment (2a)
+        # Multiplicative adjustment leaves all winners (lengths_behind=0.0) at 0.0,
+        # which fails to distinguish a Class 1 winner from a Class 7 winner.
+        # We apply an additive penalty proportional to the quality gap (max penalty 0.5 units).
+        df["_adj_lpf"] = df["_lb_per_furlong"].fillna(0) + (1.0 - _quality) * 0.5
 
         _adj_ops = [
             ("speed_fig_adj_avg_5", "mean", 5),
@@ -1856,7 +1862,7 @@ def add_pace_style_features(df: pd.DataFrame) -> pd.DataFrame:
         score = np.divide(
             total,
             weight_sum,
-            out=np.zeros(len(df), dtype=np.float64),
+            out=np.full(len(df), np.nan, dtype=np.float64),
             where=weight_sum > 0,
         )
         return pd.Series(score, index=df.index)
@@ -1864,6 +1870,9 @@ def add_pace_style_features(df: pd.DataFrame) -> pd.DataFrame:
     pace_base = _weighted_history_score(pace_components)
     pace_finish_bias = _weighted_history_score(balance_components)
     pace_trend = _weighted_history_score(trend_components)
+
+    # Expose RTV pace history coverage explicitly (2d)
+    df["has_pace_style_history"] = pace_base.notna().astype(np.int8)
 
     df["pace_style_index"] = pace_base
     df["pace_finish_bias"] = pace_finish_bias
@@ -1902,6 +1911,11 @@ def add_pace_style_features(df: pd.DataFrame) -> pd.DataFrame:
         & (df["field_pace_pressure"] == 1)
     ).astype(np.int8)
 
+    # Pace duel dynamics
+    df["is_pace_duel"] = df["hot_pace_flag"]
+    df["front_runner_vulnerability"] = df["pace_front_runner_flag"] * df["field_pace_pressure"]
+    df["closer_setup_intensity"] = df["pace_closer_flag"] * df["field_pace_pressure"]
+
     df["pace_rank"] = df.groupby("race_id")["pace_style_index"].rank(
         ascending=False,
         method="min",
@@ -1926,6 +1940,7 @@ def add_pace_style_features(df: pd.DataFrame) -> pd.DataFrame:
     if "distance_furlongs" in df.columns:
         is_sprint = (df["distance_furlongs"].fillna(8.0) <= 7.0).astype(float)
         df["pace_style_x_sprint"] = df["pace_style_index"] * is_sprint
+        df["is_pace_duel_x_distance"] = df["is_pace_duel"].astype(float) * df["distance_furlongs"].fillna(8.0)
 
     return df
 
@@ -1976,6 +1991,13 @@ def add_track_config_features(df: pd.DataFrame) -> pd.DataFrame:
     if "draw_pct" in df.columns:
         _dp = df["draw_pct"].replace([np.inf, -np.inf], np.nan).fillna(0.5)
         df["draw_x_bias"] = _dp * df["track_draw_bias"]
+
+        # New Draw × soft ground turf interaction: outside draws favored in heavy/soft turf
+        _is_soft_going = df["going"].fillna("Good").isin(["Soft", "Heavy", "Yielding"]).astype(float)
+        _is_turf = (~df["track_is_aw"].fillna(0).astype(bool)).astype(float)
+        _is_soft_turf = _is_soft_going * _is_turf
+        df["draw_pct_x_soft_turf"] = _dp * _is_soft_turf
+        df["draw_bias_x_soft_turf"] = df["track_draw_bias"] * _is_soft_turf
 
     # --- Uphill finish × weight ---
     # Uphill finishes penalise heavier horses more
@@ -2271,6 +2293,17 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Engineering pedigree features...")
     df = df.copy()
 
+    # Pre-compute condition masks for specialty pedigree features
+    is_soft = df["going"].fillna("Good").isin(["Soft", "Heavy", "Yielding"])
+    is_aw = df["surface"].fillna("Turf").astype(str).str.lower().str.contains("aw|all weather|all-weather")
+    dist_f = df["distance_furlongs"].fillna(8.0)
+    is_sprint = dist_f <= 7.0
+    is_stay_route = dist_f >= 11.5
+
+    result_start_flag = df["_result_start"].fillna(0.0)
+    won_flag = df["won"].fillna(0.0)
+    placed_flag = df["_placed_for_history"].fillna(0.0)
+
     for col in ["sire", "dam", "damsire"]:
         if col not in df.columns:
             continue
@@ -2304,8 +2337,56 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
             prior_rate=0.30, prior_strength=20.0,
         )
 
-        df = df.drop(columns=[f"_safe_{col}_runs", f"_safe_{col}_wins", f"_safe_{col}_places", 
-                     f"{col}_win_rate", f"{col}_place_rate"], errors="ignore")
+        # Cleanup basic stats temporary columns
+        temp_cols = [f"_safe_{col}_runs", f"_safe_{col}_wins", f"_safe_{col}_places", 
+                     f"{col}_win_rate", f"{col}_place_rate"]
+
+        # Only compute detailed conditional preferences for sire and damsire to avoid noise/fragmentation
+        if col != "dam":
+            conds = {
+                "soft": is_soft,
+                "aw": is_aw,
+                "sprint": is_sprint,
+                "stay": is_stay_route
+            }
+            for cond_name, mask in conds.items():
+                temp_runs = f"_safe_{col}_{cond_name}_runs"
+                temp_wins = f"_safe_{col}_{cond_name}_wins"
+                temp_places = f"_safe_{col}_{cond_name}_places"
+
+                # Assign conditional indicators as temporary columns in df for _race_safe_cumsum to look up
+                df["_temp_runs_cond"] = result_start_flag.where(mask, 0.0)
+                df["_temp_wins_cond"] = won_flag.where(mask, 0.0)
+                df["_temp_places_cond"] = placed_flag.where(mask, 0.0)
+
+                df[temp_runs] = _race_safe_cumsum(df, col, "_temp_runs_cond")
+                df[temp_wins] = _race_safe_cumsum(df, col, "_temp_wins_cond")
+                df[temp_places] = _race_safe_cumsum(df, col, "_temp_places_cond")
+
+                wr_raw = np.where(df[temp_runs] > 0, df[temp_wins] / df[temp_runs], 0.0)
+                pr_raw = np.where(df[temp_runs] > 0, df[temp_places] / df[temp_runs], 0.0)
+
+                # Shrunk rates
+                df[f"{col}_{cond_name}_win_rate_shrunk"] = _bayesian_shrink(
+                    wr_raw, df[temp_runs],
+                    prior_rate=0.10, prior_strength=10.0,
+                )
+                df[f"{col}_{cond_name}_place_rate_shrunk"] = _bayesian_shrink(
+                    pr_raw, df[temp_runs],
+                    prior_rate=0.30, prior_strength=10.0,
+                )
+
+                # Specialisation edge (relative to overall class rating)
+                df[f"{col}_{cond_name}_edge"] = (
+                    df[f"{col}_{cond_name}_win_rate_shrunk"] - df[f"{col}_win_rate_shrunk"]
+                )
+
+                temp_cols.extend([temp_runs, temp_wins, temp_places])
+
+            # Drop temporary conditional indicator columns
+            df = df.drop(columns=["_temp_runs_cond", "_temp_wins_cond", "_temp_places_cond"], errors="ignore")
+
+        df = df.drop(columns=temp_cols, errors="ignore")
 
     return df
 
@@ -3182,6 +3263,8 @@ _NH_INAPPLICABLE_DRAW_FEATURES = [
     "track_draw_win_rate",
     "tight_track_x_draw",
     "track_draw_bias",
+    "draw_pct_x_soft_turf",
+    "draw_bias_x_soft_turf",
 ]
 
 
