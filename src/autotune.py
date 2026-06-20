@@ -10,9 +10,6 @@ import numpy as np
 import pandas as pd
 
 import config
-from src.data_collector import collect_data
-from src.data_processor import process_data
-from src.feature_engineer import engineer_features
 from src.model import RacePredictor, prepare_multi_target_data
 
 logger = logging.getLogger(__name__)
@@ -114,54 +111,6 @@ def delete_autotune_session(session_id: str) -> bool:
     shutil.rmtree(session_dir)
     logger.info(f"Deleted autotune session {session_id}")
     return True
-
-
-def build_autotune_dataset(
-    *,
-    data_source: str,
-    days_back: int | None = None,
-    num_races: int = 1500,
-) -> tuple[pd.DataFrame, pd.DataFrame | None, dict]:
-    if data_source in {"database", "scrape"}:
-        raw = collect_data(source=data_source, days_back=int(days_back or 90))
-    else:
-        raw = collect_data(source="sample", num_races=int(num_races))
-    processed = process_data(df=raw)
-    featured = engineer_features(processed, save=False)
-    return featured, processed, dataset_meta_from_frame(
-        featured,
-        data_source=data_source,
-        requested_days=days_back if data_source != "sample" else None,
-        origin="autotune_fresh_build",
-    )
-
-
-def dataset_meta_from_frame(
-    df: pd.DataFrame,
-    *,
-    data_source: str | None,
-    requested_days: int | None,
-    origin: str,
-) -> dict:
-    dates = pd.to_datetime(df["race_date"], errors="coerce") if "race_date" in df.columns else pd.Series(dtype="datetime64[ns]")
-    date_min = dates.min() if not dates.empty else pd.NaT
-    date_max = dates.max() if not dates.empty else pd.NaT
-    actual_days = None
-    months = None
-    if pd.notna(date_min) and pd.notna(date_max):
-        actual_days = int((date_max - date_min).days) + 1
-        months = int(dates.dt.to_period("M").nunique())
-    return {
-        "data_source": data_source,
-        "requested_days": int(requested_days) if requested_days is not None else None,
-        "actual_days": actual_days,
-        "date_start": date_min.date().isoformat() if pd.notna(date_min) else None,
-        "date_end": date_max.date().isoformat() if pd.notna(date_max) else None,
-        "months": months,
-        "rows": int(len(df)),
-        "cols": int(len(df.columns)),
-        "origin": origin,
-    }
 
 
 def create_autotune_session(

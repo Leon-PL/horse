@@ -96,8 +96,12 @@ serves stale features.
 Two regimes, made explicit:
 
 1. **Incremental store** — carries *full* per-entity state, so there is **no
-   cold start and no burn-in needed**. This is the real answer to the burn-in
-   worry: once the store exists, appended rows are exactly correct.
+   cold start at the append edge**: once the store exists, appended (and live)
+   rows are warmed by the carried state and are exactly correct, with no
+   burn-in needed for them. NB this removes the burn-in worry only at the
+   *append edge* — the **head of the full history is still cold** (the dataset
+   still begins at the true start with unwarmed cumulative/rolling/Elo stats),
+   so `BURN_IN_MONTHS` is still applied as a train-split trim (see below).
 2. **Bounded rebuild** (`build_window`, the FE studio, walk-forward folds) —
    cannot see full history, so it uses **warm-up-then-drop**: load
    `[start − burn_in, end]`, engineer, drop the pre-start prefix. Rolling/365d
@@ -105,8 +109,12 @@ Two regimes, made explicit:
    approximate. Pick burn-in ≥ the longest window that matters (≥1y covers
    rolling + TE; career stats need more or the full store).
 
-`BURN_IN_MONTHS` stays available as the *train-split* trim, but is no longer the
-only lever.
+`BURN_IN_MONTHS` (config.py, applied in `src/model.py`) stays as the
+*train-split* trim that drops the cold head of history before the time split.
+The store does **not** remove this — it only removes cold-start at the append
+edge. What the store *does* change: burn-in is no longer entangled with *which
+dataset/window* you built — there is one canonical dataset, and burn-in is just
+a slice of it.
 
 ## "Grab future races", precisely
 

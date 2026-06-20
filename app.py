@@ -42,7 +42,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 from src.data_collector import collect_data, get_scraped_racecards, scrape_todays_results
 from src.data_processor import process_data
-from src.feature_engineer import engineer_features
+from src.featured_dataset import get_featured_dataset
 from src.live_prediction import (
     build_lookahead_cache,
     cards_signature,
@@ -63,7 +63,6 @@ from src.model import (
 )
 from src.autotune import (
     AUTOTUNE_MODEL_INFO,
-    build_autotune_dataset,
     build_config_snippet,
     create_autotune_session,
     delete_autotune_session,
@@ -258,12 +257,6 @@ def _cached_load_history_context(path: str, _mtime: float) -> tuple[pd.DataFrame
     return hist, last_hist.date() if pd.notna(last_hist) else None
 
 
-@st.cache_resource(show_spinner="Rebuilding featured dataset for active run …")
-def _cached_build_featured_from_processed(path: str, _mtime: float) -> pd.DataFrame:
-    processed = _cached_load_df(path, _mtime)
-    return engineer_features(processed.copy(), save=False)
-
-
 def _predictor_runtime_token(predictor: RacePredictor | None) -> str:
     if predictor is None:
         return "no-predictor"
@@ -341,26 +334,29 @@ def _predict_featured_frame(
 
 
 def _global_featured_dataset_path() -> str | None:
+    """Path to the canonical featured dataset.
+
+    The single persistent FeatureStore is now the one source of truth, so this
+    resolves to its ``featured.parquet`` first and only falls back to the
+    legacy global file for back-compat with old on-disk datasets.
+    """
+    store_path = os.path.join(config.PROCESSED_DATA_DIR, "feature_store", "featured.parquet")
+    if os.path.exists(store_path):
+        return store_path
     pq_path = os.path.join(config.PROCESSED_DATA_DIR, "featured_races.parquet")
     csv_path = os.path.join(config.PROCESSED_DATA_DIR, "featured_races.csv")
     if os.path.exists(pq_path):
         return pq_path
     if os.path.exists(csv_path):
         return csv_path
-    # Fall back to the most recently modified cached featured dataset
-    cache_dir = os.path.join(config.PROCESSED_DATA_DIR, "cache")
-    if os.path.isdir(cache_dir):
-        candidates = sorted(
-            (f for f in os.scandir(cache_dir) if f.name.startswith("featured_") and f.name.endswith(".parquet")),
-            key=lambda f: f.stat().st_mtime,
-            reverse=True,
-        )
-        if candidates:
-            return candidates[0].path
     return None
 
 
 def _global_processed_dataset_path() -> str | None:
+    """Path to the canonical processed dataset (FeatureStore copy first)."""
+    store_path = os.path.join(config.PROCESSED_DATA_DIR, "feature_store", "processed.parquet")
+    if os.path.exists(store_path):
+        return store_path
     pq_path = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.parquet")
     csv_path = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.csv")
     if os.path.exists(pq_path):
@@ -501,18 +497,6 @@ def _render_prediction_data_health(model_df: pd.DataFrame | None) -> None:
         else:
             st.caption("No obvious data-health issues detected in the current prediction state.")
 
-
-def _dataset_cache_paths(data_source: str, days_back: int | None) -> dict[str, str | None]:
-    cache_dir = os.path.join(config.PROCESSED_DATA_DIR, "cache")
-    os.makedirs(cache_dir, exist_ok=True)
-    if data_source == "sample" or days_back is None:
-        return {"cache_key": None, "featured": None, "processed": None}
-    cache_key = f"{data_source}_{int(days_back)}d"
-    return {
-        "cache_key": cache_key,
-        "featured": os.path.join(cache_dir, f"featured_{cache_key}.parquet"),
-        "processed": os.path.join(cache_dir, f"processed_{cache_key}.parquet"),
-    }
 
 
 def _dataset_meta_from_frame(
@@ -662,57 +646,6 @@ def _build_rtv_missing_diagnostics(processed_df: pd.DataFrame) -> dict[str, obje
     return out
 
 
-def _drop_degenerate_races_pre_fe(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
-    """Drop degenerate historical races before feature engineering.
-
-    Mirrors the model-side race quality filter, but applies earlier so the
-    feature pipeline does less work on known-bad races.
-    Future rows (``_is_future == 1``) are preserved.
-    """
-    if df is None or df.empty or "race_id" not in df.columns:
-        return df, {"removed_rows": 0, "removed_races": 0}
-
-    is_future = df.get("_is_future", pd.Series(0, index=df.index)).fillna(0).astype(int)
-    hist = df[is_future == 0].copy()
-    fut = df[is_future == 1].copy()
-
-    if hist.empty:
-        return df, {"removed_rows": 0, "removed_races": 0}
-
-    # Evaluate degeneracy only on rows with valid finishing positions.
-    work = hist[hist["finish_position"].notna() & (hist["finish_position"] > 0)].copy()
-    if work.empty:
-        combined = pd.concat([hist, fut], ignore_index=True, sort=False)
-        return combined, {"removed_rows": 0, "removed_races": 0}
-
-    single_runner_ids = pd.Index([])
-    if "num_runners" in work.columns:
-        single_runner_ids = work.groupby("race_id")["num_runners"].first()
-        single_runner_ids = single_runner_ids[single_runner_ids <= 1].index
-
-    pos_spread = work.groupby("race_id")["finish_position"].nunique()
-    identical_pos_ids = pos_spread[pos_spread <= 1].index
-
-    bad_odds_ids = pd.Index([])
-    if "odds" in work.columns:
-        bad_odds_ids = work.loc[work["odds"] < 1.01, "race_id"].unique()
-
-    degenerate_ids = set(single_runner_ids) | set(identical_pos_ids) | set(bad_odds_ids)
-    if not degenerate_ids:
-        combined = pd.concat([hist, fut], ignore_index=True, sort=False)
-        return combined, {"removed_rows": 0, "removed_races": 0}
-
-    before_rows = len(hist)
-    hist = hist[~hist["race_id"].isin(degenerate_ids)].copy()
-    removed_rows = before_rows - len(hist)
-
-    combined = pd.concat([hist, fut], ignore_index=True, sort=False)
-    return combined, {
-        "removed_rows": int(removed_rows),
-        "removed_races": int(len(degenerate_ids)),
-    }
-
-
 def _set_autotune_dataset(
     featured_df: pd.DataFrame | None,
     *,
@@ -761,38 +694,9 @@ def _load_run_featured_dataset(run_id: str) -> tuple[pd.DataFrame | None, dict[s
         meta["run_id"] = run_id
         return featured, meta
 
-    cache_path = tc.get("dataset_featured_cache_path")
-    if (not cache_path or not os.path.exists(str(cache_path))) and data_source and requested_days is not None:
-        cache_path = _dataset_cache_paths(str(data_source), int(requested_days)).get("featured")
-    if cache_path and os.path.exists(str(cache_path)):
-        mtime = os.path.getmtime(str(cache_path))
-        featured = _cached_load_df(str(cache_path), mtime)
-        meta = _dataset_meta_from_frame(
-            featured,
-            data_source=data_source,
-            requested_days=requested_days,
-            cache_key=tc.get("dataset_cache_key"),
-            featured_path=str(cache_path),
-            processed_path=tc.get("dataset_processed_cache_path") or get_run_processed_path(run_id),
-            origin="dataset_cache",
-        )
-        meta["run_id"] = run_id
-        return featured, meta
-
-    processed_path = get_run_processed_path(run_id)
-    if processed_path and os.path.exists(processed_path):
-        mtime = os.path.getmtime(processed_path)
-        featured = _cached_build_featured_from_processed(processed_path, mtime)
-        meta = _dataset_meta_from_frame(
-            featured,
-            data_source=data_source,
-            requested_days=requested_days,
-            processed_path=processed_path,
-            origin="run_processed_snapshot",
-        )
-        meta["run_id"] = run_id
-        return featured, meta
-
+    # No frozen snapshot for this run: fall through so the caller serves the
+    # single canonical feature store (load_model_data's store fallback). The
+    # store is read-only here — we never trigger a (slow) rebuild on a load.
     return None, {"run_id": run_id, "origin": "missing"}
 
 
@@ -817,7 +721,9 @@ def load_model_data(run_id: str | None = None, force: bool = False) -> bool:
     if path and os.path.exists(path):
         mtime = os.path.getmtime(path)
         featured = _cached_load_df(path, mtime)
-        meta = _dataset_meta_from_frame(featured, featured_path=path, origin="global_featured")
+        meta = _dataset_meta_from_frame(
+            featured, data_source="store", featured_path=path, origin="feature_store"
+        )
         meta["run_id"] = target_run_id
         _set_model_dataset(featured, dataset_meta=meta)
         return True
@@ -1719,44 +1625,35 @@ if page == "🎓 Train & Tune":
         )
 
     # ── Data Settings ────────────────────────────────────────────────
-    st.subheader("1️⃣ Data Source")
+    # The single persistent FeatureStore is the only data source now: it holds
+    # the full featured history and is kept current by the fe_signature /
+    # data_signature guards in get_featured_dataset(). "Prepare Data" optionally
+    # scrapes the most recent days into the DB, then builds/appends the store
+    # and loads the full featured dataset (training windows are applied later as
+    # a split, not as a separate dataset build).
+    st.subheader("1️⃣ Data")
     dc1, dc2, dc3 = st.columns([2, 2, 1])
 
     with dc1:
-        data_source = st.selectbox(
-            "Source",
-            ["database", "scrape", "sample"],
+        _refresh_data = st.checkbox(
+            "Refresh data before building",
+            value=True,
             help=(
-                "**database** — SQLite DB, only scrapes new days (recommended).  \n"
-                "**scrape** — full re-scrape from Sporting Life.  \n"
-                "**sample** — synthetic data for testing."
+                "Scrape the most recent days from Sporting Life into the local "
+                "DB before (re)building the feature store, so results are "
+                "up to date. Untick to build from the DB as-is."
             ),
         )
     with dc2:
-        if data_source == "sample":
-            num_races = st.slider("Races to generate", 500, 5000, 1500, 100)
-            days_back = 90
-        else:
-            num_races = 1500
-            default_days = 90 if data_source == "database" else 30
-            # Derive max from actual data span
-            _db_info = _cached_db_stats()
-            _max_days = 2000
-            try:
-                from datetime import datetime as _dt
-                _earliest = _db_info.get("earliest_date", "")
-                _latest = _db_info.get("latest_date", "")
-                if _earliest and _earliest != "—" and _latest and _latest != "—":
-                    _max_days = max(
-                        (_dt.strptime(_latest, "%Y-%m-%d") - _dt.strptime(_earliest, "%Y-%m-%d")).days,
-                        1,
-                    )
-            except Exception:
-                pass
-            days_back = st.slider(
-                "Days of history", 1, _max_days,
-                min(default_days, _max_days), 7,
-            )
+        _catchup_days = st.number_input(
+            "Catch-up scrape window (days)", 1, 90, 14, 1,
+            help=(
+                "How many recent days to re-scrape into the DB when refreshing. "
+                "Only new/changed races are fetched; the full history already "
+                "lives in the store."
+            ),
+            disabled=not _refresh_data,
+        )
     with dc3:
         wf_min_train = st.number_input(
             "Min train months", 2, 24, 3, 1, key="wf_min_train",
@@ -1790,39 +1687,17 @@ if page == "🎓 Train & Tune":
         ),
     )
 
-    # ── Dataset cache status ─────────────────────────────────────────
-    _cache_dir = os.path.join(config.PROCESSED_DATA_DIR, "cache")
-    os.makedirs(_cache_dir, exist_ok=True)
-    _cache_files = [f for f in os.listdir(_cache_dir) if f.endswith(".parquet")] if os.path.isdir(_cache_dir) else []
-    _global_featured_path = _global_featured_dataset_path()
-    _global_cache_label = None
-    if _global_featured_path and os.path.exists(_global_featured_path):
-        _global_age_h = (time.time() - os.path.getmtime(_global_featured_path)) / 3600
-        _global_size_mb = os.path.getsize(_global_featured_path) / (1024 * 1024)
-        _global_cache_label = (
-            f"{os.path.basename(_global_featured_path)} "
-            f"({_global_size_mb:.1f} MB, {_global_age_h:.1f}h ago)"
+    # ── Feature store status ─────────────────────────────────────────
+    _store_path = _global_featured_dataset_path()
+    if _store_path and os.path.exists(_store_path):
+        _store_age_h = (time.time() - os.path.getmtime(_store_path)) / 3600
+        _store_size_mb = os.path.getsize(_store_path) / (1024 * 1024)
+        st.caption(
+            f"📦 Feature store: {os.path.basename(_store_path)} "
+            f"({_store_size_mb:.1f} MB, updated {_store_age_h:.1f}h ago)"
         )
-    if _cache_files or _global_cache_label:
-        _cache_labels = []
-        for cf in sorted(_cache_files):
-            _cf_path = os.path.join(_cache_dir, cf)
-            _age_h = (time.time() - os.path.getmtime(_cf_path)) / 3600
-            _size_mb = os.path.getsize(_cf_path) / (1024 * 1024)
-            _label = cf.replace("featured_", "").replace(".parquet", "")
-            _cache_labels.append(f"{_label} ({_size_mb:.1f} MB, {_age_h:.1f}h ago)")
-        _cc1, _cc2 = st.columns([3, 1])
-        with _cc1:
-            if _cache_labels:
-                st.caption(f"📦 Dataset cache snapshots: {', '.join(_cache_labels)}")
-            if _global_cache_label:
-                st.caption(f"📄 Global training dataset: {_global_cache_label}")
-        with _cc2:
-            if st.button("🗑️ Clear cache", key="clear_dataset_cache"):
-                import shutil
-                shutil.rmtree(_cache_dir, ignore_errors=True)
-                os.makedirs(_cache_dir, exist_ok=True)
-                st.rerun()
+    else:
+        st.caption("📦 Feature store: not built yet — click Prepare Data to build it.")
 
     # ── Prepare / load dataset ───────────────────────────────────────
     _prep_col1, _prep_col2 = st.columns([1, 2])
@@ -1842,24 +1717,11 @@ if page == "🎓 Train & Tune":
                 f"✅ Dataset ready: **{len(_cd):,} rows**, "
                 f"**{_cd_months} months** ({_cd_span})"
             )
-            _loaded_source = _train_meta.get("data_source")
             _loaded_days = _train_meta.get("actual_days")
-            if _loaded_source or _loaded_days:
-                st.caption(
-                    f"Training dataset context: source={_loaded_source or '?'} · "
-                    f"actual span={_loaded_days if _loaded_days is not None else '?'}d"
-                )
-            if (
-                _loaded_source is not None and _loaded_source != data_source
-            ) or (
-                _train_meta.get("requested_days") is not None
-                and data_source != "sample"
-                and int(_train_meta.get("requested_days")) != int(days_back)
-            ):
-                st.warning(
-                    "Loaded training dataset does not match the current source/days controls. "
-                    "Click Prepare Data if you want to train on the currently selected window."
-                )
+            st.caption(
+                "Training dataset context: feature store · "
+                f"span={_loaded_days if _loaded_days is not None else '?'}d"
+            )
         else:
             st.info("No dataset loaded — click **Prepare Data** to build one.")
 
@@ -1918,7 +1780,7 @@ if page == "🎓 Train & Tune":
     if _do_prepare:
         _prep_progress = st.progress(0, text="Starting data pipeline …")
 
-        _prep_total_steps = 4 + (3 if data_source != "sample" else 0)
+        _prep_total_steps = 5
         _prep_started_at = time.time()
         _prep_state = {"step": None, "step_started_at": _prep_started_at}
 
@@ -1932,228 +1794,155 @@ if page == "🎓 Train & Tune":
             _timing = _progress_timing_text(_prep_started_at, _prep_state["step_started_at"], _stage)
             _prep_progress.progress(_overall, text=f"Step {_step}/{_prep_total_steps} · {text} · {_timing}")
 
-        _cache_paths = _dataset_cache_paths(data_source, int(days_back) if data_source != "sample" else None)
-        _cache_key = _cache_paths.get("cache_key")
-        _cache_path = _cache_paths.get("featured")
-        _processed_cache_path = _cache_paths.get("processed")
-        _cache_hit = False
-
-        if data_source != "sample" and _cache_path and os.path.exists(_cache_path):
-            _update_prep_progress(1, "📦 Loading cached dataset …")
-            with st.spinner("Loading cached dataset …"):
-                featured = _cached_load_df(_cache_path, os.path.getmtime(_cache_path))
-                processed = (
-                    _cached_load_df(_processed_cache_path, os.path.getmtime(_processed_cache_path))
-                    if _processed_cache_path and os.path.exists(_processed_cache_path)
-                    else None
-                )
-            _cache_age_h = (time.time() - os.path.getmtime(_cache_path)) / 3600
-            _train_meta = _dataset_meta_from_frame(
-                featured,
-                data_source=data_source,
-                requested_days=int(days_back),
-                cache_key=str(_cache_key) if _cache_key is not None else None,
-                featured_path=_cache_path,
-                processed_path=_processed_cache_path if _processed_cache_path and os.path.exists(_processed_cache_path) else None,
-                origin="dataset_cache",
-            )
-            _set_training_dataset(featured, processed_df=processed, dataset_meta=_train_meta)
-            st.success(
-                f"✅ Loaded cached dataset ({featured.shape[0]:,} rows, "
-                f"{featured.shape[1]} cols) — built {_cache_age_h:.1f}h ago"
-            )
-            _cache_hit = True
-
-        if not _cache_hit:
-            # ── Step 1: Collect historical data ──────────────────────
-            _update_prep_progress(1, "📊 Collecting historical data …")
-            with st.spinner("Collecting data …"):
-                if data_source in ("database", "scrape"):
-                    raw_data = collect_data(source=data_source, days_back=days_back)
-                else:
-                    raw_data = collect_data(source="sample", num_races=num_races)
-            st.success(f"✅ Collected {len(raw_data):,} race entries")
-            raw_data["_is_future"] = 0
-
-            # ── Step 1b: Incremental RTV backfill for this window ───
-            if data_source != "sample":
-                _update_prep_progress(2, "🏇 Updating RTV cache for missing races …")
-                with st.spinner("Checking/fetching missing RTV metrics for this window …"):
+        # ── Step 1: Refresh the DB with recent days (optional) ───────────
+        if _refresh_data:
+            _update_prep_progress(1, "📊 Scraping recent days into the DB …")
+            with st.spinner(f"Scraping the last {int(_catchup_days)} days …"):
+                try:
+                    _recent_raw = collect_data(source="database", days_back=int(_catchup_days))
+                    st.success(
+                        f"✅ Refreshed DB ({len(_recent_raw):,} recent race entries checked)"
+                    )
                     try:
-                        _rtv_stats = backfill_rtv_metrics_for_races(
-                            raw_data,
-                            skip_existing=True,
-                        )
+                        _rtv_stats = backfill_rtv_metrics_for_races(_recent_raw, skip_existing=True)
                         if _rtv_stats.get("missing_races", 0) > 0:
                             st.caption(
                                 "RTV cache updated: "
                                 f"{_rtv_stats.get('fetched_races', 0)} missing races checked, "
                                 f"{_rtv_stats.get('new_rows', 0)} new runner-metric rows added"
                             )
-                            if _rtv_stats.get("skipped_known_missing", 0) > 0:
-                                st.caption(
-                                    "RTV skip-list: "
-                                    f"{_rtv_stats.get('skipped_known_missing', 0)} known no-data races skipped"
-                                )
-                            if _rtv_stats.get("new_known_missing", 0) > 0:
-                                st.caption(
-                                    "RTV skip-list updated: "
-                                    f"{_rtv_stats.get('new_known_missing', 0)} additional past races marked as no-data"
-                                )
-                        else:
-                            st.caption("RTV cache already up to date for the selected history window")
                     except Exception as _rtv_exc:
                         logger.warning("RTV incremental backfill failed: %s", _rtv_exc)
                         st.caption("RTV incremental backfill skipped due to an error (continuing build)")
+                except Exception as _scrape_exc:
+                    logger.warning("Recent-days scrape failed: %s", _scrape_exc)
+                    st.caption("Recent-days scrape skipped due to an error (building from DB as-is)")
+        else:
+            st.caption("Skipping refresh — building from the DB as-is.")
 
-            # ── Step 2: Fetch racecards for the build day + next 7 days ──
-            # Offset 0 (the build day) is included so the current date is
-            # never a blind spot: the historical results scrape only has
-            # settled races (≤ yesterday), and without offset 0 the lookahead
-            # window would start at tomorrow, leaving today uncovered.
-            _LOOKAHEAD_OFFSETS = range(0, 8)  # today … +7
-            _n_offsets = len(_LOOKAHEAD_OFFSETS)
-            _future_card_sigs: dict[str, str] = {}  # date_str → signature
-            if data_source != "sample":
-                _update_prep_progress(3, "🗓️ Fetching racecards for today + next 7 days …")
-                _card_frames: list[pd.DataFrame] = []
-                _today = datetime.now().date()
-                for _i, _offset in enumerate(_LOOKAHEAD_OFFSETS, start=1):
-                    _target = _today + timedelta(days=_offset)
-                    _target_str = _target.strftime("%Y-%m-%d")
-                    try:
-                        _cards = get_scraped_racecards(date_str=_target_str)
-                        if _cards is not None and not _cards.empty:
-                            _future_card_sigs[_target_str] = cards_signature(_cards)
-                            _cards["_is_future"] = 1
-                            _cards["won"] = 0
-                            _cards["finish_position"] = 0
-                            _cards["finish_time_secs"] = 0.0
-                            _cards["lengths_behind"] = float("nan")
-                            _card_frames.append(_cards)
-                    except Exception as _card_exc:
-                        logger.warning("Failed to fetch racecards for %s: %s", _target_str, _card_exc)
-                    _update_prep_progress(3, f"🗓️ Fetching racecards for today + next 7 days … ({_i}/{_n_offsets})", _i / _n_offsets)
-                if _card_frames:
-                    _future_raw = pd.concat(_card_frames, ignore_index=True)
-                    # The build day (offset 0) can overlap races already scraped
-                    # as settled history (if run after some races have results).
-                    # Keep the settled copy; drop the duplicate pre-race card rows
-                    # so the combined FE pass never sees a race twice.
-                    if "race_id" in raw_data.columns and "race_id" in _future_raw.columns:
-                        _existing_rids = set(raw_data["race_id"].astype(str))
-                        _future_raw = _future_raw[~_future_raw["race_id"].astype(str).isin(_existing_rids)]
-                    if not _future_raw.empty:
-                        st.success(f"✅ Fetched {len(_future_raw):,} future racecard entries")
-                        raw_data = pd.concat([raw_data, _future_raw], ignore_index=True, sort=False)
+        # ── Step 2: Process the full history from the DB ─────────────────
+        _update_prep_progress(2, "🔧 Processing full history …")
+        with st.spinner("Cleaning …"):
+            processed = process_data(save=False)
+        st.success(f"✅ {processed.shape[0]:,} records, {processed.shape[1]} columns")
 
-            # ── Step 3: Process combined dataset ─────────────────────
-            _process_step = 4 if data_source != "sample" else 2
-            _update_prep_progress(_process_step, "🔧 Processing combined dataset …")
-            with st.spinner("Cleaning …"):
-                combined_processed = process_data(df=raw_data, save=False)
+        # ── Step 3: Build / append the single feature store ──────────────
+        # get_featured_dataset builds the store once then appends new dates,
+        # rebuilding only when the FE code/config or the historical data
+        # changes. This is the one canonical featured dataset — training
+        # windows are applied later as a split, not as a separate build.
+        _update_prep_progress(3, "⚙️ Building / appending the feature store …")
+        with st.spinner("Feature engineering (store) …"):
+            featured = get_featured_dataset(processed=processed)
 
-            # Remove known-bad historical races before FE to improve speed
-            # and avoid deriving features from corrupt race outcomes.
-            combined_processed, _deg_stats = _drop_degenerate_races_pre_fe(combined_processed)
-            if _deg_stats.get("removed_races", 0) > 0:
+        _train_meta = _dataset_meta_from_frame(
+            featured,
+            data_source="store",
+            requested_days=None,
+            featured_path=_global_featured_dataset_path(),
+            processed_path=_global_processed_dataset_path(),
+            origin="feature_store",
+        )
+        _set_training_dataset(featured, processed_df=processed, dataset_meta=_train_meta)
+        st.success(
+            f"✅ Feature store ready ({featured.shape[0]:,} rows, "
+            f"{featured.shape[1]} cols)"
+        )
+
+        # ── Step 4: Fetch racecards (today + next 7 days) for live ──────
+        # Offset 0 (the build day) is included so the current date is never a
+        # blind spot: the historical results scrape only has settled races
+        # (≤ yesterday), and without offset 0 the lookahead window would start
+        # at tomorrow, leaving today uncovered.
+        _update_prep_progress(4, "🗓️ Fetching racecards for today + next 7 days …")
+        _LOOKAHEAD_OFFSETS = range(0, 8)  # today … +7
+        _n_offsets = len(_LOOKAHEAD_OFFSETS)
+        _future_card_sigs: dict[str, str] = {}  # date_str → signature
+        _card_frames: list[pd.DataFrame] = []
+        _today = datetime.now().date()
+        _existing_rids = (
+            set(processed["race_id"].astype(str)) if "race_id" in processed.columns else set()
+        )
+        for _i, _offset in enumerate(_LOOKAHEAD_OFFSETS, start=1):
+            _target = _today + timedelta(days=_offset)
+            _target_str = _target.strftime("%Y-%m-%d")
+            try:
+                _cards = get_scraped_racecards(date_str=_target_str)
+                if _cards is not None and not _cards.empty:
+                    _future_card_sigs[_target_str] = cards_signature(_cards)
+                    _cards["won"] = 0
+                    _cards["finish_position"] = 0
+                    _cards["finish_time_secs"] = 0.0
+                    _cards["lengths_behind"] = float("nan")
+                    _card_frames.append(_cards)
+            except Exception as _card_exc:
+                logger.warning("Failed to fetch racecards for %s: %s", _target_str, _card_exc)
+            _update_prep_progress(4, f"🗓️ Fetching racecards … ({_i}/{_n_offsets})", _i / _n_offsets)
+
+        future_featured = pd.DataFrame()
+        if _card_frames:
+            _future_raw = pd.concat(_card_frames, ignore_index=True)
+            # Drop pre-race cards for races already settled in the DB history,
+            # so an upcoming race that has since run is not double-counted.
+            if "race_id" in _future_raw.columns and _existing_rids:
+                _future_raw = _future_raw[~_future_raw["race_id"].astype(str).isin(_existing_rids)]
+            if not _future_raw.empty:
+                st.success(f"✅ Fetched {len(_future_raw):,} future racecard entries")
+                with st.spinner("Feature engineering upcoming races …"):
+                    _future_processed = process_data(df=_future_raw, save=False)
+                    # Bound the history context for the live FE pass (matches the
+                    # live-prediction path) so we don't re-engineer all history.
+                    _rd = pd.to_datetime(processed["race_date"], errors="coerce")
+                    _live_cut = _rd.max() - pd.DateOffset(
+                        months=int(getattr(config, "LIVE_FE_HISTORY_MONTHS", 30))
+                    )
+                    _hist_for_live = processed[_rd >= _live_cut]
+                    future_featured = feature_engineer_with_history_core(
+                        _hist_for_live, _future_processed
+                    )
+
+        # RTV derived-feature coverage on future rows is the meaningful pre-race
+        # signal quality metric (raw RTV race metrics are not expected to exist
+        # before the race is run).
+        if not future_featured.empty:
+            _raw_rtv_cols = [c for c in (RTV_METRIC_COLS + RTV_RANK_COLS) if c in future_featured.columns]
+            _rtv_derived_cols = [
+                c for c in future_featured.columns
+                if c.startswith("rtv_") and c not in _raw_rtv_cols
+            ]
+            if _rtv_derived_cols:
+                _has_any_derived = future_featured[_rtv_derived_cols].notna().any(axis=1)
+                _derived_cov = 100.0 * float(_has_any_derived.mean())
                 st.caption(
-                    "🧹 Pre-FE race quality filter: removed "
-                    f"{_deg_stats['removed_rows']:,} rows across "
-                    f"{_deg_stats['removed_races']:,} degenerate races"
+                    "📊 Future RTV derived-feature coverage: "
+                    f"{int(_has_any_derived.sum()):,} / {len(future_featured):,} rows "
+                    f"({_derived_cov:.1f}%)"
                 )
-            st.success(f"✅ {combined_processed.shape[0]:,} records, {combined_processed.shape[1]} columns")
 
-            # ── Step 4: Feature-engineer combined dataset (one pass) ─
-            _feature_step = 5 if data_source != "sample" else 3
-            _update_prep_progress(_feature_step, "⚙️ Engineering features …")
-            with st.spinner("Feature engineering …"):
-                combined_featured = engineer_features(combined_processed, save=False)
-
-            # ── Step 5: Split historical vs future ───────────────────
-            _finalise_step = 6 if data_source != "sample" else 4
-            _update_prep_progress(_finalise_step, "🧾 Finalising training dataset …")
-            if "_is_future" in combined_featured.columns:
-                future_featured = combined_featured[combined_featured["_is_future"] == 1].copy()
-                featured = combined_featured[combined_featured["_is_future"] == 0].copy()
-                featured = featured.drop(columns=["_is_future"], errors="ignore")
-                future_featured = future_featured.drop(columns=["_is_future"], errors="ignore")
-            else:
-                featured = combined_featured
-                future_featured = pd.DataFrame()
-
-            # RTV derived-feature coverage on future rows is the meaningful
-            # pre-race signal quality metric (raw RTV race metrics are not
-            # expected to exist before the race is run).
-            if not future_featured.empty:
-                _raw_rtv_cols = [c for c in (RTV_METRIC_COLS + RTV_RANK_COLS) if c in future_featured.columns]
-                _rtv_derived_cols = [
-                    c for c in future_featured.columns
-                    if c.startswith("rtv_") and c not in _raw_rtv_cols
-                ]
-                if _rtv_derived_cols:
-                    _has_any_derived = future_featured[_rtv_derived_cols].notna().any(axis=1)
-                    _derived_cov = 100.0 * float(_has_any_derived.mean())
-                    st.caption(
-                        "📊 Future RTV derived-feature coverage: "
-                        f"{int(_has_any_derived.sum()):,} / {len(future_featured):,} rows "
-                        f"({_derived_cov:.1f}%)"
-                    )
-                else:
-                    st.caption("📊 Future RTV derived-feature coverage: no derived RTV columns found")
-
-            # Also split processed for session state (historical only)
-            if "_is_future" in combined_processed.columns:
-                processed = combined_processed[combined_processed["_is_future"] == 0].copy()
-                processed = processed.drop(columns=["_is_future"], errors="ignore")
-            else:
-                processed = combined_processed
-
-            _train_meta = _dataset_meta_from_frame(
-                featured,
-                data_source=data_source,
-                requested_days=int(days_back) if data_source != "sample" else None,
-                cache_key=str(_cache_key) if _cache_key is not None else None,
-                featured_path=_cache_path,
-                processed_path=_processed_cache_path,
-                origin="fresh_build",
-            )
-            _set_training_dataset(featured, processed_df=processed, dataset_meta=_train_meta)
-
-            if data_source != "sample" and _cache_path:
-                featured.to_parquet(_cache_path, index=False)
-                if _processed_cache_path:
-                    processed.to_parquet(_processed_cache_path, index=False)
-                st.caption(f"💾 Dataset cached as `{_cache_key}`")
-
-            # ── Step 6: Store future rows as lookahead cache ─────────
-            if data_source != "sample":
-                _lookahead_step = 7
-                _update_prep_progress(_lookahead_step, "🔮 Updating lookahead cache …")
-
-            if not future_featured.empty:
-                clear_lookahead_cache()
-                _future_dates = pd.to_datetime(
-                    future_featured["race_date"], errors="coerce"
-                ).dt.strftime("%Y-%m-%d").unique()
-                _sorted_future_dates = sorted(_future_dates)
-                for _idx, _fd in enumerate(_sorted_future_dates, start=1):
-                    _fd_mask = (
-                        pd.to_datetime(future_featured["race_date"], errors="coerce")
-                        .dt.strftime("%Y-%m-%d") == _fd
-                    )
-                    _fd_rows = future_featured[_fd_mask]
-                    _fd_sig = _future_card_sigs.get(_fd, cards_signature(_fd_rows))
-                    save_lookahead_cache(_fd, _fd_rows, _fd_sig)
-                    if data_source != "sample":
-                        _update_prep_progress(
-                            _lookahead_step,
-                            f"🔮 Saving lookahead cache … ({_idx}/{len(_sorted_future_dates)})",
-                            _idx / max(len(_sorted_future_dates), 1),
-                        )
-                st.caption(f"🔮 Lookahead cached: {', '.join(_sorted_future_dates)}")
-            elif data_source != "sample":
-                st.caption("🔮 No upcoming racecards found for lookahead.")
+        # ── Step 5: Store future rows as the lookahead cache ─────────────
+        _update_prep_progress(5, "🔮 Updating lookahead cache …")
+        if not future_featured.empty:
+            clear_lookahead_cache()
+            _future_dates = pd.to_datetime(
+                future_featured["race_date"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d").unique()
+            _sorted_future_dates = sorted(_future_dates)
+            for _idx, _fd in enumerate(_sorted_future_dates, start=1):
+                _fd_mask = (
+                    pd.to_datetime(future_featured["race_date"], errors="coerce")
+                    .dt.strftime("%Y-%m-%d") == _fd
+                )
+                _fd_rows = future_featured[_fd_mask]
+                _fd_sig = _future_card_sigs.get(_fd, cards_signature(_fd_rows))
+                save_lookahead_cache(_fd, _fd_rows, _fd_sig)
+                _update_prep_progress(
+                    5,
+                    f"🔮 Saving lookahead cache … ({_idx}/{len(_sorted_future_dates)})",
+                    _idx / max(len(_sorted_future_dates), 1),
+                )
+            st.caption(f"🔮 Lookahead cached: {', '.join(_sorted_future_dates)}")
+        else:
+            st.caption("🔮 No upcoming racecards found for lookahead.")
 
         _prep_elapsed = _format_duration_compact(time.time() - _prep_started_at)
         _prep_progress.progress(1.0, text=f"✅ Data ready! · elapsed {_prep_elapsed}")
@@ -2307,10 +2096,8 @@ if page == "🎓 Train & Tune":
 
     # Experiment name
     _train_ds_meta = st.session_state.get("train_dataset_meta") or {}
-    _name_source = _train_ds_meta.get("data_source") or data_source
+    _name_source = _train_ds_meta.get("data_source") or "store"
     _name_days = _train_ds_meta.get("actual_days")
-    if _name_days is None and data_source != "sample":
-        _name_days = int(days_back)
     _default_exp_name = _build_run_name(
         data_source=str(_name_source),
         days_back=(_name_days if _name_days is not None else None),
@@ -3043,8 +2830,8 @@ if page == "🎓 Train & Tune":
 
         _training_config = {
             "days_back": _train_ds_meta.get("actual_days"),
-            "dataset_days_requested": _train_ds_meta.get("requested_days", int(days_back) if data_source != "sample" else None),
-            "data_source": _train_ds_meta.get("data_source", data_source),
+            "dataset_days_requested": _train_ds_meta.get("requested_days"),
+            "data_source": _train_ds_meta.get("data_source", "store"),
             "dataset_date_start": _train_ds_meta.get("date_start"),
             "dataset_date_end": _train_ds_meta.get("date_end"),
             "dataset_months": _train_ds_meta.get("months"),
@@ -3076,7 +2863,7 @@ if page == "🎓 Train & Tune":
             "name": _run_name,
             "timestamp": datetime.now().isoformat(),
             "model_type": model_type,
-            "data_source": _train_ds_meta.get("data_source", data_source),
+            "data_source": _train_ds_meta.get("data_source", "store"),
             "data_rows": len(featured),
             "n_features": len(get_feature_columns(featured)),
             "tuning_mode": "saved" if tune_mode == "📦 Saved Autotune" else "manual",
@@ -3121,7 +2908,7 @@ if page == "🎓 Train & Tune":
         _run_id = save_run(
             name=_run_name,
             model_type=model_type,
-            data_source=str(_train_ds_meta.get("data_source", data_source)),
+            data_source=str(_train_ds_meta.get("data_source", "store")),
             data_rows=len(featured),
             n_features=len(get_feature_columns(featured)),
             elapsed_seconds=elapsed,
@@ -3174,7 +2961,7 @@ elif page == "🧭 Autotune":
     st.subheader("1️⃣ Dataset")
     _dataset_mode = st.radio(
         "Dataset source",
-        ["Use current Train & Tune dataset", "Load latest featured dataset", "Build fresh dataset"],
+        ["Use current Train & Tune dataset", "Load feature store"],
         horizontal=True,
         key="_autotune_dataset_mode",
     )
@@ -3189,47 +2976,25 @@ elif page == "🧭 Autotune":
                 )
                 st.success("Current training dataset copied into the autotune workspace.")
         else:
-            st.warning("No training dataset is loaded yet. Prepare one on Train & Tune, load the latest featured dataset, or build fresh here.")
-    elif _dataset_mode == "Load latest featured dataset":
-        _global_featured = _global_featured_dataset_path()
-        if _global_featured and os.path.exists(_global_featured):
-            if st.button("Load latest featured dataset from disk", key="_autotune_load_global"):
-                _featured = _cached_load_df(_global_featured, os.path.getmtime(_global_featured))
+            st.warning("No training dataset is loaded yet. Prepare one on Train & Tune, or load the feature store here.")
+    else:
+        _store_featured = _global_featured_dataset_path()
+        if _store_featured and os.path.exists(_store_featured):
+            if st.button("Load the feature store dataset", key="_autotune_load_store"):
+                _featured = _cached_load_df(_store_featured, os.path.getmtime(_store_featured))
                 _set_autotune_dataset(
                     _featured,
                     dataset_meta=_dataset_meta_from_frame(
                         _featured,
-                        data_source="disk",
+                        data_source="store",
                         requested_days=None,
-                        featured_path=_global_featured,
-                        origin="autotune_global_featured",
+                        featured_path=_store_featured,
+                        origin="feature_store",
                     ),
                 )
-                st.success("Loaded the latest featured dataset from disk.")
+                st.success("Loaded the feature store dataset.")
         else:
-            st.warning("No global featured dataset file found yet.")
-    else:
-        _ad1, _ad2 = st.columns([2, 2])
-        with _ad1:
-            _at_source = st.selectbox("Data source", ["database", "scrape", "sample"], key="_autotune_source")
-        with _ad2:
-            if _at_source == "sample":
-                _at_num_races = st.slider("Sample races", 500, 5000, 1500, 100, key="_autotune_num_races")
-                _at_days_back = None
-            else:
-                _at_num_races = 1500
-                _at_days_back = st.slider("Days of history", 1, 2000, 90, 7, key="_autotune_days_back")
-        if st.button("📦 Prepare autotune dataset", type="secondary", key="_autotune_prepare"):
-            _prep = st.progress(0, text="Preparing autotune dataset …")
-            _prep.progress(10, text="Collecting raw data …")
-            _featured, _processed, _meta = build_autotune_dataset(
-                data_source=_at_source,
-                days_back=_at_days_back,
-                num_races=_at_num_races,
-            )
-            _prep.progress(100, text="Dataset ready")
-            _set_autotune_dataset(_featured, processed_df=_processed, dataset_meta=_meta)
-            st.success(f"Prepared {_meta.get('rows', 0):,} rows for autotuning.")
+            st.warning("The feature store has not been built yet — use Prepare Data on Train & Tune first.")
 
     _at_featured = st.session_state.get("autotune_featured_data")
     _at_meta = st.session_state.get("autotune_dataset_meta") or {}
