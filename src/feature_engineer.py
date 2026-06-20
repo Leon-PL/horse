@@ -881,11 +881,23 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
     result_start_flag = df["_result_start"]
     placed_hist = df["_placed_for_history"].fillna(0.0)
 
+    # Cumulative (prior-only, race-safe) counts via the incremental primitive
+    # (state=None == inline cumsum-minus-current; seed-capable for append).
+    # A jockey rides once per race, so race-safe == plain. Class C.
+    _counts, _ = cumulative_counts(
+        df["jockey"].to_numpy(), df["race_id"].to_numpy(),
+        {
+            "jockey_prev_rides": result_start_flag.to_numpy(),
+            "jockey_cum_wins": df["won"].to_numpy(),
+            "jockey_cum_places": placed_hist.to_numpy(),
+        },
+    )
+
     # Number of previous rides
-    df["jockey_prev_rides"] = result_start_flag.groupby(df["jockey"], sort=False).cumsum() - result_start_flag
+    df["jockey_prev_rides"] = _counts["jockey_prev_rides"].astype(np.int64)
 
     # Cumulative win rate (vectorised)
-    df["jockey_cum_wins"] = jockey_groups["won"].cumsum() - df["won"]
+    df["jockey_cum_wins"] = _counts["jockey_cum_wins"].astype(np.int64)
     df["jockey_win_rate"] = np.where(
         df["jockey_prev_rides"] > 0,
         df["jockey_cum_wins"] / df["jockey_prev_rides"],
@@ -909,7 +921,7 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
             df[name] = arr
 
     # Place rate (top 3)
-    df["jockey_cum_places"] = placed_hist.groupby(df["jockey"], sort=False).cumsum() - placed_hist
+    df["jockey_cum_places"] = _counts["jockey_cum_places"].astype(np.float32)
     df["jockey_place_rate"] = np.where(
         df["jockey_prev_rides"] > 0,
         df["jockey_cum_places"] / df["jockey_prev_rides"],
