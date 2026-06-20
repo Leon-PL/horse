@@ -756,8 +756,13 @@ class SportingLifeScraper:
         Convert a single Sporting Life *ride* object into a flat dict
         matching the pipeline's expected columns.
         """
-        status = ride.get("ride_status", "")
-        if status == "NON-RUNNER":
+        # Drop non-runners (withdrawn horses that never went to post). Sporting
+        # Life uses "NONRUNNER" on result pages but "NON-RUNNER" elsewhere, so
+        # normalise away separators rather than matching one exact spelling —
+        # the old exact "NON-RUNNER" check silently let every result-page
+        # non-runner through as a finish_position=0 row.
+        status_norm = re.sub(r"[^A-Z]", "", str(ride.get("ride_status", "")).upper())
+        if status_norm == "NONRUNNER":
             return None
 
         # --- horse ---
