@@ -249,6 +249,24 @@ def _infer_race_type(race_name: str, run_type: str = "") -> str:
     return "Flat"
 
 
+def _is_arabian_race(race_name: str, course_name: str, runners: list[dict]) -> bool:
+    """True if a race is a Purebred Arabian race (not Thoroughbred).
+
+    Arabian races are a different breed with different form dynamics and must
+    not pollute the Thoroughbred dataset. Sporting Life suffixes Arabian horses
+    with ``(A)`` and broadcasts some on feed-only channels mislabelled as the
+    course (e.g. ``"RMG Extras"`` / ``"TRP Extras"``).
+    """
+    rn = str(race_name or "").lower()
+    if str(course_name or "").strip().endswith("Extras"):
+        return True
+    if "arab race" in rn or "(arab" in rn:
+        return True
+    return any(
+        str(r.get("horse_name", "")).strip().endswith("(A)") for r in runners
+    )
+
+
 def _safe_int(val, default=0):
     try:
         return int(val)
@@ -538,22 +556,10 @@ class SportingLifeScraper:
         except (KeyError, TypeError, AttributeError) as e:
             logger.warning(f"Error parsing result JSON: {e}")
 
-        # Purebred Arabian races are a different breed with different form
-        # dynamics and must not pollute the Thoroughbred dataset. Sporting
-        # Life suffixes Arabian horses with "(A)" and broadcasts some on
-        # feed-only channels mislabelled as the course (e.g. "RMG Extras").
-        if runners:
-            _rn = str(race_name).lower()
-            is_arabian = (
-                str(course_name).strip().endswith("Extras")
-                or "arab race" in _rn
-                or "(arab" in _rn
-                or any(str(r.get("horse_name", "")).strip().endswith("(A)")
-                       for r in runners)
-            )
-            if is_arabian:
-                logger.info("Skipping Purebred Arabian race: %s", race_url)
-                return []
+        # Purebred Arabian races must not pollute the Thoroughbred dataset.
+        if runners and _is_arabian_race(race_name, course_name, runners):
+            logger.info("Skipping Purebred Arabian race: %s", race_url)
+            return []
 
         # Some Sporting Life "result" URLs occasionally resolve to an
         # unresolved or non-settled page shape (for example entries-like
