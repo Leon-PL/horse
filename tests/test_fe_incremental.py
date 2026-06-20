@@ -10,8 +10,35 @@ import json
 import numpy as np
 import pandas as pd
 
+import src.feature_engineer as fe
 from src.feature_engineer import _race_safe_cumsum
 from src.fe_incremental import CountsAccumulator, cumulative_counts
+
+
+class TestStateThreading:
+    """The mechanism that lets class-C stages seed from / write back state."""
+
+    def test_scope_sets_and_restores(self):
+        assert fe._COUNTS_STATE is None
+        with fe.counts_state_scope({"m": {}}):
+            assert fe._COUNTS_STATE == {"m": {}}
+        assert fe._COUNTS_STATE is None
+
+    def test_cumulative_full_build_when_no_scope(self):
+        keys = np.array(["A", "A", "B"]); races = np.array(["r1", "r2", "r3"])
+        out = fe._cumulative(keys, races, {"m": np.array([1.0, 1.0, 1.0])})
+        assert list(out["m"]) == [0.0, 1.0, 0.0]      # prior-to-race totals
+
+    def test_cumulative_seeds_and_writes_back(self):
+        keys = np.array(["A", "A", "B"]); races = np.array(["r1", "r2", "r3"])
+        state: dict = {}
+        with fe.counts_state_scope(state):
+            fe._cumulative(keys, races, {"m": np.array([1.0, 1.0, 1.0])})
+        assert state["m"]["A"] == 2.0 and state["m"]["B"] == 1.0   # written back
+
+        with fe.counts_state_scope({"m": {"A": 5.0}}):              # seeded
+            out = fe._cumulative(np.array(["A"]), np.array(["r9"]), {"m": np.array([1.0])})
+        assert out["m"][0] == 5.0
 
 
 def _frame(seed: int = 0) -> pd.DataFrame:

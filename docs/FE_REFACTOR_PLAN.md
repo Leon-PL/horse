@@ -117,6 +117,36 @@ only lever.
   forbids any *un-guarded* forward reference or whole-dataset (class **G**)
   statistic from creeping in.
 
+## State-threading mechanism (Phase 2, built)
+
+How seed-state flows through the monolith without changing every stage
+signature:
+
+- `engineer_features(..., counts_state: dict | None = None)`. `None` = full
+  build (byte-identical to before). A dict = a seeded run.
+- `counts_state_scope(state)` sets a module-level `_COUNTS_STATE` for the stage
+  loop; `_cumulative(keys, races, metrics)` (used by class-C stages) seeds its
+  `cumulative_counts` from it and writes the advanced state back. State is a
+  flat `{column: accumulator_state}` dict (column names are globally unique, so
+  no per-stage keying).
+
+Seeded-append algorithm (exact, no approximation):
+
+1. Persist `counts_state` = the per-entity totals through the store's last date
+   (the C stages write it back during the build).
+2. On append, run `engineer_features(new_rows, counts_state=seed)` — class-C
+   columns for the new rows = `seed[entity] + in-frame race-safe cumsum`, i.e.
+   exactly a full recompute; the dict is advanced and re-persisted.
+3. **For B/L (bounded-window/lag) stages to also be exact, they must be
+   seed-aware too** (carry the last N races / 365d / last row per entity as
+   state) — otherwise the append would need the full history (no win) or a
+   recent buffer (approximate, breaking the append==rebuild parity guarantee).
+   That is Phase 3.
+
+So the flip is exact once **both** C (counts state) and B/L (bounded-buffer
+state) stages are converted; ratings already carry state; W/R need only the new
+rows. Until then `counts_state=None` everywhere and behaviour is unchanged.
+
 ## Migration plan (incremental, each step shippable & reversible)
 
 **Phase 0 — single seam (this change).**

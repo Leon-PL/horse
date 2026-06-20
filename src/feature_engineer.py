@@ -16,6 +16,7 @@ Features include:
 import logging
 import ast
 import os
+from contextlib import contextmanager
 
 import numba as nb
 import numpy as np
@@ -544,6 +545,41 @@ def _entity_day_start_view(
     return df
 
 
+# ── Incremental cumulative-state threading ─────────────────────────────────
+# A seeded run (FeatureStore append) sets a flat {column: accumulator_state}
+# dict here; class-C stages seed their cumulative_counts from it and write back
+# their advanced state, so an append never recomputes history. A full build
+# leaves it None -> stages compute from scratch (byte-identical). See
+# docs/FE_REFACTOR_PLAN.md.
+_COUNTS_STATE: dict | None = None
+
+
+@contextmanager
+def counts_state_scope(state: dict | None):
+    """Activate a seed/collector dict for cumulative-count stages."""
+    global _COUNTS_STATE
+    prev = _COUNTS_STATE
+    _COUNTS_STATE = state
+    try:
+        yield
+    finally:
+        _COUNTS_STATE = prev
+
+
+def _cumulative(keys, race_ids, metrics: dict) -> dict:
+    """Seed-aware cumulative counts for a class-C stage.
+
+    With no active seed (full build) this equals the inline
+    ``groupby(key).cumsum() - flag`` formula. Under ``counts_state_scope`` it
+    seeds from the carried state and writes the advanced state back, so the
+    same stage code serves both build and append.
+    """
+    out, new_state = cumulative_counts(keys, race_ids, metrics, state=_COUNTS_STATE)
+    if _COUNTS_STATE is not None:
+        _COUNTS_STATE.update(new_state)
+    return out
+
+
 def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate horse-specific historical features.
@@ -569,7 +605,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     # append path can seed it from carried state so it never recomputes
     # history. Class C — see docs/FE_TAXONOMY.md. (Horses run once per race, so
     # race-safe == plain cumsum-minus-current here.)
-    _counts, _ = cumulative_counts(
+    _counts = _cumulative(
         df[hkey].to_numpy(), df["race_id"].to_numpy(),
         {
             "horse_prev_races": result_start_flag.to_numpy(),
@@ -884,7 +920,7 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
     # Cumulative (prior-only, race-safe) counts via the incremental primitive
     # (state=None == inline cumsum-minus-current; seed-capable for append).
     # A jockey rides once per race, so race-safe == plain. Class C.
-    _counts, _ = cumulative_counts(
+    _counts = _cumulative(
         df["jockey"].to_numpy(), df["race_id"].to_numpy(),
         {
             "jockey_prev_rides": result_start_flag.to_numpy(),
@@ -3796,6 +3832,7 @@ def engineer_features(
     save: bool = True,
     *,
     skip_ratings: bool = False,
+    counts_state: dict | None = None,
 ) -> pd.DataFrame:
     """
     Full feature engineering pipeline.
@@ -3871,23 +3908,26 @@ def engineer_features(
         apply_conditional_feature_masks,   # zero irrelevant features
     ]
     _profile = os.environ.get("FE_PROFILE")
-    if _profile:
-        import time as _t
-        _timings = []
-        for stage in stages:
-            _t0 = _t.perf_counter()
-            df = stage(df)
-            df = _defrag(df)
-            _timings.append((stage.__name__, _t.perf_counter() - _t0))
-        _timings.sort(key=lambda x: -x[1])
-        _total = sum(t for _, t in _timings)
-        logger.warning("FE stage profile (rows=%d, total=%.2fs):", len(df), _total)
-        for _name, _sec in _timings:
-            logger.warning("  %6.2fs  %5.1f%%  %s", _sec, 100 * _sec / _total, _name)
-    else:
-        for stage in stages:
-            df = stage(df)
-            df = _defrag(df)
+    # A seeded counts_state (FeatureStore append) makes class-C stages resume
+    # from carried state instead of recomputing history; None = full build.
+    with counts_state_scope(counts_state):
+        if _profile:
+            import time as _t
+            _timings = []
+            for stage in stages:
+                _t0 = _t.perf_counter()
+                df = stage(df)
+                df = _defrag(df)
+                _timings.append((stage.__name__, _t.perf_counter() - _t0))
+            _timings.sort(key=lambda x: -x[1])
+            _total = sum(t for _, t in _timings)
+            logger.warning("FE stage profile (rows=%d, total=%.2fs):", len(df), _total)
+            for _name, _sec in _timings:
+                logger.warning("  %6.2fs  %5.1f%%  %s", _sec, 100 * _sec / _total, _name)
+        else:
+            for stage in stages:
+                df = stage(df)
+                df = _defrag(df)
 
     # Final consolidation before the NaN-handling block below.
     df = _defrag(df, max_blocks=0)
