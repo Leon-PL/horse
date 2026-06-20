@@ -31,7 +31,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config
 from src.data_collector import collect_data
 from src.data_processor import process_data
-from src.feature_engineer import engineer_features
+from src.feature_engineer import engineer_features  # noqa: F401 (parity oracle / fallback)
+from src.featured_dataset import get_featured_dataset
 from src.model import (
     RacePredictor,
     DEFAULT_FRAMEWORKS,
@@ -97,8 +98,11 @@ def run_pipeline(
     logger.info(f"  Processed data shape: {processed_data.shape}")
 
     # --- Step 3: Feature Engineering ---
+    # Single build path: build the feature store once, then append new dates
+    # instead of re-engineering the whole history. A changed FE signature
+    # (code/config) forces a clean rebuild. See docs/FE_REFACTOR_PLAN.md.
     logger.info("\n⚙️ Step 3/4: Engineering features...")
-    featured_data = engineer_features(processed_data)
+    featured_data = get_featured_dataset(processed=processed_data)
     logger.info(f"  Featured data shape: {featured_data.shape}")
 
     # --- Step 4: Model Training ---
