@@ -7,3 +7,5 @@ models/
 catboost_info/
 *.prof
 rtv_backfill_output.log
+.claude/settings.json
+.gitignore

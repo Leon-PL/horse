@@ -764,7 +764,12 @@ class SportingLifeScraper:
 
         # --- weight / draw / rating ---
         weight_lbs = _parse_weight_to_lbs(ride.get("handicap", ""))
-        draw = _safe_int(ride.get("cloth_number", 0))
+        # ``draw`` is the starting-stall number (``draw_number``), NOT the
+        # saddle-cloth number. Jumps races have no stalls so ``draw_number`` is
+        # null -> 0. (Historically this read ``cloth_number`` by mistake, which
+        # corrupted every draw-bias feature; backfilled via
+        # scripts/backfill_draw.py.)
+        draw = _safe_int(ride.get("draw_number", 0))
         official_rating = _safe_int(ride.get("official_rating", 0))
 
         # --- headgear ---
