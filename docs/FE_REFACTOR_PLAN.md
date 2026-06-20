@@ -74,10 +74,22 @@ def build_window(
     # window = [start - burn_in, end]; engineer_features; drop pre-start prefix.
 ```
 
-`fe_signature` = hash of `feature_engineer.py` + `ratings.py` + the FE-relevant
-`config` flags (see `FE_OPTIONS`) + `STORE_SCHEMA_VERSION`. Stored in `meta`; a
-mismatch forces a rebuild, so adopting the store never silently serves stale
-features after an FE change.
+Two staleness guards, both stored in `meta` and checked on every
+`get_featured_dataset`:
+
+- **`fe_signature`** = hash of `feature_engineer.py` + `ratings.py` + the
+  FE-relevant `config` flags + `STORE_SCHEMA_VERSION`. Catches *code/config*
+  changes.
+- **`data_signature`** = cheap fingerprint of the processed history over the
+  region at-or-before the store's last date (row count + date span + value
+  sums of `draw`/`won`/`finish_position`/`num_runners`). Catches *in-place data
+  edits* — backfills/cleanups that change historical rows (e.g. the draw
+  backfill changes `draw`'s sum, the non-runner purge changes the row count).
+  The append model assumes history is immutable, so any change there forces a
+  rebuild instead of a (silently stale) append.
+
+Either mismatch forces a full rebuild, so adopting the store never silently
+serves stale features.
 
 ## Burn-in, resolved
 
@@ -133,6 +145,8 @@ rolling / time-window / lag stages. ~10 stages.
 ## Risks & guards
 
 - **Stale store after FE edits** → `fe_signature` rebuild guard (Phase 0).
+- **Stale store after data backfills/cleanups** → `data_signature` rebuild
+  guard over the historical region (Phase 0).
 - **Silent divergence** → every converted stage gated by a parity test against a
   full `engineer_features` rebuild (the existing pattern).
 - **Append-safety regressions** → `test_append_safety.py` fails CI on un-guarded
