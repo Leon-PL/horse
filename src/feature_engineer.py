@@ -2626,10 +2626,19 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Draw advantage (normalized by field size)
     df["draw_pct"] = df["draw"] / df["num_runners"]
+    # Jumps/bumpers have no starting stalls, so draw == 0 is "no draw", NOT the
+    # innermost stall (real flat draws are >= 1). Mark these missing so the
+    # model isn't told every jumps horse is best-drawn, and so the per-track
+    # draw-third stats below are computed over stalls races only (NaN draw_pct
+    # falls outside the low/mid/high bins).
+    df["draw_pct"] = df["draw_pct"].where(df["draw"] > 0)
 
     # ── Track-specific draw bias ─────────────────────────────────
     # Per-track draw-position win-rate (point-in-time, no leakage).
     # Tracks like Chester, Beverley, Ascot have extreme draw biases.
+    # No-draw races (NaN draw_pct) are excluded from the bins, so these
+    # stats reflect flat-with-stalls form only and don't pollute mixed
+    # flat/jumps tracks (Ascot, Newcastle, Doncaster, ...).
     if "track" in df.columns:
 
         # Create draw-position bins (low / mid / high third)
