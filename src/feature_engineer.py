@@ -580,6 +580,19 @@ def _cumulative(keys, race_ids, metrics: dict) -> dict:
     return out
 
 
+def _composite_key(df: pd.DataFrame, *cols) -> np.ndarray:
+    """Single string key joining several columns for a per-(entity×dims) group.
+
+    Used by the horse×dimension class-C stages so they can route through
+    ``_cumulative`` (which keys on one entity array). The unit-separator never
+    appears in the data, so this is collision-free vs a pandas multi-col groupby.
+    """
+    s = df[cols[0]].astype(str)
+    for c in cols[1:]:
+        s = s + "\x1f" + df[c].astype(str)
+    return s.to_numpy()
+
+
 def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate horse-specific historical features.
@@ -731,11 +744,14 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Race-type-aware horse features ---
     if "race_type" in df.columns:
-        rt_groups = df.groupby([hkey, "race_type"])
         result_start_hist = df["_result_start"].fillna(0.0)
         won_hist = df["_won_for_history"].fillna(0.0)
-        df["horse_rt_runs"] = result_start_hist.groupby([df[hkey], df["race_type"]], sort=False).cumsum() - result_start_hist
-        df["horse_rt_wins"] = won_hist.groupby([df[hkey], df["race_type"]], sort=False).cumsum() - won_hist
+        _rt = _cumulative(
+            _composite_key(df, hkey, "race_type"), df["race_id"].to_numpy(),
+            {"horse_rt_runs": result_start_hist.to_numpy(), "horse_rt_wins": won_hist.to_numpy()},
+        )
+        df["horse_rt_runs"] = _rt["horse_rt_runs"]
+        df["horse_rt_wins"] = _rt["horse_rt_wins"]
         df["horse_rt_win_rate"] = np.where(
             df["horse_rt_runs"] > 0,
             df["horse_rt_wins"] / df["horse_rt_runs"],
@@ -1159,12 +1175,19 @@ def add_track_features(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Engineering track features...")
     hkey = _horse_key(df)
 
-    # Horse's track record
-    track_groups = df.groupby([hkey, "track"])
+    # Horse's track / distance / going records — class C, seed-aware so the
+    # FeatureStore append carries state (see docs/FE_TAXONOMY.md). One row per
+    # (horse, dim, race), so race-safe == plain cumsum-minus-current.
     result_start_hist = df["_result_start"].fillna(0.0)
     won_hist = df["_won_for_history"].fillna(0.0)
-    df["horse_track_runs"] = result_start_hist.groupby([df[hkey], df["track"]], sort=False).cumsum() - result_start_hist
-    df["horse_track_wins"] = won_hist.groupby([df[hkey], df["track"]], sort=False).cumsum() - won_hist
+    _race = df["race_id"].to_numpy()
+    _rs = result_start_hist.to_numpy()
+    _wh = won_hist.to_numpy()
+
+    _trk = _cumulative(_composite_key(df, hkey, "track"), _race,
+        {"horse_track_runs": _rs, "horse_track_wins": _wh})
+    df["horse_track_runs"] = _trk["horse_track_runs"]
+    df["horse_track_wins"] = _trk["horse_track_wins"]
     df["horse_track_win_rate"] = np.where(
         df["horse_track_runs"] > 0,
         df["horse_track_wins"] / df["horse_track_runs"],
@@ -1175,10 +1198,10 @@ def add_track_features(df: pd.DataFrame) -> pd.DataFrame:
         prior_rate=0.10, prior_strength=5.0,
     )
 
-    # Horse's distance record
-    dist_groups = df.groupby([hkey, "distance_furlongs"])
-    df["horse_dist_runs"] = result_start_hist.groupby([df[hkey], df["distance_furlongs"]], sort=False).cumsum() - result_start_hist
-    df["horse_dist_wins"] = won_hist.groupby([df[hkey], df["distance_furlongs"]], sort=False).cumsum() - won_hist
+    _dst = _cumulative(_composite_key(df, hkey, "distance_furlongs"), _race,
+        {"horse_dist_runs": _rs, "horse_dist_wins": _wh})
+    df["horse_dist_runs"] = _dst["horse_dist_runs"]
+    df["horse_dist_wins"] = _dst["horse_dist_wins"]
     df["horse_dist_win_rate"] = np.where(
         df["horse_dist_runs"] > 0,
         df["horse_dist_wins"] / df["horse_dist_runs"],
@@ -1189,10 +1212,10 @@ def add_track_features(df: pd.DataFrame) -> pd.DataFrame:
         prior_rate=0.10, prior_strength=5.0,
     )
 
-    # Horse's going record
-    going_groups = df.groupby([hkey, "going"])
-    df["horse_going_runs"] = result_start_hist.groupby([df[hkey], df["going"]], sort=False).cumsum() - result_start_hist
-    df["horse_going_wins"] = won_hist.groupby([df[hkey], df["going"]], sort=False).cumsum() - won_hist
+    _gng = _cumulative(_composite_key(df, hkey, "going"), _race,
+        {"horse_going_runs": _rs, "horse_going_wins": _wh})
+    df["horse_going_runs"] = _gng["horse_going_runs"]
+    df["horse_going_wins"] = _gng["horse_going_wins"]
     df["horse_going_win_rate"] = np.where(
         df["horse_going_runs"] > 0,
         df["horse_going_wins"] / df["horse_going_runs"],
@@ -1356,11 +1379,15 @@ def add_course_distance_features(df: pd.DataFrame) -> pd.DataFrame:
     df["_dist_rounded"] = (df["distance_furlongs"] * 2).round() / 2
 
     # --- C&D (same track + same distance) ---
-    cd_groups = df.groupby([hkey, "track", "_dist_rounded"])
     result_start_hist = df["_result_start"].fillna(0.0)
     won_hist = df["_won_for_history"].fillna(0.0)
-    df["horse_cd_runs"] = result_start_hist.groupby([df[hkey], df["track"], df["_dist_rounded"]], sort=False).cumsum() - result_start_hist
-    df["horse_cd_wins"] = won_hist.groupby([df[hkey], df["track"], df["_dist_rounded"]], sort=False).cumsum() - won_hist
+    _race = df["race_id"].to_numpy()
+    _cd = _cumulative(
+        _composite_key(df, hkey, "track", "_dist_rounded"), _race,
+        {"horse_cd_runs": result_start_hist.to_numpy(), "horse_cd_wins": won_hist.to_numpy()},
+    )
+    df["horse_cd_runs"] = _cd["horse_cd_runs"]
+    df["horse_cd_wins"] = _cd["horse_cd_wins"]
     df["horse_cd_winner"] = (df["horse_cd_wins"] > 0).astype(int)
     df["horse_cd_win_rate"] = np.where(
         df["horse_cd_runs"] > 0,
@@ -1370,8 +1397,10 @@ def add_course_distance_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Course only (already partially in add_track_features, but
     #     add a "has won at course before" binary for clarity) ---
-    c_groups = df.groupby([hkey, "track"])
-    df["horse_course_wins"] = won_hist.groupby([df[hkey], df["track"]], sort=False).cumsum() - won_hist
+    df["horse_course_wins"] = _cumulative(
+        _composite_key(df, hkey, "track"), _race,
+        {"horse_course_wins": won_hist.to_numpy()},
+    )["horse_course_wins"]
     df["horse_course_winner"] = (df["horse_course_wins"] > 0).astype(int)
 
     df = df.drop(
@@ -1407,11 +1436,15 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Horse win rate at this distance category ---
     df["_dist_cat_str"] = df["dist_category"].astype(str)
-    dc_groups = df.groupby([hkey, "_dist_cat_str"])
     result_start_hist = df["_result_start"].fillna(0.0)
     won_hist = df["_won_for_history"].fillna(0.0)
-    df["horse_dist_cat_runs"] = result_start_hist.groupby([df[hkey], df["_dist_cat_str"]], sort=False).cumsum() - result_start_hist
-    df["_dc_wins"] = won_hist.groupby([df[hkey], df["_dist_cat_str"]], sort=False).cumsum() - won_hist
+    _race = df["race_id"].to_numpy()
+    _dc = _cumulative(
+        _composite_key(df, hkey, "_dist_cat_str"), _race,
+        {"horse_dist_cat_runs": result_start_hist.to_numpy(), "_dc_wins": won_hist.to_numpy()},
+    )
+    df["horse_dist_cat_runs"] = _dc["horse_dist_cat_runs"]
+    df["_dc_wins"] = _dc["_dc_wins"]
     df["horse_dist_cat_wr"] = np.where(
         df["horse_dist_cat_runs"] > 0,
         df["_dc_wins"] / df["horse_dist_cat_runs"],
@@ -1429,9 +1462,12 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
     # Surface × distance-category record captures horses that are, for example,
     # good AW sprinters but mediocre on turf or over longer trips.
     if "surface" in df.columns:
-        sdc_groups = df.groupby([hkey, "surface", "_dist_cat_str"])
-        df["horse_surface_dist_cat_runs"] = result_start_hist.groupby([df[hkey], df["surface"], df["_dist_cat_str"]], sort=False).cumsum() - result_start_hist
-        df["_sdc_wins"] = won_hist.groupby([df[hkey], df["surface"], df["_dist_cat_str"]], sort=False).cumsum() - won_hist
+        _sdc = _cumulative(
+            _composite_key(df, hkey, "surface", "_dist_cat_str"), _race,
+            {"horse_surface_dist_cat_runs": result_start_hist.to_numpy(), "_sdc_wins": won_hist.to_numpy()},
+        )
+        df["horse_surface_dist_cat_runs"] = _sdc["horse_surface_dist_cat_runs"]
+        df["_sdc_wins"] = _sdc["_sdc_wins"]
         df["horse_surface_dist_cat_wr"] = np.where(
             df["horse_surface_dist_cat_runs"] > 0,
             df["_sdc_wins"] / df["horse_surface_dist_cat_runs"],
@@ -1450,7 +1486,9 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
     # For each horse, find the distance category where they've won most.
     # Use cummax() (not transform("max")) to avoid look-ahead: at each
     # point in time we only know the horse's wins up to NOW, not future.
-    df["_cum_dist_cat_wins"] = won_hist.groupby([df[hkey], df["_dist_cat_str"]], sort=False).cumsum() - won_hist
+    # Identical formula to _dc_wins above — reuse to avoid a second sweep and a
+    # duplicate state key.
+    df["_cum_dist_cat_wins"] = df["_dc_wins"]
     # Running max of cumulative wins within each (horse, dist_cat) group
     df["_dc_running_max"] = df.groupby([hkey, "_dist_cat_str"])["_cum_dist_cat_wins"].cummax()
     # Running max across ALL distance categories for each horse
@@ -1494,7 +1532,10 @@ def add_headgear_features(df: pd.DataFrame) -> pd.DataFrame:
     hkey = _horse_key(df)
     horse_groups = df.groupby(hkey)
     df["_prev_hg"] = horse_groups["has_headgear"].shift(1).fillna(0)
-    df["_ever_had_hg"] = horse_groups["has_headgear"].cumsum() - df["has_headgear"]
+    df["_ever_had_hg"] = _cumulative(
+        df[hkey].to_numpy(), df["race_id"].to_numpy(),
+        {"_ever_had_hg": df["has_headgear"].to_numpy()},
+    )["_ever_had_hg"]
     # First-time = wearing headgear now AND never worn it in any prior race
     df["first_time_headgear"] = (
         (df["has_headgear"] == 1) & (df["_ever_had_hg"] == 0)
@@ -1517,11 +1558,15 @@ def add_surface_features(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Engineering surface features...")
     hkey = _horse_key(df)
 
-    surf_groups = df.groupby([hkey, "surface"])
     result_start_hist = df["_result_start"].fillna(0.0)
     won_hist = df["_won_for_history"].fillna(0.0)
-    df["horse_surface_runs"] = result_start_hist.groupby([df[hkey], df["surface"]], sort=False).cumsum() - result_start_hist
-    df["horse_surface_wins"] = won_hist.groupby([df[hkey], df["surface"]], sort=False).cumsum() - won_hist
+    _race = df["race_id"].to_numpy()
+    _sf = _cumulative(
+        _composite_key(df, hkey, "surface"), _race,
+        {"horse_surface_runs": result_start_hist.to_numpy(), "horse_surface_wins": won_hist.to_numpy()},
+    )
+    df["horse_surface_runs"] = _sf["horse_surface_runs"]
+    df["horse_surface_wins"] = _sf["horse_surface_wins"]
     df["horse_surface_win_rate"] = np.where(
         df["horse_surface_runs"] > 0,
         df["horse_surface_wins"] / df["horse_surface_runs"],
@@ -1548,9 +1593,12 @@ def add_surface_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Combined horse context: surface × race type
     if "race_type" in df.columns:
-        srt_groups = df.groupby([hkey, "surface", "race_type"])
-        df["horse_surface_rt_runs"] = result_start_hist.groupby([df[hkey], df["surface"], df["race_type"]], sort=False).cumsum() - result_start_hist
-        df["_surface_rt_wins"] = won_hist.groupby([df[hkey], df["surface"], df["race_type"]], sort=False).cumsum() - won_hist
+        _srt = _cumulative(
+            _composite_key(df, hkey, "surface", "race_type"), _race,
+            {"horse_surface_rt_runs": result_start_hist.to_numpy(), "_surface_rt_wins": won_hist.to_numpy()},
+        )
+        df["horse_surface_rt_runs"] = _srt["horse_surface_rt_runs"]
+        df["_surface_rt_wins"] = _srt["_surface_rt_wins"]
         df["horse_surface_rt_wr"] = np.where(
             df["horse_surface_rt_runs"] > 0,
             df["_surface_rt_wins"] / df["horse_surface_rt_runs"],
@@ -2536,7 +2584,10 @@ def add_prize_money_features(df: pd.DataFrame) -> pd.DataFrame:
     ).fillna(0)
     
     # Cumsum / count to avoid expanding().mean() issues:
-    df["_safe_cum_prize"] = horse_groups["prize_money"].cumsum() - df["prize_money"]
+    df["_safe_cum_prize"] = _cumulative(
+        df[hkey].to_numpy(), df["race_id"].to_numpy(),
+        {"_safe_cum_prize": df["prize_money"].to_numpy()},
+    )["_safe_cum_prize"]
     hp_races = df.get("horse_prev_races", pd.Series(0, index=df.index))
     df["horse_avg_prize_contested"] = np.where(
         hp_races > 0,
@@ -3273,14 +3324,19 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     logger.info("Engineering cross-entity features...")
     hkey = _horse_key(df)
+    # Shared inputs for the class-C cross-entity counts (seed-aware _cumulative).
+    _rs = df["_result_start"].fillna(0.0).to_numpy()
+    _wh = df["_won_for_history"].fillna(0.0).to_numpy()
+    _race = df["race_id"].to_numpy()
 
     # --- Jockey × going ---
     if "going" in df.columns:
-        jg = df.groupby(["jockey", "going"])
-        result_start_hist = df["_result_start"].fillna(0.0)
-        won_hist = df["_won_for_history"].fillna(0.0)
-        df["jockey_going_runs"] = result_start_hist.groupby([df["jockey"], df["going"]], sort=False).cumsum() - result_start_hist
-        df["_jg_w"] = won_hist.groupby([df["jockey"], df["going"]], sort=False).cumsum() - won_hist
+        _jg = _cumulative(
+            _composite_key(df, "jockey", "going"), _race,
+            {"jockey_going_runs": _rs, "_jg_w": _wh},
+        )
+        df["jockey_going_runs"] = _jg["jockey_going_runs"]
+        df["_jg_w"] = _jg["_jg_w"]
         df["jockey_going_wr"] = np.where(
             df["jockey_going_runs"] > 2,
             df["_jg_w"] / df["jockey_going_runs"],
@@ -3294,9 +3350,12 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Jockey × distance category ---
     if "dist_category" in df.columns:
         df["_dc_str"] = df["dist_category"].astype(str)
-        jdc = df.groupby(["jockey", "_dc_str"])
-        df["jockey_dist_cat_runs"] = result_start_hist.groupby([df["jockey"], df["_dc_str"]], sort=False).cumsum() - result_start_hist
-        df["_jdc_w"] = won_hist.groupby([df["jockey"], df["_dc_str"]], sort=False).cumsum() - won_hist
+        _jdc = _cumulative(
+            _composite_key(df, "jockey", "_dc_str"), _race,
+            {"jockey_dist_cat_runs": _rs, "_jdc_w": _wh},
+        )
+        df["jockey_dist_cat_runs"] = _jdc["jockey_dist_cat_runs"]
+        df["_jdc_w"] = _jdc["_jdc_w"]
         df["jockey_dist_cat_wr"] = np.where(
             df["jockey_dist_cat_runs"] > 2,
             df["_jdc_w"] / df["jockey_dist_cat_runs"],
@@ -3309,9 +3368,14 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Horse × going (win rate on this going type) ---
     if "going" in df.columns:
-        hg = df.groupby([hkey, "going"])
-        df["horse_going_runs"] = result_start_hist.groupby([df[hkey], df["going"]], sort=False).cumsum() - result_start_hist
-        df["_hg_w"] = won_hist.groupby([df[hkey], df["going"]], sort=False).cumsum() - won_hist
+        # Tagged state key — this recomputes horse_going_runs (also produced in
+        # add_track_features); a distinct key keeps the two seed states separate.
+        _hg = _cumulative(
+            _composite_key(df, hkey, "going"), _race,
+            {"horse_going_runs__xent": _rs, "_hg_w": _wh},
+        )
+        df["horse_going_runs"] = _hg["horse_going_runs__xent"]
+        df["_hg_w"] = _hg["_hg_w"]
         df["horse_going_wr"] = np.where(
             df["horse_going_runs"] > 0,
             df["_hg_w"] / df["horse_going_runs"],
@@ -3322,9 +3386,12 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Horse × going × distance rounded (C&D&G specialisation) ---
     if "going" in df.columns and "distance_furlongs" in df.columns:
         df["_dist_r2"] = (df["distance_furlongs"] * 2).round() / 2
-        hgd = df.groupby([hkey, "going", "_dist_r2"])
-        df["horse_going_dist_runs"] = result_start_hist.groupby([df[hkey], df["going"], df["_dist_r2"]], sort=False).cumsum() - result_start_hist
-        df["_hgd_w"] = won_hist.groupby([df[hkey], df["going"], df["_dist_r2"]], sort=False).cumsum() - won_hist
+        _hgd = _cumulative(
+            _composite_key(df, hkey, "going", "_dist_r2"), _race,
+            {"horse_going_dist_runs": _rs, "_hgd_w": _wh},
+        )
+        df["horse_going_dist_runs"] = _hgd["horse_going_dist_runs"]
+        df["_hgd_w"] = _hgd["_hgd_w"]
         df["horse_going_dist_wr"] = np.where(
             df["horse_going_dist_runs"] > 0,
             df["_hgd_w"] / df["horse_going_dist_runs"],
@@ -3335,8 +3402,12 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Trainer × race class (race-safe) ---
     if "race_class" in df.columns:
         df["_tc_key"] = df["trainer"].astype(str) + "||" + df["race_class"].astype(str)
-        df["trainer_class_runs"] = _race_safe_cumcount(df, "_tc_key")
-        df["_tc_w"] = _race_safe_cumsum(df, "_tc_key", "won")
+        _tc = _cumulative(
+            df["_tc_key"].to_numpy(), _race,
+            {"trainer_class_runs": np.ones(len(df)), "_tc_w": df["won"].to_numpy()},
+        )
+        df["trainer_class_runs"] = _tc["trainer_class_runs"]
+        df["_tc_w"] = _tc["_tc_w"]
         df["trainer_class_wr"] = np.where(
             df["trainer_class_runs"] > 2,
             df["_tc_w"] / df["trainer_class_runs"],
