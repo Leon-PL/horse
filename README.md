@@ -33,8 +33,9 @@ The flagship model is a **6-model ensemble** combining Learning-to-Rank, regress
 
 ```
 horse/
-├── app.py                          # Streamlit web application
-├── train.py                        # Command-line training script
+├── picks_app.py                    # Lean serving app: Today's Picks + Matchbook (loads the promoted model only)
+├── training_app.py                 # Heavy app: data refresh, training, registry, diagnostics
+├── train.py                        # Command-line training script (thin CLI over src/training.train_run)
 ├── config.py                       # Configuration settings
 ├── requirements.txt                # Python dependencies (loose)
 ├── requirements.lock               # Pinned dependency versions
@@ -109,23 +110,34 @@ python train.py --source sample --races 3000
 python train.py --skip-collection
 ```
 
-### 3. Launch the Web App
+### 3. Launch the Web Apps
+
+The UI is split into two processes so the day-to-day picks app stays fast.
 
 ```bash
-streamlit run app.py
+# Lean serving app — loads only the promoted model (fast startup)
+streamlit run picks_app.py
+
+# Heavy app — data refresh, training, registry, diagnostics (separate port)
+streamlit run training_app.py --server.port 8502
 ```
 
-This opens an interactive dashboard with 7 pages:
+**`picks_app.py`** (serving) — loads the production-promoted model via the
+registry pointer; it never loads the full feature store at startup.
 
 | Page | Description |
 |------|-------------|
-| **🎓 Train & Tune** | Scrape data, configure frameworks & hyperparameters, train the ensemble from the UI |
-| **🧪 Experiments** | Compare saved training runs side-by-side |
-| **🔮 Predict** | Paste a race URL or enter horses manually for prediction |
-| **💰 Today's Picks** | Auto-scrape current UK racecards with live odds and value picks |
-| **📊 Data Explorer** | Charts and statistics from the training dataset |
-| **📈 Model Insights** | Feature importance, SHAP explanations, overfit diagnostics, backtesting with P&L charts |
-| **📖 Guide** | In-app documentation |
+| **💰 Today's Picks** | Auto-scrape current UK racecards with live odds, value picks, and manual custom-race entry |
+| **🔌 Matchbook API** | Connectivity harness for the Matchbook exchange |
+
+**`training_app.py`** (training/analysis) — refresh data, train & compare
+runs, and promote a run to production.
+
+| Page | Description |
+|------|-------------|
+| **📦 Data** | Inspect / refresh the feature store |
+| **🤖 Train** | Configure frameworks & hyperparameters, run `train_run`, review calibration / ROI / CLV evals |
+| **🗂️ Registry** | Browse saved runs and promote one to production |
 
 ### 4. Run the Tests
 

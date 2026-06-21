@@ -7,7 +7,7 @@ This document serves as a high-level overview of the project architecture, curre
 The project is a comprehensive Python-based machine learning pipeline and betting automation system for horse racing. It features data scraping, feature engineering, model training (XGBoost/CatBoost), backtesting, and live Matchbook API integration, all orchestrated through a Streamlit UI.
 
 **Core Tech Stack**
-*   **UI Application:** Streamlit (`app.py`)
+*   **UI Application:** Streamlit, split into two processes — `picks_app.py` (lean serving) and `training_app.py` (heavy training/analysis)
 *   **Modeling:** LightGBM (default framework, incl. focal-loss classifiers), XGBoost, CatBoost, Scikit-learn (Joblib for persistence)
 *   **Hyperparameter Tuning:** Optuna
 *   **Data Processing:** Pandas, Numba (for high-performance functions)
@@ -16,17 +16,12 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
 
 ## 2. Directory Structure & System Status
 
-### 2.1 User Interface (`app.py` & `config.py`)
+### 2.1 User Interface (`picks_app.py`, `training_app.py` & `config.py`)
 *   **Status:** Functional, actively maintained.
-*   **Description:** The main entry point is `app.py`; pages are selected via a sidebar radio, so only the active page's section executes per rerun. The cached run-store wrappers, chart builders and diagnostic panels live in `src/app_helpers.py`. The page sections:
-    *   `🎓 Train & Tune`: Core pipeline execution.
-    *   `🧭 Autotune`: Hyperparameter optimization wrapper.
-    *   `🧪 Experiments`: Run tracking and MLFlow-style experiment viewing.
-    *   `🔮 Predict`: Serving predictions for specific race cards.
-    *   `💰 Today's Picks`: High-value predictions matched to today's races.
-    *   `🔌 Matchbook API`: Live connection to Matchbook for pulling odds and placing bets.
-    *   `🔎 Shortcomings`: Analytical tools for model weaknesses.
-*   **Recent Changes:** H2O AutoML and FLAML were cleanly removed from the UI and dependencies to simplify the modeling pipeline. Sub-model frameworks are selectable per role (`config.SUB_MODEL_FRAMEWORKS`); the current defaults are LightGBM for both win and place classifiers.
+*   **Description:** The UI is split into two Streamlit processes so the day-to-day serving app stays fast (the old monolithic `app.py` was retired). Pages are selected via a sidebar radio, so only the active page's section executes per rerun. The cached run-store wrappers, chart builders and diagnostic panels live in `src/app_helpers.py`.
+    *   **`picks_app.py` (serving)** — loads only the production-promoted model via the registry pointer (`src/run_store.load_production_predictor` / `production.json`); it never loads the full feature store at startup. Pages: `💰 Today's Picks` (high-value predictions matched to today's races, plus manual custom-race entry) and `🔌 Matchbook API` (Matchbook connectivity harness).
+    *   **`training_app.py` (training/analysis)** — heavy, run on a separate port. A thin Streamlit shell over the callable `src/training` modules. Pages: `📦 Data` (feature-store inspect/refresh), `🤖 Train` (configure frameworks/hyperparameters, run `train_run`, review calibration/ROI/CLV evals), `🗂️ Registry` (browse saved runs, promote one to production).
+*   **Recent Changes:** Training pipeline rebuilt as a callable core (`src/training.train_run`) with a lean run registry (no per-run featured/processed parquet snapshots — reproduce from the store) and a production pointer for promotion. Serving and training were split into two apps. H2O AutoML and FLAML were previously removed from the UI and dependencies. Sub-model frameworks are selectable per role (`config.SUB_MODEL_FRAMEWORKS`); the current defaults are LightGBM for both win and place classifiers.
 
 ### 2.2 Data Pipeline & Scraping (`src/data_*.py`, `src/database.py`, `src/rtv_scraper.py`, `src/pedigree_backfill.py`)
 *   **Status:** Stable / In Production.
