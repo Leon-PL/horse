@@ -192,6 +192,36 @@ def test_rolling_seeded_append_matches_full():
         assert np.all(np.isclose(a, b, rtol=1e-4, atol=1e-6) | both_nan), k
 
 
+def test_time_window_seeded_append_matches_full():
+    """Seed-aware _time_window_stats: seeded append == full recompute for new rows
+    (sum and count), with the window straddling the history/new boundary."""
+    rng = np.random.default_rng(13)
+    rows = []
+    rid = 0
+    for day in range(60):
+        for _ in range(int(rng.integers(1, 3))):
+            rid += 1
+            for _ in range(int(rng.integers(2, 6))):
+                rows.append({
+                    "race_id": f"R{rid:04d}",
+                    "race_date": pd.Timestamp("2024-01-01") + pd.Timedelta(days=day),
+                    "trainer": f"T{int(rng.integers(0, 8))}",
+                    "v": float(rng.integers(0, 2)),
+                })
+    df = pd.DataFrame(rows)
+    vs_full, vc_full = fe._time_window_stats_core(df, "trainer", "race_date", "v", 30)
+
+    boundary = pd.Timestamp("2024-01-31")
+    hist = df[df["race_date"] <= boundary]
+    new = df[df["race_date"] > boundary]
+    newmask = (df["race_date"] > boundary).to_numpy()
+
+    _, state = fe._time_window_with_seed(hist, "trainer", "race_date", "v", 30, {})
+    (vs, vc), _ = fe._time_window_with_seed(new, "trainer", "race_date", "v", 30, state)
+    assert np.allclose(vs, vs_full[newmask])
+    assert np.allclose(vc, vc_full[newmask])
+
+
 def test_state_is_json_serialisable_and_reloadable():
     df = _frame(4)
     cut = sorted(df["race_id"].unique())[len(df["race_id"].unique()) // 2]

@@ -470,7 +470,7 @@ def _race_safe_cumsum(df: pd.DataFrame, entity_col, value_col: str) -> pd.Series
     return naive_cumsum - within_race_cumsum
 
 
-def _time_window_stats(
+def _time_window_stats_core(
     df: pd.DataFrame,
     entity_col: str,
     date_col: str,
@@ -507,6 +507,84 @@ def _time_window_stats(
     val_out[orig_idx] = v_sum
     cnt_out[orig_idx] = v_cnt
     return val_out, cnt_out
+
+
+_DAY_NS = np.int64(86_400_000_000_000)
+
+
+def _time_window_with_seed(df, entity_col, date_col, value_col, window_days, seed):
+    """Seed-aware ``_time_window_stats``: prepend each entity's carried recent
+    history rows (their REAL dates + values, within ``window_days``) so the
+    calendar-window kernel runs unchanged on a new-only frame.
+
+    ``seed``/``new_seed`` map entity -> list of ``(date_i8, value)`` within the
+    last ``window_days`` of history — exactly what any later row's window can
+    reach, so the append equals a full recompute."""
+    seed = dict(seed or {})
+    ent = df[entity_col].astype(str).to_numpy()
+    dates_i8 = pd.to_datetime(df[date_col], errors="coerce").values.astype("int64")
+    vals = df[value_col].to_numpy().astype(np.float64)
+    n = len(df)
+
+    s_ent: list = []
+    s_date: list = []
+    s_val: list = []
+    for e in set(ent.tolist()):
+        for d_i8, v in seed.get(e, []):
+            s_ent.append(e)
+            s_date.append(d_i8)
+            s_val.append(v)
+
+    if s_ent:
+        aug_ent = np.concatenate([np.array(s_ent, dtype=object), ent])
+        aug_date = np.concatenate([np.array(s_date, dtype="int64"), dates_i8])
+        aug_val = np.concatenate([np.array(s_val, dtype=np.float64), vals])
+        synth_mask = np.concatenate(
+            [np.ones(len(s_ent), bool), np.zeros(n, bool)]
+        )
+    else:
+        aug_ent, aug_date, aug_val = ent, dates_i8, vals
+        synth_mask = np.zeros(n, bool)
+
+    aug = pd.DataFrame({
+        entity_col: aug_ent,
+        date_col: pd.to_datetime(aug_date),
+        value_col: aug_val,
+    })
+    v_sum, v_cnt = _time_window_stats_core(aug, entity_col, date_col, value_col, window_days)
+    real = ~synth_mask
+    out = (v_sum[real], v_cnt[real])
+
+    # Advance: keep each entity's rows within window_days of the frame's max date.
+    window_ns = np.int64(window_days) * _DAY_NS
+    maxd = aug_date.max() if len(aug_date) else np.int64(0)
+    cutoff = maxd - window_ns
+    new_state = dict(seed)
+    keep = aug_date >= cutoff
+    from collections import defaultdict
+    buf: dict = defaultdict(list)
+    for e, d_i8, v, k in zip(aug_ent.tolist(), aug_date.tolist(), aug_val.tolist(), keep.tolist()):
+        if k:
+            buf[e].append((int(d_i8), float(v)))
+    for e in buf:
+        new_state[e] = buf[e]
+    return out, new_state
+
+
+def _time_window(df, entity_col, date_col, value_col, window_days):
+    """Calendar-window stats, seed-aware under ``counts_state_scope`` (class B).
+
+    Full build (no active state) calls the core directly — byte-identical.
+    Under a seed scope it carries each entity's last ``window_days`` of rows so
+    an append can run over new rows only. State keyed by (entity, value, days)."""
+    if _COUNTS_STATE is None:
+        return _time_window_stats_core(df, entity_col, date_col, value_col, window_days)
+    key = f"tw::{entity_col}::{value_col}::{window_days}"
+    out, new_state = _time_window_with_seed(
+        df, entity_col, date_col, value_col, window_days, _COUNTS_STATE.get(key)
+    )
+    _COUNTS_STATE[key] = new_state
+    return out
 
 
 def _entity_day_start_view(
@@ -1111,9 +1189,9 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
         _places_col = f"jockey_places_{days}d"
         _pr_col = f"jockey_pr_{days}d"
 
-        w_arr, _ = _time_window_stats(df, "jockey", "race_date", "_won_for_history", days)
-        r_arr, _ = _time_window_stats(df, "jockey", "race_date", "_result_start_for_history", days)
-        p_arr, _ = _time_window_stats(df, "jockey", "race_date", "_placed_for_history", days)
+        w_arr, _ = _time_window(df, "jockey", "race_date", "_won_for_history", days)
+        r_arr, _ = _time_window(df, "jockey", "race_date", "_result_start_for_history", days)
+        p_arr, _ = _time_window(df, "jockey", "race_date", "_placed_for_history", days)
         df[_wins_col] = w_arr
         df[_rides_col] = r_arr
         df[_places_col] = p_arr
@@ -1205,9 +1283,9 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
         _places_col = f"trainer_places_{days}d"
         _pr_col = f"trainer_pr_{days}d"
 
-        w_arr, _ = _time_window_stats(df, "trainer", "race_date", "_won_for_history", days)
-        r_arr, _ = _time_window_stats(df, "trainer", "race_date", "_result_start_for_history", days)
-        p_arr, _ = _time_window_stats(df, "trainer", "race_date", "_placed_for_history", days)
+        w_arr, _ = _time_window(df, "trainer", "race_date", "_won_for_history", days)
+        r_arr, _ = _time_window(df, "trainer", "race_date", "_result_start_for_history", days)
+        p_arr, _ = _time_window(df, "trainer", "race_date", "_placed_for_history", days)
         df[_wins_col] = w_arr
         df[_runs_col] = r_arr
         df[_places_col] = p_arr
@@ -3256,11 +3334,11 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
                     race_date=("race_date", "first"),
                 ).reset_index()
                 # Sum-of-individual-norm_pos in window
-                _ws, _ = _time_window_stats(
+                _ws, _ = _time_window(
                     _agg, entity_col, "race_date", "_np_sum", _te_w,
                 )
                 # Count-of-individual-runners in window
-                _wc, _ = _time_window_stats(
+                _wc, _ = _time_window(
                     _agg, entity_col, "race_date", "_np_cnt", _te_w,
                 )
                 _agg["_val_sum"] = _ws
@@ -3275,10 +3353,10 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
                 val_sum = _mapped["_val_sum"].values.astype(float)
                 val_cnt = _mapped["_val_cnt"].values.astype(float)
             else:
-                val_sum, _ = _time_window_stats(
+                val_sum, _ = _time_window(
                     df, entity_col, "race_date", "_norm_pos_safe", _te_w,
                 )
-                val_cnt, _ = _time_window_stats(
+                val_cnt, _ = _time_window(
                     df, entity_col, "race_date", "_norm_pos_weight", _te_w,
                 )
             observed = np.full(np.shape(val_sum), global_mean, dtype=float)
@@ -3707,8 +3785,8 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
         count_source = "_result_start_for_history" if "_result_start_for_history" in df.columns else "_ones"
         if count_source == "_ones":
             df["_ones"] = 1.0
-        _, cnt_14 = _time_window_stats(df, hkey, "race_date", count_source, 14)
-        _, cnt_30 = _time_window_stats(df, hkey, "race_date", count_source, 30)
+        _, cnt_14 = _time_window(df, hkey, "race_date", count_source, 14)
+        _, cnt_30 = _time_window(df, hkey, "race_date", count_source, 30)
         df["races_in_last_14d"] = cnt_14
         df["races_in_last_30d"] = cnt_30
         df = df.drop(columns=["_ones"], errors="ignore")
