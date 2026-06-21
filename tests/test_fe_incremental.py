@@ -222,6 +222,36 @@ def test_time_window_seeded_append_matches_full():
     assert np.allclose(vc, vc_full[newmask])
 
 
+def test_lag_seeded_append_matches_full():
+    """Seed-aware _lag: seeded append == full groupby.shift(1) for new rows."""
+    rng = np.random.default_rng(21)
+    rows = []
+    rid = 0
+    for day in range(30):
+        rid += 1
+        for _ in range(int(rng.integers(2, 6))):
+            rows.append({
+                "race_id": f"R{rid:04d}",
+                "horse": f"H{int(rng.integers(0, 10))}",
+                "v": float(rng.normal()),
+            })
+    df = pd.DataFrame(rows)
+    full = df.groupby("horse", sort=False)["v"].shift(1).to_numpy()
+    cut = sorted(df["race_id"].unique())[len(df["race_id"].unique()) // 2]
+    hist = df[df["race_id"] <= cut]
+    new = df[df["race_id"] > cut]
+    newmask = (df["race_id"] > cut).to_numpy()
+
+    state: dict = {}
+    with fe.counts_state_scope(state):
+        fe._lag(hist, "horse", "v")
+    with fe.counts_state_scope(state):
+        got = fe._lag(new, "horse", "v").to_numpy()
+    a, b = got, full[newmask]
+    both_nan = np.isnan(a) & np.isnan(b)
+    assert np.all(np.isclose(a, b, equal_nan=False) | both_nan)
+
+
 def test_state_is_json_serialisable_and_reloadable():
     df = _frame(4)
     cut = sorted(df["race_id"].unique())[len(df["race_id"].unique()) // 2]

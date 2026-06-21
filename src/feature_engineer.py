@@ -770,6 +770,29 @@ def _rolling_with_seed(df, group_key, value_col, operations, seed):
     return results, new_state
 
 
+def _lag(df, entity_col, col):
+    """Per-entity ``shift(1)`` (previous-row value), seed-aware under
+    ``counts_state_scope`` (class L — bounded lookback of 1 row but unbounded in
+    time). Full build calls ``groupby.shift(1)`` directly (byte-identical). Seeded:
+    the first in-frame row of each entity takes the carried last value; state
+    holds the last value per entity. Works for any dtype (numeric / date / str)."""
+    g = df.groupby(entity_col, sort=False)
+    shifted = g[col].shift(1)
+    if _COUNTS_STATE is None:
+        return shifted
+    key = f"lag::{entity_col}::{col}"
+    seed = _COUNTS_STATE.get(key, {})
+    if seed:
+        ent = pd.Series(df[entity_col].to_numpy(), index=df.index)
+        first_mask = pd.Series((g.cumcount() == 0).to_numpy(), index=df.index)
+        shifted = shifted.where(~first_mask, ent.map(seed))
+    new_state = dict(seed)
+    _tail = df.groupby(entity_col, sort=False).tail(1)
+    new_state.update(dict(zip(_tail[entity_col].to_numpy(), _tail[col].to_numpy())))
+    _COUNTS_STATE[key] = new_state
+    return shifted
+
+
 def _rolling(df, group_key, value_col, operations) -> dict:
     """Rolling features, seed-aware under ``counts_state_scope`` (class B).
 
@@ -863,7 +886,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         prior_rate=0.05, prior_strength=10.0,
     )
     df["horse_last_run_non_finish"] = (
-        horse_groups["_non_finisher_result"].shift(1).fillna(0).astype(np.int8)
+        _lag(df, hkey, "_non_finisher_result").fillna(0).astype(np.int8)
     )
 
     # Override the static scraped lifetime stats with properly computed
@@ -924,8 +947,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     df["horse_non_finish_rate_10"] = df["horse_non_finish_rate_10"].fillna(0)
 
     # --- Days since last race ---
-    horse_groups_dates = df.groupby(hkey)
-    df["horse_last_race_date"] = horse_groups_dates["race_date"].shift(1)
+    df["horse_last_race_date"] = _lag(df, hkey, "race_date")
     df["days_since_last_race"] = (
         (df["race_date"] - df["horse_last_race_date"]).dt.days.fillna(60)
     )
@@ -963,7 +985,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Weight change from previous run ---
     if "weight_lbs" in df.columns:
         horse_groups = df.groupby(hkey)
-        df["weight_change"] = horse_groups["weight_lbs"].diff().fillna(0)
+        df["weight_change"] = (df["weight_lbs"] - _lag(df, hkey, "weight_lbs")).fillna(0)
         # Weight-change relative to the field: did THIS horse's burden shift
         # more or less than the race average?  Captures apprentice allowances
         # and handicapping adjustments that narrow/widen vs the competition.
@@ -1542,7 +1564,7 @@ def add_class_change_features(df: pd.DataFrame) -> pd.DataFrame:
         df["_class_num"] = 0
 
     horse_groups = df.groupby(hkey)
-    df["_prev_class"] = horse_groups["_class_num"].shift(1)
+    df["_prev_class"] = _lag(df, hkey, "_class_num")
 
     # Positive = dropping (easier), Negative = rising (harder)
     df["class_change"] = (df["_class_num"] - df["_prev_class"]).fillna(0)
@@ -1551,7 +1573,7 @@ def add_class_change_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Official-rating change from previous run
     if "official_rating" in df.columns:
-        df["or_change"] = horse_groups["official_rating"].diff().fillna(0)
+        df["or_change"] = (df["official_rating"] - _lag(df, hkey, "official_rating")).fillna(0)
     else:
         df["or_change"] = 0
 
@@ -1616,7 +1638,7 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Distance change from previous race ---
     horse_groups = df.groupby(hkey)
-    df["_prev_dist"] = horse_groups["distance_furlongs"].shift(1)
+    df["_prev_dist"] = _lag(df, hkey, "distance_furlongs")
     df["distance_change"] = (df["distance_furlongs"] - df["_prev_dist"]).fillna(0)
     df["stepping_up"] = (df["distance_change"] > 0.5).astype(int)
     df["stepping_down"] = (df["distance_change"] < -0.5).astype(int)
@@ -1725,7 +1747,7 @@ def add_headgear_features(df: pd.DataFrame) -> pd.DataFrame:
     # First-time headgear detection
     hkey = _horse_key(df)
     horse_groups = df.groupby(hkey)
-    df["_prev_hg"] = horse_groups["has_headgear"].shift(1).fillna(0)
+    df["_prev_hg"] = _lag(df, hkey, "has_headgear").fillna(0)
     df["_ever_had_hg"] = _cumulative(
         df[hkey].to_numpy(), df["race_id"].to_numpy(),
         {"_ever_had_hg": df["has_headgear"].to_numpy()},
@@ -1780,7 +1802,7 @@ def add_surface_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Surface switch from previous run — captures adaptation cost
     horse_groups = df.groupby(hkey)
-    df["_prev_surface"] = horse_groups["surface"].shift(1)
+    df["_prev_surface"] = _lag(df, hkey, "surface")
     df["surface_switch"] = (
         df["_prev_surface"].notna() & (df["surface"] != df["_prev_surface"])
     ).astype(np.int8)
@@ -1824,14 +1846,14 @@ def add_jockey_intent_features(df: pd.DataFrame) -> pd.DataFrame:
     horse_groups = df.groupby(hkey)
 
     # --- Jockey switch (different jockey from last run) ---
-    df["_prev_jockey"] = horse_groups["jockey"].shift(1)
+    df["_prev_jockey"] = _lag(df, hkey, "jockey")
     df["jockey_switch"] = (
         df["_prev_jockey"].notna() & (df["jockey"] != df["_prev_jockey"])
     ).astype(int)
 
     # --- Jockey upgrade (current jockey Elo > previous jockey Elo) ---
     if "jockey_elo" in df.columns:
-        df["_prev_jockey_elo"] = horse_groups["jockey_elo"].shift(1)
+        df["_prev_jockey_elo"] = _lag(df, hkey, "jockey_elo")
         df["jockey_elo_change"] = (
             (df["jockey_elo"] - df["_prev_jockey_elo"]).fillna(0)
         )
@@ -1842,8 +1864,8 @@ def add_jockey_intent_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Beaten favourite last time (bounce-back angle) ---
     if "is_favourite" in df.columns:
-        df["_prev_fav"] = horse_groups["is_favourite"].shift(1).fillna(0)
-        df["_prev_won"] = horse_groups["won"].shift(1).fillna(0)
+        df["_prev_fav"] = _lag(df, hkey, "is_favourite").fillna(0)
+        df["_prev_won"] = _lag(df, hkey, "won").fillna(0)
         df["beaten_fav_last"] = (
             (df["_prev_fav"] == 1) & (df["_prev_won"] == 0)
         ).astype(int)
@@ -2759,7 +2781,7 @@ def add_medical_features(df: pd.DataFrame) -> pd.DataFrame:
     
     horse_groups = df.groupby(hkey)
     # Track the previous known sex (shifting by 1)
-    df["_prev_is_gelding"] = horse_groups["_is_gelding"].shift(1).fillna(0)
+    df["_prev_is_gelding"] = _lag(df, hkey, "_is_gelding").fillna(0)
     
     # First time gelding is 1 if it is now a gelding but previously was not
     df["first_time_gelded"] = (
@@ -3794,7 +3816,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
     # ── Trainer Switch ──
     if "trainer" in df.columns:
         horse_groups = df.groupby(hkey)
-        df["_prev_trainer"] = horse_groups["trainer"].shift(1)
+        df["_prev_trainer"] = _lag(df, hkey, "trainer")
         df["trainer_switch"] = (
             df["_prev_trainer"].notna()
             & (df["trainer"] != df["_prev_trainer"])
