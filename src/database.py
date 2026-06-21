@@ -388,11 +388,15 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
     else:
         logger.info("  No new runners found for missing dates")
 
-    # Save a CSV copy for the pipeline
-    full_df = load_from_database(days_back=days_back)
+    # Save a CSV copy for the pipeline. This MUST be the full history, not the
+    # scrape window: feature engineering computes cumulative/rolling features
+    # across each horse's whole career, and get_featured_dataset() rebuilds the
+    # store from this CSV. Writing only `days_back` here previously clobbered
+    # the feature store down to the scrape window.
+    full_df = load_from_database()
     csv_path = os.path.join(config.RAW_DATA_DIR, "race_results.csv")
     full_df.to_csv(csv_path, index=False)
-    logger.info(f"  Saved CSV snapshot → {csv_path}")
+    logger.info(f"  Saved full CSV snapshot ({len(full_df):,} rows) → {csv_path}")
 
     return full_df
 

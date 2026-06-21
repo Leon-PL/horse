@@ -210,7 +210,7 @@ if page == "📦 Data":
         with st.spinner(f"Scraping last {cu}d …"):
             from src.database import sync_database
             df = sync_database(days_back=int(cu))
-        st.success(f"DB synced — {len(df):,} rows in window.")
+        st.success(f"DB synced — {len(df):,} rows total in the DB.")
         _db_stats.clear()
 
 
