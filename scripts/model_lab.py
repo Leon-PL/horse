@@ -15,6 +15,7 @@ Usage:
     python scripts/model_lab.py --exp baseline
     python scripts/model_lab.py --exp baseline --frac 0.5   # subsample races
     python scripts/model_lab.py --exp place_ab --frac 0.4   # place model vs win-derived fallback (quick)
+    python scripts/model_lab.py --exp prune --frac 0.4      # feature-count ablation: top-K knee vs full
 """
 from __future__ import annotations
 
@@ -73,10 +74,16 @@ def build_slim_store() -> None:
     """Build the slim parquet straight from the feature store.
 
     The lean run registry no longer snapshots per-run featured parquets, so
-    this is the way to get a slim dataset for experiments now.
+    this is the way to get a slim dataset for experiments now. Reads the
+    already-built store directly (load_featured) — it does NOT re-run
+    process_data or trigger any (re)build.
     """
-    from src.featured_dataset import get_featured_dataset
-    df = get_featured_dataset()
+    from src.feature_store import FeatureStore
+    store = FeatureStore()
+    if not store.exists():
+        raise SystemExit("Feature store not built. Build it first "
+                         "(scripts/build_feature_store_batched.py).")
+    df = store.load_featured()
     feat_cols = get_feature_columns(df)
     meta = [c for c in ["race_id", "race_date", "horse_name", "finish_position",
                         "won", "num_runners", "odds", "handicap", "horse_prev_races",
@@ -505,6 +512,65 @@ def exp_framework(data):
     _print(eval_calib(fit_raw(data, BASE_PARAMS, framework="cat"), calib="platt", label="catboost(platt)"))
 
 
+def _print_prune(res, base_ll):
+    d = res["log_loss"] - base_ll
+    extra = f"  gap_mkt {res['gap_log_loss']:+.4f}" if "gap_log_loss" in res else ""
+    print(f"  {res['label']:26} feat={res['n_feat']:>4}  logloss {res['log_loss']:.4f} "
+          f"(Δfull {d:+.4f})  brier {res['brier']:.4f}  rps {res['rps']:.4f}{extra}", flush=True)
+
+
+def exp_prune(data):
+    """Find the feature knee by ABLATION (retrain at top-K), not importance alone.
+
+    A pilot LGBM fit ranks features by gain; we then retrain the win model at
+    several top-K budgets and read Δ log-loss vs the full-feature model. The
+    smallest K within ~0.001 log-loss of full is the defensible cut. A
+    correlation-pruned variant is included to expose the split-importance trap.
+    Use --frac to keep it quick.
+    """
+    import lightgbm as lgb
+    fcols = list(data["feature_cols"])
+    n = len(fcols)
+    Xtr, Xte = data["X_train"], data["X_test"]
+    gtr = data["groups_train"]
+    cum = np.cumsum(gtr); rc = int(np.searchsorted(cum, int(len(Xtr) * 0.85)))
+    row = int(cum[rc - 1]) if rc > 0 else 0
+    yw = data["y_train_won"].astype(int)
+
+    # Pilot fit (train-fit slice only) → gain importance ranking
+    pilot = lgb.LGBMClassifier(**{**BASE_PARAMS, "n_estimators": 500}).fit(Xtr[:row], yw[:row])
+    gain = pilot.booster_.feature_importance(importance_type="gain").astype(float)
+    order = np.argsort(gain)[::-1]
+    print(f"features={n}  dead(zero gain)={int((gain == 0).sum())}  "
+          f"(pilot 500 trees on {row:,} rows)\n")
+
+    # Full-feature reference
+    full = fit_eval(data, BASE_PARAMS, calib="platt", label="full")[0]
+    base_ll = full["log_loss"]
+    _print_prune(full, base_ll)
+
+    def _eval_cols(cols, label):
+        cols = np.sort(np.asarray(cols, dtype=int))
+        sub = dict(data)
+        sub["X_train"] = Xtr[:, cols]
+        sub["X_test"] = Xte[:, cols]
+        _print_prune(fit_eval(sub, BASE_PARAMS, calib="platt", label=label)[0], base_ll)
+
+    print("\nTop-K by gain (retrained):")
+    for k in [k for k in (50, 100, 150, 200, 300, 400, 500) if k < n]:
+        _eval_cols(order[:k], f"top{k}")
+
+    # Correlation-pruned variant (drops redundant pairs by lower pilot importance)
+    print("\nCorrelation-pruned (addresses split-importance):")
+    from src.model import _drop_correlated_features
+    for thr in (0.95, 0.90):
+        kept = _drop_correlated_features(Xtr[:row], fcols, gain, thr)
+        idx = [fcols.index(c) for c in kept]
+        _eval_cols(idx, f"corrprune@{thr}")
+    print("\nKnee = smallest K whose Δfull log-loss is within ~0.001 (noise). "
+          "Cut there; re-run --exp place_ab at the same K for the place leg.")
+
+
 def _platt_1d(pc, yc, pt):
     """Platt-scale raw probs `pt` using a logistic fit on (pc, yc)."""
     def _lp(p):
@@ -614,6 +680,7 @@ EXPERIMENTS = {
     "dl": exp_dl,
     "mlp": exp_mlp,
     "place_ab": exp_place_ab,
+    "prune": exp_prune,
 }
 
 
