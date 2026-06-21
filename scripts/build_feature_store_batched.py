@@ -37,6 +37,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 import config
@@ -128,28 +129,33 @@ def main() -> None:
         total_rows += len(featured)
         logger.info(
             "chunk %d/%d [%s..%s]: %d rows featured (%d cols) → %s | cum %d | RSS %.1f GB | %.0fs",
-            i + 1, len(spans), str(lo.date()), str(hi.date()), len(featured),
+            i + 1, len(spans), str(lo)[:10], str(hi)[:10], len(featured),
             featured.shape[1], os.path.basename(part), total_rows, _rss_gb(),
             time.perf_counter() - t0,
         )
         del chunk, keyed, rated, featured
         gc.collect()
 
+    # ── unify schemas across chunks (later chunks gain RTV columns once RTV
+    # data starts; all such extras are float, NaN for earlier rows in a
+    # monolithic build, so adding them as typed nulls is exact). ───────────
+    schemas = [pq.read_schema(p) for p in part_paths]
+    unified = pa.unify_schemas(schemas)
+
     # ── global speed-figure median (the one non-chunk-invariant imputation) ──
     # engineer_features deferred this fill per chunk; compute ONE median per
     # speed_fig column over the whole consolidated set so the build is identical
     # to a monolithic engineer_features, and stamp the medians into counts_state
     # so later appends reuse them (see engineer_features' speed-fill comment).
-    schemas = [pq.read_schema(p) for p in part_paths]
-    unified = pa.unify_schemas(schemas)
     speed_cols = [n for n in unified.names if "speed_fig" in n.lower()]
     med_map: dict[str, float] = {}
     if speed_cols:
         logger.info("Computing global medians for %d speed_fig columns…", len(speed_cols))
         acc = {c: [] for c in speed_cols}
         for p in part_paths:
-            t = pq.read_table(p, columns=speed_cols)
-            for c in speed_cols:
+            present = [c for c in speed_cols if c in set(pq.read_schema(p).names)]
+            t = pq.read_table(p, columns=present)
+            for c in present:
                 arr = t.column(c).to_numpy(zero_copy_only=False).astype("float64")
                 acc[c].append(arr[~np.isnan(arr)])
         for c in speed_cols:
@@ -160,30 +166,14 @@ def main() -> None:
         for c in speed_cols:
             counts_state[f"median::{c}"] = med_map[c]
 
-    # ── consolidate parts → single featured.parquet (streaming, pyarrow) ──
-    logger.info("Consolidating %d parts → %s", len(part_paths), store.featured_path)
-    writer = pq.ParquetWriter(store.featured_path, unified)
-    for p in part_paths:
-        pf = pq.ParquetFile(p)
-        for batch in pf.iter_batches(batch_size=50_000):
-            tbl = pa.Table.from_batches([batch]).cast(unified)
-            if med_map:
-                tbl = tbl.to_pandas()
-                for c, m in med_map.items():
-                    tbl[c] = tbl[c].fillna(m)
-                tbl = pa.Table.from_pandas(tbl, schema=unified, preserve_index=False)
-            writer.write_table(tbl)
-    writer.close()
-    logger.info("featured.parquet written (RSS %.1f GB)", _rss_gb())
-
-    # ── processed.parquet + state + meta ──
+    # ── save processed + carried state + meta BEFORE the streaming write, so a
+    # consolidation hiccup never discards the expensive per-chunk work. ─────
+    last_date = rd.max()
     _stringify_objects(processed).to_parquet(
         store.processed_path, index=False, engine="pyarrow"
     )
     store._save_state(ratings_state or {"elo": None, "glicko": None})
     store._save_counts_state(counts_state)
-
-    last_date = rd.max()
     meta = {
         "schema_version": STORE_SCHEMA_VERSION,
         "last_date": str(last_date.date()),
@@ -193,11 +183,44 @@ def main() -> None:
         "fe_signature": fe_signature(),
         "data_signature": data_signature(processed, cutoff=last_date),
     }
+
+    # ── consolidate parts → single featured.parquet (streaming, pyarrow) ──
+    # Conform each part to the unified schema (add missing columns as typed
+    # nulls; never .cast a narrower table) and fill the speed medians in arrow
+    # so no pandas round-trip can choke on a null integer column.
+    def _conform(tbl: pa.Table) -> pa.Table:
+        have = set(tbl.schema.names)
+        arrays = [
+            tbl.column(f.name).cast(f.type) if f.name in have
+            else pa.nulls(tbl.num_rows, f.type)
+            for f in unified
+        ]
+        return pa.Table.from_arrays(arrays, schema=unified)
+
+    logger.info("Consolidating %d parts → %s", len(part_paths), store.featured_path)
+    writer = pq.ParquetWriter(store.featured_path, unified)
+    for p in part_paths:
+        pf = pq.ParquetFile(p)
+        for batch in pf.iter_batches(batch_size=50_000):
+            tbl = _conform(pa.Table.from_batches([batch]))
+            for c, m in med_map.items():
+                i = unified.get_field_index(c)
+                tbl = tbl.set_column(i, unified.field(i), pc.fill_null(tbl.column(c), m))
+            writer.write_table(tbl)
+        del pf  # release the file handle so the cleanup below can unlink it (Windows)
+    writer.close()
+    logger.info("featured.parquet written (RSS %.1f GB)", _rss_gb())
+
     with open(store.meta_path, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2, sort_keys=True, default=str)
 
+    # Best-effort temp cleanup: a leftover part is harmless (the next build
+    # clears _build_parts first), and on Windows the parquet handle can linger.
     for p in part_paths:
-        os.remove(p)
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     try:
         os.rmdir(parts_dir)
     except OSError:
