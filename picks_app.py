@@ -1,21 +1,23 @@
 """
-Streamlit Web Application — v3.0
-================================
-Interactive web interface for the Horse Racing Prediction system.
+Picks App — lean serving UI
+===========================
+The day-to-day serving interface for the Horse Racing Prediction system.
+It loads ONLY the production-promoted model via the registry pointer
+(``src.run_store.load_production_predictor`` / ``production.json``) and never
+loads the full feature store at startup, so it opens fast.
 
-Features:
-- Train models with hyperparameter tuning & presets
-- Experiment tracking and comparison
-- Predictions for upcoming races
-- Walk-forward backtesting
-- Data exploration and model insights
+Pages:
+- 💰 Today's Picks — live racecards, value picks, manual custom-race entry
+- 🔌 Matchbook API — exchange connectivity harness
+
+Training, tuning, backtesting, insights and promotion live in the separate
+``training_app.py``.
 
 Run with:
-    streamlit run app.py
+    streamlit run picks_app.py
 """
 
 import hashlib
-import json
 import os
 
 # Limit numpy/BLAS threads to prevent ReleaseSemaphore crashes in Streamlit threadpool
@@ -26,65 +28,43 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
 os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 import sys
-import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from src.data_collector import collect_data, get_scraped_racecards, scrape_todays_results
+from src.data_collector import (
+    get_scraped_racecards,
+    scrape_todays_results,
+)
 from src.data_processor import process_data
-from src.featured_dataset import get_featured_dataset
 from src.live_prediction import (
-    build_lookahead_cache,
-    cards_signature,
-    clear_lookahead_cache,
     feature_engineer_with_history_core,
-    gap_fill_signature,
-    history_source_signature,
     load_lookahead_cache,
     lookahead_cache_valid,
-    save_lookahead_cache,
 )
-from src.database import db_stats as _raw_db_stats
-from src.model import (
-    RacePredictor,
-    get_autotune_search_space,
-    get_feature_importance,
-    get_feature_columns,
+from src.model import RacePredictor
+from src.run_store import (
+    get_run_processed_path,
+    get_run_featured_path,
+    get_production_run_id,
 )
-from src.autotune import (
-    AUTOTUNE_MODEL_INFO,
-    build_config_snippet,
-    create_autotune_session,
-    delete_autotune_session,
-    list_autotune_sessions,
-    load_autotune_session,
-    load_optuna_study,
-    run_autotune_session,
+from src.utils import (
+    kelly_criterion,
+    compact_numeric_dtypes as _compact_numeric_dtypes,
 )
-from src.rtv_scraper import (
-    RTV_METRIC_COLS,
-    RTV_RANK_COLS,
-    _normalise_horse_key,
-    _normalise_off_time_key,
-    _normalise_track_key,
-    backfill_rtv_metrics_for_races,
-    load_rtv_cache,
-)
-from src.backtester import walk_forward_validation
-from src.run_store import save_run, list_runs as _raw_list_runs, load_run as _raw_load_run, load_run_meta as _raw_load_run_meta, delete_run as _raw_delete_run, rename_run, get_latest_run_id, restore_run_model, run_has_model, get_run_processed_path, get_run_featured_path, prune_runs, run_disk_usage, get_production_run_id
-from src.utils import format_odds, kelly_criterion, compact_numeric_dtypes as _compact_numeric_dtypes
 from src.bet_settlement import dynamic_value_threshold, ew_placed_flag, settle_ew_bet, settle_win_bet
-from src.each_way import compute_ew_columns, ew_value_bets, get_ew_terms, kelly_ew, EachWayTerms
+from src.each_way import (
+    ew_value_bets,
+    get_ew_terms,
+    kelly_ew,
+)
 from src.matchbook_client import MatchbookAPIError, MatchbookClient
 from src.matchbook_signals import build_fake_prediction_frame, build_signal_frame
 from src.paper_trade_store import append_paper_trades, build_paper_trades_from_signals, load_paper_trades, save_paper_trades, settle_paper_trades
@@ -92,65 +72,24 @@ from src.paper_trade_store import append_paper_trades, build_paper_trades_from_s
 logger = logging.getLogger(__name__)
 
 
-from src.app_helpers import (  # noqa: F401
-    EXPERIMENTS_FILE,
-    _PACE_DISPLAY_COLUMNS,
-    _PACE_REQUIRED_COLUMNS,
-    _add_shortcomings_bands,
+from src.app_helpers import (
     _attach_pace_diagnostics,
     _attach_ranker_diagnostics,
     _bet_confidence_state,
-    _build_concentration_charts,
-    _build_generalization_frame,
-    _build_generalization_trend_chart,
-    _build_metric_snapshot_frame,
-    _build_model_tradeoff_frame,
-    _build_overfit_section_charts,
-    _build_ranker_selector_explainer,
-    _build_run_name,
-    _build_shortcomings_correlation_table,
-    _build_shortcomings_fold_frame,
-    _build_shortcomings_run_frame,
-    _build_trend_chart,
     _cached_db_stats,
     _cached_load_df,
-    _calibration_metric_cards,
-    _calibration_signature,
-    _first_metric_value,
-    _flatten_numeric_metrics,
-    _fmt_metric,
-    _format_duration_compact,
-    _gap_status,
     _has_pace_diagnostics,
-    _invalidate_run_caches,
-    _is_diagnostic_metric,
-    _load_experiments,
-    _log_experiment,
-    _metric_direction,
-    _metric_family,
-    _metric_label,
-    _model_display_name,
     _ordinal,
     _pace_race_summary,
-    _pace_runner_tags,
-    _prepare_shortcomings_run_frames,
-    _progress_timing_text,
-    _ranker_consensus_state,
     _render_pace_panel,
     _render_ranker_consensus_badge,
     _render_ranker_disagreement_panel,
     _render_shap_explanation,
-    _resolve_model_metric_payload,
-    _save_experiments,
-    _summarise_shortcomings_slice,
     _value_bet_mask,
     _value_odds_range,
-    delete_run,
-    list_runs,
     load_run,
     load_run_meta,
 )
-
 
 
 # ── Page Configuration ───────────────────────────────────────────────
@@ -245,8 +184,6 @@ def load_existing_model():
         st.session_state.predictor = p
         return True
     return False
-
-
 
 
 def _cached_load_history_context(path: str, _mtime: float) -> tuple[pd.DataFrame, object]:
@@ -362,153 +299,6 @@ def _global_featured_dataset_path() -> str | None:
     return None
 
 
-def _global_processed_dataset_path() -> str | None:
-    """Path to the canonical processed dataset (FeatureStore copy first)."""
-    store_path = os.path.join(config.PROCESSED_DATA_DIR, "feature_store", "processed.parquet")
-    if os.path.exists(store_path):
-        return store_path
-    pq_path = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.parquet")
-    csv_path = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.csv")
-    if os.path.exists(pq_path):
-        return pq_path
-    if os.path.exists(csv_path):
-        return csv_path
-    return None
-
-
-def _fmt_age_from_ts(ts: float | None) -> str:
-    if ts is None:
-        return "—"
-    age_seconds = max(time.time() - float(ts), 0.0)
-    if age_seconds < 60:
-        return f"{int(age_seconds)}s ago"
-    if age_seconds < 3600:
-        return f"{int(age_seconds // 60)}m ago"
-    if age_seconds < 86400:
-        return f"{int(age_seconds // 3600)}h ago"
-    return f"{int(age_seconds // 86400)}d ago"
-
-
-def _dir_health(path: str, *, suffix: str | None = None) -> dict[str, object]:
-    if not os.path.isdir(path):
-        return {"exists": False, "count": 0, "latest_mtime": None}
-    files = [
-        entry.path for entry in os.scandir(path)
-        if entry.is_file() and (suffix is None or entry.name.endswith(suffix))
-    ]
-    latest_mtime = max((os.path.getmtime(fp) for fp in files), default=None)
-    return {
-        "exists": True,
-        "count": len(files),
-        "latest_mtime": latest_mtime,
-    }
-
-
-def _dataframe_missing_pct(df: pd.DataFrame | None, col: str) -> float | None:
-    if df is None or df.empty or col not in df.columns:
-        return None
-    series = df[col]
-    if pd.api.types.is_numeric_dtype(series):
-        missing = series.isna()
-    else:
-        missing = series.isna() | series.astype(str).str.strip().eq("")
-    return float(missing.mean() * 100.0)
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def _build_prediction_data_health(featured_path: str | None, featured_mtime: float | None) -> dict:
-    db = _cached_db_stats()
-    processed_path = _global_processed_dataset_path()
-    processed_mtime = os.path.getmtime(processed_path) if processed_path and os.path.exists(processed_path) else None
-    racecards_cache = _dir_health(os.path.join(config.DATA_DIR, "racecards_cache"), suffix=".csv")
-    live_feature_cache = _dir_health(os.path.join(config.PROCESSED_DATA_DIR, "live_feature_cache"))
-    lookahead_cache = _dir_health(os.path.join(config.PROCESSED_DATA_DIR, "lookahead_cache"))
-    return {
-        "db": db,
-        "featured_path": featured_path,
-        "featured_mtime": featured_mtime,
-        "processed_path": processed_path,
-        "processed_mtime": processed_mtime,
-        "racecards_cache": racecards_cache,
-        "live_feature_cache": live_feature_cache,
-        "lookahead_cache": lookahead_cache,
-    }
-
-
-def _render_prediction_data_health(model_df: pd.DataFrame | None) -> None:
-    featured_path = _global_featured_dataset_path()
-    featured_mtime = os.path.getmtime(featured_path) if featured_path and os.path.exists(featured_path) else None
-    health = _build_prediction_data_health(featured_path, featured_mtime)
-    db_latest = (health.get("db") or {}).get("latest_date")
-    db_latest_delta = "—"
-    if db_latest:
-        try:
-            db_latest_dt = pd.to_datetime(db_latest, errors="coerce")
-            if pd.notna(db_latest_dt):
-                db_latest_delta = f"{max((datetime.now().date() - db_latest_dt.date()).days, 0)}d lag"
-        except Exception:
-            db_latest_delta = "—"
-
-    latest_race_date = None
-    if model_df is not None and not model_df.empty and "race_date" in model_df.columns:
-        race_dates = pd.to_datetime(model_df["race_date"], errors="coerce")
-        if race_dates.notna().any():
-            latest_race_date = race_dates.max()
-
-    jockey_missing = _dataframe_missing_pct(model_df, "jockey")
-    trainer_missing = _dataframe_missing_pct(model_df, "trainer")
-    odds_missing = _dataframe_missing_pct(model_df, "odds")
-    required_cols = ["race_id", "horse_name", "race_date"]
-    missing_required = [col for col in required_cols if model_df is None or col not in model_df.columns]
-
-    with st.expander("🩺 Data Health", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric(
-            "DB Latest",
-            str(db_latest or "—"),
-            db_latest_delta,
-        )
-        c2.metric(
-            "Featured Cache",
-            "Present" if health.get("featured_path") else "Missing",
-            _fmt_age_from_ts(health.get("featured_mtime")),
-        )
-        c3.metric(
-            "Racecards Cache",
-            str((health.get("racecards_cache") or {}).get("count", 0)),
-            _fmt_age_from_ts((health.get("racecards_cache") or {}).get("latest_mtime")),
-        )
-        c4.metric(
-            "Lookahead Cache",
-            str((health.get("lookahead_cache") or {}).get("count", 0)),
-            _fmt_age_from_ts((health.get("lookahead_cache") or {}).get("latest_mtime")),
-        )
-
-        if latest_race_date is not None:
-            st.caption(f"Loaded featured data latest race date: {latest_race_date.date().isoformat()}")
-        if missing_required:
-            st.warning(f"Missing required prediction columns: {', '.join(missing_required)}")
-
-        issues: list[str] = []
-        if jockey_missing is not None and jockey_missing > 5.0:
-            issues.append(f"Jockey missing: {jockey_missing:.1f}%")
-        if trainer_missing is not None and trainer_missing > 5.0:
-            issues.append(f"Trainer missing: {trainer_missing:.1f}%")
-        if odds_missing is not None and odds_missing > 10.0:
-            issues.append(f"Odds missing: {odds_missing:.1f}%")
-        if not health.get("featured_path"):
-            issues.append("No featured dataset found on disk")
-        if not (health.get("racecards_cache") or {}).get("exists"):
-            issues.append("Racecards cache directory missing")
-
-        if issues:
-            for issue in issues:
-                st.caption(f"• {issue}")
-        else:
-            st.caption("No obvious data-health issues detected in the current prediction state.")
-
-
-
 def _dataset_meta_from_frame(
     df: pd.DataFrame | None,
     *,
@@ -542,131 +332,6 @@ def _dataset_meta_from_frame(
         "processed_path": processed_path,
         "origin": origin,
     }
-
-
-def _set_training_dataset(
-    featured_df: pd.DataFrame | None,
-    *,
-    processed_df: pd.DataFrame | None = None,
-    dataset_meta: dict[str, object] | None = None,
-) -> None:
-    featured_df = _compact_numeric_dtypes(featured_df, label="training featured")
-    processed_df = _compact_numeric_dtypes(processed_df, label="training processed")
-    st.session_state.featured_data = featured_df
-    st.session_state.train_processed_data = processed_df
-    st.session_state.train_dataset_meta = dataset_meta or None
-
-
-def _build_rtv_missing_diagnostics(processed_df: pd.DataFrame) -> dict[str, object]:
-    """Return RTV coverage diagnostics for the current processed dataset."""
-    required = {"race_date", "track", "off_time", "horse_name"}
-    if processed_df is None or processed_df.empty or not required.issubset(processed_df.columns):
-        return {
-            "ok": False,
-            "message": "Processed dataset is missing required key columns for RTV diagnostics.",
-        }
-
-    cache = load_rtv_cache()
-    if cache is None or cache.empty:
-        return {
-            "ok": False,
-            "message": "RTV cache is empty. Run backfill first.",
-        }
-
-    df = processed_df.copy()
-    c = cache.copy()
-
-    df["_rd"] = pd.to_datetime(df["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df["_trk"] = df["track"].map(_normalise_track_key)
-    df["_ot"] = df["off_time"].map(_normalise_off_time_key)
-    df["_hn"] = df["horse_name"].map(_normalise_horse_key)
-
-    c["_rd"] = pd.to_datetime(c["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    c["_trk"] = c["track"].map(_normalise_track_key)
-    c["_ot"] = c["off_time"].map(_normalise_off_time_key)
-    c["_hn"] = c["horse_name"].map(_normalise_horse_key)
-
-    key_cols = ["_rd", "_trk", "_ot", "_hn"]
-    metric_cols = [col for col in RTV_METRIC_COLS if col in c.columns]
-    c = c[key_cols + metric_cols].drop_duplicates(key_cols, keep="last")
-
-    m = df.merge(c, on=key_cols, how="left", indicator=True)
-    has_any_metric = m[metric_cols].notna().any(axis=1)
-
-    m["reason"] = "key_match"
-    m.loc[m["_merge"] == "left_only", "reason"] = "no_key_match"
-    m.loc[(m["_merge"] == "both") & (~has_any_metric), "reason"] = "key_match_but_no_metrics"
-
-    # Race-level summaries for manual review
-    race_group_cols = ["_rd", "track", "off_time"]
-    no_key_races = (
-        m[m["reason"] == "no_key_match"]
-        .groupby(race_group_cols, dropna=False)
-        .size()
-        .reset_index(name="missing_runners")
-        .sort_values(["missing_runners", "_rd"], ascending=[False, False])
-    )
-    no_metric_races = (
-        m[m["reason"] == "key_match_but_no_metrics"]
-        .groupby(race_group_cols, dropna=False)
-        .size()
-        .reset_index(name="runners_without_metrics")
-        .sort_values(["runners_without_metrics", "_rd"], ascending=[False, False])
-    )
-
-    reason_pct = (m["reason"].value_counts(normalize=True) * 100).round(2)
-    by_track_no_key = (
-        m[m["reason"] == "no_key_match"]["track"]
-        .value_counts()
-        .reset_index(name="rows")
-        .rename(columns={"index": "track"})
-        .head(20)
-    )
-
-    out = {
-        "ok": True,
-        "rows": int(len(m)),
-        "key_match_pct": round(float((m["_merge"] == "both").mean() * 100), 2),
-        "any_metric_pct": round(float(has_any_metric.mean() * 100), 2),
-        "no_key_pct": round(float(reason_pct.get("no_key_match", 0.0)), 2),
-        "no_metrics_pct": round(float(reason_pct.get("key_match_but_no_metrics", 0.0)), 2),
-        "no_key_races": no_key_races,
-        "no_metric_races": no_metric_races,
-        "top_no_key_tracks": by_track_no_key,
-        "no_key_rows": m[m["reason"] == "no_key_match"][
-            ["race_date", "track", "off_time", "horse_name"]
-        ].copy(),
-        "no_metric_rows": m[m["reason"] == "key_match_but_no_metrics"][
-            ["race_date", "track", "off_time", "horse_name"]
-        ].copy(),
-    }
-
-    if "race_type" in m.columns:
-        by_rt = (
-            m.assign(no_key=m["reason"].eq("no_key_match"))
-            .groupby("race_type", dropna=False)["no_key"]
-            .mean()
-            .mul(100)
-            .round(2)
-            .reset_index(name="no_key_match_pct")
-            .sort_values("no_key_match_pct", ascending=False)
-        )
-        out["by_race_type_no_key"] = by_rt
-
-    return out
-
-
-def _set_autotune_dataset(
-    featured_df: pd.DataFrame | None,
-    *,
-    processed_df: pd.DataFrame | None = None,
-    dataset_meta: dict[str, object] | None = None,
-) -> None:
-    featured_df = _compact_numeric_dtypes(featured_df, label="autotune featured")
-    processed_df = _compact_numeric_dtypes(processed_df, label="autotune processed")
-    st.session_state.autotune_featured_data = featured_df
-    st.session_state.autotune_processed_data = processed_df
-    st.session_state.autotune_dataset_meta = dataset_meta or None
 
 
 def _set_model_dataset(
@@ -789,82 +454,6 @@ def feature_engineer_with_history(
     return feature_engineer_with_history_core(hist, live_processed, extra_history=extra_history)
 
 
-def scrape_gap_fill(target_date_str: str, progress_fn=None) -> pd.DataFrame | None:
-    """Scrape and process results for dates between stored history and *target_date_str*.
-
-    Returns processed (but not featured) DataFrame of gap-fill results,
-    or ``None`` if no gap exists.
-    """
-    hist = _load_processed_history()
-    target = datetime.strptime(target_date_str, "%Y-%m-%d").date()
-
-    if hist is not None and not hist.empty:
-        hist_dates = pd.to_datetime(hist["race_date"], errors="coerce")
-        last_hist = hist_dates.max().date()
-    else:
-        # No history — nothing to gap-fill against
-        return None
-
-    # Build list of dates we need results for (day after last history up to
-    # the day before the target date)
-    gap_start = last_hist + timedelta(days=1)
-    gap_end = target - timedelta(days=1)
-
-    if gap_start > gap_end:
-        return None  # no gap
-
-    gap_dates = []
-    d = gap_start
-    while d <= gap_end:
-        gap_dates.append(d.strftime("%Y-%m-%d"))
-        d += timedelta(days=1)
-
-    logger.info(
-        f"Gap-fill: scraping results for {len(gap_dates)} date(s) "
-        f"({gap_dates[0]} → {gap_dates[-1]})"
-    )
-
-    all_gap_runners: list[pd.DataFrame] = []
-    for idx, ds in enumerate(gap_dates):
-        if progress_fn:
-            progress_fn(idx + 1, len(gap_dates), ds)
-        try:
-            day_df = scrape_todays_results(date_str=ds)
-            if day_df is not None and not day_df.empty:
-                all_gap_runners.append(day_df)
-                logger.info(f"  Gap {ds}: {len(day_df)} runners")
-        except Exception as e:
-            logger.warning(f"  Gap {ds}: failed — {e}")
-
-    if not all_gap_runners:
-        return None
-
-    gap_raw = pd.concat(all_gap_runners, ignore_index=True)
-    gap_proc = process_data(df=gap_raw, save=False)
-    logger.info(f"Gap-fill complete: {len(gap_proc)} processed rows")
-    return gap_proc
-
-
-def load_existing_data():
-    featured_path = _global_featured_dataset_path()
-    if featured_path and os.path.exists(featured_path):
-        featured_mtime = os.path.getmtime(featured_path)
-        featured = _cached_load_df(featured_path, featured_mtime)
-        processed = None
-        processed_path = _global_processed_dataset_path()
-        if processed_path and os.path.exists(processed_path):
-            processed = _cached_load_df(processed_path, os.path.getmtime(processed_path))
-        meta = _dataset_meta_from_frame(
-            featured,
-            featured_path=featured_path,
-            processed_path=processed_path,
-            origin="global_featured",
-        )
-        _set_training_dataset(featured, processed_df=processed, dataset_meta=meta)
-        return True
-    return False
-
-
 # ── Auto-restore production run metadata (lightweight; no dataset load) ──
 # The lean picks app never loads the multi-GB featured dataset at startup —
 # the predictor is loaded lazily by the page bodies (load_existing_model),
@@ -924,314 +513,6 @@ _CUSTOM_PRESET_LABEL = "Custom"
 _LR_OPTIONS = [0.001, 0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.1, 0.15, 0.2, 0.3]
 
 
-def _nearest_option(value: float, options: list[float]) -> float:
-    """Return nearest valid option for slider/select controls."""
-    if not options:
-        return value
-    try:
-        v = float(value)
-    except Exception:
-        return options[0]
-    return min(options, key=lambda x: abs(float(x) - v))
-
-
-def _mark_hp_preset_custom(prefix: str) -> None:
-    """Mark the preset as custom when any manual HP control is changed."""
-    _preset_key = f"{prefix}_preset"
-    if st.session_state.get(_preset_key) != _CUSTOM_PRESET_LABEL:
-        st.session_state[_preset_key] = _CUSTOM_PRESET_LABEL
-
-
-def _apply_hp_preset(
-    model_key: str,
-    framework: str,
-    prefix: str,
-    preset_name: str,
-) -> None:
-    """Copy preset values into session state so sliders visibly update."""
-    if preset_name == _CUSTOM_PRESET_LABEL or preset_name not in PRESETS:
-        return
-
-    defaults = _MODEL_KEY_DEFAULTS.get(model_key, DEFAULT_HP.get("classifier", {}))
-    preset = PRESETS[preset_name]
-
-    st.session_state[f"{prefix}_n_est"] = int(
-        preset.get("n_estimators", defaults.get("n_estimators", 500))
-    )
-    st.session_state[f"{prefix}_depth"] = int(
-        preset.get("max_depth", defaults.get("max_depth", 6))
-    )
-    st.session_state[f"{prefix}_lr"] = _nearest_option(
-        float(preset.get("learning_rate", defaults.get("learning_rate", 0.05))),
-        _LR_OPTIONS,
-    )
-    st.session_state[f"{prefix}_subsample"] = float(
-        preset.get("subsample", defaults.get("subsample", 0.8))
-    )
-    st.session_state[f"{prefix}_colsample"] = float(
-        preset.get("colsample_bytree", defaults.get("colsample_bytree", 0.8))
-    )
-
-    if framework == "xgb":
-        st.session_state[f"{prefix}_mcw"] = int(defaults.get("min_child_weight", 3))
-    elif framework == "cat":
-        st.session_state[f"{prefix}_depth_cat"] = int(
-            defaults.get("depth", defaults.get("max_depth", 6))
-        )
-        st.session_state[f"{prefix}_l2"] = float(defaults.get("l2_leaf_reg", 3.0))
-    else:
-        st.session_state[f"{prefix}_mcs"] = int(defaults.get("min_child_samples", 20))
-
-    # Regularisation
-    st.session_state[f"{prefix}_reg_alpha"] = float(
-        preset.get("reg_alpha", defaults.get("reg_alpha", 0.1))
-    )
-    st.session_state[f"{prefix}_reg_lambda"] = float(
-        preset.get("reg_lambda", defaults.get("reg_lambda", 1.0))
-    )
-    if framework == "lgbm":
-        st.session_state[f"{prefix}_num_leaves"] = int(
-            preset.get("num_leaves", defaults.get("num_leaves", 31))
-        )
-        st.session_state[f"{prefix}_linear_tree"] = bool(
-            preset.get("linear_tree", defaults.get("linear_tree", False))
-        )
-
-
-def _on_hp_preset_change(model_key: str, framework: str, prefix: str) -> None:
-    """Streamlit callback: apply selected preset values into HP widgets."""
-    _preset_name = st.session_state.get(f"{prefix}_preset", _CUSTOM_PRESET_LABEL)
-    _apply_hp_preset(model_key, framework, prefix, _preset_name)
-
-
-def _hp_widgets(model_key: str, framework: str = "lgbm", prefix: str = "hp") -> dict:
-    """Render hyperparameter controls for a single sub-model.
-
-    Args:
-        model_key: One of ``"classifier"``, ``"place"``.
-        framework: ``"lgbm"``, ``"xgb"``, or ``"cat"``.
-        prefix: Unique key prefix for Streamlit widgets.
-    """
-    defaults = _MODEL_KEY_DEFAULTS.get(model_key, DEFAULT_HP.get("classifier", {}))
-    _preset_key = f"{prefix}_preset"
-    _preset_options = [_CUSTOM_PRESET_LABEL, *list(PRESETS.keys())]
-    if _preset_key not in st.session_state:
-        st.session_state[_preset_key] = _CUSTOM_PRESET_LABEL
-
-    # Preset selector
-    preset_name = st.selectbox(
-        "Preset",
-        _preset_options,
-        index=_preset_options.index(st.session_state[_preset_key])
-        if st.session_state[_preset_key] in _preset_options
-        else 0,
-        key=_preset_key,
-        on_change=_on_hp_preset_change,
-        args=(model_key, framework, prefix),
-        help="Quick preset — values are copied into sliders below.",
-    )
-    preset = PRESETS.get(preset_name, {})
-
-    st.caption(
-        "Training uses the slider values shown below. "
-        "Selecting a preset now updates these controls immediately."
-    )
-
-    hp: dict = {}
-
-    # Guard against legacy/off-grid values (e.g. 0.04) that break select_slider.
-    _lr_key = f"{prefix}_lr"
-    _lr_default = float(preset.get("learning_rate", defaults.get("learning_rate", 0.05)))
-    if _lr_key not in st.session_state:
-        st.session_state[_lr_key] = _nearest_option(_lr_default, _LR_OPTIONS)
-    else:
-        st.session_state[_lr_key] = _nearest_option(st.session_state[_lr_key], _LR_OPTIONS)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        hp["n_estimators"] = st.slider(
-            "n_estimators (trees)", 50, 2000,
-            preset.get("n_estimators", defaults.get("n_estimators", 500)),
-            step=50, key=f"{prefix}_n_est",
-            on_change=_mark_hp_preset_custom,
-            args=(prefix,),
-        )
-        hp["max_depth"] = st.slider(
-            "max_depth", 2, 15,
-            preset.get("max_depth", defaults.get("max_depth", 6)),
-            key=f"{prefix}_depth",
-            on_change=_mark_hp_preset_custom,
-            args=(prefix,),
-        )
-        hp["learning_rate"] = st.select_slider(
-            "learning_rate",
-            options=_LR_OPTIONS,
-            value=st.session_state[_lr_key],
-            key=f"{prefix}_lr",
-            on_change=_mark_hp_preset_custom,
-            args=(prefix,),
-        )
-    with c2:
-        hp["subsample"] = st.slider(
-            "subsample (row sampling)", 0.5, 1.0,
-            preset.get("subsample", defaults.get("subsample", 0.8)),
-            step=0.05, key=f"{prefix}_subsample",
-            on_change=_mark_hp_preset_custom,
-            args=(prefix,),
-        )
-        hp["colsample_bytree"] = st.slider(
-            "colsample_bytree (feature sampling)", 0.3, 1.0,
-            preset.get("colsample_bytree", defaults.get("colsample_bytree", 0.8)),
-            step=0.05, key=f"{prefix}_colsample",
-            on_change=_mark_hp_preset_custom,
-            args=(prefix,),
-        )
-
-        # Framework-specific extras
-        if framework == "xgb":
-            hp["min_child_weight"] = st.slider(
-                "min_child_weight", 1, 20,
-                defaults.get("min_child_weight", 3),
-                key=f"{prefix}_mcw",
-                on_change=_mark_hp_preset_custom,
-                args=(prefix,),
-            )
-        elif framework == "cat":
-            hp["depth"] = st.slider(
-                "depth", 3, 12,
-                defaults.get("depth", defaults.get("max_depth", 6)),
-                key=f"{prefix}_depth_cat",
-                on_change=_mark_hp_preset_custom,
-                args=(prefix,),
-            )
-            hp["l2_leaf_reg"] = st.slider(
-                "l2_leaf_reg", 1.0, 20.0,
-                float(defaults.get("l2_leaf_reg", 3.0)),
-                step=0.5,
-                key=f"{prefix}_l2",
-                on_change=_mark_hp_preset_custom,
-                args=(prefix,),
-            )
-        else:
-            hp["min_child_samples"] = st.slider(
-                "min_child_samples", 1, 100,
-                defaults.get("min_child_samples", 20),
-                key=f"{prefix}_mcs",
-                on_change=_mark_hp_preset_custom,
-                args=(prefix,),
-            )
-
-    # ── Regularisation controls (all frameworks) ─────────────────
-    with st.expander("Regularisation", expanded=False):
-        r1, r2 = st.columns(2)
-        with r1:
-            hp["reg_alpha"] = st.slider(
-                "reg_alpha (L1)", 0.0, 5.0,
-                float(defaults.get("reg_alpha", 0.1)),
-                step=0.05, key=f"{prefix}_reg_alpha",
-                on_change=_mark_hp_preset_custom,
-                args=(prefix,),
-            )
-        with r2:
-            hp["reg_lambda"] = st.slider(
-                "reg_lambda (L2)", 0.0, 10.0,
-                float(defaults.get("reg_lambda", 1.0)),
-                step=0.1, key=f"{prefix}_reg_lambda",
-                on_change=_mark_hp_preset_custom,
-                args=(prefix,),
-            )
-        if framework == "lgbm":
-            hp["num_leaves"] = st.slider(
-                "num_leaves", 8, 128,
-                int(defaults.get("num_leaves", 31)),
-                key=f"{prefix}_num_leaves",
-                on_change=_mark_hp_preset_custom,
-                args=(prefix,),
-            )
-            hp["linear_tree"] = st.checkbox(
-                "Linear tree (fit linear model in each leaf)",
-                value=bool(defaults.get("linear_tree", False)),
-                key=f"{prefix}_linear_tree",
-                on_change=_mark_hp_preset_custom,
-                args=(prefix,),
-                help=(
-                    "When enabled, each leaf fits a linear regression "
-                    "instead of a constant value. Can improve accuracy "
-                    "for features with strong linear relationships but "
-                    "increases training time."
-                ),
-            )
-
-    return hp
-
-
-def _sync_hp_from_state(framework: str, prefix: str, hp: dict) -> dict:
-    """Rebuild hyperparameters from Streamlit state for deterministic training."""
-    synced = dict(hp or {})
-
-    _common_map = {
-        "n_estimators": f"{prefix}_n_est",
-        "max_depth": f"{prefix}_depth",
-        "learning_rate": f"{prefix}_lr",
-        "subsample": f"{prefix}_subsample",
-        "colsample_bytree": f"{prefix}_colsample",
-        "reg_alpha": f"{prefix}_reg_alpha",
-        "reg_lambda": f"{prefix}_reg_lambda",
-    }
-    for _hp_key, _state_key in _common_map.items():
-        if _state_key in st.session_state:
-            synced[_hp_key] = st.session_state[_state_key]
-
-    if framework == "xgb":
-        _state_key = f"{prefix}_mcw"
-        if _state_key in st.session_state:
-            synced["min_child_weight"] = st.session_state[_state_key]
-    elif framework == "cat":
-        _depth_key = f"{prefix}_depth_cat"
-        _l2_key = f"{prefix}_l2"
-        if _depth_key in st.session_state:
-            synced["depth"] = st.session_state[_depth_key]
-        if _l2_key in st.session_state:
-            synced["l2_leaf_reg"] = st.session_state[_l2_key]
-        synced.pop("max_depth", None)
-    else:
-        _mcs_key = f"{prefix}_mcs"
-        _leaves_key = f"{prefix}_num_leaves"
-        _lt_key = f"{prefix}_linear_tree"
-        if _mcs_key in st.session_state:
-            synced["min_child_samples"] = st.session_state[_mcs_key]
-        if _leaves_key in st.session_state:
-            synced["num_leaves"] = st.session_state[_leaves_key]
-        if _lt_key in st.session_state:
-            synced["linear_tree"] = bool(st.session_state[_lt_key])
-
-    return synced
-
-
-def _apply_runtime_linear_tree_flags(
-    frameworks: dict[str, str],
-    custom_hp: dict[str, dict] | None,
-) -> None:
-    """Push UI linear-tree selections into runtime config before training."""
-    _param_maps = {
-        "classifier": getattr(config, "CLASSIFIER_PARAMS", None),
-        "place": getattr(config, "PLACE_CLASSIFIER_PARAMS", None),
-    }
-    for _mk, _cfg in _param_maps.items():
-        if not isinstance(_cfg, dict):
-            continue
-        _fw = frameworks.get(_mk)
-        _hp = (custom_hp or {}).get(_mk, {}) if isinstance(custom_hp, dict) else {}
-        _state_key = f"hp_{_mk}_linear_tree"
-        if _fw != "lgbm":
-            _cfg.pop("linear_tree", None)
-            continue
-        _val = _hp.get("linear_tree")
-        if _state_key in st.session_state:
-            _val = bool(st.session_state[_state_key])
-        _cfg["linear_tree"] = bool(_val)
-
-
 def _mask_token(token: str | None) -> str:
     if not token:
         return ""
@@ -1285,39 +566,6 @@ def _matchbook_markets_table(markets: list[dict]) -> pd.DataFrame:
             "best_lay": None if best_lay is None else best_lay.get("odds"),
         })
     return pd.DataFrame(rows)
-
-
-def _build_matchbook_predictions_for_date(date_str: str) -> pd.DataFrame:
-    if st.session_state.predictor is None and not load_existing_model():
-        raise MatchbookAPIError(
-            "No trained model is available. Promote one in the training app first."
-        )
-
-    cache = st.session_state.setdefault("matchbook_prediction_cache", {})
-    cached = cache.get(date_str)
-    if isinstance(cached, pd.DataFrame) and not cached.empty:
-        return cached
-
-    cards_df = get_scraped_racecards(date_str=date_str)
-    if cards_df is None or cards_df.empty:
-        raise MatchbookAPIError(f"No Sporting Life racecards were found for {date_str}.")
-
-    cards = cards_df.copy()
-    cards["won"] = 0
-    cards["finish_position"] = 0
-    cards["finish_time_secs"] = 0.0
-    cards["lengths_behind"] = np.nan
-
-    processed = process_data(df=cards, save=False)
-    featured = feature_engineer_with_history(processed)
-    preds = _predict_featured_frame(
-        st.session_state.predictor,
-        featured,
-        ew_fraction=st.session_state.value_config.get("ew_fraction"),
-    )
-    cache[date_str] = preds
-    st.session_state["matchbook_prediction_cache"] = cache
-    return preds
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────
@@ -2215,7 +1463,6 @@ if page == "💰 Today's Picks":
 
                 # Stake column + Flags / badges
                 _is_kelly = _tp_vc.get("staking_mode") == "kelly"
-                _bankroll = float(_tp_vc.get("bankroll", 100.0))
                 _stake_html = "—"
                 flags = []
                 if _iv:
