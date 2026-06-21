@@ -40,7 +40,6 @@ from sklearn.model_selection import GroupShuffleSplit
 # entry points call _ensure_lightgbm()/_ensure_xgboost() before use.
 LGBMRegressor = None
 LGBMClassifier = None
-LGBMRanker = None
 XGBRegressor = None
 XGBClassifier = None
 CatBoostRegressor = None
@@ -48,12 +47,11 @@ CatBoostClassifier = None
 
 
 def _ensure_lightgbm() -> None:
-    global LGBMRegressor, LGBMClassifier, LGBMRanker
+    global LGBMRegressor, LGBMClassifier
     if LGBMClassifier is None:
         import lightgbm as lgb
         LGBMRegressor = lgb.LGBMRegressor
         LGBMClassifier = lgb.LGBMClassifier
-        LGBMRanker = lgb.LGBMRanker
 
 
 def _ensure_xgboost() -> None:
@@ -361,7 +359,7 @@ def get_autotune_search_space(
                 {"name": "linear_tree", "kind": "categorical", "choices": [True, False]},
             ])
 
-    if include_recency and model_key in {"classifier", "place", "ranker"}:
+    if include_recency and model_key in {"classifier", "place"}:
         specs.extend([
             {"name": "recency_half_life_days", "kind": "int", "low": 60, "high": 360, "step": 30},
             {"name": "recency_seasonal_boost", "kind": "float", "low": 0.0, "high": 0.30, "step": 0.05},
@@ -663,7 +661,6 @@ _CAT_VALID_HP = {
 DEFAULT_FRAMEWORKS: dict[str, str] = {
     "classifier": "cat",
     "place": "cat",
-    "ranker": "lgbm",
 }
 
 
@@ -1497,11 +1494,7 @@ class RacePredictor:
        Drives the **Value Bet** and **Top Pick** strategies.
     2. **Place Classifier** — binary classifier → calibrated P(place).
        Drives the **Each-Way** strategy.
-    3. **Race Ranker** (optional, ``config.TRAIN_RANKER``) — LambdaRank
-       model trained and evaluated for **diagnostics only** (ranker/
-       classifier agreement panels). Its scores are *not* blended into
-       the win probabilities at inference time.
-    4. **Linear baseline** — logistic regression fitted on the same
+    3. **Linear baseline** — logistic regression fitted on the same
        features and reported in the metrics so tree-model lift is
        always measured against a simple reference. Not persisted.
 
@@ -1522,11 +1515,10 @@ class RacePredictor:
     ):
         self.clf_model = None
         self.place_model = None
-        self.ranker_model = None
         self.scaler = None
         self.feature_cols = None
         self.frameworks = {
-            "classifier": "cat", "place": "cat", "ranker": "lgbm",
+            "classifier": "cat", "place": "cat",
             **(frameworks or {}),
         }
         # Win-classifier calibration (Platt)
@@ -1714,7 +1706,6 @@ class RacePredictor:
 
         oof_clf_logits_parts: list[np.ndarray] = []
         oof_place_probs_parts: list[np.ndarray] = []
-        oof_ranker_scores_parts: list[np.ndarray] = []
         oof_groups_parts: list[np.ndarray] = []
         oof_fp_parts: list[np.ndarray] = []
         oof_placed_parts: list[np.ndarray] = []
@@ -1800,36 +1791,12 @@ class RacePredictor:
                 params=_p.get("place"), sample_weight=_f_sw,
                 eval_set=_f_eval_p,
             )
-            if getattr(config, "TRAIN_RANKER", False):
-                if _f_es is not None:
-                    _f_g_tr_races = np.searchsorted(np.cumsum(g_f_tr), _f_tr_end, side="left") + 1
-                    self.ranker_model = self._train_ranker(
-                        _f_X,
-                        data["y_train_rel"][:_f_tr_end],
-                        g_f_tr[:_f_g_tr_races],
-                        params=_p.get("ranker"),
-                        sample_weight=_f_sw,
-                    )
-                else:
-                    self.ranker_model = self._train_ranker(
-                        X_f_tr,
-                        data["y_train_rel"][:tr_end],
-                        g_f_tr,
-                        params=_p.get("ranker"),
-                        sample_weight=_f_sw,
-                    )
-            else:
-                self.ranker_model = None
-
             # Score validation fold
             clf_probs_vl = self.clf_model.predict_proba(X_f_vl)[:, 1]
             place_probs_vl = self.place_model.predict_proba(X_f_vl)[:, 1]
-            ranker_scores_vl = self.ranker_model.predict(X_f_vl) if self.ranker_model is not None else None
 
             oof_clf_logits_parts.append(clf_probs_vl)
             oof_place_probs_parts.append(place_probs_vl)
-            if ranker_scores_vl is not None:
-                oof_ranker_scores_parts.append(np.asarray(ranker_scores_vl, dtype=np.float64))
             oof_groups_parts.append(g_f_vl)
             oof_fp_parts.append(fp_f_vl)
             oof_df_parts.append(data["train_df"].iloc[vl_beg:vl_end].copy())
@@ -1925,9 +1892,6 @@ class RacePredictor:
             _tuned_params: dict[str, dict] = {}
             _tune_models = {"classifier": "Win Classifier", "place": "Place Classifier"}
             _tune_metrics = {"classifier": "Hybrid", "place": "Hybrid"}
-            if getattr(config, "TRAIN_RANKER", False):
-                _tune_models["ranker"] = "Race Ranker"
-                _tune_metrics["ranker"] = "Ranker Hybrid"
             _model_count = max(len(_tune_models), 1)
             for _m_i, (_mk, _m_label) in enumerate(sorted(_tune_models.items())):
                 _m_pct = 0.36 + (_m_i / _model_count) * 0.25
@@ -2081,32 +2045,6 @@ class RacePredictor:
                 params=_p.get("place"), sample_weight=_sw_place_full,
             )
 
-        if getattr(config, "TRAIN_RANKER", False):
-            _ranker_fw = self.frameworks.get("ranker", "lgbm").upper()
-            _cb(f"Phase 2 — Training Race Ranker ({_ranker_fw}) …", 0.84)
-            logger.info(f"Training Race Ranker ({_ranker_fw}) …")
-            _sw_ranker_full = _weights_for_params(train_dates_full, _p.get("ranker"), sw_full)
-            if use_es:
-                _sw_ranker_es = _weights_for_params(dates_es_tr, _p.get("ranker"), sw_es_tr)
-                self.ranker_model = self._train_ranker(
-                    X_es_tr,
-                    y_es_rel_tr,
-                    g_es_tr,
-                    params=_p.get("ranker"),
-                    sample_weight=_sw_ranker_es,
-                    eval_set=[(X_es_vl, y_es_rel_vl, g_es_vl)],
-                )
-            else:
-                self.ranker_model = self._train_ranker(
-                    X_train,
-                    data["y_train_rel"],
-                    groups_train,
-                    params=_p.get("ranker"),
-                    sample_weight=_sw_ranker_full,
-                )
-        else:
-            self.ranker_model = None
-
         _used_training_slab_cal = self._fit_training_slab_calibrators(
             X_train=X_train,
             groups_train=groups_train,
@@ -2161,7 +2099,6 @@ class RacePredictor:
         _cb("Evaluating models on holdout validation set …", 0.86)
         clf_test_probs_raw = self.clf_model.predict_proba(X_eval)[:, 1]
         place_test_probs_raw = self.place_model.predict_proba(X_eval)[:, 1]
-        ranker_test_scores = self.ranker_model.predict(X_eval) if self.ranker_model is not None else None
 
         # Apply training-only calibration (+ market anchor when fitted)
         win_probs = self._calibrate_win_probs(clf_test_probs_raw, groups_eval, eval_df)
@@ -2212,14 +2149,6 @@ class RacePredictor:
         all_metrics["place_classifier"] = self._evaluate_place_model(
             place_probs, place_test_probs_raw, eval_df, groups_eval,
         )
-        if ranker_test_scores is not None:
-            all_metrics["ranker"] = self._evaluate_as_ranker(
-                ranker_test_scores,
-                y_eval_rel,
-                groups_eval,
-                eval_df,
-                "RANKER",
-            )
 
         # ── Linear baseline (sanity reference, not persisted) ─────
         # A logistic regression on the same features: if the tree
@@ -2298,21 +2227,9 @@ class RacePredictor:
             train_metrics["place_classifier"] = self._evaluate_place_model(
                 _oof_place_cal, _all_place_probs, _oof_df, _all_groups,
             )
-            if oof_ranker_scores_parts:
-                _all_ranker_scores = np.concatenate(oof_ranker_scores_parts)
-                train_metrics["ranker"] = self._evaluate_as_ranker(
-                    _all_ranker_scores,
-                    _oof_rel,
-                    _all_groups,
-                    _oof_df,
-                    "RANKER_OOF",
-                )
-            else:
-                train_metrics["ranker"] = {}
         else:
             train_metrics["win_classifier"] = {}
             train_metrics["place_classifier"] = {}
-            train_metrics["ranker"] = {}
         self.train_metrics = train_metrics
 
         # ── Betting simulation ───────────────────────────────────
@@ -2394,12 +2311,10 @@ class RacePredictor:
         _metric_names = {
             "classifier": "Top1-Calibration Hybrid",
             "place": "Place Top-3 Hybrid",
-            "ranker": "Ranker Top-1 Hybrid",
         }
         _metric_directions = {
             "classifier": "maximize",
             "place": "maximize",
-            "ranker": "maximize",
         }
 
         fw = self.frameworks.get(model_key, "xgb")
@@ -2477,21 +2392,6 @@ class RacePredictor:
                 + 0.25 * place_precision
                 + 0.20 * cal_brier
                 + 0.20 * logloss_quality
-            )
-
-        def _ranker_hybrid_score(metrics: dict[str, float | int | None]) -> float:
-            ndcg1 = _bounded_positive(metrics.get("ndcg_at_1"), low=0.0, high=1.0)
-            ndcg3 = _bounded_positive(metrics.get("ndcg_at_3"), low=0.0, high=1.0)
-            top1 = _bounded_positive(metrics.get("top1_accuracy"), low=0.0, high=1.0)
-            win_top3 = _bounded_positive(metrics.get("win_in_top3"), low=0.0, high=1.0)
-            rps_quality = _bounded_negative_loss(metrics.get("rps"), upper=0.35)
-
-            return float(
-                0.30 * ndcg1
-                + 0.20 * ndcg3
-                + 0.25 * top1
-                + 0.15 * win_top3
-                + 0.10 * rps_quality
             )
 
         def _score_split(
@@ -2614,52 +2514,8 @@ class RacePredictor:
                 metrics["objective_score"] = round(_place_hybrid_score(metrics), 6)
                 return float(metrics["objective_score"]), metrics
 
-            def _ranker_metrics_eval(scores):
-                rel = np.asarray(split_targets_val["rel"], dtype=np.float64)
-                finish_position = np.asarray(split_targets_val["fp"], dtype=np.float64)
-                scores_arr = np.asarray(scores, dtype=np.float64)
-                probs = _grouped_softmax(scores_arr, split_groups_val)
-                probs_clipped = np.clip(probs, 1e-15, 1 - 1e-15)
-                y_won = (finish_position == 1).astype(np.float64)
-
-                ndcg1_vals: list[float] = []
-                ndcg3_vals: list[float] = []
-                top1_hits = 0
-                win3_hits = 0
-                total = 0
-                offset = 0
-                for group_size in split_groups_val:
-                    gl = rel[offset:offset + group_size]
-                    gs = scores_arr[offset:offset + group_size]
-                    offset += group_size
-                    if group_size < 2 or gl.max() == gl.min() or gs.max() == gs.min():
-                        continue
-                    total += 1
-                    try:
-                        ndcg1_vals.append(float(ndcg_score([gl], [gs], k=1)))
-                        ndcg3_vals.append(float(ndcg_score([gl], [gs], k=3)))
-                    except ValueError:
-                        pass
-                    if int(np.argmax(gs)) == int(np.argmax(gl)):
-                        top1_hits += 1
-                    if int(np.argmax(gl)) in set(np.argsort(gs)[-3:]):
-                        win3_hits += 1
-
-                metrics = {
-                    "rps": round(rps_per_race(probs, finish_position, split_groups_val), 6),
-                    "brier_score": round(float(brier_score_loss(y_won, probs_clipped)), 6),
-                    "log_loss": round(float(log_loss(y_won, probs_clipped)), 6),
-                    "ndcg_at_1": round(float(np.mean(ndcg1_vals)) if ndcg1_vals else 0.0, 6),
-                    "ndcg_at_3": round(float(np.mean(ndcg3_vals)) if ndcg3_vals else 0.0, 6),
-                    "top1_accuracy": round(top1_hits / total, 6) if total else 0.0,
-                    "win_in_top3": round(win3_hits / total, 6) if total else 0.0,
-                    "total_races": int(total),
-                }
-                metrics["objective_score"] = round(_ranker_hybrid_score(metrics), 6)
-                return float(metrics["objective_score"]), metrics
-
             trial_sw = split_sw_train
-            if model_key in {"classifier", "place", "ranker"} and split_train_dates is not None:
+            if model_key in {"classifier", "place"} and split_train_dates is not None:
                 trial_sw = compute_recency_sample_weights(
                     split_train_dates,
                     half_life_days=params["recency_half_life_days"],
@@ -2683,22 +2539,11 @@ class RacePredictor:
                     params=params, sample_weight=trial_sw,
                 )
                 scores = _proba_to_logit(mdl.predict_proba(split_X_val)[:, 1])
-            elif model_key == "ranker":
-                mdl = self._train_ranker(
-                    split_X_train,
-                    split_targets_train["rel"],
-                    split_groups_train,
-                    params=params,
-                    sample_weight=trial_sw,
-                )
-                scores = mdl.predict(split_X_val)
             else:
                 raise ValueError(f"Unknown model_key: {model_key}")
 
             if model_key == "classifier":
                 return _win_metrics_eval(scores)
-            if model_key == "ranker":
-                return _ranker_metrics_eval(scores)
             return _place_metrics_eval(scores)
 
         def _aggregate_trial_metrics(split_metric_dicts: list[dict[str, float | int | None]]) -> dict[str, float | int]:
@@ -3117,56 +2962,6 @@ class RacePredictor:
                 fit_kw["verbose"] = False
         model.fit(X, y, **fit_kw)
         logger.info(f"Place Classifier ({fw.upper()}) training complete")
-        return model
-
-    def _train_ranker(self, X, y, groups, params=None, sample_weight=None, eval_set=None):
-        """Train a LightGBM LambdaRank model on per-race relevance labels."""
-        _ensure_lightgbm()
-        fw = self.frameworks.get("ranker", "lgbm")
-        if fw != "lgbm":
-            logger.warning(
-                "Ranker framework '%s' is not supported in this build; using LGBM LambdaRank.",
-                fw,
-            )
-        _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
-        hp = {
-            "n_estimators": config.RANKER_PARAMS.get("n_estimators", 800),
-            "max_depth": config.RANKER_PARAMS.get("max_depth", 6),
-            "learning_rate": config.RANKER_PARAMS.get("learning_rate", 0.05),
-            "subsample": config.RANKER_PARAMS.get("subsample", 0.8),
-            "colsample_bytree": config.RANKER_PARAMS.get("colsample_bytree", 0.8),
-            "reg_alpha": config.RANKER_PARAMS.get("reg_alpha", 0.1),
-            "reg_lambda": config.RANKER_PARAMS.get("reg_lambda", 1.0),
-            "linear_tree": bool(config.RANKER_PARAMS.get("linear_tree", False)),
-            "min_child_samples": config.RANKER_PARAMS.get("min_child_samples", 20),
-            "num_leaves": config.RANKER_PARAMS.get("num_leaves", 63),
-        }
-        hp.update(self._filter_params(params, "lgbm"))
-        model = LGBMRanker(
-            objective="lambdarank",
-            metric="ndcg",
-            label_gain=[0, 1, 2, 4, 8, 16, 32],
-            **hp,
-            subsample_freq=1,
-            random_state=config.RANDOM_SEED,
-            n_jobs=self._autotune_njobs,
-            verbose=-1,
-        )
-        fit_kw: dict = {
-            "group": np.asarray(groups, dtype=np.int32).tolist(),
-            "sample_weight": sample_weight,
-        }
-        if eval_set is not None:
-            from lightgbm import early_stopping as _lgb_es
-
-            _eval_X, _eval_y, _eval_group = eval_set[0]
-            fit_kw["eval_set"] = [(_eval_X, _eval_y)]
-            fit_kw["eval_group"] = [np.asarray(_eval_group, dtype=np.int32).tolist()]
-            fit_kw["eval_at"] = [1, 3]
-            fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
-
-        model.fit(X, y, **fit_kw)
-        logger.info("Race Ranker (LGBM) training complete")
         return model
 
     def _evaluate_as_ranker(self, scores, y_test, groups_test, test_df, name,
@@ -3953,9 +3748,6 @@ class RacePredictor:
         elif self.place_model is not None:
             explain_model = self.place_model
             explain_label = "Place Classifier"
-        elif self.ranker_model is not None:
-            explain_model = self.ranker_model
-            explain_label = "Race Ranker"
 
         if explain_model is None:
             raise ValueError(
@@ -3979,7 +3771,6 @@ class RacePredictor:
             {
                 "clf_model": self.clf_model,
                 "place_model": self.place_model,
-                "ranker_model": self.ranker_model,
                 "scaler": self.scaler,
                 "feature_cols": self.feature_cols,
                 "calibration_temp": self.calibration_temp,
@@ -4004,7 +3795,6 @@ class RacePredictor:
         data = joblib.load(path)
         self.clf_model = data.get("clf_model")
         self.place_model = data.get("place_model")
-        self.ranker_model = data.get("ranker_model")
         self.scaler = data.get("scaler") or _IdentityScaler()
         self.feature_cols = data["feature_cols"]
         self.calibration_temp = float(data.get("calibration_temp", 1.0))
@@ -4015,7 +3805,7 @@ class RacePredictor:
         self.win_iso_cal = data.get("win_iso_cal")
         self.place_iso_cal = data.get("place_iso_cal")
         self.market_anchor = data.get("market_anchor")
-        self.frameworks = data.get("frameworks", {"classifier": "cat", "place": "cat", "ranker": "lgbm"})
+        self.frameworks = data.get("frameworks", {"classifier": "cat", "place": "cat"})
         logger.info(f"Models loaded (frameworks: {self.frameworks})")
 
     # ── Walk-forward fold helper ─────────────────────────────────

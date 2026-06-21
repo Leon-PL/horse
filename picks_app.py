@@ -74,16 +74,12 @@ logger = logging.getLogger(__name__)
 
 from src.app_helpers import (
     _attach_pace_diagnostics,
-    _attach_ranker_diagnostics,
-    _bet_confidence_state,
     _cached_db_stats,
     _cached_load_df,
     _has_pace_diagnostics,
     _ordinal,
     _pace_race_summary,
     _render_pace_panel,
-    _render_ranker_consensus_badge,
-    _render_ranker_disagreement_panel,
     _render_shap_explanation,
     _value_bet_mask,
     _value_odds_range,
@@ -256,13 +252,11 @@ def _predict_featured_frame(
     if hasattr(predictor, "predict_races") and "race_id" in feature_df.columns:
         preds = predictor.predict_races(feature_df, ew_fraction=ew_fraction)
         preds = _attach_pace_diagnostics(preds, feature_df)
-        preds = _attach_ranker_diagnostics(preds, predictor, feature_df)
         return _prediction_cache_set(cache_key, preds)
 
     if "race_id" not in feature_df.columns:
         preds = predictor.predict_race(feature_df, ew_fraction=ew_fraction)
         preds = _attach_pace_diagnostics(preds, feature_df)
-        preds = _attach_ranker_diagnostics(preds, predictor, feature_df)
         return _prediction_cache_set(cache_key, preds)
 
     all_preds: list[pd.DataFrame] = []
@@ -272,7 +266,6 @@ def _predict_featured_frame(
             continue
         preds = predictor.predict_race(feat_slice, ew_fraction=ew_fraction)
         preds = _attach_pace_diagnostics(preds, feat_slice)
-        preds = _attach_ranker_diagnostics(preds, predictor, feat_slice)
         preds["race_id"] = race_id
         all_preds.append(preds)
 
@@ -1495,11 +1488,6 @@ if page == "💰 Today's Picks":
                         else:
                             _stake_html += " EW"
                         flags.append("<span class='badge badge-ew'>🔀 EW</span>")
-                _conf_label, _conf_detail = _bet_confidence_state(r)
-                if _conf_label == "✅ Aligned" or _conf_label == "✓ Supported":
-                    flags.append(f"<span class='badge badge-align'>{_conf_label}</span>")
-                elif _conf_label:
-                    flags.append(f"<span class='badge badge-warn'>{_conf_label}</span>")
                 if rank == 1:
                     flags.append("🎯")
 
@@ -1573,10 +1561,6 @@ if page == "💰 Today's Picks":
                 f"{len(value_df)} selections where model probability exceeds "
                 "the market-implied probability."
             )
-            if "ranker_disagrees_top_pick" in value_df.columns:
-                _split_n = int(value_df["ranker_disagrees_top_pick"].fillna(False).sum())
-                if _split_n > 0:
-                    st.caption(f"⚠ {_split_n} value pick(s) sit in races where the ranker and win model split on the top pick.")
             _val_display = value_df.sort_values(
                 ["off_time", "value_score"], ascending=[True, False],
             )
@@ -1601,10 +1585,6 @@ if page == "💰 Today's Picks":
                 f"{len(ew_df)} selections where the place probability "
                 "exceeds the implied place odds from the fixed EW fraction."
             )
-            if "ranker_disagrees_top_pick" in ew_df.columns:
-                _split_ew_n = int(ew_df["ranker_disagrees_top_pick"].fillna(False).sum())
-                if _split_ew_n > 0:
-                    st.caption(f"⚠ {_split_ew_n} EW pick(s) come from split-view races, so treat conviction more cautiously.")
             _ew_display = ew_df.sort_values(
                 ["off_time", "place_edge"], ascending=[True, False],
             )
@@ -1887,9 +1867,7 @@ if page == "💰 Today's Picks":
             )
 
             st.markdown("### 🏆 Custom Race Prediction")
-            _render_ranker_consensus_badge(predictions)
             _render_pace_panel(predictions, key="custom_pace")
-            _render_ranker_disagreement_panel(predictions, key="custom_ranker")
             for _, row in predictions.iterrows():
                 rank = int(row["predicted_rank"])
                 emoji = (
@@ -1901,12 +1879,6 @@ if page == "💰 Today's Picks":
                 c1.markdown(f"**{emoji}**")
                 _tp_tag = " 🎯 TOP PICK" if rank == 1 else ""
                 c2.markdown(f"**{row['horse_name']}**{_tp_tag}")
-                if bool(row.get("ranker_disagrees_top_pick", False)) and rank == 1:
-                    c2.caption("Split top pick")
-                if pd.notna(row.get("rank_disagreement")) and float(row.get("rank_disagreement", 0)) >= 2:
-                    c2.caption(
-                        f"Ranker differs: win #{int(row['predicted_rank'])} vs ranker #{int(row['ranker_rank'])}"
-                    )
                 c3.metric("Win Prob", f"{row['win_probability']:.1%}")
                 if "odds" in row:
                     c4.metric("Odds", f"{row['odds']:.1f}")

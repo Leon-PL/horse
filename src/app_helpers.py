@@ -1,13 +1,12 @@
 """
 App Helper Layer
 ================
-Pure/diagnostic helpers extracted from app.py: cached run-store
-wrappers, chart builders for the Experiments and Shortcomings pages,
-pace/ranker diagnostic panels, SHAP rendering, metric formatting and
-the experiment log.
+Pure/diagnostic helpers shared by the Streamlit apps: cached run-store
+wrappers, chart builders for the registry/insights views, pace diagnostic
+panels, SHAP rendering, metric formatting and the experiment log.
 
-These functions hold no page logic — app.py imports them and remains
-the single Streamlit entry point.
+These functions hold no page logic — the picks and training apps import
+them.
 """
 
 """
@@ -224,137 +223,6 @@ def _render_pace_panel(predictions: pd.DataFrame, *, key: str) -> None:
             hide_index=True,
             width="stretch",
         )
-
-
-def _attach_ranker_diagnostics(
-    predictions: pd.DataFrame,
-    predictor: RacePredictor,
-    feature_df: pd.DataFrame | None,
-) -> pd.DataFrame:
-    if predictions is None or predictions.empty or feature_df is None or feature_df.empty:
-        return predictions
-    ranker_model = getattr(predictor, "ranker_model", None)
-    if ranker_model is None:
-        return predictions
-    if not hasattr(predictor, "_prepare_prediction_frame"):
-        return predictions
-
-    join_cols = [c for c in ["race_id", "horse_name"] if c in predictions.columns and c in feature_df.columns]
-    if "horse_name" not in join_cols:
-        return predictions
-
-    try:
-        predict_df, X_scaled = predictor._prepare_prediction_frame(feature_df)
-        ranker_scores = np.asarray(ranker_model.predict(X_scaled), dtype=np.float64)
-    except Exception:
-        return predictions
-
-    ranker_frame = predict_df[join_cols].copy() if join_cols else predict_df[["horse_name"]].copy()
-    ranker_frame["ranker_score"] = ranker_scores
-    group_cols = [c for c in ["race_id"] if c in ranker_frame.columns]
-    if group_cols:
-        ranker_frame["ranker_rank"] = ranker_frame.groupby(group_cols, sort=False)["ranker_score"].rank(
-            ascending=False,
-            method="min",
-        ).astype(int)
-    else:
-        ranker_frame["ranker_rank"] = ranker_frame["ranker_score"].rank(ascending=False, method="min").astype(int)
-
-    ranker_frame = ranker_frame.drop_duplicates(subset=join_cols, keep="last")
-    merged = predictions.merge(ranker_frame, on=join_cols, how="left")
-    if "predicted_rank" in merged.columns and "ranker_rank" in merged.columns:
-        merged["rank_disagreement"] = (
-            pd.to_numeric(merged["predicted_rank"], errors="coerce")
-            - pd.to_numeric(merged["ranker_rank"], errors="coerce")
-        ).abs()
-        merged["ranker_disagrees_top_pick"] = (
-            (pd.to_numeric(merged["predicted_rank"], errors="coerce") == 1)
-            != (pd.to_numeric(merged["ranker_rank"], errors="coerce") == 1)
-        )
-    return merged
-
-
-def _render_ranker_disagreement_panel(predictions: pd.DataFrame, *, key: str) -> None:
-    if predictions is None or predictions.empty or "ranker_rank" not in predictions.columns:
-        return
-
-    top_pick = predictions.loc[pd.to_numeric(predictions.get("predicted_rank"), errors="coerce") == 1]
-    ranker_top = predictions.loc[pd.to_numeric(predictions.get("ranker_rank"), errors="coerce") == 1]
-    top_pick_name = top_pick["horse_name"].iloc[0] if not top_pick.empty else None
-    ranker_top_name = ranker_top["horse_name"].iloc[0] if not ranker_top.empty else None
-
-    if top_pick_name and ranker_top_name and top_pick_name == ranker_top_name:
-        st.caption(f"Ranker agrees with the win model on the top pick: {top_pick_name}.")
-    elif top_pick_name and ranker_top_name:
-        st.caption(f"Ranker disagreement: win model prefers {top_pick_name}, ranker prefers {ranker_top_name}.")
-
-    panel = predictions.copy()
-    panel["rank_disagreement"] = pd.to_numeric(panel.get("rank_disagreement"), errors="coerce")
-    shown = panel[[c for c in ["predicted_rank", "ranker_rank", "horse_name", "win_probability", "rank_disagreement"] if c in panel.columns]].copy()
-    shown = shown.rename(columns={
-        "predicted_rank": "Win Rank",
-        "ranker_rank": "Ranker Rank",
-        "horse_name": "Horse",
-        "win_probability": "Win Prob",
-        "rank_disagreement": "Δ Rank",
-    }).sort_values(["Δ Rank", "Win Rank"], ascending=[False, True], kind="stable")
-
-    with st.expander("⚔️ Ranker Disagreement", expanded=False):
-        st.dataframe(
-            shown.style.format({
-                "Win Prob": "{:.1%}",
-                "Δ Rank": "{:.0f}",
-            }),
-            hide_index=True,
-            width="stretch",
-        )
-
-
-def _ranker_consensus_state(predictions: pd.DataFrame) -> tuple[str, str]:
-    if predictions is None or predictions.empty or "ranker_rank" not in predictions.columns:
-        return "", ""
-
-    panel = predictions.copy()
-    panel["predicted_rank"] = pd.to_numeric(panel.get("predicted_rank"), errors="coerce")
-    panel["ranker_rank"] = pd.to_numeric(panel.get("ranker_rank"), errors="coerce")
-    panel["rank_disagreement"] = pd.to_numeric(panel.get("rank_disagreement"), errors="coerce")
-
-    top_pick = panel.loc[panel["predicted_rank"] == 1, "horse_name"]
-    ranker_top = panel.loc[panel["ranker_rank"] == 1, "horse_name"]
-    same_top = bool(not top_pick.empty and not ranker_top.empty and top_pick.iloc[0] == ranker_top.iloc[0])
-
-    top_band = panel.loc[(panel["predicted_rank"] <= 3) | (panel["ranker_rank"] <= 3)]
-    mean_gap = float(top_band["rank_disagreement"].dropna().mean()) if not top_band.empty else float("nan")
-
-    if same_top and np.isfinite(mean_gap) and mean_gap <= 0.75:
-        return "🟢 Strong consensus", "Win model and ranker agree tightly at the top of the race."
-    if same_top and np.isfinite(mean_gap) and mean_gap <= 1.5:
-        return "🟡 Moderate consensus", "Top pick agrees, but the rest of the ordering is less stable."
-    if same_top:
-        return "🟡 Narrow consensus", "They agree on the winner, but disagree materially underneath."
-    return "🔴 Split view", "The ranker and win model disagree on the top of the race."
-
-
-def _render_ranker_consensus_badge(predictions: pd.DataFrame) -> None:
-    label, detail = _ranker_consensus_state(predictions)
-    if not label:
-        return
-    st.caption(f"{label} — {detail}")
-
-
-def _bet_confidence_state(row: pd.Series) -> tuple[str, str]:
-    if pd.isna(row.get("ranker_rank")):
-        return "", ""
-    disagreement = pd.to_numeric(pd.Series([row.get("rank_disagreement")]), errors="coerce").iloc[0]
-    if bool(row.get("ranker_disagrees_top_pick", False)) and int(pd.to_numeric(row.get("predicted_rank"), errors="coerce") or 0) == 1:
-        return "⚠ Split", "Ranker does not back the model's top pick."
-    if pd.notna(disagreement) and float(disagreement) >= 2:
-        return "⚠ Caution", "Ranker is materially lower on this runner."
-    if pd.notna(disagreement) and float(disagreement) <= 0:
-        return "✅ Aligned", "Win model and ranker agree on this runner's rank."
-    if pd.notna(disagreement) and float(disagreement) <= 1:
-        return "✓ Supported", "Ranker broadly supports this runner."
-    return "", ""
 
 
 # ── Cached wrappers for disk I/O ─────────────────────────────────────
@@ -755,7 +623,6 @@ def _model_display_name(model_key: str) -> str:
         "classifier": "Win Classifier",
         "place_classifier": "Place Classifier",
         "place": "Place Classifier",
-        "ranker": "Race Ranker",
         "baseline_win": "Baseline — Logistic (Win)",
         "baseline_place": "Baseline — Logistic (Place)",
         "baseline_market": "Baseline — Market (odds)",
@@ -907,7 +774,6 @@ def _build_metric_snapshot_frame(metrics_payload: dict | None) -> tuple[pd.DataF
 
     model_groups = [
         ("win_classifier", "classifier"),
-        ("ranker",),
         ("place_classifier", "place"),
         ("baseline_win",),
         ("baseline_place",),
@@ -951,31 +817,6 @@ def _build_metric_snapshot_frame(metrics_payload: dict | None) -> tuple[pd.DataF
             value_rows.append(value_row)
 
     return pd.DataFrame(full_rows), pd.DataFrame(value_rows)
-
-
-def _build_ranker_selector_explainer(metrics_payload: dict | None) -> dict:
-    """Return compact diagnostics explaining why ranker ROI can diverge."""
-    _, ranker_payload = _resolve_model_metric_payload(metrics_payload, "ranker")
-    _, win_payload = _resolve_model_metric_payload(metrics_payload, "win_classifier", "classifier")
-    if not ranker_payload or not win_payload:
-        return {}
-
-    def _delta(metric_name: str, higher_is_better: bool) -> float | None:
-        ranker_value = _first_metric_value(ranker_payload, metric_name)
-        win_value = _first_metric_value(win_payload, metric_name)
-        if ranker_value is None or win_value is None:
-            return None
-        raw = float(ranker_value) - float(win_value)
-        return raw if higher_is_better else -raw
-
-    return {
-        "full_brier_edge": _delta("brier_score", higher_is_better=False),
-        "full_log_loss_edge": _delta("log_loss", higher_is_better=False),
-        "selected_brier_edge": _delta("value_bet_brier", higher_is_better=False),
-        "selected_log_loss_edge": _delta("value_bet_log_loss", higher_is_better=False),
-        "roi_edge": _delta("value_bet_roi", higher_is_better=True),
-        "bet_count_delta": _delta("value_bets", higher_is_better=True),
-    }
 
 
 @st.cache_data(show_spinner=False)

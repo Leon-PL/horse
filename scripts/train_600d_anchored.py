@@ -39,7 +39,7 @@ featured = pd.read_parquet(get_run_featured_path(BASE_RUN))
 logger.info("Featured: %d rows x %d cols", len(featured), featured.shape[1])
 
 logger.info("Training RacePredictor (anchor=%s, ranker=%s) ...",
-            config.MARKET_ANCHOR, config.TRAIN_RANKER)
+            config.MARKET_ANCHOR, False)
 predictor = RacePredictor(frameworks=dict(config.SUB_MODEL_FRAMEWORKS))
 metrics = predictor.train(featured, save=True, value_config=VALUE_CONFIG)
 
@@ -58,7 +58,7 @@ run_id = save_run(
     test_analysis=predictor.test_analysis,
     training_config={"value_config": VALUE_CONFIG, "days_back": 600,
                      "frameworks": dict(config.SUB_MODEL_FRAMEWORKS),
-                     "train_ranker": bool(config.TRAIN_RANKER),
+                     "train_ranker": bool(False),
                      "market_anchor": predictor.market_anchor,
                      "base_run": BASE_RUN},
     featured_df=featured,

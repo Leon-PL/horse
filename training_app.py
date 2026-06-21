@@ -302,7 +302,7 @@ elif page == "🧭 Tune":
         tname = st.text_input("Session name", value="tune")
         c1, c2, c3 = st.columns(3)
         with c1:
-            models = st.multiselect("Models", ["classifier", "place", "ranker"],
+            models = st.multiselect("Models", ["classifier", "place"],
                                     default=["classifier"])
         with c2:
             n_trials = st.number_input("Trials per model", 5, 500, 30)

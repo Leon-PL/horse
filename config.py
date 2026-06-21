@@ -126,18 +126,6 @@ PLACE_CLASSIFIER_PARAMS = {
     "reg_lambda": 3.0,
 }
 
-RANKER_PARAMS = {
-    "n_estimators": 1200,
-    "max_depth": 6,
-    "learning_rate": 0.03,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_samples": 30,
-    "num_leaves": 63,
-    "reg_alpha": 0.2,
-    "reg_lambda": 2.0,
-}
-
 # --- Sub-Model Framework Selection ---
 # For each sub-model role, choose "xgb" (XGBoost), "lgbm" (LightGBM),
 # or "cat" (CatBoost).
@@ -166,14 +154,6 @@ MARKET_ANCHOR = True
 # improves accuracy only — it does NOT create a betting edge.
 WIN_SOFT_LABEL_DISTILL = True
 WIN_SOFT_LABEL_BLEND = 1.0
-
-# --- Race Ranker ---
-# LambdaRank learns relative order within each race directly.
-# Diagnostics only — its scores are never blended into win
-# probabilities, and training it costs roughly a third of total
-# training time. Off by default; enable here or via the Train page
-# toggle when you want the ranker/classifier agreement panels.
-TRAIN_RANKER = False
 
 # --- Glicko Settings ---
 GLICKO_ENABLED = True    # adds horse_glicko* features in feature engineering

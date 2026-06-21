@@ -26,13 +26,8 @@ AUTOTUNE_MODEL_INFO = {
         "training_metric": "Place Top-3 Hybrid",
         "objective_summary": "Higher is better. Rewards getting the actual top-3 finishers into the model's top-3, while still keeping place precision, calibration Brier, and log loss honest.",
     },
-    "ranker": {
-        "label": "Race Ranker",
-        "training_metric": "Ranker Top-1 Hybrid",
-        "objective_summary": "Higher is better. Rewards within-race ordering directly via NDCG, top-1, winner-in-top-3, and rank-probability quality across purged walk-forward folds.",
-    },
 }
-AUTOTUNE_OBJECTIVE_VERSION = 7
+AUTOTUNE_OBJECTIVE_VERSION = 8
 
 
 def _ensure_dir(path: str) -> None:
@@ -313,7 +308,7 @@ def run_autotune_session(
     for model_index, model_key in enumerate(models, start=1):
         if model_key not in AUTOTUNE_MODEL_INFO:
             continue
-        if model_key not in {"classifier", "place", "ranker"}:
+        if model_key not in {"classifier", "place"}:
             logger.warning("Skipping unsupported dedicated autotune model: %s", model_key)
             continue
 
@@ -394,7 +389,6 @@ def build_config_snippet(manifest: dict) -> str:
     model_to_config_key = {
         "classifier": "CLASSIFIER_PARAMS",
         "place": "PLACE_CLASSIFIER_PARAMS",
-        "ranker": "RANKER_PARAMS",
     }
     lines = []
     summaries = manifest.get("summaries") or {}

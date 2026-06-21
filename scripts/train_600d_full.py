@@ -52,7 +52,7 @@ logger.info("Featured: %d rows x %d cols (FE %.1f min)",
 
 t1 = time.time()
 logger.info("Training RacePredictor (anchor=%s, ranker=%s, trueskill=%s) ...",
-            config.MARKET_ANCHOR, config.TRAIN_RANKER,
+            config.MARKET_ANCHOR, False,
             getattr(config, "TRUESKILL_ENABLED", False))
 predictor = RacePredictor(frameworks=dict(config.SUB_MODEL_FRAMEWORKS))
 metrics = predictor.train(featured, save=True, value_config=VALUE_CONFIG)
@@ -70,7 +70,7 @@ run_id = save_run(
     test_analysis=predictor.test_analysis,
     training_config={"value_config": VALUE_CONFIG, "days_back": 600,
                      "frameworks": dict(config.SUB_MODEL_FRAMEWORKS),
-                     "train_ranker": bool(config.TRAIN_RANKER),
+                     "train_ranker": bool(False),
                      "market_anchor": predictor.market_anchor,
                      "trueskill": bool(getattr(config, "TRUESKILL_ENABLED", False)),
                      "pedigree_coverage": round(float(ped_cov), 4)},

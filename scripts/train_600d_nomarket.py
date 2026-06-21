@@ -45,7 +45,7 @@ logger.info("Featured: %d rows x %d cols", len(featured), featured.shape[1])
 featured, dropped = _drop_market_feature_columns(featured)
 logger.info("Dropped %d market features: %s", len(dropped), ", ".join(dropped))
 
-logger.info("Training RacePredictor without market features (ranker=%s) ...", config.TRAIN_RANKER)
+logger.info("Training RacePredictor without market features (ranker=%s) ...", False)
 predictor = RacePredictor(frameworks=dict(config.SUB_MODEL_FRAMEWORKS))
 metrics = predictor.train(featured, save=True, value_config=VALUE_CONFIG)
 
@@ -64,7 +64,7 @@ run_id = save_run(
     test_analysis=predictor.test_analysis,
     training_config={"value_config": VALUE_CONFIG, "days_back": 600,
                      "frameworks": dict(config.SUB_MODEL_FRAMEWORKS),
-                     "train_ranker": bool(config.TRAIN_RANKER),
+                     "train_ranker": bool(False),
                      "dropped_market_features": dropped,
                      "base_run": BASE_RUN},
     featured_df=featured,

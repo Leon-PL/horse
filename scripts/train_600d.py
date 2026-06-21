@@ -48,7 +48,7 @@ featured = engineer_features(processed, save=False)
 featured = compact_numeric_dtypes(featured, label="600d featured")
 logger.info("Featured: %d rows x %d cols", len(featured), featured.shape[1])
 
-logger.info("Training RacePredictor (ranker=%s) ...", config.TRAIN_RANKER)
+logger.info("Training RacePredictor (ranker=%s) ...", False)
 predictor = RacePredictor(frameworks=dict(config.SUB_MODEL_FRAMEWORKS))
 metrics = predictor.train(featured, save=True, value_config=VALUE_CONFIG)
 
@@ -65,7 +65,7 @@ run_id = save_run(
     test_analysis=predictor.test_analysis,
     training_config={"value_config": VALUE_CONFIG, "days_back": 600,
                      "frameworks": dict(config.SUB_MODEL_FRAMEWORKS),
-                     "train_ranker": bool(config.TRAIN_RANKER)},
+                     "train_ranker": bool(False)},
     featured_df=featured,
     processed_df=processed,
 )
