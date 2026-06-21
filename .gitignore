@@ -6,6 +6,6 @@ models/
 .venv/
 catboost_info/
 *.prof
-rtv_backfill_output.log
+*.log
 .claude/settings.json
 .gitignore
