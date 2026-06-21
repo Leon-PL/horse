@@ -40,7 +40,6 @@ import pandas as pd
 
 import config
 from src.feature_engineer import engineer_features
-from src.live_prediction import feature_engineer_with_history_core
 from src.ratings import compute_elo_features, compute_glicko_features
 
 logger = logging.getLogger(__name__)
@@ -251,21 +250,28 @@ class FeatureStore:
         self._save_counts_state(counts_state)  # advanced in place by the stages
         return featured_new, advanced
 
-    def append(self, processed_new: pd.DataFrame, *, fast: bool = False) -> pd.DataFrame:
-        """Feature-engineer and append new race dates.
+    def append(self, processed_new: pd.DataFrame) -> pd.DataFrame:
+        """Feature-engineer and append new race dates (NEW ROWS ONLY).
 
         Only rows strictly after the store's ``last_date`` are taken (the
         store holds settled history; re-appending the same dates is a
         no-op). Returns the newly appended featured rows.
 
-        With ``fast=True`` (and a store carrying ``counts_state``) the whole FE
-        pass runs on the NEW rows only — ratings seeded from persisted state and
-        every pandas stage resumed from carried state — so history is never
-        recomputed. Without carried state (a pre-flip store) it falls back to the
-        full-recompute path. Both paths are parity-tested against a full rebuild.
+        The whole FE pass runs on the new rows only — ratings seeded from
+        persisted state and every pandas stage resumed from carried
+        ``counts_state`` — so history is never recomputed. Parity with a full
+        rebuild is enforced by tests/test_feature_store.py. A store predating
+        the incremental flip (no carried state) must be rebuilt rather than
+        appended; ``get_featured_dataset`` enforces that via the schema-version
+        guard, but we also assert it here.
         """
         if not self.exists():
             raise RuntimeError("FeatureStore is empty; call build() first.")
+        if self.load_counts_state() is None:
+            raise RuntimeError(
+                "FeatureStore lacks carried state (pre-flip store); rebuild via "
+                "get_featured_dataset(rebuild=True) before appending."
+            )
 
         processed_hist = self.load_processed()
         last = self.last_date()
@@ -276,13 +282,7 @@ class FeatureStore:
             logger.info("FeatureStore.append: no rows after %s — nothing to do", last)
             return new
 
-        if fast and self.load_counts_state() is not None:
-            featured_new, advanced = self._fast_featurize(new)
-        else:
-            # Correct re-featuring against full history (parity-tested path):
-            # also the fallback for pre-flip stores that lack carried state.
-            featured_new = feature_engineer_with_history_core(processed_hist, new)
-            advanced = self._compute_ratings_state(new, seed=self.load_state())
+        featured_new, advanced = self._fast_featurize(new)
 
         # Persist: append featured + processed, advance + save rating state.
         featured_all = pd.concat(

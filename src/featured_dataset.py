@@ -105,7 +105,6 @@ def get_featured_dataset(
     *,
     processed: pd.DataFrame | None = None,
     rebuild: bool = False,
-    fast_append: bool = True,
 ) -> pd.DataFrame:
     """Return the full featured dataset, building or appending as needed.
 
@@ -114,14 +113,15 @@ def get_featured_dataset(
     changed beneath the store** (a backfill/cleanup edited rows at-or-before
     the store's last date). Otherwise appends only the newer race dates.
 
+    The append path features NEW ROWS ONLY (ratings + every pandas stage
+    seeded from carried state) — history is never recomputed. The
+    ``fe_signature`` guard (which folds in ``STORE_SCHEMA_VERSION``) forces a
+    full rebuild for any store predating the incremental flip, so the append
+    always has carried state to resume from.
+
     Args:
         processed: pre-processed history; loaded via ``process_data`` if None.
         rebuild: force a full rebuild even if the store looks current.
-        fast_append: use the incremental append path that features NEW ROWS
-            ONLY (ratings + every pandas stage seeded from carried state),
-            instead of recomputing history. Parity-tested against a full
-            rebuild; falls back to the recompute path for pre-flip stores
-            lacking carried state. Default True.
     """
     store = FeatureStore()
     fe_sig = fe_signature()
@@ -145,6 +145,6 @@ def get_featured_dataset(
         )
         return _rebuild(store, processed, fe_sig)
 
-    store.append(processed, fast=fast_append)
+    store.append(processed)
     _stamp(store, fe_sig, data_signature(processed, cutoff=store.last_date()))
     return store.load_featured()

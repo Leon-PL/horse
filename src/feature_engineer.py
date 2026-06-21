@@ -712,7 +712,13 @@ def _rolling_with_seed(df, group_key, value_col, operations, seed):
 
     ent = _entity_str(df, keys)
     n = len(df)
-    cols = {kc: df[kc].to_numpy() for kc in keys}
+    # Key columns MUST be strings here: the synthetic seed rows below build
+    # their keys from ``e.split("||")`` (strings), so if the real rows kept a
+    # numeric key (e.g. horse_id) the concat would mix str/int and
+    # ``_encode_groups`` would treat '920554' and 920554 as different groups —
+    # orphaning each entity's carried tail and silently dropping the seed on
+    # the first appended row. Casting to str keeps synth and real in one group.
+    cols = {kc: df[kc].astype(str).to_numpy() for kc in keys}
     cols[date_col] = pd.to_datetime(df[date_col], errors="coerce").to_numpy()
     cols["race_id"] = (
         df["race_id"].astype(str).to_numpy() if "race_id" in df.columns
@@ -804,18 +810,45 @@ def _running_extreme(df, entity_col, col, *, kind="max", prev=False):
         cum = cum.groupby(df[entity_col].to_numpy()).shift(1)
     if _COUNTS_STATE is None:
         return cum
-    state_key = f"ext::{kind}::{int(prev)}::{entity_col}::{col}"
-    seed = _COUNTS_STATE.get(state_key, {})
+
+    # Seeded path. pandas ``cummax``/``cummin`` are skipna BUT keep NaN at NaN
+    # input rows, and ``.shift(1)`` then propagates that NaN to the next row.
+    # To match a full build exactly across a seam we carry two values per
+    # entity: R = the running skipna extreme through end of history (to extend
+    # the running max into new rows), and L = the cummax value AT the last
+    # history row (which is NaN if that row's value was NaN) — that is what the
+    # first new row's ``shift(1)`` must reproduce. Carrying only the skipna
+    # extreme silently "revived" a career high that an intervening no-rating
+    # race had nulled out in the full build.
     npf = np.fmax if kind == "max" else np.fmin
-    if seed:
-        seed_vals = pd.Series(df[entity_col].to_numpy(), index=df.index).map(seed).to_numpy(dtype="float64")
-        cum = pd.Series(npf(cum.to_numpy(dtype="float64"), seed_vals), index=df.index)
+    state_key = f"ext::{kind}::{int(prev)}::{entity_col}::{col}"
+    state = _COUNTS_STATE.get(state_key, {})  # entity -> (R, L)
+    ent = df[entity_col]
+    vals = df[col].to_numpy(dtype="float64")
+    local = (g[col].cummax() if kind == "max" else g[col].cummin()).to_numpy(dtype="float64")
+    R_row = ent.map({e: rl[0] for e, rl in state.items()}).to_numpy(dtype="float64")
+    # combined = full cummax restricted to this frame (NaN kept at NaN inputs).
+    combined = np.where(np.isnan(vals), np.nan, npf(local, R_row))
+    combined = pd.Series(combined, index=df.index)
+
+    if prev:
+        result = combined.groupby(df[entity_col].to_numpy()).shift(1)
+        first = pd.Series((g.cumcount() == 0).to_numpy(), index=df.index)
+        result = result.where(~first, ent.map({e: rl[1] for e, rl in state.items()}))
+    else:
+        result = combined
+
+    # Advance state: R' = extreme(R, frame skipna extreme); L' = combined at the
+    # entity's last (chronological) row in this frame.
     frame_ext = g[col].max() if kind == "max" else g[col].min()
-    new_state = dict(seed)
+    is_last = (g.cumcount(ascending=False) == 0).to_numpy()
+    last_combined = dict(zip(ent.to_numpy()[is_last], combined.to_numpy()[is_last]))
+    new_state = dict(state)
     for e, v in zip(frame_ext.index.to_numpy(), frame_ext.to_numpy()):
-        new_state[e] = float(npf(seed.get(e, np.nan), v))
+        R_old = state.get(e, (np.nan, np.nan))[0]
+        new_state[e] = (float(npf(R_old, v)), last_combined.get(e, np.nan))
     _COUNTS_STATE[state_key] = new_state
-    return cum
+    return result
 
 
 def _ffill_prev(df, entity_col, col):
@@ -891,24 +924,65 @@ def _expanding_prev(df, key_col, col, stats):
 
 
 def _distinct_count(df, entity_col, col):
-    """Per-entity distinct-value count (``groupby[col].transform('nunique')``),
-    seed-aware via a carried set per entity. Full build is byte-identical; on an
-    append the count is ``|carried ∪ new distinct|`` (matches a full rebuild at
-    the data's end). State holds the set of values seen per entity."""
-    g = df.groupby(entity_col, sort=False)[col]
-    if _COUNTS_STATE is None:
-        return g.transform("nunique")
+    """Per-entity CAUSAL running distinct-value count: for each row, how many
+    distinct non-null ``col`` values the entity has shown up to AND INCLUDING
+    this race (chronological). This replaces the earlier whole-frame
+    ``transform('nunique')``, which leaked the future — a row's count included
+    values the entity would only show in LATER races, so it could not be
+    computed incrementally and violated the no-leakage rule (CLAUDE.md #1).
+
+    Order is made deterministic internally (sort by date + race_id) so the
+    result is independent of the incoming row order, and identical whether
+    computed in one full build or across appended chunks. Seed-aware under
+    ``counts_state_scope``: state holds the set of values seen per entity, so an
+    append continues the running count from where history left off."""
+    n = len(df)
+    date_col = "_event_dt" if "_event_dt" in df.columns else "race_date"
+    sort_cols = [c for c in (date_col, "race_id") if c in df.columns]
+    if sort_cols:
+        perm = (
+            df[sort_cols].reset_index(drop=True)
+            .sort_values(sort_cols, kind="stable").index.to_numpy()
+        )
+    else:
+        perm = np.arange(n)
+    inv = np.empty(n, dtype=np.intp)
+    inv[perm] = np.arange(n)
+
+    ent_s = df[entity_col].to_numpy()[perm]
+    val_s = df[col].to_numpy()[perm]
+    notna_s = ~pd.isna(val_s)
+    # First occurrence of each (entity, value) among non-null rows, in order.
+    first_s = notna_s & (
+        ~pd.DataFrame({"e": ent_s, "v": val_s}).duplicated(["e", "v"]).to_numpy()
+    )
+
     state_key = f"nuniq::{entity_col}::{col}"
-    seed = _COUNTS_STATE.get(state_key, {})
-    frame_sets = g.apply(lambda s: set(pd.unique(s.dropna())))
-    total: dict = {}
-    new_state = dict(seed)
-    for e, fs in frame_sets.items():
-        u = set(seed.get(e, set())) | set(fs)
-        total[e] = len(u)
-        new_state[e] = u
-    _COUNTS_STATE[state_key] = new_state
-    return df[entity_col].map(total)
+    seed = _COUNTS_STATE.get(state_key, {}) if _COUNTS_STATE is not None else {}
+
+    if seed:
+        # A first-in-frame value only increments if not already carried.
+        carried_pairs = [(e, v) for e, vs in seed.items() for v in vs]
+        carried_idx = pd.MultiIndex.from_tuples(carried_pairs)
+        not_carried = ~pd.MultiIndex.from_arrays([ent_s, val_s]).isin(carried_idx)
+        inc_s = (first_s & not_carried).astype(np.int64)
+        base = pd.Series(ent_s).map(
+            {e: len(vs) for e, vs in seed.items()}
+        ).fillna(0).to_numpy()
+    else:
+        inc_s = first_s.astype(np.int64)
+        base = 0
+
+    run_s = base + pd.Series(inc_s).groupby(ent_s).cumsum().to_numpy()
+    out = pd.Series(run_s[inv].astype("float64"), index=df.index)
+
+    if _COUNTS_STATE is not None:
+        new_state = {e: set(vs) for e, vs in seed.items()}
+        seen = pd.DataFrame({"e": ent_s[notna_s], "v": val_s[notna_s]})
+        for e, grp in seen.groupby("e")["v"]:
+            new_state[e] = new_state.get(e, set()) | set(grp.unique())
+        _COUNTS_STATE[state_key] = new_state
+    return out
 
 
 def _rolling(df, group_key, value_col, operations) -> dict:
@@ -4304,6 +4378,7 @@ def engineer_features(
     *,
     skip_ratings: bool = False,
     counts_state: dict | None = None,
+    defer_global_imputation: bool = False,
 ) -> pd.DataFrame:
     """
     Full feature engineering pipeline.
@@ -4358,6 +4433,15 @@ def engineer_features(
         stages.append(compute_elo_features)
         if getattr(config, "GLICKO_ENABLED", True):
             stages.append(compute_glicko_features)  # rating + uncertainty (RD)
+    else:
+        # The rating sweeps drop ``_event_dt`` as a side effect (ratings.py:
+        # ``compute_elo_features`` line ~806). Downstream rolling stages then
+        # fall back to sorting by ``race_date`` (day granularity). When the
+        # caller supplies ratings and skips the sweeps we must reproduce that
+        # side effect, or those stages sort by the finer ``_event_dt`` and the
+        # rolling/EWMA features (field_avg_elo_*, speed_fig_*, speed_z_class_*)
+        # diverge from a full inline build. See tests/test_feature_store.py.
+        stages.append(lambda d: d.drop(columns=["_event_dt"], errors="ignore"))
     stages += [
         add_opposition_strength_features,  # needs horse_elo
         add_headgear_features,
@@ -4409,10 +4493,24 @@ def engineer_features(
     # and unknown context directly.
     numeric_cols = df.select_dtypes(include=[np.number]).columns
 
-    # Speed figure columns: fill with column median (unknown = average)
+    # Speed figure columns: fill with column median (unknown = average).
+    # This median is a GLOBAL statistic over the frame, so it is not chunk-
+    # invariant: a full rebuild and an incremental append (new rows only) would
+    # otherwise impute cold-start rows with different medians. To keep the
+    # append faithful to a rebuild we persist the build-time median per column
+    # in ``counts_state`` and reuse it on later appends. ``defer_global_
+    # imputation`` skips the fill entirely (the batched builder leaves NaN and
+    # applies one global median over the consolidated frame, then stamps the
+    # medians into counts_state for subsequent appends).
     speed_cols = [c for c in numeric_cols if "speed_fig" in c.lower()]
-    for c in speed_cols:
-        df[c] = df[c].fillna(df[c].median() if df[c].notna().any() else 0)
+    if not defer_global_imputation:
+        for c in speed_cols:
+            med = counts_state.get(f"median::{c}") if counts_state is not None else None
+            if med is None:
+                med = float(df[c].median()) if df[c].notna().any() else 0.0
+                if counts_state is not None:
+                    counts_state[f"median::{c}"] = med
+            df[c] = df[c].fillna(med)
 
     # RTV RACEiQ rolling columns: keep NaN (LightGBM handles missing
     # natively) and expose coverage explicitly. The previous global

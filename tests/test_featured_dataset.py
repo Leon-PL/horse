@@ -69,8 +69,8 @@ class _FakeStore:
         self.calls.append("build")
         return pd.DataFrame({"featured": [1]})
 
-    def append(self, processed, fast=False):
-        self.calls.append(f"append(fast={fast})")
+    def append(self, processed):
+        self.calls.append("append")
 
     def load_featured(self):
         self.calls.append("load")
@@ -132,4 +132,4 @@ class TestBuildVsAppend:
                   "data_signature": data_signature(proc, cutoff=last)},
         )
         get_featured_dataset(processed=proc)
-        assert fake.calls == ["append(fast=True)", "load"]
+        assert fake.calls == ["append", "load"]

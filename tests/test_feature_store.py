@@ -30,13 +30,13 @@ def proc_split():
     return proc, hist, new, boundary
 
 
-def _assert_append_matches_batch(store_root, proc, hist, new, boundary, *, fast):
+def _assert_append_matches_batch(store_root, proc, hist, new, boundary):
     batch = engineer_features(proc.copy(), save=False)
     batch_new = batch[batch["race_date"] >= boundary]
 
     store = FeatureStore(root=str(store_root))
     store.build(hist.copy())
-    appended = store.append(new.copy(), fast=fast)
+    appended = store.append(new.copy())
 
     model_cols = [c for c in get_feature_columns(batch) if c in appended.columns]
     assert model_cols
@@ -57,19 +57,13 @@ def _assert_append_matches_batch(store_root, proc, hist, new, boundary, *, fast)
             j = int(np.argmax(~close))
             bad.append(f"{col}: {n}/{len(x)} differ (e.g. batch={x[j]!r} store={y[j]!r} at {b.index[j]})")
     assert not bad, (
-        f"Feature store append (fast={fast}) diverges from full rebuild:\n"
-        + "\n".join(bad[:40])
+        "Feature store append diverges from full rebuild:\n" + "\n".join(bad[:40])
     )
 
 
-def test_build_then_append_matches_full_rebuild(proc_split, tmp_path):
+def test_append_matches_full_rebuild(proc_split, tmp_path):
     proc, hist, new, boundary = proc_split
-    _assert_append_matches_batch(tmp_path / "store", proc, hist, new, boundary, fast=False)
-
-
-def test_fast_append_matches_full_rebuild(proc_split, tmp_path):
-    proc, hist, new, boundary = proc_split
-    _assert_append_matches_batch(tmp_path / "store_fast", proc, hist, new, boundary, fast=True)
+    _assert_append_matches_batch(tmp_path / "store", proc, hist, new, boundary)
 
 
 def test_persisted_featured_grows_and_dedupes(proc_split, tmp_path):

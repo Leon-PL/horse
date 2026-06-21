@@ -56,7 +56,13 @@ def _synthetic_raw(n_days: int = 100, races_per_day: int = 2, field: int = 6, se
                     "prize_money": 5000.0 + 100 * (rid % 10),
                     "num_runners": field,
                     "horse_name": f"Horse {h}",
-                    "horse_id": f"hid{h}",
+                    # NUMERIC horse_id on purpose: real data keys history on an
+                    # integer horse_id, and an earlier incremental-FE bug only
+                    # bit numeric keys (string seed rows vs numeric frame rows
+                    # grouped apart, orphaning carried history). A string id here
+                    # silently hid it — keep this numeric so the parity tests
+                    # actually exercise the real-data key path.
+                    "horse_id": 100000 + h,
                     "jockey": jockeys[h % len(jockeys)],
                     "trainer": trainers[h % len(trainers)],
                     "age": 4 + h % 5,
