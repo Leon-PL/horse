@@ -1021,9 +1021,19 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     placed_hist = df["_placed_for_history"].fillna(0.0)
 
     # Race-safe: trainers often have multiple runners in the same race.
-    # All same-race runners must see identical prior-race stats.
-    df["trainer_prev_runs"] = _race_safe_cumsum(df, "trainer", "_result_start")
-    df["trainer_cum_wins"] = _race_safe_cumsum(df, "trainer", "won")
+    # All same-race runners must see identical prior-race stats. Routed through
+    # the seed-aware cumulative primitive (class C; see docs/FE_TAXONOMY.md) so
+    # the FeatureStore append can carry state instead of recomputing history.
+    _tc = _cumulative(
+        df["trainer"].to_numpy(), df["race_id"].to_numpy(),
+        {
+            "trainer_prev_runs": df["_result_start"].to_numpy(),
+            "trainer_cum_wins": df["won"].to_numpy(),
+            "trainer_cum_places": placed_hist.to_numpy(),
+        },
+    )
+    df["trainer_prev_runs"] = _tc["trainer_prev_runs"]
+    df["trainer_cum_wins"] = _tc["trainer_cum_wins"]
     df["trainer_win_rate"] = np.where(
         df["trainer_prev_runs"] > 0,
         df["trainer_cum_wins"] / df["trainer_prev_runs"],
@@ -1043,8 +1053,7 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
         df[name] = arr
 
     # Place rate
-    df["_placed_hist_safe"] = placed_hist
-    df["trainer_cum_places"] = _race_safe_cumsum(df, "trainer", "_placed_hist_safe")
+    df["trainer_cum_places"] = _tc["trainer_cum_places"]
     df["trainer_place_rate"] = np.where(
         df["trainer_prev_runs"] > 0,
         df["trainer_cum_places"] / df["trainer_prev_runs"],
@@ -1084,7 +1093,7 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["trainer_hot_vs_30d"] = df["trainer_wr_14d"] - df["trainer_wr_30d"]
 
-    df = df.drop(columns=["trainer_cum_wins", "trainer_cum_places", "_placed_hist_safe"])
+    df = df.drop(columns=["trainer_cum_wins", "trainer_cum_places"], errors="ignore")
     df = _entity_day_start_view(df, ["trainer"], [
         "trainer_prev_runs", "trainer_win_rate", "trainer_win_rate_shrunk",
         "trainer_wins_10", "trainer_wins_20",
@@ -1101,8 +1110,12 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     if "track" in df.columns:
         # Create a combined key so _race_safe helpers can group correctly
         df["_tt_key"] = df["trainer"].astype(str) + "||" + df["track"].astype(str)
-        df["trainer_track_runs"] = _race_safe_cumcount(df, "_tt_key")
-        df["trainer_track_wins"] = _race_safe_cumsum(df, "_tt_key", "won")
+        _ttc = _cumulative(
+            df["_tt_key"].to_numpy(), df["race_id"].to_numpy(),
+            {"trainer_track_runs": np.ones(len(df)), "trainer_track_wins": df["won"].to_numpy()},
+        )
+        df["trainer_track_runs"] = _ttc["trainer_track_runs"]
+        df["trainer_track_wins"] = _ttc["trainer_track_wins"]
         df["trainer_track_win_rate"] = np.where(
             df["trainer_track_runs"] > 0,
             df["trainer_track_wins"] / df["trainer_track_runs"],
@@ -1123,8 +1136,12 @@ def add_jockey_track_features(df: pd.DataFrame) -> pd.DataFrame:
 
     logger.info("Engineering jockey-at-track features...")
     df["_jt_key"] = df["jockey"].astype(str) + "||" + df["track"].astype(str)
-    df["jockey_track_runs"] = _race_safe_cumcount(df, "_jt_key")
-    df["jockey_track_wins"] = _race_safe_cumsum(df, "_jt_key", "won")
+    _jtkc = _cumulative(
+        df["_jt_key"].to_numpy(), df["race_id"].to_numpy(),
+        {"jockey_track_runs": np.ones(len(df)), "jockey_track_wins": df["won"].to_numpy()},
+    )
+    df["jockey_track_runs"] = _jtkc["jockey_track_runs"]
+    df["jockey_track_wins"] = _jtkc["jockey_track_wins"]
     df["jockey_track_win_rate"] = np.where(
         df["jockey_track_runs"] > 0,
         df["jockey_track_wins"] / df["jockey_track_runs"],
@@ -1211,8 +1228,17 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     # Race-safe: a jockey-trainer combo can (rarely) have multiple
     # runners in the same race (different jockeys for same trainer,
     # but the *combo* key makes this less frequent).  Stay consistent.
-    df["jt_prev_runs"] = _race_safe_cumsum(df, "_jt_combo", "_result_start")
-    df["jt_cum_wins"] = _race_safe_cumsum(df, "_jt_combo", "won")
+    # Seed-aware cumulative primitive (class C; see docs/FE_TAXONOMY.md).
+    _jtc = _cumulative(
+        df["_jt_combo"].to_numpy(), df["race_id"].to_numpy(),
+        {
+            "jt_prev_runs": df["_result_start"].to_numpy(),
+            "jt_cum_wins": df["won"].to_numpy(),
+            "jt_cum_places": placed_hist.to_numpy(),
+        },
+    )
+    df["jt_prev_runs"] = _jtc["jt_prev_runs"]
+    df["jt_cum_wins"] = _jtc["jt_cum_wins"]
     df["jt_win_rate"] = np.where(
         df["jt_prev_runs"] > 0,
         df["jt_cum_wins"] / df["jt_prev_runs"],
@@ -1224,8 +1250,7 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     # Combo place rate (top 3)
-    df["_placed_hist_safe"] = placed_hist
-    df["jt_cum_places"] = _race_safe_cumsum(df, "_jt_combo", "_placed_hist_safe")
+    df["jt_cum_places"] = _jtc["jt_cum_places"]
     df["jt_place_rate"] = np.where(
         df["jt_prev_runs"] > 0,
         df["jt_cum_places"] / df["jt_prev_runs"],
@@ -1241,7 +1266,7 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
         "jt_place_rate", "jt_place_rate_shrunk",
     ])
     df = df.drop(
-        columns=["_jt_combo", "jt_cum_wins", "jt_cum_places", "_placed_hist_safe"],
+        columns=["_jt_combo", "jt_cum_wins", "jt_cum_places"],
         errors="ignore",
     )
 
@@ -1254,7 +1279,10 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
         # Count prior rides per (trainer, jockey) pair — race-safe so that
         # a trainer's multiple runners in the same race share identical priors.
         df["_tjkey"] = df["trainer"].astype(str) + "||" + df["jockey"].astype(str)
-        df["_tj_prior_rides"] = _race_safe_cumcount(df, "_tjkey")
+        df["_tj_prior_rides"] = _cumulative(
+            df["_tjkey"].to_numpy(), df["race_id"].to_numpy(),
+            {"_tj_prior_rides": np.ones(len(df))},
+        )["_tj_prior_rides"]
 
         # For each race row, find the jockey with the most prior rides for
         # this trainer.  We do this by: (a) for every row record the
@@ -1664,8 +1692,12 @@ def add_trainer_specialisation_features(df: pd.DataFrame) -> pd.DataFrame:
     if "dist_category" in df.columns:
         df["_dc_str"] = df["dist_category"].astype(str)
         df["_tdc_key"] = df["trainer"].astype(str) + "||" + df["_dc_str"]
-        df["trainer_dist_cat_runs"] = _race_safe_cumcount(df, "_tdc_key")
-        df["_tdc_wins"] = _race_safe_cumsum(df, "_tdc_key", "won")
+        _tdcc = _cumulative(
+            df["_tdc_key"].to_numpy(), df["race_id"].to_numpy(),
+            {"trainer_dist_cat_runs": np.ones(len(df)), "_tdc_wins": df["won"].to_numpy()},
+        )
+        df["trainer_dist_cat_runs"] = _tdcc["trainer_dist_cat_runs"]
+        df["_tdc_wins"] = _tdcc["_tdc_wins"]
         df["trainer_dist_cat_wr"] = np.where(
             df["trainer_dist_cat_runs"] > 2,
             df["_tdc_wins"] / df["trainer_dist_cat_runs"],
@@ -1679,8 +1711,12 @@ def add_trainer_specialisation_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Trainer × going (race-safe) ---
     if "going" in df.columns:
         df["_tg_key"] = df["trainer"].astype(str) + "||" + df["going"].astype(str)
-        df["trainer_going_runs"] = _race_safe_cumcount(df, "_tg_key")
-        df["_tg_wins"] = _race_safe_cumsum(df, "_tg_key", "won")
+        _tgc = _cumulative(
+            df["_tg_key"].to_numpy(), df["race_id"].to_numpy(),
+            {"trainer_going_runs": np.ones(len(df)), "_tg_wins": df["won"].to_numpy()},
+        )
+        df["trainer_going_runs"] = _tgc["trainer_going_runs"]
+        df["_tg_wins"] = _tgc["_tg_wins"]
         df["trainer_going_wr"] = np.where(
             df["trainer_going_runs"] > 2,
             df["_tg_wins"] / df["trainer_going_runs"],
