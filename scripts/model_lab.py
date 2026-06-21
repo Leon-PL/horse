@@ -11,8 +11,10 @@ featured_races.parquet so subsequent loads are fast.
 
 Usage:
     python scripts/model_lab.py --build-slim <run_id>
+    python scripts/model_lab.py --build-slim-store          # lean registry: build from the feature store
     python scripts/model_lab.py --exp baseline
-    python scripts/model_lab.py --exp baseline --frac 0.5     # subsample races
+    python scripts/model_lab.py --exp baseline --frac 0.5   # subsample races
+    python scripts/model_lab.py --exp place_ab --frac 0.4   # place model vs win-derived fallback (quick)
 """
 from __future__ import annotations
 
@@ -65,6 +67,23 @@ def build_slim(run_id: str) -> None:
     df = pd.read_parquet(fp, columns=cols, engine="pyarrow")
     df.to_parquet(SLIM, index=False, engine="pyarrow")
     print(f"slim built: {len(df):,} rows × {len(cols)} cols → {SLIM}")
+
+
+def build_slim_store() -> None:
+    """Build the slim parquet straight from the feature store.
+
+    The lean run registry no longer snapshots per-run featured parquets, so
+    this is the way to get a slim dataset for experiments now.
+    """
+    from src.featured_dataset import get_featured_dataset
+    df = get_featured_dataset()
+    feat_cols = get_feature_columns(df)
+    meta = [c for c in ["race_id", "race_date", "horse_name", "finish_position",
+                        "won", "num_runners", "odds", "handicap", "horse_prev_races",
+                        "lengths_behind"] if c in df.columns]
+    cols = [c for c in sorted(set(feat_cols) | set(meta)) if c in df.columns]
+    df[cols].to_parquet(SLIM, index=False, engine="pyarrow")
+    print(f"slim built from store: {len(df):,} rows × {len(cols)} cols → {SLIM}")
 
 
 def build_slim_ext(run_id: str) -> None:
@@ -486,6 +505,103 @@ def exp_framework(data):
     _print(eval_calib(fit_raw(data, BASE_PARAMS, framework="cat"), calib="platt", label="catboost(platt)"))
 
 
+def _platt_1d(pc, yc, pt):
+    """Platt-scale raw probs `pt` using a logistic fit on (pc, yc)."""
+    def _lp(p):
+        return np.log(np.clip(p, 1e-9, 1 - 1e-9) / np.clip(1 - p, 1e-9, 1)).reshape(-1, 1)
+    m = LogisticRegression(C=1e6, solver="lbfgs").fit(_lp(pc), yc)
+    return m.predict_proba(_lp(pt))[:, 1]
+
+
+def exp_place_ab(data):
+    """Quick A/B: does the trained PLACE model beat the free win-derived
+    fallback (`1-(1-win)^k`) for each-way? Single fit, no OOF/walk-forward.
+
+    Compares both on (a) place calibration vs the actual placed outcome and
+    (b) realised EW ROI using the production each_way pricing + settlement.
+    """
+    import lightgbm as lgb
+    from src.each_way import adjust_place_probs_for_race, get_ew_terms, compute_ew_columns, ew_value_bets
+    from src.bet_settlement import settle_ew_bet, ew_placed_flag
+
+    gtr, gte = data["groups_train"], data["groups_test"]
+    Xtr, Xte = data["X_train"], data["X_test"]
+    cum = np.cumsum(gtr); rc = int(np.searchsorted(cum, int(len(Xtr) * 0.85)))
+    row = int(cum[rc - 1]) if rc > 0 else 0
+    g_cal = gtr[rc:]
+    Xf, Xc = Xtr[:row], Xtr[row:]
+
+    # WIN model → calibrated, per-race-normalised test win probs
+    yw = data["y_train_won"].astype(int)
+    mw = lgb.LGBMClassifier(**BASE_PARAMS).fit(Xf, yw[:row])
+    win_pc = _grouped_normalize(mw.predict_proba(Xc)[:, 1], g_cal)
+    win_pt = _grouped_normalize(mw.predict_proba(Xte)[:, 1], gte)
+    win_pt = _grouped_normalize(_platt_1d(win_pc, yw[row:].astype(float), win_pt), gte)
+
+    # PLACE model → Platt-calibrated raw place probs (NOT per-race-normalised)
+    yp = data["y_train_placed"].astype(int)
+    mp = lgb.LGBMClassifier(**BASE_PARAMS).fit(Xf, yp[:row])
+    place_pc = mp.predict_proba(Xc)[:, 1]
+    place_pt = _platt_1d(place_pc, yp[row:].astype(float), mp.predict_proba(Xte)[:, 1])
+
+    test_df = data["test_df"].reset_index(drop=True)
+    placed = data["y_test_placed"].astype(float)
+    nr = test_df["num_runners"].fillna(0).astype(int).values
+    hc = (test_df["handicap"] if "handicap" in test_df.columns
+          else pd.Series(0, index=test_df.index)).fillna(0).astype(bool).values
+
+    # Per-race: model place (logit shrink/shift) vs analytic win-derived fallback
+    model_place = np.zeros(len(test_df))
+    fb_place = np.zeros(len(test_df))
+    off = 0
+    for g in gte:
+        sl = slice(off, off + g); off += g
+        if g <= 0:
+            continue
+        n = int(nr[sl][0])
+        terms = get_ew_terms(n, is_handicap=bool(hc[sl][0]))
+        pp = terms.places_paid if terms.eligible else (3 if n >= 8 else 2 if n >= 5 else 0)
+        w = win_pt[sl]
+        if pp <= 0:
+            continue
+        model_place[sl] = adjust_place_probs_for_race(place_pt[sl], w, pp)
+        if n > pp:                                  # mirror model.py fallback
+            fb = 1.0 - (1.0 - w) ** (n / pp)
+            fb = np.maximum(fb, w)
+            tot = fb.sum()
+            fb_place[sl] = np.clip(fb * (pp / tot), 0.0, 1.0) if tot > 0 else fb
+        else:
+            fb_place[sl] = np.clip(w, 0.0, 1.0)
+
+    print(f"\nPlace calibration vs actual placed (n={len(placed):,}):")
+    for label, pp_arr in [("place_model", model_place), ("win_fallback", fb_place)]:
+        print(f"  {label:14} brier {_brier(pp_arr, placed):.4f}  logloss {_logloss(pp_arr, placed):.4f}")
+
+    def _ew_econ(place_probs, label):
+        d = test_df.copy()
+        d["win_probability"] = win_pt
+        d["place_probability"] = place_probs
+        d = compute_ew_columns(d)
+        bets = ew_value_bets(d)
+        if bets.empty:
+            print(f"  {label:14} no EW value bets at default thresholds")
+            return
+        fp = pd.to_numeric(bets["finish_position"], errors="coerce").values
+        won = (fp == 1)
+        plc = np.array([ew_placed_flag(f, p) for f, p in zip(fp, bets["ew_places"])])
+        pnl = np.array([settle_ew_bet(o, po, w, pl)
+                        for o, po, w, pl in zip(bets["odds"], bets["place_odds"], won, plc)])
+        roi = pnl.sum() / (2.0 * len(bets)) * 100.0
+        print(f"  {label:14} bets {len(bets):>5}  strike {plc.mean()*100:5.1f}%  "
+              f"ROI {roi:+6.2f}%  P&L {pnl.sum():+8.1f}u")
+
+    print("Each-way economics (real each_way pricing + settlement):")
+    _ew_econ(model_place, "place_model")
+    _ew_econ(fb_place, "win_fallback")
+    print("\nVerdict: keep the place model only if it beats win_fallback on BOTH "
+          "place brier/logloss AND EW ROI; otherwise the free fallback wins.")
+
+
 EXPERIMENTS = {
     "baseline": exp_baseline,
     "calib": exp_calib,
@@ -497,18 +613,24 @@ EXPERIMENTS = {
     "distill": exp_distill,
     "dl": exp_dl,
     "mlp": exp_mlp,
+    "place_ab": exp_place_ab,
 }
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-slim", metavar="RUN_ID")
+    ap.add_argument("--build-slim-store", action="store_true",
+                    help="Build the slim parquet from the feature store (lean registry).")
     ap.add_argument("--build-slim-ext", metavar="RUN_ID")
     ap.add_argument("--exp", default="baseline")
     ap.add_argument("--frac", type=float, default=1.0)
     args = ap.parse_args()
     if args.build_slim:
         build_slim(args.build_slim)
+        return
+    if args.build_slim_store:
+        build_slim_store()
         return
     if args.build_slim_ext:
         build_slim_ext(args.build_slim_ext)
