@@ -156,6 +156,42 @@ def test_plain_seeded_append_matches_full_recompute():
     assert np.allclose(new_out["w"], full[(df["race_id"] > cut).to_numpy()])
 
 
+def test_rolling_seeded_append_matches_full():
+    """Seed-aware _fast_grouped_rolling: a seeded append == a full recompute for
+    the new rows, across bounded ops and EWMA (within tolerance)."""
+    rng = np.random.default_rng(11)
+    rows = []
+    rid = 0
+    for day in range(40):
+        for _ in range(int(rng.integers(1, 3))):
+            rid += 1
+            for _ in range(int(rng.integers(2, 6))):
+                rows.append({
+                    "race_id": f"R{rid:04d}",
+                    "race_date": pd.Timestamp("2024-01-01") + pd.Timedelta(days=day),
+                    "horse": f"H{int(rng.integers(0, 15))}",
+                    "v": float(rng.normal()),
+                })
+    df = pd.DataFrame(rows)
+    ops = [("m", "mean", 3), ("s", "sum", 5), ("mn", "min", 5),
+           ("mx", "max", 5), ("sd", "std", 5), ("e", "ewma", 0.3)]
+
+    full = fe._fast_grouped_rolling_core(df, "horse", "v", ops)
+    rids = sorted(df["race_id"].unique())
+    cut = rids[len(rids) // 2]
+    hist = df[df["race_id"] <= cut]
+    new = df[df["race_id"] > cut]
+    newmask = (df["race_id"] > cut).to_numpy()
+
+    _, state = fe._rolling_with_seed(hist, "horse", "v", ops, {})
+    new_res, _ = fe._rolling_with_seed(new, "horse", "v", ops, state)
+    for k in ["m", "s", "mn", "mx", "sd", "e"]:
+        a = new_res[k]
+        b = full[k][newmask]
+        both_nan = np.isnan(a) & np.isnan(b)
+        assert np.all(np.isclose(a, b, rtol=1e-4, atol=1e-6) | both_nan), k
+
+
 def test_state_is_json_serialisable_and_reloadable():
     df = _frame(4)
     cut = sorted(df["race_id"].unique())[len(df["race_id"].unique()) // 2]

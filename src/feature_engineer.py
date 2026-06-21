@@ -344,7 +344,7 @@ def _nb_time_window(dates_i8, values, group_ids, window_ns):
     return val_sum, cnt
 
 
-def _fast_grouped_rolling(
+def _fast_grouped_rolling_core(
     df: pd.DataFrame,
     group_key,
     value_col: str,
@@ -603,6 +603,112 @@ def _composite_key(df: pd.DataFrame, *cols) -> np.ndarray:
     return s.to_numpy()
 
 
+# Depth of per-entity raw-value tail carried as rolling state (class B). Bounded
+# rolling ops (mean/sum/min/max/std, window ≤ this) are EXACT; EWMA (unbounded)
+# is exact to ~(1-alpha)^CAP — with the half-lives used here (≤7) that is well
+# below the 1e-4 parity tolerance, so prepending the tail needs no kernel change.
+_ROLL_SEED_CAP = 256
+
+
+def _entity_str(df: pd.DataFrame, keys: list) -> np.ndarray:
+    s = df[keys[0]].astype(str)
+    for k in keys[1:]:
+        s = s + "||" + df[k].astype(str)
+    return s.to_numpy()
+
+
+def _rolling_with_seed(df, group_key, value_col, operations, seed):
+    """Seed-aware ``_fast_grouped_rolling``: prepend each entity's stored raw-value
+    tail (from *seed*) as synthetic earlier rows, run the unchanged kernel, drop
+    the synthetic rows, and return ``(results_in_df_order, new_seed)``.
+
+    Exact across an append: new rows are strictly after history; a tail of
+    ``_ROLL_SEED_CAP`` covers every bounded window and converges EWMA below the
+    parity tolerance. ``seed``/``new_seed`` map entity-key-string -> last-CAP raw
+    values (chronological)."""
+    from collections import defaultdict
+
+    keys = [group_key] if isinstance(group_key, str) else list(group_key)
+    seed = dict(seed or {})
+    date_col = "_event_dt" if "_event_dt" in df.columns else "race_date"
+
+    ent = _entity_str(df, keys)
+    n = len(df)
+    cols = {kc: df[kc].to_numpy() for kc in keys}
+    cols[date_col] = pd.to_datetime(df[date_col], errors="coerce").to_numpy()
+    cols["race_id"] = (
+        df["race_id"].astype(str).to_numpy() if "race_id" in df.columns
+        else np.arange(n).astype(str)
+    )
+    cols[value_col] = df[value_col].to_numpy()
+    real_df = pd.DataFrame(cols)
+    real_df["_synth"] = 0
+
+    base_min = pd.to_datetime(df[date_col], errors="coerce").min()
+    base = (pd.Timestamp("2000-01-01") if pd.isna(base_min) else pd.Timestamp(base_min)) \
+        - pd.Timedelta(days=_ROLL_SEED_CAP + 5)
+
+    s_keys: dict = {kc: [] for kc in keys}
+    s_date: list = []
+    s_rid: list = []
+    s_val: list = []
+    for e in set(ent.tolist()):
+        tail = seed.get(e)
+        if not tail:
+            continue
+        parts = e.split("||")
+        for j, v in enumerate(tail):
+            for ki, kc in enumerate(keys):
+                s_keys[kc].append(parts[ki])
+            s_date.append(base + pd.Timedelta(days=j))
+            s_rid.append(f"__seed__{j}__{e}")
+            s_val.append(v)
+
+    if s_val:
+        synth = {kc: s_keys[kc] for kc in keys}
+        synth[date_col] = s_date
+        synth["race_id"] = s_rid
+        synth[value_col] = s_val
+        synth_df = pd.DataFrame(synth)
+        synth_df["_synth"] = 1
+        aug = pd.concat([synth_df, real_df], ignore_index=True)
+    else:
+        aug = real_df
+
+    res_aug = _fast_grouped_rolling_core(aug, group_key, value_col, operations)
+    real_mask = aug["_synth"].to_numpy() == 0
+    results = {k: v[real_mask] for k, v in res_aug.items()}
+
+    # Advance state: last CAP raw values per entity, in chronological order.
+    order = np.lexsort((cols["race_id"], cols[date_col].astype("datetime64[ns]").astype("int64")))
+    ent_sorted = ent[order]
+    val_sorted = cols[value_col][order]
+    buf: dict = defaultdict(list)
+    for e, v in zip(ent_sorted.tolist(), val_sorted.tolist()):
+        buf[e].append(v)
+    new_state = dict(seed)
+    for e, newvals in buf.items():
+        new_state[e] = (list(seed.get(e, [])) + newvals)[-_ROLL_SEED_CAP:]
+    return results, new_state
+
+
+def _rolling(df, group_key, value_col, operations) -> dict:
+    """Rolling features, seed-aware under ``counts_state_scope`` (class B).
+
+    Full build (no active state) calls ``_fast_grouped_rolling`` directly —
+    byte-identical to before. Under a seed scope it carries a per-entity raw
+    tail so an append can run over new rows only. State is keyed by the first
+    output name (globally unique)."""
+    if _COUNTS_STATE is None:
+        return _fast_grouped_rolling_core(df, group_key, value_col, operations)
+    state_key = f"roll::{operations[0][0]}"
+    results, new_state = _rolling_with_seed(
+        df, group_key, value_col, operations, _COUNTS_STATE.get(state_key)
+    )
+    _COUNTS_STATE[state_key] = new_state
+    return results
+
+
 def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate horse-specific historical features.
@@ -724,12 +830,12 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     ]
 
     # Execute batched rolling on finish_position
-    for name, arr in _fast_grouped_rolling(df, hkey, "_finish_pos_for_history", _pos_ops).items():
+    for name, arr in _rolling(df,hkey, "_finish_pos_for_history", _pos_ops).items():
         df[name] = arr
     # Execute batched rolling on won
-    for name, arr in _fast_grouped_rolling(df, hkey, "_won_for_history", _won_ops).items():
+    for name, arr in _rolling(df,hkey, "_won_for_history", _won_ops).items():
         df[name] = arr
-    for name, arr in _fast_grouped_rolling(df, hkey, "_non_finisher_for_history", _dnf_ops).items():
+    for name, arr in _rolling(df,hkey, "_non_finisher_for_history", _dnf_ops).items():
         df[name] = arr
 
     # Fill consistency NaN with default
@@ -904,9 +1010,9 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[_lb_finished.isna(), "_close_finish"] = np.nan
         _cf_ops = [("close_finish_rate", "mean", 5)]
 
-        for name, arr in _fast_grouped_rolling(df, hkey, "_lb_finished", _lb_ops).items():
+        for name, arr in _rolling(df,hkey, "_lb_finished", _lb_ops).items():
             df[name] = arr
-        for name, arr in _fast_grouped_rolling(df, hkey, "_close_finish", _cf_ops).items():
+        for name, arr in _rolling(df,hkey, "_close_finish", _cf_ops).items():
             df[name] = arr
 
         df["horse_avg_lb_behind"] = df["horse_avg_lb_behind"].fillna(3.0)
@@ -978,7 +1084,7 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
         _jock_pos_ops.append((f"jockey_avg_pos_{w}", "mean", w))
 
     for col, ops in [("_won_for_history", _jock_won_ops), ("_finish_pos_for_history", _jock_pos_ops)]:
-        results = _fast_grouped_rolling(df, "jockey", col, ops)
+        results = _rolling(df,"jockey", col, ops)
         for name, arr in results.items():
             df[name] = arr
 
@@ -1074,7 +1180,7 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     _trainer_won_ops = []
     for w in [10, 20]:
         _trainer_won_ops.append((f"trainer_wins_{w}", "sum", w))
-    results = _fast_grouped_rolling(df, "trainer", "won", _trainer_won_ops)
+    results = _rolling(df,"trainer", "won", _trainer_won_ops)
     for name, arr in results.items():
         df[name] = arr
 
@@ -1828,7 +1934,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
         ("speed_fig_avg_10", "mean", 10),
         ("speed_fig_best_5", "min", 5),
     ]
-    for name, arr in _fast_grouped_rolling(df, hkey, "_lb_per_furlong", _speed_ops).items():
+    for name, arr in _rolling(df,hkey, "_lb_per_furlong", _speed_ops).items():
         df[name] = arr
 
     # Trend: recent avg minus long-term avg (negative = improving)
@@ -1836,7 +1942,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Relative performance rolling avg (negative = above average)
     _rel_ops = [("speed_fig_rel_avg_5", "mean", 5)]
-    for name, arr in _fast_grouped_rolling(df, hkey, "_rel_perf", _rel_ops).items():
+    for name, arr in _rolling(df,hkey, "_rel_perf", _rel_ops).items():
         df[name] = arr
 
     # ── Class-adjusted speed figures ─────────────────────────────
@@ -1856,7 +1962,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
             ("speed_fig_adj_avg_5", "mean", 5),
             ("speed_fig_adj_best_5", "min", 5),
         ]
-        for name, arr in _fast_grouped_rolling(df, hkey, "_adj_lpf", _adj_ops).items():
+        for name, arr in _rolling(df,hkey, "_adj_lpf", _adj_ops).items():
             df[name] = arr
         df = df.drop(columns=["_adj_lpf"], errors="ignore")
 
@@ -1879,7 +1985,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
             ("speed_z_class_avg_10", "mean", 10),
             ("speed_z_class_best_5", "min", 5),
         ]
-        for name, arr in _fast_grouped_rolling(df, hkey, "_speed_z_class", _z_ops).items():
+        for name, arr in _rolling(df,hkey, "_speed_z_class", _z_ops).items():
             df[name] = arr
         df["speed_z_class_trend"] = (
             df["speed_z_class_avg_5"] - df["speed_z_class_avg_10"]
@@ -1939,7 +2045,7 @@ def add_rtv_features(df: pd.DataFrame) -> pd.DataFrame:
             (f"rtv_{short}_avg_5",  "mean", 5),
             (f"rtv_{short}_best_3", "max" if hib else "min", 3),
         ]
-        for name, arr in _fast_grouped_rolling(df, hkey, col, ops).items():
+        for name, arr in _rolling(df,hkey, col, ops).items():
             df[name] = arr
 
         # Trend: recent avg minus longer avg
@@ -3235,7 +3341,7 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
                 cum_n = _race_safe_cumsum(df, entity_col, "_norm_pos_weight").values
             else:
                 ops = [(f"_{prefix}_te_ewma_raw", "ewma", _ewma_alpha)]
-                results = _fast_grouped_rolling(
+                results = _rolling(
                     df, entity_col, "_norm_pos", ops,
                 )
                 raw = results[f"_{prefix}_te_ewma_raw"]
@@ -3338,14 +3444,14 @@ def add_opposition_strength_features(df: pd.DataFrame) -> pd.DataFrame:
     _ewma_alpha = 1.0 - np.exp(-np.log(2) / _ewma_hl)
     _opp_ops.append(("field_avg_elo_ewma", "ewma", _ewma_alpha))
 
-    for name, arr in _fast_grouped_rolling(df, hkey, "field_avg_elo", _opp_ops).items():
+    for name, arr in _rolling(df,hkey, "field_avg_elo", _opp_ops).items():
         df[name] = arr
 
     # ── 3. Prior-race Elo-vs-field EWMA ──────────────────────────────
     # How consistently has this horse outrated / underrated its fields?
     df["_elo_vs_opp"] = df["horse_elo"] - df["field_avg_elo"]
     _vs_ops = [("elo_vs_field_ewma", "ewma", _ewma_alpha)]
-    for name, arr in _fast_grouped_rolling(df, hkey, "_elo_vs_opp", _vs_ops).items():
+    for name, arr in _rolling(df,hkey, "_elo_vs_opp", _vs_ops).items():
         df[name] = arr
     df = df.drop(columns=["_elo_vs_opp"], errors="ignore")
 
@@ -3544,7 +3650,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
         ("_pos_min_10", "min", 10),
         ("horse_pos_stddev_10", "std", 10),
     ]
-    _range_results = _fast_grouped_rolling(
+    _range_results = _rolling(
         df, hkey, "_finish_pos_for_history", _range_ops,
     )
     df["horse_pos_range_10"] = (
@@ -3570,7 +3676,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
 
         # Class trend: short-term vs long-term avg class
         # Negative = horse recently aimed at higher (tougher) races
-        _class_results = _fast_grouped_rolling(
+        _class_results = _rolling(
             df, hkey, "_class_num_tmp",
             [("_class_avg_3", "mean", 3), ("_class_avg_10", "mean", 10)],
         )
@@ -3658,7 +3764,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
         ("_pos_max_5", "max", 5),
         ("_pos_min_5", "min", 5),
     ]
-    _cons_results = _fast_grouped_rolling(
+    _cons_results = _rolling(
         df, hkey, "_finish_pos_for_history", _cons_ops,
     )
     df["horse_pos_stddev_5"] = np.where(np.isnan(_cons_results["horse_pos_stddev_5"]), 3.0, _cons_results["horse_pos_stddev_5"])
@@ -3667,7 +3773,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # ── Beaten-lengths consistency ───────────────────────────────
     if "lengths_behind" in df.columns:
-        _lb_cons = _fast_grouped_rolling(
+        _lb_cons = _rolling(
             df, hkey, "lengths_behind",
             [("horse_lb_stddev_5", "std", 5)],
         )
