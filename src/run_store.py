@@ -452,6 +452,24 @@ def production_model_path() -> str | None:
     return os.path.join(RUNS_DIR, rid, "model.joblib") if rid else None
 
 
+def run_model_path(run_id: str) -> str | None:
+    """Path to a specific run's model.joblib, or ``None`` if it has none."""
+    path = os.path.join(RUNS_DIR, run_id, "model.joblib")
+    return path if os.path.isfile(path) else None
+
+
+def load_run_predictor(run_id: str):
+    """Load a specific run's model as a ``RacePredictor`` (or ``None``)."""
+    path = run_model_path(run_id)
+    if not path:
+        return None
+    from src.model import RacePredictor
+
+    p = RacePredictor()
+    p.load(path)
+    return p
+
+
 def load_production_predictor():
     """Load the promoted model as a ``RacePredictor`` (or ``None``).
 
