@@ -1,0 +1,118 @@
+"""Closing-line value (CLV) against Betfair BSP.
+=================================================
+
+CLV measures how a bet's taken price compares to the market's closing price —
+here the **Betfair Starting Price** (BSP), the sharpest available estimate of a
+runner's true chance. Beating the close consistently is the single best proxy
+for a real, durable edge, so the training pipeline reports CLV alongside
+calibration (Brier/log-loss) and backtest ROI.
+
+``compute_clv`` takes a bets frame (as produced by ``bet_analysis.analyse_test_
+set``) and joins it to ``data/processed/betfair_bsp.parquet`` on the shared
+merge keys (``src/utils`` track/off-time keys + ``src/betfair`` horse key), then
+summarises CLV overall and per strategy. Bets whose race has no BSP row (e.g.
+Irish-only races, or dates beyond BSP coverage) are excluded from the CLV
+denominator and reported as ``coverage``.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+import numpy as np
+import pandas as pd
+
+import config
+from src.betfair import bf_horse_key
+from src.utils import normalise_off_time_key, normalise_track_key
+
+logger = logging.getLogger(__name__)
+
+BSP_PATH = os.path.join(config.PROCESSED_DATA_DIR, "betfair_bsp.parquet")
+
+
+def _race_date_str(s: pd.Series) -> pd.Series:
+    dt = pd.to_datetime(s, errors="coerce")
+    return dt.dt.strftime("%Y-%m-%d")
+
+
+def _summarise(clv: np.ndarray) -> dict:
+    clv = clv[np.isfinite(clv)]
+    if clv.size == 0:
+        return {"n": 0}
+    return {
+        "n": int(clv.size),
+        "mean_clv": float(np.mean(clv)),            # taken_odds / bsp; >1 = beat close
+        "median_clv": float(np.median(clv)),
+        "mean_log_clv": float(np.mean(np.log(clv))),
+        "pct_beat_close": float(np.mean(clv > 1.0)),
+    }
+
+
+def compute_clv(
+    bets: pd.DataFrame,
+    ref_df: pd.DataFrame | None = None,
+    *,
+    bsp_path: str | None = None,
+) -> dict:
+    """Summarise closing-line value of *bets* against Betfair BSP.
+
+    Args:
+        bets: bets frame with at least ``race_date``, ``horse_name``, ``odds``
+            and (``track`` or ``track_key``); ``strategy`` and ``off_time`` are
+            used when present. ``race_id`` lets us recover ``off_time`` from
+            *ref_df* when the bets frame lacks it.
+        ref_df: optional frame (e.g. the featured/test set) carrying
+            ``race_id`` + ``off_time`` so the off-time key can be filled in.
+        bsp_path: override the BSP parquet location (defaults to the store).
+
+    Returns:
+        ``{"overall": {...}, "by_strategy": {name: {...}}, "coverage": float,
+        "n_bets": int, "n_matched": int, "bsp_available": bool}``.
+    """
+    path = bsp_path or BSP_PATH
+    out: dict = {"n_bets": int(len(bets)), "n_matched": 0, "coverage": 0.0,
+                 "bsp_available": os.path.exists(path), "overall": {}, "by_strategy": {}}
+    if bets is None or bets.empty or not out["bsp_available"] or "odds" not in bets.columns:
+        return out
+
+    b = bets.copy()
+    b["_rd"] = _race_date_str(b["race_date"])
+
+    # off_time: prefer the bets frame, else map race_id -> off_time from ref_df.
+    if "off_time" not in b.columns and ref_df is not None and "off_time" in ref_df.columns \
+            and "race_id" in b.columns and "race_id" in ref_df.columns:
+        off_map = ref_df.drop_duplicates("race_id").set_index("race_id")["off_time"]
+        b["off_time"] = b["race_id"].map(off_map)
+
+    b["_tk"] = b["track_key"] if "track_key" in b.columns else b.get("track", "").map(normalise_track_key)
+    b["_ok"] = b["off_time"].map(normalise_off_time_key) if "off_time" in b.columns else ""
+    b["_hk"] = b["horse_name"].map(bf_horse_key)
+
+    bsp = pd.read_parquet(path, columns=["race_date", "track_key", "off_key", "horse_key", "bsp"])
+    bsp["_rd"] = _race_date_str(bsp["race_date"])
+    bsp = bsp.dropna(subset=["bsp"])
+    bsp = bsp[pd.to_numeric(bsp["bsp"], errors="coerce") > 1.0]
+
+    merged = b.merge(
+        bsp[["_rd", "track_key", "off_key", "horse_key", "bsp"]].rename(
+            columns={"track_key": "_tk", "off_key": "_ok", "horse_key": "_hk"}
+        ),
+        on=["_rd", "_tk", "_ok", "_hk"], how="left",
+    )
+    matched = merged.dropna(subset=["bsp"])
+    out["n_matched"] = int(len(matched))
+    out["coverage"] = float(len(matched) / len(merged)) if len(merged) else 0.0
+    if matched.empty:
+        return out
+
+    clv = pd.to_numeric(matched["odds"], errors="coerce").to_numpy(dtype=float) / \
+        pd.to_numeric(matched["bsp"], errors="coerce").to_numpy(dtype=float)
+    out["overall"] = _summarise(clv)
+    if "strategy" in matched.columns:
+        for strat, grp in matched.groupby("strategy"):
+            s_clv = pd.to_numeric(grp["odds"], errors="coerce").to_numpy(float) / \
+                pd.to_numeric(grp["bsp"], errors="coerce").to_numpy(float)
+            out["by_strategy"][str(strat)] = _summarise(s_clv)
+    return out

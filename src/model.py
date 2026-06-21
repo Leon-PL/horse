@@ -3996,8 +3996,9 @@ class RacePredictor:
         )
         logger.info(f"Models saved to {path}")
 
-    def load(self):
-        path = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
+    def load(self, path: str | None = None):
+        if path is None:
+            path = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
         if not os.path.exists(path):
             raise FileNotFoundError(f"No models found at {path}")
         data = joblib.load(path)

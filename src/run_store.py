@@ -409,6 +409,65 @@ def run_has_model(run_id: str) -> bool:
     return os.path.isfile(os.path.join(RUNS_DIR, run_id, "model.joblib"))
 
 
+# ── Production pointer (the model the serving app loads) ──────────────
+# Instead of copying a run's model file into MODELS_DIR to "activate" it, we
+# write a tiny JSON pointer naming the promoted run. The serving app reads the
+# pointer and loads that run's model.joblib directly — no file shuffling, and
+# the experimental runs stay untouched.
+
+PRODUCTION_POINTER = os.path.join(config.MODELS_DIR, "production.json")
+
+
+def promote(run_id: str) -> bool:
+    """Mark *run_id* as the production model. Returns ``True`` on success."""
+    if not run_has_model(run_id):
+        logger.warning("Cannot promote %s: no model snapshot.", run_id)
+        return False
+    os.makedirs(config.MODELS_DIR, exist_ok=True)
+    with open(PRODUCTION_POINTER, "w", encoding="utf-8") as fh:
+        json.dump(
+            {"run_id": run_id, "promoted_at": datetime.now().isoformat(timespec="seconds")},
+            fh, indent=2,
+        )
+    logger.info("Promoted run %s to production", run_id)
+    return True
+
+
+def get_production_run_id() -> str | None:
+    """Return the promoted run id, or ``None`` if nothing is promoted."""
+    if not os.path.isfile(PRODUCTION_POINTER):
+        return None
+    try:
+        with open(PRODUCTION_POINTER, encoding="utf-8") as fh:
+            rid = json.load(fh).get("run_id")
+    except (OSError, json.JSONDecodeError):
+        return None
+    # Guard against a pointer to a deleted/incomplete run.
+    return rid if rid and run_has_model(rid) else None
+
+
+def production_model_path() -> str | None:
+    """Path to the promoted run's model.joblib, or ``None``."""
+    rid = get_production_run_id()
+    return os.path.join(RUNS_DIR, rid, "model.joblib") if rid else None
+
+
+def load_production_predictor():
+    """Load the promoted model as a ``RacePredictor`` (or ``None``).
+
+    This is the serving app's single entry point — it loads ONLY the lean model
+    artifact, never a featured dataset.
+    """
+    path = production_model_path()
+    if not path:
+        return None
+    from src.model import RacePredictor
+
+    p = RacePredictor()
+    p.load(path)
+    return p
+
+
 def get_run_processed_path(run_id: str) -> str | None:
     """Return the path to the processed-data snapshot for *run_id*, or ``None``."""
     run_dir = os.path.join(RUNS_DIR, run_id)
