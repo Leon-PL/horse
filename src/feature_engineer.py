@@ -2459,9 +2459,17 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
         # We must exclude the current race to prevent data leakage from stable-mates
         # competing in the same race.
         # Use existing race-safe cumulative functions from the module!
-        df[f"_safe_{col}_runs"] = _race_safe_cumsum(df, col, "_result_start")
-        df[f"_safe_{col}_wins"] = _race_safe_cumsum(df, col, "won")
-        df[f"_safe_{col}_places"] = _race_safe_cumsum(df, col, "_placed_for_history")
+        _ped = _cumulative(
+            df[col].to_numpy(), df["race_id"].to_numpy(),
+            {
+                f"_safe_{col}_runs": df["_result_start"].to_numpy(),
+                f"_safe_{col}_wins": df["won"].to_numpy(),
+                f"_safe_{col}_places": df["_placed_for_history"].to_numpy(),
+            },
+        )
+        df[f"_safe_{col}_runs"] = _ped[f"_safe_{col}_runs"]
+        df[f"_safe_{col}_wins"] = _ped[f"_safe_{col}_wins"]
+        df[f"_safe_{col}_places"] = _ped[f"_safe_{col}_places"]
 
         df[f"{col}_win_rate"] = np.where(
             df[f"_safe_{col}_runs"] > 0,
@@ -2501,14 +2509,19 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
                 temp_wins = f"_safe_{col}_{cond_name}_wins"
                 temp_places = f"_safe_{col}_{cond_name}_places"
 
-                # Assign conditional indicators as temporary columns in df for _race_safe_cumsum to look up
-                df["_temp_runs_cond"] = result_start_flag.where(mask, 0.0)
-                df["_temp_wins_cond"] = won_flag.where(mask, 0.0)
-                df["_temp_places_cond"] = placed_flag.where(mask, 0.0)
-
-                df[temp_runs] = _race_safe_cumsum(df, col, "_temp_runs_cond")
-                df[temp_wins] = _race_safe_cumsum(df, col, "_temp_wins_cond")
-                df[temp_places] = _race_safe_cumsum(df, col, "_temp_places_cond")
+                # Conditional (going/surface/trip) progeny counts, race-safe and
+                # seed-aware via _cumulative; metric keys are unique per (col, cond).
+                _pc = _cumulative(
+                    df[col].to_numpy(), df["race_id"].to_numpy(),
+                    {
+                        temp_runs: result_start_flag.where(mask, 0.0).to_numpy(),
+                        temp_wins: won_flag.where(mask, 0.0).to_numpy(),
+                        temp_places: placed_flag.where(mask, 0.0).to_numpy(),
+                    },
+                )
+                df[temp_runs] = _pc[temp_runs]
+                df[temp_wins] = _pc[temp_wins]
+                df[temp_places] = _pc[temp_places]
 
                 wr_raw = np.where(df[temp_runs] > 0, df[temp_wins] / df[temp_runs], 0.0)
                 pr_raw = np.where(df[temp_runs] > 0, df[temp_places] / df[temp_runs], 0.0)
@@ -3050,14 +3063,24 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # ---- Helper: target-encode one entity column ----
     def _te(entity_col: str, prefix: str, race_safe: bool = False):
-        """Add ``{prefix}_te_norm_pos`` target-encoded feature."""
-        if race_safe:
-            cum_sum = _race_safe_cumsum(df, entity_col, "_norm_pos_safe")
-            cum_n = _race_safe_cumsum(df, entity_col, "_norm_pos_weight")
-        else:
-            grp = df.groupby(entity_col)
-            cum_sum = grp["_norm_pos_safe"].cumsum() - df["_norm_pos_safe"]
-            cum_n = grp["_norm_pos_weight"].cumsum() - df["_norm_pos_weight"]
+        """Add ``{prefix}_te_norm_pos`` target-encoded feature.
+
+        Lifetime (class-C) encoding routed through the seed-aware _cumulative
+        primitive so the FeatureStore append can carry its state.
+        cumulative_counts is always race-safe, which equals the plain
+        cumsum-minus-current for one-row-per-race entities (horse/jockey); the
+        ``race_safe`` flag is retained for call-site clarity but no longer
+        changes the result.
+        """
+        _c = _cumulative(
+            df[entity_col].to_numpy(), df["race_id"].to_numpy(),
+            {
+                f"{prefix}_te_sum": df["_norm_pos_safe"].to_numpy(),
+                f"{prefix}_te_n": df["_norm_pos_weight"].to_numpy(),
+            },
+        )
+        cum_sum = _c[f"{prefix}_te_sum"]
+        cum_n = _c[f"{prefix}_te_n"]
         observed = np.full(np.shape(cum_sum), global_mean, dtype=float)
         np.divide(cum_sum, cum_n, out=observed, where=(cum_n > 0))
         # Bayesian shrinkage: (n * observed + m * prior) / (n + m)
