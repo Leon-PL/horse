@@ -45,11 +45,43 @@ _TRACK_ALIASES = {
     "bangor": "bangor-on-dee",         # ...and sometimes uses the bare name
 }
 
+# The 2020-2021 Betfair "BASIC" streams abbreviate the course in eventName
+# ("Bev 5th Jun" -> "Bev"); later years use full names. Map each abbreviation's
+# normalised key to the full DB track key so both sides of the join agree.
+# Without this ~6.5k pre-2022 Betfair races fail to join to data/races.db.
+_TRACK_ABBREVIATIONS = {
+    "ballin": "ballinrobe", "bang": "bangor-on-dee", "belle": "bellewstown",
+    "bev": "beverley", "carl": "carlisle", "cart": "cartmel",
+    "catt": "catterick", "chelmc": "chelmsford city", "chelt": "cheltenham",
+    "chep": "chepstow", "chest": "chester", "clon": "clonmel",
+    "curr": "curragh", "donc": "doncaster", "downp": "downpatrick",
+    "downr": "down royal", "dund": "dundalk", "epsm": "epsom",
+    "extr": "exeter", "fairy": "fairyhouse", "fake": "fakenham",
+    "ffosl": "ffos las", "font": "fontwell", "gal": "galway",
+    "good": "goodwood", "gowp": "gowran park", "ham": "hamilton",
+    "hayd": "haydock", "here": "hereford", "hex": "hexham",
+    "hunt": "huntingdon", "kemp": "kempton", "kilb": "kilbeggan",
+    "killar": "killarney", "leic": "leicester", "leop": "leopardstown",
+    "lim": "limerick", "ling": "lingfield", "ludl": "ludlow",
+    "mrktr": "market rasen", "muss": "musselburgh", "newb": "newbury",
+    "newc": "newcastle", "newm": "newmarket", "newt": "newton abbot",
+    "plump": "plumpton", "ponte": "pontefract", "punch": "punchestown",
+    "redc": "redcar", "rosc": "roscommon", "salis": "salisbury",
+    "sand": "sandown", "sedge": "sedgefield", "sthl": "southwell",
+    "strat": "stratford", "taun": "taunton", "thurl": "thurles",
+    "tipp": "tipperary", "tram": "tramore", "uttox": "uttoxeter",
+    "warw": "warwick", "weth": "wetherby", "wex": "wexford",
+    "winc": "wincanton", "wind": "windsor", "wolv": "wolverhampton",
+    "yarm": "yarmouth",
+}
+
+_TRACK_KEY_MAP = {**_TRACK_ALIASES, **_TRACK_ABBREVIATIONS}
+
 
 def bf_track_key(track) -> str:
     """Track key for the Betfair join, with course-name aliases applied."""
     k = normalise_track_key(track)
-    return _TRACK_ALIASES.get(k, k)
+    return _TRACK_KEY_MAP.get(k, k)
 
 
 def bf_horse_key(name) -> str:
