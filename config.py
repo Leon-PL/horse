@@ -204,6 +204,20 @@ FEATURE_PRUNE_FRACTION = 0.2
 # in a pair is dropped (before importance pruning). 0.0 = disabled.
 FEATURE_CORR_THRESHOLD = 0.95
 
+# --- Feature allow-list ---
+# When set, the model trains on ONLY these features (intersected with the
+# numeric, non-excluded columns); everything else stays in the feature store
+# but never enters the model. This makes a deterministic, reproducible cut —
+# unlike FEATURE_PRUNE_FRACTION, which re-derives a different bottom-X% each
+# run from a pilot model. None = use all features.
+#
+# Accepts a list of names or a path to a file (one name per line, '#'
+# comments allowed, or a JSON list). Generate one from the ablation knee:
+#   python scripts/model_lab.py --write-allowlist <K>
+# then point this at the written file. Applied AFTER it, FEATURE_PRUNE_FRACTION
+# still trims within the allow-list (set it to 0.0 to keep exactly the list).
+FEATURE_ALLOWLIST = None
+
 # --- Early Stopping ---
 # Number of boosting rounds without improvement before stopping.
 # 0 = disabled (train for full n_estimators on all training data).

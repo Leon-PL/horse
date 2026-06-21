@@ -16,6 +16,7 @@ Usage:
     python scripts/model_lab.py --exp baseline --frac 0.5   # subsample races
     python scripts/model_lab.py --exp place_ab --frac 0.4   # place model vs win-derived fallback (quick)
     python scripts/model_lab.py --exp prune --frac 0.4      # feature-count ablation: top-K knee vs full
+    python scripts/model_lab.py --write-allowlist 350       # write top-350 -> feature_allowlist.txt (set FEATURE_ALLOWLIST)
 """
 from __future__ import annotations
 
@@ -512,6 +513,31 @@ def exp_framework(data):
     _print(eval_calib(fit_raw(data, BASE_PARAMS, framework="cat"), calib="platt", label="catboost(platt)"))
 
 
+def write_allowlist(k: int, frac: float = 1.0) -> None:
+    """Pilot-rank features by gain and write the top-K names to a file that
+    config.FEATURE_ALLOWLIST can point at. Temporarily ignores any existing
+    allow-list so the ranking sees the full feature set."""
+    import lightgbm as lgb
+    config.FEATURE_ALLOWLIST = None          # rank over ALL features
+    data = get_data(frac)
+    fcols = list(data["feature_cols"])
+    Xtr, gtr = data["X_train"], data["groups_train"]
+    cum = np.cumsum(gtr); rc = int(np.searchsorted(cum, int(len(Xtr) * 0.85)))
+    row = int(cum[rc - 1]) if rc > 0 else 0
+    yw = data["y_train_won"].astype(int)
+    pilot = lgb.LGBMClassifier(**{**BASE_PARAMS, "n_estimators": 800}).fit(Xtr[:row], yw[:row])
+    gain = pilot.booster_.feature_importance(importance_type="gain").astype(float)
+    order = np.argsort(gain)[::-1]
+    keep = [fcols[i] for i in order[:k]]
+    path = os.path.join(config.PROCESSED_DATA_DIR, "feature_allowlist.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# top-{k} of {len(fcols)} features by LGBM gain "
+                f"(pilot on {row:,} rows, frac={frac})\n")
+        f.write("\n".join(keep) + "\n")
+    print(f"wrote {len(keep)} features -> {path}")
+    print(f"enable it: set in config.py\n    FEATURE_ALLOWLIST = r\"{path}\"")
+
+
 def _print_prune(res, base_ll):
     d = res["log_loss"] - base_ll
     extra = f"  gap_mkt {res['gap_log_loss']:+.4f}" if "gap_log_loss" in res else ""
@@ -690,9 +716,17 @@ def main():
     ap.add_argument("--build-slim-store", action="store_true",
                     help="Build the slim parquet from the feature store (lean registry).")
     ap.add_argument("--build-slim-ext", metavar="RUN_ID")
+    ap.add_argument("--write-allowlist", type=int, metavar="K",
+                    help="Write top-K features (by pilot LGBM gain) to a "
+                         "feature_allowlist.txt for config.FEATURE_ALLOWLIST.")
     ap.add_argument("--exp", default="baseline")
     ap.add_argument("--frac", type=float, default=1.0)
     args = ap.parse_args()
+    if args.write_allowlist:
+        if not os.path.exists(SLIM):
+            raise SystemExit("No slim parquet. Run --build-slim-store first.")
+        write_allowlist(args.write_allowlist, args.frac)
+        return
     if args.build_slim:
         build_slim(args.build_slim)
         return

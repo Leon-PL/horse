@@ -9,6 +9,7 @@ Supports:
 """
 
 import os
+import json
 import logging
 import warnings
 import importlib
@@ -764,20 +765,81 @@ def compute_recency_sample_weights(
     return weights / max(weights.mean(), 1e-12)
 
 
+_ALLOWLIST_CACHE: tuple = (None, None, None)  # (raw, mtime, frozenset|None)
+
+
+def _resolve_feature_allowlist() -> set[str] | None:
+    """Resolve ``config.FEATURE_ALLOWLIST`` to a set of names, or None.
+
+    Accepts a list/tuple/set of names, or a path to a file (one name per
+    line, ``#`` comments allowed, or a JSON list). Result is cached on the
+    raw value (and file mtime) so the hot path doesn't re-read the file.
+    """
+    global _ALLOWLIST_CACHE
+    raw = getattr(config, "FEATURE_ALLOWLIST", None)
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple, set)):
+        return {str(c) for c in raw}
+    if not isinstance(raw, str):
+        logger.warning("FEATURE_ALLOWLIST=%r is not a list or path; ignoring.", raw)
+        return None
+    if not os.path.isfile(raw):
+        logger.warning("FEATURE_ALLOWLIST file not found: %s — ignoring.", raw)
+        return None
+    mtime = os.path.getmtime(raw)
+    if _ALLOWLIST_CACHE[0] == raw and _ALLOWLIST_CACHE[1] == mtime:
+        return _ALLOWLIST_CACHE[2]
+    txt = open(raw, encoding="utf-8").read().strip()
+    names: set[str] = set()
+    if txt:
+        if txt[0] == "[":
+            try:
+                names = {str(c) for c in json.loads(txt)}
+            except Exception:
+                logger.warning("FEATURE_ALLOWLIST %s looks like JSON but failed to parse.", raw)
+        else:
+            names = {ln.strip() for ln in txt.splitlines()
+                     if ln.strip() and not ln.lstrip().startswith("#")}
+    result = names or None
+    _ALLOWLIST_CACHE = (raw, mtime, result)
+    return result
+
+
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
     """Get the list of feature columns (exclude targets and identifiers).
 
     Accepts every numeric dtype: the previous int64/float64/int32/float32
     allow-list silently dropped ~160 uint8/int8 columns (one-hot dummies,
     age, draw, handicap, pace/equipment flags ...) from the model.
+
+    When ``config.FEATURE_ALLOWLIST`` is set, the result is further
+    restricted to those names (a deterministic, reproducible cut).
     """
-    return [
+    cols = [
         col
         for col in df.columns
         if col not in EXCLUDE_COLUMNS
         and pd.api.types.is_numeric_dtype(df[col])
         and not pd.api.types.is_complex_dtype(df[col])
     ]
+    allow = _resolve_feature_allowlist()
+    if allow is not None:
+        kept = [c for c in cols if c in allow]
+        if not kept:
+            logger.warning(
+                "FEATURE_ALLOWLIST matched 0 of %d candidate columns — "
+                "ignoring it (check the names).", len(cols),
+            )
+            return cols
+        n_missing = len(allow) - len(kept)
+        if n_missing > 0:
+            logger.info(
+                "FEATURE_ALLOWLIST: kept %d features; %d list entries not present "
+                "in this frame.", len(kept), n_missing,
+            )
+        return kept
+    return cols
 
 
 def _event_sort_key(df: pd.DataFrame) -> pd.Series:
