@@ -76,6 +76,64 @@ class CountsAccumulator:
         return out
 
 
+class PlainCountsAccumulator:
+    """Resumable prior-only **plain** per-entity cumulative sum (one metric).
+
+    Unlike :class:`CountsAccumulator` this does *not* exclude same-race peers —
+    it reproduces the inline ``groupby(key)[v].cumsum() - v`` idiom (row-order
+    prior sum). Used by the few stages whose historical formula is plain
+    cumsum-minus-current rather than race-safe (e.g. track×draw counts). Still
+    exact across an append: new rows are strictly after history and within-frame
+    row order is preserved, so seed_total + in-frame(cumsum - current) equals a
+    full recompute. No ``race_ids`` needed.
+    """
+
+    def __init__(self, state: dict | None = None):
+        self.state: dict = dict(state or {})
+
+    def to_state(self) -> dict:
+        return dict(self.state)
+
+    def transform(self, keys, values) -> np.ndarray:
+        keys = np.asarray(pd.Series(keys).to_numpy())
+        values = np.asarray(values, dtype="float64")
+        frame = pd.DataFrame({"k": keys, "v": values})
+        base = (frame.groupby("k", sort=False)["v"].cumsum() - frame["v"]).to_numpy()
+        if self.state:
+            seed = pd.Series(keys).map(self.state).fillna(0.0).to_numpy()
+        else:
+            seed = 0.0
+        out = base + seed
+        totals = pd.Series(values).groupby(keys, sort=False).sum()
+        for k, t in totals.items():
+            self.state[k] = self.state.get(k, 0.0) + float(t)
+        return out
+
+
+def cumulative_counts_plain(
+    keys,
+    metrics: dict[str, object],
+    *,
+    state: dict | None = None,
+) -> tuple[dict[str, np.ndarray], dict]:
+    """Plain (non-race-safe) sibling of :func:`cumulative_counts`.
+
+    Same ``{out_column: value_array} -> ({out_column: array}, new_state)`` API,
+    but each column is a plain prior-only cumsum-minus-current (the seed-aware
+    equivalent of ``groupby(key)[v].cumsum() - v``). For one-row-per-race
+    entities this equals the race-safe version; use it only where the original
+    stage was deliberately plain.
+    """
+    state = state or {}
+    out: dict[str, np.ndarray] = {}
+    new_state: dict = {}
+    for col, values in metrics.items():
+        acc = PlainCountsAccumulator(state.get(col))
+        out[col] = acc.transform(keys, values)
+        new_state[col] = acc.to_state()
+    return out, new_state
+
+
 def cumulative_counts(
     keys,
     race_ids,

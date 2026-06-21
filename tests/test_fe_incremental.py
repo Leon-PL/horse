@@ -12,7 +12,12 @@ import pandas as pd
 
 import src.feature_engineer as fe
 from src.feature_engineer import _race_safe_cumsum
-from src.fe_incremental import CountsAccumulator, cumulative_counts
+from src.fe_incremental import (
+    CountsAccumulator,
+    PlainCountsAccumulator,
+    cumulative_counts,
+    cumulative_counts_plain,
+)
 
 
 class TestStateThreading:
@@ -123,6 +128,32 @@ def test_cumulative_counts_multi_metric_and_seed():
     )
     assert np.allclose(new["runs"], full["runs"][n.to_numpy()])
     assert np.allclose(new["wins"], full["wins"][n.to_numpy()])
+
+
+def test_plain_matches_cumsum_minus_current():
+    # PlainCountsAccumulator == groupby(key).cumsum() - current (row-order).
+    df = _frame(7)
+    expected = (df.groupby("trainer")["won"].cumsum() - df["won"]).to_numpy()
+    got = PlainCountsAccumulator().transform(df["trainer"], df["won"])
+    assert np.allclose(got, expected)
+
+
+def test_plain_seeded_append_matches_full_recompute():
+    df = _frame(8)
+    full = PlainCountsAccumulator().transform(df["trainer"], df["won"])
+    cut = sorted(df["race_id"].unique())[len(df["race_id"].unique()) // 2]
+    hist = df[df["race_id"] <= cut]
+    new = df[df["race_id"] > cut]
+
+    acc = PlainCountsAccumulator()
+    acc.transform(hist["trainer"], hist["won"])
+    got_new = acc.transform(new["trainer"], new["won"])
+    assert np.allclose(got_new, full[(df["race_id"] > cut).to_numpy()])
+
+    # API form
+    _, state = cumulative_counts_plain(hist["trainer"], {"w": hist["won"].to_numpy()})
+    new_out, _ = cumulative_counts_plain(new["trainer"], {"w": new["won"].to_numpy()}, state=state)
+    assert np.allclose(new_out["w"], full[(df["race_id"] > cut).to_numpy()])
 
 
 def test_state_is_json_serialisable_and_reloadable():

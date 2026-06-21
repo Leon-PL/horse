@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from src.ratings import compute_elo_features, compute_glicko_features
-from src.fe_incremental import cumulative_counts
+from src.fe_incremental import cumulative_counts, cumulative_counts_plain
 from src.track_config import get_track_config, direction_code, shape_code
 
 import config
@@ -575,6 +575,16 @@ def _cumulative(keys, race_ids, metrics: dict) -> dict:
     same stage code serves both build and append.
     """
     out, new_state = cumulative_counts(keys, race_ids, metrics, state=_COUNTS_STATE)
+    if _COUNTS_STATE is not None:
+        _COUNTS_STATE.update(new_state)
+    return out
+
+
+def _cumulative_plain(keys, metrics: dict) -> dict:
+    """Seed-aware **plain** cumulative counts (cumsum - current) for a class-C
+    stage that is deliberately not race-safe (e.g. track×draw). Mirrors
+    ``_cumulative`` but threads ``PlainCountsAccumulator`` state."""
+    out, new_state = cumulative_counts_plain(keys, metrics, state=_COUNTS_STATE)
     if _COUNTS_STATE is not None:
         _COUNTS_STATE.update(new_state)
     return out
@@ -2813,11 +2823,21 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
         ).astype(str)
 
         for draw_pos in ["low", "mid", "high"]:
-            mask = df["_draw_third"] == draw_pos
-            # Track × draw-third win-rate (cumulative, shifted)
-            td_groups = df[mask].groupby("track")
-            df.loc[mask, f"_td_wins_{draw_pos}"] = td_groups["won"].cumsum() - df.loc[mask, "won"]
-            df.loc[mask, f"_td_runs_{draw_pos}"] = td_groups.cumcount()
+            mask = (df["_draw_third"] == draw_pos).to_numpy()
+            # Track × draw-third win-rate (plain prior-only cumsum-minus-current,
+            # not race-safe — same-race peers are intentionally included as in
+            # the original). Seed-aware via _cumulative_plain so the append can
+            # carry per-(draw_pos, track) state. Keyed on track within the
+            # draw-third subset; metric keys unique per draw_pos.
+            _td = _cumulative_plain(
+                df["track"].to_numpy()[mask],
+                {
+                    f"_td_wins_{draw_pos}": df["won"].to_numpy()[mask],
+                    f"_td_runs_{draw_pos}": np.ones(int(mask.sum())),
+                },
+            )
+            df.loc[mask, f"_td_wins_{draw_pos}"] = _td[f"_td_wins_{draw_pos}"]
+            df.loc[mask, f"_td_runs_{draw_pos}"] = _td[f"_td_runs_{draw_pos}"]
 
         # Recombine: the horse's draw-third win-rate at this track
         df["track_draw_wr_wins"] = 0.0
