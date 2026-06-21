@@ -793,6 +793,103 @@ def _lag(df, entity_col, col):
     return shifted
 
 
+def _running_extreme(df, entity_col, col, *, kind="max", prev=False):
+    """Per-entity running max/min (optionally prior-only via grouped shift(1)),
+    seed-aware (class C-like, unbounded). Full build is identical to
+    ``groupby[col].cummax()/cummin()`` (then grouped ``.shift(1)`` if *prev*).
+    State holds the running extreme per entity (numeric)."""
+    g = df.groupby(entity_col, sort=False)
+    cum = g[col].cummax() if kind == "max" else g[col].cummin()
+    if prev:
+        cum = cum.groupby(df[entity_col].to_numpy()).shift(1)
+    if _COUNTS_STATE is None:
+        return cum
+    state_key = f"ext::{kind}::{int(prev)}::{entity_col}::{col}"
+    seed = _COUNTS_STATE.get(state_key, {})
+    npf = np.fmax if kind == "max" else np.fmin
+    if seed:
+        seed_vals = pd.Series(df[entity_col].to_numpy(), index=df.index).map(seed).to_numpy(dtype="float64")
+        cum = pd.Series(npf(cum.to_numpy(dtype="float64"), seed_vals), index=df.index)
+    frame_ext = g[col].max() if kind == "max" else g[col].min()
+    new_state = dict(seed)
+    for e, v in zip(frame_ext.index.to_numpy(), frame_ext.to_numpy()):
+        new_state[e] = float(npf(seed.get(e, np.nan), v))
+    _COUNTS_STATE[state_key] = new_state
+    return cum
+
+
+def _ffill_prev(df, entity_col, col):
+    """Per-entity prior-only forward-fill (``groupby[col].ffill().shift(1)``),
+    seed-aware (class L). State holds the last non-null value per entity (any
+    dtype)."""
+    g = df.groupby(entity_col, sort=False)
+    filled = g[col].ffill()
+    filled_prev = filled.groupby(df[entity_col].to_numpy()).shift(1)
+    if _COUNTS_STATE is None:
+        return filled_prev
+    state_key = f"ffill::{entity_col}::{col}"
+    seed = _COUNTS_STATE.get(state_key, {})
+    if seed:
+        seed_vals = pd.Series(df[entity_col].to_numpy(), index=df.index).map(seed)
+        filled_prev = filled_prev.where(filled_prev.notna(), seed_vals)
+    tailrows = df.assign(_ff=filled).groupby(entity_col, sort=False).tail(1)
+    new_state = dict(seed)
+    for e, v in zip(tailrows[entity_col].to_numpy(), tailrows["_ff"].to_numpy()):
+        if pd.notna(v):
+            new_state[e] = v
+    _COUNTS_STATE[state_key] = new_state
+    return filled_prev
+
+
+def _expanding_prev(df, key_col, col, stats):
+    """Per-key prior-only expanding stats (``shift(1).expanding().<stat>()``),
+    seed-aware via FULL per-key history (option A — exact, unbounded state).
+    *stats* ⊆ {'median','std'}. Returns ``{stat: Series in df order}``."""
+    def _compute(gb):
+        out = {}
+        for st in stats:
+            if st == "median":
+                out[st] = gb.transform(lambda x: x.shift(1).expanding().median())
+            else:
+                out[st] = gb.transform(lambda x: x.shift(1).expanding().std())
+        return out
+
+    if _COUNTS_STATE is None:
+        return _compute(df.groupby(key_col, sort=False)[col])
+
+    state_key = f"exp::{key_col}::{col}"
+    seed = _COUNTS_STATE.get(state_key, {})  # key -> chronological list of values
+    keyvals = df[key_col].to_numpy()
+    vals = df[col].to_numpy().astype("float64")
+
+    s_key: list = []
+    s_val: list = []
+    for k in set(keyvals.tolist()):
+        for v in seed.get(k, []):
+            s_key.append(k)
+            s_val.append(v)
+    if s_key:
+        aug_key = np.concatenate([np.array(s_key, dtype=object), keyvals])
+        aug_val = np.concatenate([np.array(s_val, dtype="float64"), vals])
+        real = np.concatenate([np.zeros(len(s_key), bool), np.ones(len(df), bool)])
+    else:
+        aug_key, aug_val, real = keyvals, vals, np.ones(len(df), bool)
+
+    aug = pd.DataFrame({"_k": aug_key, "_v": aug_val})
+    res = _compute(aug.groupby("_k", sort=False)["_v"])
+    out = {st: pd.Series(arr.to_numpy()[real], index=df.index) for st, arr in res.items()}
+
+    from collections import defaultdict
+    buf: dict = defaultdict(list)
+    for k, v in zip(keyvals.tolist(), vals.tolist()):
+        buf[k].append(float(v))
+    new_state = {k: list(v) for k, v in seed.items()}
+    for k, nv in buf.items():
+        new_state[k] = list(seed.get(k, [])) + nv
+    _COUNTS_STATE[state_key] = new_state
+    return out
+
+
 def _rolling(df, group_key, value_col, operations) -> dict:
     """Rolling features, seed-aware under ``counts_state_scope`` (class B).
 
@@ -1032,9 +1129,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Days since last win ---
     df["_last_win_date"] = df["race_date"].where(df["won"] == 1)
-    horse_groups = df.groupby(hkey)
-    df["_last_win_date"] = horse_groups["_last_win_date"].ffill()
-    df["_last_win_date"] = horse_groups["_last_win_date"].shift(1)
+    df["_last_win_date"] = _ffill_prev(df, hkey, "_last_win_date")
     df["days_since_last_win"] = (
         (df["race_date"] - df["_last_win_date"]).dt.days.fillna(365)
     )
@@ -1066,12 +1161,9 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         # Vectorised ffill+shift / cummax+shift — each groupby method
         # stays within groups automatically, avoiding cross-boundary
         # leakage without a per-group Python lambda (much faster).
-        df["_last_win_or"] = horse_groups["_win_or_raw"].ffill()
-        df["_last_win_or"] = horse_groups["_last_win_or"].shift(1)
-        df["_last_place_or"] = horse_groups["_place_or_raw"].ffill()
-        df["_last_place_or"] = horse_groups["_last_place_or"].shift(1)
-        df["_career_high_or_prev"] = horse_groups["_real_or"].cummax()
-        df["_career_high_or_prev"] = horse_groups["_career_high_or_prev"].shift(1)
+        df["_last_win_or"] = _ffill_prev(df, hkey, "_win_or_raw")
+        df["_last_place_or"] = _ffill_prev(df, hkey, "_place_or_raw")
+        df["_career_high_or_prev"] = _running_extreme(df, hkey, "_real_or", kind="max", prev=True)
 
         df["or_vs_last_win_mark"] = (
             df["_real_or"] - df["_last_win_or"]
@@ -1532,7 +1624,7 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
         #   1. groupby trainer, sort by race index
         #   2. expanding cummax of _tj_prior_rides within trainer
         #   3. is_stable_jockey = 1 when own prior rides == trainer's cummax
-        trainer_max_tj = df.groupby("trainer")["_tj_prior_rides"].transform("cummax")
+        trainer_max_tj = _running_extreme(df, "trainer", "_tj_prior_rides", kind="max", prev=False)
         df["is_stable_jockey"] = (
             (df["_tj_prior_rides"] == trainer_max_tj) & (df["_tj_prior_rides"] > 0)
         ).astype(np.int8)
@@ -1706,9 +1798,11 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
     # duplicate state key.
     df["_cum_dist_cat_wins"] = df["_dc_wins"]
     # Running max of cumulative wins within each (horse, dist_cat) group
-    df["_dc_running_max"] = df.groupby([hkey, "_dist_cat_str"])["_cum_dist_cat_wins"].cummax()
+    df["_hdc_key"] = _composite_key(df, hkey, "_dist_cat_str")
+    df["_dc_running_max"] = _running_extreme(df, "_hdc_key", "_cum_dist_cat_wins", kind="max", prev=False)
     # Running max across ALL distance categories for each horse
-    df["_best_dc"] = df.groupby(hkey)["_dc_running_max"].cummax()
+    df["_best_dc"] = _running_extreme(df, hkey, "_dc_running_max", kind="max", prev=False)
+    df = df.drop(columns=["_hdc_key"], errors="ignore")
     df["at_preferred_dist"] = (
         (df["_cum_dist_cat_wins"] == df["_best_dc"]) & (df["_best_dc"] > 0)
     ).astype(int)
@@ -2067,17 +2161,15 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
         df = df.drop(columns=["_adj_lpf"], errors="ignore")
 
         # ── Class-relative Z-score speed figures ─────────────────
-        _class_key = _class_num.astype(int).astype(str)
-        # shift(1) so each row's own lb_per_furlong is excluded from
-        # the class median / std (avoids current-race outcome leakage).
-        _class_median = df.groupby(_class_key)["_lb_per_furlong"].transform(
-            lambda x: x.shift(1).expanding().median()
-        )
-        _class_std = df.groupby(_class_key)["_lb_per_furlong"].transform(
-            lambda x: x.shift(1).expanding().std()
-        )
-        _class_std = _class_std.replace(0, np.nan).fillna(1.0)
+        # shift(1) so each row's own lb_per_furlong is excluded from the class
+        # median / std (avoids current-race outcome leakage). Seed-aware via
+        # _expanding_prev (full per-class history — option A, exact).
+        df["_class_key"] = _class_num.astype(int).astype(str)
+        _exp = _expanding_prev(df, "_class_key", "_lb_per_furlong", ["median", "std"])
+        _class_median = _exp["median"]
+        _class_std = _exp["std"].replace(0, np.nan).fillna(1.0)
         df["_speed_z_class"] = (df["_lb_per_furlong"] - _class_median) / _class_std
+        df = df.drop(columns=["_class_key"], errors="ignore")
 
         # Rolling Z-score averages (Numba-accelerated)
         _z_ops = [
@@ -2808,8 +2900,8 @@ def add_prize_money_features(df: pd.DataFrame) -> pd.DataFrame:
     # NB: the shift MUST be inside transform — a bare
     # groupby().cummax().shift(1) shifts globally across horses and, with
     # raw rows in finish order, leaks finish position (CLAUDE.md rule 1).
-    df["horse_max_prize_contested"] = horse_groups["prize_money"].transform(
-        lambda x: x.cummax().shift(1)
+    df["horse_max_prize_contested"] = _running_extreme(
+        df, hkey, "prize_money", kind="max", prev=True
     ).fillna(0)
     
     # Cumsum / count to avoid expanding().mean() issues:
@@ -3791,11 +3883,12 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         # Vectorised expanding min: fill NaN with inf so cummin ignores
         # non-winning races, then shift(1) for prior-only.
-        _wc_filled = df["_win_class"].fillna(np.inf)
-        df["horse_best_class_won"] = _wc_filled.groupby(df[hkey]).cummin()
+        df["_wc_filled"] = df["_win_class"].fillna(np.inf)
+        df["horse_best_class_won"] = _running_extreme(df, hkey, "_wc_filled", kind="min", prev=False)
         df.loc[df["horse_best_class_won"] == np.inf, "horse_best_class_won"] = np.nan
-        df["horse_best_class_won"] = df.groupby(hkey)["horse_best_class_won"].shift(1)
+        df["horse_best_class_won"] = _lag(df, hkey, "horse_best_class_won")
         df["horse_best_class_won"] = df["horse_best_class_won"].fillna(7)
+        df = df.drop(columns=["_wc_filled"], errors="ignore")
 
         # Current class vs best proven level (negative = below proven)
         df["class_vs_best_won"] = _class_num - df["horse_best_class_won"]

@@ -252,6 +252,76 @@ def test_lag_seeded_append_matches_full():
     assert np.all(np.isclose(a, b, equal_nan=False) | both_nan)
 
 
+def _horse_value_frame(seed, n_horses=8, hi=20):
+    rng = np.random.default_rng(seed)
+    rows = []
+    rid = 0
+    for _day in range(30):
+        rid += 1
+        for _ in range(int(rng.integers(2, 6))):
+            rows.append({
+                "race_id": f"R{rid:04d}",
+                "horse": f"H{int(rng.integers(0, n_horses))}",
+                "v": float(rng.integers(0, hi)),
+            })
+    return pd.DataFrame(rows)
+
+
+def test_running_extreme_seeded_matches_full():
+    df = _horse_value_frame(31)
+    rids = sorted(df["race_id"].unique())
+    cut = rids[len(rids) // 2]
+    nm = (df["race_id"] > cut).to_numpy()
+    for kind, prev in [("max", True), ("max", False), ("min", False)]:
+        full = fe._running_extreme(df, "horse", "v", kind=kind, prev=prev).to_numpy()
+        st: dict = {}
+        with fe.counts_state_scope(st):
+            fe._running_extreme(df[df["race_id"] <= cut], "horse", "v", kind=kind, prev=prev)
+        with fe.counts_state_scope(st):
+            got = fe._running_extreme(df[df["race_id"] > cut], "horse", "v", kind=kind, prev=prev).to_numpy()
+        a, b = got, full[nm]
+        bn = np.isnan(a) & np.isnan(b)
+        assert np.all(np.isclose(a, b) | bn), (kind, prev)
+
+
+def test_ffill_prev_seeded_matches_full():
+    df = _horse_value_frame(32)
+    df.loc[df.index % 3 != 0, "v"] = np.nan  # sparse non-nulls
+    rids = sorted(df["race_id"].unique())
+    cut = rids[len(rids) // 2]
+    nm = (df["race_id"] > cut).to_numpy()
+    full = fe._ffill_prev(df, "horse", "v").to_numpy()
+    st: dict = {}
+    with fe.counts_state_scope(st):
+        fe._ffill_prev(df[df["race_id"] <= cut], "horse", "v")
+    with fe.counts_state_scope(st):
+        got = fe._ffill_prev(df[df["race_id"] > cut], "horse", "v").to_numpy()
+    a, b = got, full[nm]
+    bn = np.isnan(a) & np.isnan(b)
+    assert np.all(np.isclose(a, b) | bn)
+
+
+def test_expanding_prev_seeded_matches_full():
+    rng = np.random.default_rng(33)
+    df = pd.DataFrame({
+        "k": [f"C{int(rng.integers(0, 4))}" for _ in range(400)],
+        "v": rng.normal(size=400),
+    })
+    full = fe._expanding_prev(df, "k", "v", ["median", "std"])
+    half = len(df) // 2
+    hist, new = df.iloc[:half], df.iloc[half:]
+    st: dict = {}
+    with fe.counts_state_scope(st):
+        fe._expanding_prev(hist, "k", "v", ["median", "std"])
+    with fe.counts_state_scope(st):
+        got = fe._expanding_prev(new, "k", "v", ["median", "std"])
+    for s in ("median", "std"):
+        a = got[s].to_numpy()
+        b = full[s].to_numpy()[half:]
+        bn = np.isnan(a) & np.isnan(b)
+        assert np.all(np.isclose(a, b, rtol=1e-6) | bn), s
+
+
 def test_state_is_json_serialisable_and_reloadable():
     df = _frame(4)
     cut = sorted(df["race_id"].unique())[len(df["race_id"].unique()) // 2]
