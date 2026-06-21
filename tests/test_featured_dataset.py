@@ -132,4 +132,4 @@ class TestBuildVsAppend:
                   "data_signature": data_signature(proc, cutoff=last)},
         )
         get_featured_dataset(processed=proc)
-        assert fake.calls == ["append(fast=False)", "load"]
+        assert fake.calls == ["append(fast=True)", "load"]

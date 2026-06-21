@@ -105,7 +105,7 @@ def get_featured_dataset(
     *,
     processed: pd.DataFrame | None = None,
     rebuild: bool = False,
-    fast_append: bool = False,
+    fast_append: bool = True,
 ) -> pd.DataFrame:
     """Return the full featured dataset, building or appending as needed.
 
@@ -117,7 +117,11 @@ def get_featured_dataset(
     Args:
         processed: pre-processed history; loaded via ``process_data`` if None.
         rebuild: force a full rebuild even if the store looks current.
-        fast_append: use the rating-only fast append path (parity-tested).
+        fast_append: use the incremental append path that features NEW ROWS
+            ONLY (ratings + every pandas stage seeded from carried state),
+            instead of recomputing history. Parity-tested against a full
+            rebuild; falls back to the recompute path for pre-flip stores
+            lacking carried state. Default True.
     """
     store = FeatureStore()
     fe_sig = fe_signature()

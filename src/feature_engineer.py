@@ -890,6 +890,27 @@ def _expanding_prev(df, key_col, col, stats):
     return out
 
 
+def _distinct_count(df, entity_col, col):
+    """Per-entity distinct-value count (``groupby[col].transform('nunique')``),
+    seed-aware via a carried set per entity. Full build is byte-identical; on an
+    append the count is ``|carried ∪ new distinct|`` (matches a full rebuild at
+    the data's end). State holds the set of values seen per entity."""
+    g = df.groupby(entity_col, sort=False)[col]
+    if _COUNTS_STATE is None:
+        return g.transform("nunique")
+    state_key = f"nuniq::{entity_col}::{col}"
+    seed = _COUNTS_STATE.get(state_key, {})
+    frame_sets = g.apply(lambda s: set(pd.unique(s.dropna())))
+    total: dict = {}
+    new_state = dict(seed)
+    for e, fs in frame_sets.items():
+        u = set(seed.get(e, set())) | set(fs)
+        total[e] = len(u)
+        new_state[e] = u
+    _COUNTS_STATE[state_key] = new_state
+    return df[entity_col].map(total)
+
+
 def _rolling(df, group_key, value_col, operations) -> dict:
     """Rolling features, seed-aware under ``counts_state_scope`` (class B).
 
@@ -3514,33 +3535,34 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
                     df.groupby([entity_col, "race_id"], sort=False)
                     .agg(
                         _np_mean=("_norm_pos", "mean"),
-                        _dt=(_dt_col, "first"),
+                        _event_dt=(_dt_col, "first"),
                     )
                     .reset_index()
-                    .sort_values([entity_col, "_dt", "race_id"])
                 )
-                _gids = _encode_groups(_agg, entity_col)
-                _vals = _agg["_np_mean"].values.astype(np.float64)
-                _shifted = _nb_grouped_shift1(_vals, _gids)
-                _ewma_arr = _nb_ewma(_shifted, _gids, _ewma_alpha)
-                # Map per-race EWMA back to individual runners
-                _agg["_ewma"] = _ewma_arr
+                # Seed-aware EWMA over the per-(entity, race) series via the
+                # rolling primitive (carries an EWMA-converging tail), then map
+                # the per-race value back onto each runner.
+                _eo = _rolling(
+                    _agg, entity_col, "_np_mean",
+                    [(f"_{prefix}_te_ewma_raw", "ewma", _ewma_alpha)],
+                )
+                _agg["_ewma"] = _eo[f"_{prefix}_te_ewma_raw"]
                 _lookup = _agg.set_index([entity_col, "race_id"])["_ewma"]
                 _mi = pd.MultiIndex.from_arrays(
                     [df[entity_col], df["race_id"]]
                 )
                 raw = _lookup.reindex(_mi).values
-                cum_n = _race_safe_cumsum(df, entity_col, "_norm_pos_weight").values
             else:
-                ops = [(f"_{prefix}_te_ewma_raw", "ewma", _ewma_alpha)]
                 results = _rolling(
-                    df, entity_col, "_norm_pos", ops,
+                    df, entity_col, "_norm_pos",
+                    [(f"_{prefix}_te_ewma_raw", "ewma", _ewma_alpha)],
                 )
                 raw = results[f"_{prefix}_te_ewma_raw"]
-                cum_n = (
-                    df.groupby(entity_col)["_norm_pos_weight"].cumsum()
-                    - df["_norm_pos_weight"]
-                )
+            # Prior weighted-run count (class C, seed-aware) drives the shrink.
+            cum_n = _cumulative(
+                df[entity_col].to_numpy(), df["race_id"].to_numpy(),
+                {f"_{prefix}_te_ewma_n": df["_norm_pos_weight"].to_numpy()},
+            )[f"_{prefix}_te_ewma_n"]
             # Shrink toward prior for low-count entities
             df[f"{prefix}_te_ewma"] = (
                 (cum_n * np.where(cum_n > 0, raw, global_mean)
@@ -3977,7 +3999,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
     # Low value = consistent across distances; high = distance-dependent.
     if "dist_category" in df.columns:
         _dist_runs = df.groupby([hkey, "dist_category"])["finish_position"].transform("count")
-        _n_dist_cats = df.groupby(hkey)["dist_category"].transform("nunique")
+        _n_dist_cats = _distinct_count(df, hkey, "dist_category")
         df["horse_n_dist_cats"] = _n_dist_cats.fillna(1).astype(np.int8)
 
     return df

@@ -45,7 +45,7 @@ from src.ratings import compute_elo_features, compute_glicko_features
 
 logger = logging.getLogger(__name__)
 
-STORE_SCHEMA_VERSION = 1
+STORE_SCHEMA_VERSION = 2  # 2: carries counts_state.pkl for new-rows-only appends
 
 
 def _event_date(df: pd.DataFrame) -> pd.Series:
@@ -77,6 +77,7 @@ class FeatureStore:
         self.featured_path = os.path.join(self.root, "featured.parquet")
         self.processed_path = os.path.join(self.root, "processed.parquet")
         self.state_path = os.path.join(self.root, "ratings_state.pkl")
+        self.counts_state_path = os.path.join(self.root, "counts_state.pkl")
         self.meta_path = os.path.join(self.root, "meta.json")
 
     # ── status ────────────────────────────────────────────────────────
@@ -108,6 +109,15 @@ class FeatureStore:
         if not os.path.exists(self.state_path):
             return {"elo": None, "glicko": None}
         with open(self.state_path, "rb") as fh:
+            return pickle.load(fh)
+
+    def load_counts_state(self) -> dict | None:
+        """Carried pandas-stage state (counts/rolling/time-window/lag/extrema/
+        expanding). ``None`` if the store predates the incremental flip — the
+        caller must then fall back to the full-recompute append."""
+        if not os.path.exists(self.counts_state_path):
+            return None
+        with open(self.counts_state_path, "rb") as fh:
             return pickle.load(fh)
 
     # ── persistence helpers ───────────────────────────────────────────
@@ -195,62 +205,50 @@ class FeatureStore:
         with open(self.state_path, "wb") as fh:
             pickle.dump(state, fh, protocol=pickle.HIGHEST_PROTOCOL)
 
+    def _save_counts_state(self, state: dict):
+        with open(self.counts_state_path, "wb") as fh:
+            pickle.dump(state, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
     # ── build / append ────────────────────────────────────────────────
     def build(self, processed: pd.DataFrame) -> pd.DataFrame:
-        """Build the store from scratch over the full processed history."""
+        """Build the store from scratch over the full processed history.
+
+        Runs the FE pass with an (empty) ``counts_state`` collector so every
+        stateful pandas stage writes its end-state — identical features to a
+        plain build (empty seed == no seed), but the carried state is persisted
+        so later appends can run on new rows only. Rating end-state is persisted
+        separately (the existing Elo/Glicko mechanism)."""
         processed = processed.copy()
-        featured = engineer_features(processed, save=False)
+        counts_state: dict = {}
+        featured = engineer_features(processed, save=False, counts_state=counts_state)
 
         _stringify_objects(featured).to_parquet(self.featured_path, index=False, engine="pyarrow")
         _stringify_objects(processed).to_parquet(self.processed_path, index=False, engine="pyarrow")
         self._save_state(self._compute_ratings_state(processed))
+        self._save_counts_state(counts_state)
         self._write_meta(processed, featured, op="built")
         logger.info("FeatureStore built: %d featured rows", len(featured))
         return featured
 
-    def _fast_featurize(
-        self, processed_hist: pd.DataFrame, new: pd.DataFrame
-    ) -> tuple[pd.DataFrame, dict]:
-        """Incremental featurise: sweep ratings only over the new rows
-        (seeded from persisted state, ~47% of FE time), then run the rest of
-        the pipeline with ``skip_ratings=True``.
+    def _fast_featurize(self, new: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+        """Incremental featurise on NEW ROWS ONLY.
 
-        History rows carry their stored rating columns so the few stages
-        that read prior-row ratings (e.g. ``jockey_elo_change``) stay
-        correct; within-race rating features for new rows come from their
-        own (all-new) racemates. Correctness is enforced against a full
-        rebuild by tests/test_feature_store.py.
-        """
+        Seed the rating sweeps from persisted state and attach those columns to
+        the new rows, then run the full pipeline with ``skip_ratings=True`` under
+        the carried ``counts_state`` so every stateful pandas stage (counts,
+        rolling, time-window, lag, extrema, expanding) resumes from its persisted
+        end-state instead of recomputing history. No history rows enter the FE
+        pass — this is the actual incremental speed-up. Parity with a full
+        rebuild is enforced by tests/test_feature_store.py (fast path)."""
         seed = self.load_state()
-        keyed_ratings, rating_cols, advanced = self._seeded_rating_frame(new, seed)
-
-        # Attach rating columns to new rows (by key) and to history rows
-        # (from the stored featured frame).
+        keyed_ratings, _rating_cols, advanced = self._seeded_rating_frame(new, seed)
         new_rated = new.merge(keyed_ratings, on=["race_id", "horse_name"], how="left")
 
-        hist_featured = self.load_featured()
-        hist_rating_cols = [c for c in rating_cols if c in hist_featured.columns]
-        missing = set(rating_cols) - set(hist_rating_cols)
-        if missing:
-            logger.warning(
-                "Stored featured frame missing %d rating cols (%s…) — "
-                "fast append may diverge; rebuild the store.",
-                len(missing), sorted(missing)[:3],
-            )
-        hist_rated = processed_hist.merge(
-            hist_featured[["race_id", "horse_name"] + hist_rating_cols],
-            on=["race_id", "horse_name"], how="left",
+        counts_state = self.load_counts_state() or {}
+        featured_new = engineer_features(
+            new_rated, save=False, skip_ratings=True, counts_state=counts_state
         )
-
-        combined = pd.concat([hist_rated, new_rated], ignore_index=True, sort=False)
-        featured_all_new = engineer_features(combined, save=False, skip_ratings=True)
-
-        new_keys = set(zip(new["race_id"].astype(str), new["horse_name"].astype(str)))
-        mask = [
-            (str(r), str(h)) in new_keys
-            for r, h in zip(featured_all_new["race_id"], featured_all_new["horse_name"])
-        ]
-        featured_new = featured_all_new[pd.Series(mask, index=featured_all_new.index)].copy()
+        self._save_counts_state(counts_state)  # advanced in place by the stages
         return featured_new, advanced
 
     def append(self, processed_new: pd.DataFrame, *, fast: bool = False) -> pd.DataFrame:
@@ -260,10 +258,11 @@ class FeatureStore:
         store holds settled history; re-appending the same dates is a
         no-op). Returns the newly appended featured rows.
 
-        With ``fast=True`` the rating sweeps run only over the new rows
-        (seeded from persisted state) instead of the whole history; the rest
-        of the pipeline still runs over history+new. Both paths are
-        parity-tested against a full rebuild.
+        With ``fast=True`` (and a store carrying ``counts_state``) the whole FE
+        pass runs on the NEW rows only — ratings seeded from persisted state and
+        every pandas stage resumed from carried state — so history is never
+        recomputed. Without carried state (a pre-flip store) it falls back to the
+        full-recompute path. Both paths are parity-tested against a full rebuild.
         """
         if not self.exists():
             raise RuntimeError("FeatureStore is empty; call build() first.")
@@ -277,10 +276,11 @@ class FeatureStore:
             logger.info("FeatureStore.append: no rows after %s — nothing to do", last)
             return new
 
-        if fast:
-            featured_new, advanced = self._fast_featurize(processed_hist, new)
+        if fast and self.load_counts_state() is not None:
+            featured_new, advanced = self._fast_featurize(new)
         else:
-            # Correct re-featuring against full history (parity-tested path).
+            # Correct re-featuring against full history (parity-tested path):
+            # also the fallback for pre-flip stores that lack carried state.
             featured_new = feature_engineer_with_history_core(processed_hist, new)
             advanced = self._compute_ratings_state(new, seed=self.load_state())
 
