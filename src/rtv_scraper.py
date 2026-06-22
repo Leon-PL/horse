@@ -273,9 +273,10 @@ def fetch_rtv_comparison(
 
     rows = []
     for h in horses:
+        finish_pos = h.get("finish_position")
         row = {
             "horse_name": h.get("horse_name", ""),
-            "finish_position": h.get("finish_position"),
+            "finish_position": finish_pos,
         }
         metrics = h.get("metrics", {})
         for api_key, col_name in [
@@ -291,7 +292,12 @@ def fetch_rtv_comparison(
             m = metrics.get(api_key)
             if m is not None:
                 try:
-                    row[col_name] = float(m["value"])
+                    val = float(m["value"])
+                    # fsp ("finishing speed %") is undefined for a non-finisher:
+                    # the API emits junk (±15k) for DNF runners. Drop it.
+                    if api_key == "fsp" and finish_pos is None:
+                        raise ValueError("fsp invalid for non-finisher")
+                    row[col_name] = val
                 except (ValueError, KeyError, TypeError):
                     pass
                 rank_col = col_name.replace("rtv_", "rtv_rank_")
