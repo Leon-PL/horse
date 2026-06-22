@@ -58,6 +58,7 @@ STAGE_TAXONOMY: dict[str, str] = {
     "add_pace_style_features": "W",
     "add_field_quality_features": "W",
     "add_track_config_features": "R",
+    "add_course_dynamics_features": "C",
     "add_weather_features": "R",
     "add_supplementary_features": "B",
     "add_race_relative_signal_features": "W",

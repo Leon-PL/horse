@@ -2594,6 +2594,145 @@ def add_track_config_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# Static per-shape "quirkiness": how much an idiosyncratic layout rewards
+# course-craft / experience. Galloping, fair tracks ≈ 0; tight/sharp ≈ 1.
+# Codes match shape_code(): Galloping 0, Tight 1, Sharp 2, Undulating 3, Stiff 4.
+_SHAPE_QUIRK = {0: 0.0, 1: 0.8, 2: 1.0, 3: 0.4, 4: 0.5}
+# How much a layout favours front-runners (hard to make up ground): tight/sharp
+# and short circuits favour leaders; long galloping tracks do not.
+_SHAPE_LEADERS = {0: 0.1, 1: 0.7, 2: 0.9, 3: 0.4, 4: 0.3}
+
+
+def _haversine_km(lat1, lon1, lat2, lon2):
+    """Vectorised great-circle distance in km (NaN-safe)."""
+    R = 6371.0
+    lat1r = np.radians(np.asarray(lat1, dtype=float))
+    lat2r = np.radians(np.asarray(lat2, dtype=float))
+    dlat = np.radians(np.asarray(lat2, dtype=float) - np.asarray(lat1, dtype=float))
+    dlon = np.radians(np.asarray(lon2, dtype=float) - np.asarray(lon1, dtype=float))
+    a = np.sin(dlat / 2) ** 2 + np.cos(lat1r) * np.cos(lat2r) * np.sin(dlon / 2) ** 2
+    return 2 * R * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
+
+
+def add_course_dynamics_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Course angles that go beyond the static venue config.
+
+    All features are strictly race-safe (prior runs only, via the seed-aware
+    cumulative / lag primitives). Themes:
+
+    * **Course experience × quirkiness** — a track-debutant is penalised far
+      more at an idiosyncratic course (tight Chester, switchback Goodwood) than
+      at a fair galloping one. Plain ``horse_track_runs`` cannot express this;
+      the interaction with a static quirk score can. Includes a pragmatic
+      course-*specialisation* term (proven course form weighted by quirk) — a
+      fully data-driven per-track specialisation score is leak-prone, so we let
+      the model lean on existing race-safe course form where craft matters.
+    * **Handedness** — some horses demonstrably prefer one turning direction;
+      experience and success at *today's* hand, plus a flag for switching to an
+      unfamiliar hand after a career of the other way.
+    * **Pace bias** — front-runners are favoured on tight/short courses where
+      it is hard to come from behind; interact run-style with a leader-bias.
+    * **Travel** — distance shipped from the last run: mild fatigue but also a
+      strong trainer-intent signal (you don't van a horse 300 km on a whim).
+    * **Going-at-this-course** — ground preference is partly course-specific.
+
+    Must run after ``add_track_config_features`` (needs track_direction/shape/
+    draw_bias/circumference), ``add_track_features`` (horse_track_runs / wr) and
+    ``add_pace_style_features`` (pace_style_index).
+    """
+    if "track" not in df.columns:
+        return df
+    logger.info("Engineering course-dynamics features...")
+    hkey = _horse_key(df)
+    _race = df["race_id"].to_numpy()
+    _rs = df["_result_start"].fillna(0.0).to_numpy()
+    _wh = df["_won_for_history"].fillna(0.0).to_numpy()
+
+    # Career runs (prior only) — denominator for "share of career at this hand".
+    career_runs = _cumulative(
+        df[hkey].astype(str).to_numpy(), _race, {"_career_runs": _rs}
+    )["_career_runs"]
+
+    # ── Static course descriptors (0..1) ─────────────────────────
+    shape = df.get("track_shape")
+    draw_bias = pd.to_numeric(df.get("track_draw_bias"), errors="coerce").fillna(0.0) \
+        if "track_draw_bias" in df.columns else pd.Series(0.0, index=df.index)
+    circ = pd.to_numeric(df.get("track_circumference"), errors="coerce").fillna(10.0) \
+        if "track_circumference" in df.columns else pd.Series(10.0, index=df.index)
+    if shape is not None:
+        quirk = shape.map(_SHAPE_QUIRK).fillna(0.0).astype(float)
+        leaders = shape.map(_SHAPE_LEADERS).fillna(0.2).astype(float)
+    else:
+        quirk = pd.Series(0.0, index=df.index)
+        leaders = pd.Series(0.2, index=df.index)
+    short_circ = ((circ > 0) & (circ < 9.0)).astype(float)
+    df["course_quirk_score"] = (quirk + 0.15 * draw_bias + 0.2 * short_circ).clip(0.0, 1.0)
+    df["course_favours_leaders"] = (leaders + 0.2 * short_circ).clip(0.0, 1.0)
+
+    # ── #1 Course experience × quirk ─────────────────────────────
+    if "horse_track_runs" in df.columns:
+        runs = df["horse_track_runs"].fillna(0.0)
+        df["first_time_at_course"] = (runs == 0).astype(np.int8)
+        df["course_inexperience"] = 1.0 / (1.0 + runs)
+        df["course_debut_x_quirk"] = df["first_time_at_course"] * df["course_quirk_score"]
+        df["course_inexp_x_quirk"] = df["course_inexperience"] * df["course_quirk_score"]
+        # Field-relative course experience (race-safe: prior-run counts only).
+        df["course_exp_vs_field"] = runs - df.groupby("race_id")["horse_track_runs"].transform("mean")
+    if "horse_track_wr_shrunk" in df.columns:
+        df["course_form_x_quirk"] = (
+            df["horse_track_wr_shrunk"].fillna(0.0) * df["course_quirk_score"]
+        )
+
+    # ── #2 Handedness (left/right experience & success) ──────────
+    if "track_direction" in df.columns:
+        _hd = _cumulative(_composite_key(df, hkey, "track_direction"), _race,
+            {"_curdir_runs": _rs, "_curdir_wins": _wh})
+        cur_runs = _hd["_curdir_runs"]
+        cur_wins = _hd["_curdir_wins"]
+        df["horse_curdir_runs"] = cur_runs
+        cur_wr = np.where(cur_runs > 0, cur_wins / np.maximum(cur_runs, 1e-9), 0.0)
+        df["horse_curdir_wr_shrunk"] = _bayesian_shrink(
+            pd.Series(cur_wr, index=df.index), pd.Series(cur_runs, index=df.index),
+            prior_rate=0.10, prior_strength=5.0)
+        # Experienced horse meeting an unfamiliar turning direction today.
+        df["first_time_this_hand"] = ((cur_runs == 0) & (career_runs > 0)).astype(np.int8)
+        df["hand_experience_ratio"] = np.where(
+            career_runs > 0, cur_runs / np.maximum(career_runs, 1e-9), 0.0)
+
+    # ── #5 Pace / run-style bias ─────────────────────────────────
+    if "pace_style_index" in df.columns:
+        df["pace_x_course_leaders"] = (
+            df["pace_style_index"].fillna(0.0) * df["course_favours_leaders"])
+    if "pace_front_runner_flag" in df.columns:
+        df["frontrunner_at_bias_track"] = (
+            df["pace_front_runner_flag"].fillna(0).astype(float) * df["course_favours_leaders"])
+
+    # ── #6 Travel shipped from the last run ──────────────────────
+    cfg = {t: get_track_config(str(t)) for t in df["track"].astype(str).unique()}
+    df["track_lat"] = df["track"].astype(str).map(lambda t: cfg[t]["lat"])
+    df["track_lon"] = df["track"].astype(str).map(lambda t: cfg[t]["lon"])
+    prev_lat = _lag(df, hkey, "track_lat")
+    prev_lon = _lag(df, hkey, "track_lon")
+    df["travel_from_last_km"] = _haversine_km(
+        prev_lat.to_numpy(), prev_lon.to_numpy(),
+        df["track_lat"].to_numpy(), df["track_lon"].to_numpy())
+    df["is_long_haul"] = (df["travel_from_last_km"] > 200.0).astype(np.int8)
+    df = df.drop(columns=["track_lat", "track_lon"], errors="ignore")
+
+    # ── #7 Going at this specific course ─────────────────────────
+    if "going" in df.columns:
+        _tg = _cumulative(_composite_key(df, hkey, "track", "going"), _race,
+            {"_tg_runs": _rs, "_tg_wins": _wh})
+        tg_runs = _tg["_tg_runs"]
+        df["horse_track_going_runs"] = tg_runs
+        tg_wr = np.where(tg_runs > 0, _tg["_tg_wins"] / np.maximum(tg_runs, 1e-9), 0.0)
+        df["horse_track_going_wr_shrunk"] = _bayesian_shrink(
+            pd.Series(tg_wr, index=df.index), pd.Series(tg_runs, index=df.index),
+            prior_rate=0.10, prior_strength=5.0)
+
+    return df
+
+
 def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fetch & attach weather features for every race-day / track pair.
@@ -4485,6 +4624,7 @@ def engineer_features(
         add_pace_style_features,           # needs RTV history + draw/field context
         add_field_quality_features,
         add_track_config_features,         # static venue data
+        add_course_dynamics_features,      # course experience/handedness/pace-bias/travel
         add_weather_features,              # Open-Meteo historical weather
         add_supplementary_features,        # consistency, class, campaign, seasonal
         add_race_relative_signal_features,
