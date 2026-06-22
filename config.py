@@ -140,7 +140,7 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
 # with (alpha, beta) fitted by maximum likelihood on OOF predictions.
 # beta > 1 also corrects the favourite-longshot bias. Races without
 # complete odds fall back to the unanchored probabilities.
-MARKET_ANCHOR = True
+MARKET_ANCHOR = False
 
 # --- Win-model market-probability distillation ---
 # When True, the win classifier trains on the market-implied win
@@ -152,7 +152,7 @@ MARKET_ANCHOR = True
 #   1.0 = pure probability target; 0.5 = even blend (best-calibrated in tests).
 # Validated gain on the full dataset was small (~-0.0013 log-loss) and
 # improves accuracy only — it does NOT create a betting edge.
-WIN_SOFT_LABEL_DISTILL = True
+WIN_SOFT_LABEL_DISTILL = False
 WIN_SOFT_LABEL_BLEND = 1.0
 
 # --- Glicko Settings ---

@@ -155,6 +155,9 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     #    unless code/data signatures changed).
     _tick("Loading featured dataset (feature store)", 0.15)
     featured = get_featured_dataset(processed=processed)
+    # Burn-in is an absolute boundary tied to the FULL history's start; capture
+    # it before windowing so a short window isn't wrongly treated as cold-start.
+    dataset_start = pd.to_datetime(featured["race_date"], errors="coerce").min()
     featured = _apply_window(featured, cfg)
 
     # 3) Train.
@@ -162,7 +165,7 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     predictor = RacePredictor(frameworks=dict(cfg.frameworks))
     metrics = predictor.train(
         featured, params=cfg.hyperparams, value_config=cfg.value_config,
-        blend_market_odds=cfg.blend_market_odds,
+        blend_market_odds=cfg.blend_market_odds, dataset_start=dataset_start,
         progress_callback=(lambda m, p: _tick(m, 0.30 + 0.55 * p)) if progress_cb else None,
     )
 

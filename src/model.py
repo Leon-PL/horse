@@ -1038,6 +1038,7 @@ def _quick_prune_mask(
 
 def prepare_multi_target_data(
     df: pd.DataFrame,
+    dataset_start: "pd.Timestamp | None" = None,
 ) -> dict:
     """
     Prepare a shared train/test split with **multiple** target arrays.
@@ -1106,11 +1107,17 @@ def prepare_multi_target_data(
         )
 
     # ── Burn-in exclusion (dataset-level, before split) ────────────────
-    # Applied once from the absolute dataset start so that every
-    # downstream split / CV fold sees the same burn-in boundary.
+    # Burn-in is an ABSOLUTE boundary tied to the start of the whole database
+    # (where horses are genuinely cold-start because no prior history exists in
+    # the data). It must be measured from the global dataset start, not from
+    # ``df`` — which may be a windowed slice. When a caller trains on, say, the
+    # last 2 years, ``dataset_start`` is the full-history start, so the cutoff
+    # lands well before the window and nothing is dropped (those rows carry full
+    # career history). Falls back to ``df``'s own min when not supplied.
     _burn_months = getattr(config, "BURN_IN_MONTHS", 4)
     if _burn_months > 0 and len(df) > 0:
-        _ds_start = pd.Timestamp(df["race_date"].min())
+        _ds_start = pd.Timestamp(dataset_start) if dataset_start is not None \
+            else pd.Timestamp(df["race_date"].min())
         _ds_end = pd.Timestamp(df["race_date"].max())
         _burn_cutoff = _ds_start + pd.DateOffset(months=_burn_months)
         if _burn_cutoff < _ds_end:
@@ -1664,6 +1671,7 @@ class RacePredictor:
         value_config: dict | None = None,
         auto_tune: dict | None = None,
         blend_market_odds: bool | None = None,
+        dataset_start: "pd.Timestamp | None" = None,
         **_ignored,
     ) -> dict:
         """Train two task-specific models:
@@ -1675,7 +1683,7 @@ class RacePredictor:
         Phase 1b (optional): Optuna auto-tune per model.
         Phase 2: Retrain on full data → evaluate → betting simulation.
         """
-        data = prepare_multi_target_data(df)
+        data = prepare_multi_target_data(df, dataset_start=dataset_start)
 
         self.feature_cols = data["feature_cols"]
         self.scaler = data["scaler"]
