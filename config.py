@@ -199,7 +199,9 @@ FOCAL_ALPHA = "auto" # positive-class weight — "auto" computes from actual pre
 
 # --- Feature Pruning ---
 # Fraction of lowest-importance features to drop (0.0 = keep all).
-FEATURE_PRUNE_FRACTION = 0.2
+# Held at 0.0 because FEATURE_ALLOWLIST below already fixes the feature set
+# (top-150 by ablation); an extra per-run prune would re-cut it nondeterministically.
+FEATURE_PRUNE_FRACTION = 0.0
 # Absolute Pearson correlation above which the less-important feature
 # in a pair is dropped (before importance pruning). 0.0 = disabled.
 FEATURE_CORR_THRESHOLD = 0.95
@@ -216,7 +218,7 @@ FEATURE_CORR_THRESHOLD = 0.95
 #   python scripts/model_lab.py --write-allowlist <K>
 # then point this at the written file. Applied AFTER it, FEATURE_PRUNE_FRACTION
 # still trims within the allow-list (set it to 0.0 to keep exactly the list).
-FEATURE_ALLOWLIST = None
+FEATURE_ALLOWLIST = os.path.join(PROCESSED_DATA_DIR, "feature_allowlist.txt")
 
 # --- Early Stopping ---
 # Number of boosting rounds without improvement before stopping.
@@ -235,7 +237,10 @@ PURGE_DAYS = 7
 # rolling counts (near-zero horse_prev_races, unwarmed Elo) that produce
 # noisy gradients without contributing useful pattern learning.
 # Set to 0 to disable.
-BURN_IN_MONTHS = 4
+# 8 chosen from scripts/feature_audit.py: the debut share (first-seen horses)
+# falls from ~91% at 2020-09 to its ~8% steady floor by ~2021-05 and stays
+# there; was 4, which left several months of still-warming form features.
+BURN_IN_MONTHS = 8
 # TE_WINDOW_DAYS: calendar window (days) for the additional windowed
 # target-encoding features.  Alongside the full cumulative encodings,
 # windowed encodings capture RECENT entity form — important under concept
