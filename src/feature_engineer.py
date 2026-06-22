@@ -2306,6 +2306,35 @@ def add_rtv_features(df: pd.DataFrame) -> pd.DataFrame:
     # ── Merge cached metrics onto the DF ─────────────────────────
     df = merge_rtv_metrics(df)
 
+    # ── Sanitise raw RTV metrics ─────────────────────────────────
+    # The RTV API occasionally returns garbage values (e.g. fsp up to
+    # ±15,000 for a metric that legitimately sits ~85–120). The raw parse
+    # accepts them blindly, and they poison the rolling avg/best/trend and
+    # pace_finish_bias. NaN out values outside a generous plausible band so
+    # they're treated as missing (consistent with sparse RTV coverage),
+    # never as data.
+    _RTV_PLAUSIBLE = {
+        "rtv_fsp": (0.0, 300.0),                  # % finishing speed (~85–120)
+        "rtv_top_speed": (0.0, 80.0),             # MPH
+        "rtv_entry_speed": (0.0, 80.0),           # MPH
+        "rtv_jump_index": (0.0, 20.0),            # /10
+        "rtv_lengths_gained_jumping": (-100.0, 100.0),
+        "rtv_speed_lost": (-100.0, 20.0),         # negative MPH
+        "rtv_acceleration": (0.0, 60.0),          # seconds 0–20 MPH
+        "rtv_stride_length": (0.0, 20.0),         # metres
+    }
+    _rtv_bad = 0
+    for _col, (_lo, _hi) in _RTV_PLAUSIBLE.items():
+        if _col in df.columns:
+            _vals = pd.to_numeric(df[_col], errors="coerce")
+            _oob = _vals.notna() & ((_vals < _lo) | (_vals > _hi))
+            _n = int(_oob.sum())
+            if _n:
+                df.loc[_oob, _col] = np.nan
+                _rtv_bad += _n
+    if _rtv_bad:
+        logger.info("RTV sanitise: NaN'd %d implausible raw metric values", _rtv_bad)
+
     hkey = _horse_key(df)
 
     # Metrics to build rolling features from  (name, higher_is_better)
