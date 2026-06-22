@@ -72,9 +72,12 @@ class _FakeStore:
     def append(self, processed):
         self.calls.append("append")
 
-    def load_featured(self):
+    def load_featured(self, columns=None):
         self.calls.append("load")
         return pd.DataFrame({"featured": [2]})
+
+    def featured_schema_names(self):
+        return ["featured"]
 
 
 @pytest.fixture

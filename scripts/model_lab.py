@@ -71,20 +71,31 @@ def build_slim(run_id: str) -> None:
     print(f"slim built: {len(df):,} rows × {len(cols)} cols → {SLIM}")
 
 
-def build_slim_store() -> None:
+def build_slim_store(lean: bool = False) -> None:
     """Build the slim parquet straight from the feature store.
 
     The lean run registry no longer snapshots per-run featured parquets, so
     this is the way to get a slim dataset for experiments now. Reads the
     already-built store directly (load_featured) — it does NOT re-run
     process_data or trigger any (re)build.
+
+    lean=True (when FEATURE_ALLOWLIST is set) reads only the model columns
+    (~200 vs ~1000) so the slim and every experiment load stays light — use
+    it for place_ab/baseline once a cut is chosen. Leave it False for
+    --exp prune / feature_audit, which need the full feature set.
     """
     from src.feature_store import FeatureStore
     store = FeatureStore()
     if not store.exists():
         raise SystemExit("Feature store not built. Build it first "
                          "(scripts/build_feature_store_batched.py).")
-    df = store.load_featured()
+    cols = None
+    if lean:
+        from src.featured_dataset import _model_load_columns
+        cols = _model_load_columns(store)
+        if cols is None:
+            print("(no FEATURE_ALLOWLIST set — building full slim)")
+    df = store.load_featured(columns=cols)
     feat_cols = get_feature_columns(df)
     meta = [c for c in ["race_id", "race_date", "horse_name", "finish_position",
                         "won", "num_runners", "odds", "handicap", "horse_prev_races",
@@ -715,6 +726,9 @@ def main():
     ap.add_argument("--build-slim", metavar="RUN_ID")
     ap.add_argument("--build-slim-store", action="store_true",
                     help="Build the slim parquet from the feature store (lean registry).")
+    ap.add_argument("--lean-slim", action="store_true",
+                    help="With --build-slim-store: read only model columns (needs "
+                         "FEATURE_ALLOWLIST). Light enough to avoid the full-load freeze.")
     ap.add_argument("--build-slim-ext", metavar="RUN_ID")
     ap.add_argument("--write-allowlist", type=int, metavar="K",
                     help="Write top-K features (by pilot LGBM gain) to a "
@@ -731,7 +745,7 @@ def main():
         build_slim(args.build_slim)
         return
     if args.build_slim_store:
-        build_slim_store()
+        build_slim_store(lean=args.lean_slim)
         return
     if args.build_slim_ext:
         build_slim_ext(args.build_slim_ext)

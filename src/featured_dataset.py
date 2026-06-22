@@ -101,6 +101,38 @@ def _rebuild(store: FeatureStore, processed: pd.DataFrame, fe_sig: str) -> pd.Da
     return featured
 
 
+# Columns the training/eval code needs present in the frame even when they
+# aren't model features (settlement, EW pricing, ranking label, BSP/CLV).
+_REQUIRED_KEEP = {"num_runners", "handicap", "bsp", "relevance", "finish_time_secs"}
+
+
+def _model_load_columns(store: FeatureStore) -> list[str] | None:
+    """Columns to read when a feature allow-list is active, else None (all).
+
+    Returns meta/target columns + required-for-settlement columns + the
+    allow-listed features — everything EXCEPT the numeric feature columns the
+    model won't use. Lets training read ~200 of ~1000 columns and avoids
+    materialising the full multi-GB frame (the load that freezes low-RAM boxes).
+    """
+    from src.model import EXCLUDE_COLUMNS, _resolve_feature_allowlist
+    allow = _resolve_feature_allowlist()
+    path = getattr(store, "featured_path", None)
+    if not allow or not path or not os.path.exists(path):
+        return None
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    schema = pq.read_schema(path)
+    keep: list[str] = []
+    for field in schema:
+        n = field.name
+        is_num = (pa.types.is_floating(field.type) or pa.types.is_integer(field.type)
+                  or pa.types.is_boolean(field.type))
+        is_feature = is_num and n not in EXCLUDE_COLUMNS
+        if (not is_feature) or (n in allow) or (n in _REQUIRED_KEEP):
+            keep.append(n)
+    return keep
+
+
 def get_featured_dataset(
     *,
     processed: pd.DataFrame | None = None,
@@ -147,4 +179,8 @@ def get_featured_dataset(
 
     store.append(processed)
     _stamp(store, fe_sig, data_signature(processed, cutoff=store.last_date()))
-    return store.load_featured()
+    cols = _model_load_columns(store)
+    if cols is not None:
+        logger.info("FeatureStore: loading %d of %d columns (allow-list active)",
+                    len(cols), len(store.featured_schema_names()))
+    return store.load_featured(columns=cols)

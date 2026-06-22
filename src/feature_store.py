@@ -94,10 +94,15 @@ class FeatureStore:
         return pd.Timestamp(m["last_date"]) if m.get("last_date") else None
 
     # ── load ──────────────────────────────────────────────────────────
-    def load_featured(self) -> pd.DataFrame | None:
+    def load_featured(self, columns: list[str] | None = None) -> pd.DataFrame | None:
         if not os.path.exists(self.featured_path):
             return None
-        return pd.read_parquet(self.featured_path, engine="pyarrow")
+        return pd.read_parquet(self.featured_path, columns=columns, engine="pyarrow")
+
+    def featured_schema_names(self) -> list[str]:
+        """Column names of the stored featured parquet (no data read)."""
+        import pyarrow.parquet as pq
+        return pq.read_schema(self.featured_path).names if os.path.exists(self.featured_path) else []
 
     def load_processed(self) -> pd.DataFrame | None:
         if not os.path.exists(self.processed_path):
