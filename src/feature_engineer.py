@@ -1573,6 +1573,56 @@ def add_jockey_track_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_hidden_form_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Flag horses whose pre-race record shows prior runs NOT in our database.
+
+    The classic case: a foreign raider (a French horse at Cheltenham) or a
+    point-to-point graduate first appears with ``horse_prev_races == 0`` — so
+    every form / rating feature is null and the model treats it as a blank-slate
+    debutant and under-rates it (confirmed in the 2026-06 error analysis).
+
+    **Leakage:** only PRE-RACE source fields are used. ``form`` is the record
+    coming INTO the race — verified empirically that today's result is NOT in it
+    (its most-recent character matches today's finishing position only at chance,
+    ~12%). ``days_since_last_run`` is the raw source gap before today (the
+    engineered ``days_since_last_race`` is DB-derived and defaults to 60 for
+    DB-debutants, so it is unsuitable here). The raw lifetime ``horse_runs`` is
+    deliberately NOT used — it is a *retroactive* career total (constant across a
+    horse's rows; see line ~1087 where it is overwritten) and would leak the
+    future. ``form`` parsing counts position characters (digits + P/F/U/… codes),
+    requiring >=2 to clear the single-char placeholder that true debutants carry.
+    """
+    if "form" not in df.columns and "days_since_last_run" not in df.columns:
+        return df
+    logger.info("Engineering hidden-form (external-experience) features...")
+
+    if "form" in df.columns:
+        prior_form_runs = (df["form"].fillna("").astype(str)
+                           .str.replace(r"[^0-9A-Za-z]", "", regex=True).str.len())
+    else:
+        prior_form_runs = pd.Series(0, index=df.index)
+    df["prior_form_runs"] = prior_form_runs.astype(np.int16)
+
+    src_days = (pd.to_numeric(df["days_since_last_run"], errors="coerce").fillna(0.0)
+                if "days_since_last_run" in df.columns else pd.Series(0.0, index=df.index))
+    db_prior = pd.to_numeric(df.get("horse_prev_races", 0), errors="coerce").fillna(0)
+
+    # "Ran before per the source": a real gap since last run, or >=2 form chars
+    # (>=2 avoids the single-char placeholder that true debutants carry).
+    ran_before = (src_days > 0) | (df["prior_form_runs"] >= 2)
+    # Appears as a DB debutant but has external history -> form we don't hold.
+    df["has_hidden_form"] = ((db_prior == 0) & ran_before).astype(np.int8)
+    # Recent runs the form book shows beyond our DB record (also catches
+    # lightly-raced-but-experienced horses); capped by the ~6-run form window.
+    excess = np.clip(df["prior_form_runs"].to_numpy() - db_prior.to_numpy(), 0, None)
+    df["hidden_form_runs"] = np.where(ran_before.to_numpy(), excess, 0).astype(np.int16)
+    # Experience corrected for hidden form, so raiders aren't treated as debutants.
+    df["experience_with_hidden"] = (
+        db_prior.to_numpy() + df["hidden_form_runs"].to_numpy()
+    ).astype(np.int32)
+    return df
+
+
 def add_track_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate track-specific features for each horse."""
     logger.info("Engineering track features...")
@@ -4582,6 +4632,7 @@ def engineer_features(
     # each stage inserts its columns one-by-one.
     stages = [
         add_horse_features,
+        add_hidden_form_features,      # external/unseen prior form (foreign raiders)
         add_pedigree_features,         # sire/dam/damsire edge
         add_medical_features,          # gelding
         add_prize_money_features,      # class shifts / purse jumps

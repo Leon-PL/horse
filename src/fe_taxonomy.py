@@ -29,6 +29,7 @@ FORBIDDEN_CLASSES = {"G"}
 # the full breakdown; the dominant class drives the append strategy.)
 STAGE_TAXONOMY: dict[str, str] = {
     "add_horse_features": "C",
+    "add_hidden_form_features": "R",
     "add_pedigree_features": "C",
     "add_medical_features": "L",
     "add_prize_money_features": "C",
