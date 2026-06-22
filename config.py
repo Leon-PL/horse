@@ -151,8 +151,14 @@ MARKET_ANCHOR = False
 #   thin_history: a foreign raider (e.g. a French horse at Cheltenham) has no
 #   form in our DB, so the model under-rates it and the whole race is mispriced.
 #   Block races containing a short-priced runner with too little DB history.
+# enabled=False: a 2026-06-22 walk-forward-style quantification showed the
+# thin-history gate does NOT improve betting results on the current (form-only,
+# no-edge) model — it hurt top-pick ROI in every threshold tested and only
+# marginally helped value bets. The real accuracy flaw it targets is not a
+# betting flaw (the model already declines to back the horses it under-rates).
+# Kept as documented, tunable infrastructure; turn on in the panel to use it.
 QC_DEFAULTS = {
-    "enabled": True,
+    "enabled": False,
     "thin_history_contender_max_odds": 8.0,   # "contender" = SP at/below this
     "thin_history_min_prev_races": 1,         # "thin" = <= this many prior DB runs
 }

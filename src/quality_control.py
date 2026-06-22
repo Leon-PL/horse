@@ -40,7 +40,10 @@ import pandas as pd
 # Defaults live here so a fresh install has sane gates even without config
 # overrides; ``config.QC_DEFAULTS`` (if present) and per-call cfg override them.
 QC_DEFAULTS: dict = {
-    "enabled": True,
+    # Off by default: quantification (2026-06-22) showed the thin_history gate
+    # does not improve betting ROI on the current model — it is kept as opt-in,
+    # auditable infrastructure (toggle in the Picks app's Quality Control panel).
+    "enabled": False,
     # thin_history: a "contender" is a runner at or below this SP ...
     "thin_history_contender_max_odds": 8.0,
     # ... and "thin" means at most this many prior runs in our database.

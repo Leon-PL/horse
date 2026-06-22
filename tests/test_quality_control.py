@@ -4,6 +4,11 @@ import pandas as pd
 
 from src.quality_control import assess_quality, apply_betting_gate
 
+# Gates ship off-by-default (quantified as not helpful on the current model),
+# so the behaviour tests opt in explicitly. ``test_disabled_passes_everything``
+# covers the default-off path.
+ON = {"enabled": True}
+
 
 def _card():
     # Race A: a short-priced thin-history raider (horse A1, SP 4.0, 0 prior runs)
@@ -19,7 +24,7 @@ def _card():
 
 
 def test_thin_history_flags_short_priced_no_form():
-    qc = assess_quality(_card())
+    qc = assess_quality(_card(), ON)
     flagged = qc["runner_flagged"]
     assert flagged.tolist() == [True, False, False, False]
     assert "Thin-history" in qc["reason"].iloc[0]
@@ -27,7 +32,7 @@ def test_thin_history_flags_short_priced_no_form():
 
 
 def test_block_is_race_level():
-    qc = assess_quality(_card())
+    qc = assess_quality(_card(), ON)
     # The whole of race A is blocked (it contains the thin raider); B is clean.
     assert qc["race_blocked"].tolist() == [True, True, False, False]
     assert qc["blocked_race_ids"] == {"A"}
@@ -37,7 +42,7 @@ def test_block_is_race_level():
 
 def test_apply_gate_suppresses_blocked_race_bets():
     df = _card()
-    apply_betting_gate(df, ["is_value", "is_ew_value"])
+    apply_betting_gate(df, ["is_value", "is_ew_value"], ON)
     # Race A bets suppressed (both runners), race B untouched.
     assert df["is_value"].tolist() == [False, False, True, True]
     assert df["is_ew_value"].tolist() == [False, False, True, False]
@@ -46,7 +51,7 @@ def test_apply_gate_suppresses_blocked_race_bets():
 def test_threshold_tunes_what_counts_as_contender():
     df = _card()
     # Tighten the contender band below A1's SP -> it's no longer a contender.
-    qc = assess_quality(df, {"thin_history_contender_max_odds": 3.0})
+    qc = assess_quality(df, {**ON, "thin_history_contender_max_odds": 3.0})
     assert qc["runner_flagged"].sum() == 0
 
 
