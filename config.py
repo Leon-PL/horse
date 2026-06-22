@@ -142,6 +142,21 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
 # complete odds fall back to the unanchored probabilities.
 MARKET_ANCHOR = False
 
+# --- Data-quality betting gates (src/quality_control.py) ---
+# Pre-bet gates that SUPPRESS bets where the model's inputs are unreliable (a
+# distinct concern from value/edge rules, which live in src/bet_settlement.py).
+# Surfaced + tunable in the Picks app's Quality Control panel, so the rules stay
+# visible and auditable rather than buried. Keys mirror QC_DEFAULTS in the
+# module; anything set here overrides the module defaults.
+#   thin_history: a foreign raider (e.g. a French horse at Cheltenham) has no
+#   form in our DB, so the model under-rates it and the whole race is mispriced.
+#   Block races containing a short-priced runner with too little DB history.
+QC_DEFAULTS = {
+    "enabled": True,
+    "thin_history_contender_max_odds": 8.0,   # "contender" = SP at/below this
+    "thin_history_min_prev_races": 1,         # "thin" = <= this many prior DB runs
+}
+
 # --- Win-model market-probability distillation ---
 # When True, the win classifier trains on the market-implied win
 # probability (a low-noise teacher) via cross-entropy instead of the 0/1

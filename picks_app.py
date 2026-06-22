@@ -234,6 +234,22 @@ def _prediction_cache_set(cache_key: tuple, value: pd.DataFrame) -> pd.DataFrame
     return value
 
 
+# Inputs the quality-control gates need carried onto the predictions frame.
+_QC_INPUT_COLUMNS = ["horse_prev_races"]
+
+
+def _attach_qc_inputs(preds: pd.DataFrame, feature_df: pd.DataFrame | None) -> pd.DataFrame:
+    """Carry data-quality gate inputs (e.g. horse_prev_races) onto predictions."""
+    if feature_df is None or feature_df.empty or preds is None or preds.empty:
+        return preds
+    join_cols = [c for c in ["race_id", "horse_name"] if c in preds.columns and c in feature_df.columns]
+    qc_cols = [c for c in _QC_INPUT_COLUMNS if c in feature_df.columns and c not in preds.columns]
+    if not join_cols or not qc_cols:
+        return preds
+    src = feature_df[join_cols + qc_cols].drop_duplicates(subset=join_cols, keep="last")
+    return preds.merge(src, on=join_cols, how="left")
+
+
 def _predict_featured_frame(
     predictor: RacePredictor,
     feature_df: pd.DataFrame,
@@ -252,11 +268,13 @@ def _predict_featured_frame(
     if hasattr(predictor, "predict_races") and "race_id" in feature_df.columns:
         preds = predictor.predict_races(feature_df, ew_fraction=ew_fraction)
         preds = _attach_pace_diagnostics(preds, feature_df)
+        preds = _attach_qc_inputs(preds, feature_df)
         return _prediction_cache_set(cache_key, preds)
 
     if "race_id" not in feature_df.columns:
         preds = predictor.predict_race(feature_df, ew_fraction=ew_fraction)
         preds = _attach_pace_diagnostics(preds, feature_df)
+        preds = _attach_qc_inputs(preds, feature_df)
         return _prediction_cache_set(cache_key, preds)
 
     all_preds: list[pd.DataFrame] = []
@@ -266,6 +284,7 @@ def _predict_featured_frame(
             continue
         preds = predictor.predict_race(feat_slice, ew_fraction=ew_fraction)
         preds = _attach_pace_diagnostics(preds, feat_slice)
+        preds = _attach_qc_inputs(preds, feat_slice)
         preds["race_id"] = race_id
         all_preds.append(preds)
 
@@ -1237,6 +1256,21 @@ if page == "💰 Today's Picks":
             full_preds["is_ew_value"] = False
             ew_df = pd.DataFrame()
 
+        # ── data-quality gate: suppress bets on unreliable inputs ──
+        # Race-level block (e.g. a thin-history foreign raider mispricing the
+        # whole race). Rules + thresholds live in src/quality_control.py and are
+        # shown/tunable in the Quality Control panel below — never inlined here.
+        from src.quality_control import apply_betting_gate
+        _qc_cfg = st.session_state.get("qc_config", dict(getattr(config, "QC_DEFAULTS", {})))
+        _qc = apply_betting_gate(full_preds, ["is_value", "is_ew_value"], _qc_cfg)
+        full_preds["qc_blocked"] = _qc["race_blocked"].to_numpy()
+        full_preds["qc_flagged"] = _qc["runner_flagged"].to_numpy()
+        full_preds["qc_reason"] = _qc["reason"].to_numpy()
+        # Re-derive the bet frames now that blocked races are suppressed.
+        value_df = full_preds[full_preds["is_value"]].copy() if "is_value" in full_preds else value_df
+        if not ew_df.empty:
+            ew_df = ew_df[~ew_df.index.isin(full_preds.index[full_preds["qc_blocked"]])].copy()
+
         # ── headline banner ───────────────────────────────────────
         _any_settled = full_preds["is_settled"].any()
         _n_settled_races = full_preds.loc[full_preds["is_settled"], "race_id"].nunique() if _any_settled else 0
@@ -1245,6 +1279,58 @@ if page == "💰 Today's Picks":
         h2.metric("🐴 Total Runners", len(full_preds))
         h3.metric("💰 Win Value Bets", len(value_df))
         h4.metric("🔀 EW Value Bets", len(ew_df))
+
+        # ── Quality Control panel ─────────────────────────────────
+        # Visible, tunable, auditable. The gate above already suppressed bets in
+        # blocked races; this shows what was gated and why, and lets thresholds
+        # be adjusted live. Keeps the data-quality rules out of the shadows.
+        from src.quality_control import QC_CHECKS
+        _qc_sum = _qc["summary"]
+        _n_blocked = _qc_sum["n_races_blocked"]
+        _n_flagged = _qc_sum["n_runners_flagged"]
+        with st.expander(
+            f"🛡️ Quality Control — {_n_blocked} race(s) blocked, {_n_flagged} runner(s) flagged",
+            expanded=bool(_n_blocked),
+        ):
+            st.caption(
+                "Data-quality gates suppress bets where the model's inputs are unreliable "
+                "(distinct from value rules). Defined in `src/quality_control.py`; "
+                "thresholds below are live-tunable."
+            )
+            _cfg_now = dict(st.session_state.get("qc_config", dict(getattr(config, "QC_DEFAULTS", {}))))
+            qc1, qc2, qc3 = st.columns(3)
+            _enabled = qc1.checkbox("Gates enabled", value=bool(_cfg_now.get("enabled", True)), key="qc_enabled")
+            _max_odds = qc2.number_input(
+                "Thin-history contender max SP", min_value=1.5, max_value=50.0, step=0.5,
+                value=float(_cfg_now.get("thin_history_contender_max_odds", 8.0)), key="qc_max_odds",
+                help="A runner at or below this SP counts as a market contender.",
+            )
+            _min_prev = qc3.number_input(
+                "Thin-history max prior DB runs", min_value=0, max_value=10, step=1,
+                value=int(_cfg_now.get("thin_history_min_prev_races", 1)), key="qc_min_prev",
+                help="Contenders with this many or fewer prior runs in our DB are flagged.",
+            )
+            _new_cfg = {
+                "enabled": bool(_enabled),
+                "thin_history_contender_max_odds": float(_max_odds),
+                "thin_history_min_prev_races": int(_min_prev),
+            }
+            if _new_cfg != _cfg_now:
+                st.session_state["qc_config"] = _new_cfg
+                st.rerun()
+            for _chk in QC_CHECKS:
+                _s = _qc_sum["checks"].get(_chk["id"], {})
+                st.markdown(f"**{_chk['label']}** — {_s.get('n_runners', 0)} runner(s) flagged. {_chk['description']}")
+            if _n_flagged:
+                _fcols = [c for c in ["off_time", "track", "horse_name", "odds",
+                                      "horse_prev_races", "qc_reason"] if c in full_preds.columns]
+                _ftab = full_preds[full_preds["qc_flagged"]][_fcols].copy()
+                _sortc = [c for c in ["track", "off_time"] if c in _ftab.columns]
+                if _sortc:
+                    _ftab = _ftab.sort_values(_sortc)
+                st.dataframe(_ftab, hide_index=True, width="stretch")
+            else:
+                st.success("No data-quality issues detected in today's card.")
 
         # ── settlement summary (only when results are available) ──
         if _any_settled:

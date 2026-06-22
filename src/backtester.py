@@ -36,6 +36,7 @@ from src.model import (
     RacePredictor,
 )
 from src.each_way import get_ew_terms, ew_value as _ew_value
+from src.quality_control import assess_quality
 from src.bet_settlement import (
     ew_bet_selected,
     ew_odds_in_band,
@@ -309,6 +310,14 @@ def walk_forward_validation(
         )
         if place_probs is not None:
             test_with_probs["place_prob"] = place_probs
+
+        # --- Data-quality gate (parity with live serving) ---
+        # Suppress ALL bets in races the quality-control gates block (e.g. a
+        # thin-history foreign raider that misprices the race). Same rule module
+        # the Picks app uses, so backtest ROI reflects what would actually be bet.
+        _qc_block = assess_quality(test_with_probs)["race_blocked"]
+        if _qc_block.any():
+            test_with_probs = test_with_probs[~_qc_block.to_numpy()].copy()
 
         # --- Strategy 1: Top Pick (highest win probability, vectorised) ---
         # Skip races where model_prob is constant (model has no opinion).
