@@ -3083,9 +3083,14 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
         _ped = _cumulative(
             df[col].to_numpy(), df["race_id"].to_numpy(),
             {
-                f"_safe_{col}_runs": df["_result_start"].to_numpy(),
-                f"_safe_{col}_wins": df["won"].to_numpy(),
-                f"_safe_{col}_places": df["_placed_for_history"].to_numpy(),
+                # Use the fillna(0) flags (as the conditional path below does) —
+                # the raw _placed_for_history is NaN on result-less rows (live
+                # cards, non-finishers), which propagated NaN into _safe_*_places
+                # and left {col}_place_rate_shrunk NaN for every live runner while
+                # _wins (from `won`, set to 0 on cards) stayed fine.
+                f"_safe_{col}_runs": result_start_flag.to_numpy(),
+                f"_safe_{col}_wins": won_flag.to_numpy(),
+                f"_safe_{col}_places": placed_flag.to_numpy(),
             },
         )
         df[f"_safe_{col}_runs"] = _ped[f"_safe_{col}_runs"]
