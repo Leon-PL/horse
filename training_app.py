@@ -113,15 +113,19 @@ def _render_evals(evals: dict) -> None:
                 crows.append({"model": k, "brier": m.get("brier_score"),
                               "logloss": m.get("log_loss"), "ece": m.get("ece"),
                               "ndcg@1": m.get("ndcg_at_1")})
-        st.dataframe(pd.DataFrame(crows), hide_index=True, use_container_width=True) \
-            if crows else st.caption("—")
+        if crows:
+            st.dataframe(pd.DataFrame(crows), hide_index=True, use_container_width=True)
+        else:
+            st.caption("—")
     with rcol:
         st.markdown("**Backtest ROI**")
         rrows = [{"strategy": s, "bets": m.get("bets"), "strike%": m.get("strike_rate"),
                   "roi%": m.get("roi"), "pnl": m.get("pnl")}
                  for s, m in roi.items() if isinstance(m, dict)]
-        st.dataframe(pd.DataFrame(rrows), hide_index=True, use_container_width=True) \
-            if rrows else st.caption("—")
+        if rrows:
+            st.dataframe(pd.DataFrame(rrows), hide_index=True, use_container_width=True)
+        else:
+            st.caption("—")
     with vcol:
         st.markdown("**CLV vs BSP**")
         o = clv.get("overall") or {}
