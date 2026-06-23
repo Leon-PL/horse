@@ -11,7 +11,7 @@ Selections need today's form-featured runners — built by the picks app's
 lookahead cache (src.live_prediction.build_lookahead_cache). This script loads
 that cache; build it first if missing.
 """
-import argparse, os, sys, logging
+import argparse, os, sys, logging, re
 import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
@@ -40,6 +40,12 @@ def _find_market(markets, *names):
     return None
 
 
+def _places_from_name(name) -> int | None:
+    """Matchbook encodes places-paid in the place-market name, e.g. 'Place (3)'."""
+    m = re.search(r"\((\d+)\)", str(name or ""))
+    return int(m.group(1)) if m else None
+
+
 def matchbook_prices(client, *, hours_ahead=24, debug=False) -> pd.DataFrame:
     """Per-runner live MB win + place prices for upcoming GB/IE races."""
     resp = client.get_horse_racing_events(hours_ahead=hours_ahead, include_prices=True, per_page=50)
@@ -57,7 +63,10 @@ def matchbook_prices(client, *, hours_ahead=24, debug=False) -> pd.DataFrame:
         place = next((m for m in markets if "PLACE" in str(m.get("name") or "").upper()), None)
         if win is None or place is None:
             continue
-        places_paid = place.get("number-of-winners") or place.get("places")
+        # MB names the place market "Place (N)" where N = places paid — most
+        # reliable source; fall back to the API fields if the name lacks it.
+        places_paid = (_places_from_name(place.get("name"))
+                       or place.get("number-of-winners") or place.get("places"))
         win_px = {str(r.get("name")): _best_price(r.get("prices") or [], {"back", "win"})[0]
                   for r in win.get("runners") or []}
         for r in place.get("runners") or []:
