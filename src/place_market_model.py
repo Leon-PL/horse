@@ -226,3 +226,67 @@ def train_and_evaluate(featured: pd.DataFrame, *, use_market_features: bool = Tr
         "trained_at": pd.Timestamp.now().isoformat(timespec="seconds"),
     }
     return final_model, meta, eval_block
+
+
+def walk_forward_place_market(featured: pd.DataFrame, *, use_market_features: bool = True,
+                              ev_threshold: float = DEFAULT_EV_THRESHOLD,
+                              commission: float = PLACE_EXCHANGE_COMMISSION,
+                              min_train_quarters: int = 8, jumps_only: bool = False,
+                              params: dict | None = None, n_boot: int = 2000, seed: int = 0) -> dict:
+    """Expanding-window walk-forward of the place-market strategy.
+
+    For each quarter after a *min_train_quarters* burn-in, train on all earlier
+    matched rows and forward-test on that quarter only (+EV selection @ place BSP,
+    settled at *commission*). Pools every fold's bets for one ROI + bootstrap CI,
+    and reports per-fold ROIs and how many folds were positive — the robust,
+    across-time read (no single-split luck). This is the method behind the
+    project's headline place-edge numbers.
+    """
+    df, feature_cols, _ = prepare_place_data(featured, use_market_features=use_market_features)
+    matched = df[df["bf_places_paid"].notna()].copy()
+    if matched.empty:
+        raise ValueError("No rows with a Betfair places-paid match.")
+    if jumps_only and "race_type" in matched.columns:
+        matched = matched[matched["race_type"].astype(str).str.contains("Hurdle|Chase", case=False, na=False)]
+    matched["_q"] = matched["race_date"].dt.to_period("Q")
+    quarters = sorted(matched["_q"].unique())
+
+    pnl_chunks, per_fold = [], []
+    for q in quarters[min_train_quarters:]:
+        tr = matched[matched["_q"] < q]
+        te = matched[matched["_q"] == q]
+        if len(tr) < 1000 or te.empty:
+            continue
+        model = train_place_market_model(tr, feature_cols, params=params)
+        p = model.predict_proba(te[feature_cols])[:, 1]
+        price = pd.to_numeric(te["place_bsp"], errors="coerce").to_numpy()
+        pp = pd.to_numeric(te["bf_places_paid"], errors="coerce").to_numpy()
+        ev = p * price - 1.0
+        sel = np.isfinite(price) & (price > 1.01) & np.isfinite(pp) & (ev > ev_threshold)
+        if not sel.any():
+            continue
+        te_sel = te[sel]
+        placed = _placed_target(te_sel).to_numpy().astype(bool)
+        pnl = settle_place_exchange_bets(price[sel], placed, commission=commission)
+        pnl_chunks.append(pnl)
+        per_fold.append({"quarter": str(q), "n_bets": int(sel.sum()),
+                         "roi_pct": round(float(pnl.mean() * 100.0), 2)})
+        logger.info("WF fold %s: %d bets, ROI %.2f%%", q, int(sel.sum()), float(pnl.mean() * 100))
+
+    if not pnl_chunks:
+        return {"n_folds": 0, "n_bets": 0, "roi_pct": None}
+    pnl_all = np.concatenate(pnl_chunks)
+    n = len(pnl_all)
+    rng = np.random.default_rng(seed)
+    boots = pnl_all[rng.integers(0, n, size=(n_boot, n))].mean(axis=1) * 100.0
+    return {
+        "n_folds": len(per_fold), "n_bets": int(n),
+        "roi_pct": round(float(pnl_all.mean() * 100.0), 2),
+        "ci_low": round(float(np.percentile(boots, 2.5)), 2),
+        "ci_high": round(float(np.percentile(boots, 97.5)), 2),
+        "total_pnl": round(float(pnl_all.sum()), 1),
+        "folds_positive": int(sum(f["roi_pct"] > 0 for f in per_fold)),
+        "use_market_features": bool(use_market_features), "jumps_only": bool(jumps_only),
+        "ev_threshold": ev_threshold, "commission": commission,
+        "per_fold": per_fold,
+    }
