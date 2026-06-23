@@ -98,10 +98,21 @@ def generate(args):
     # places_paid fallback if MB didn't expose it
     if mb["places_paid"].isna().all():
         log.warning("MB did not expose places-paid; falling back to field-size formula at settle.")
-    date = sorted(mb["race_date"].dropna().unique())[0] if mb["race_date"].notna().any() else None
-    featured = load_lookahead_cache(date) if date else None
-    if featured is None or featured.empty:
-        log.error("No lookahead featured cache for %s — build it in the picks app first.", date); return
+    # MB returns several days at once (incl. US/AUS cards we don't model); load
+    # the featured cache for *every* date present and join across all of them,
+    # rather than only the earliest date — otherwise a US-heavy "today" can hide
+    # the GB/IE action on a later date.
+    dates = sorted(mb["race_date"].dropna().unique())
+    frames = []
+    for d in dates:
+        f = load_lookahead_cache(d)
+        if f is not None and not f.empty:
+            frames.append(f); log.info("Loaded lookahead cache %s (%d runners)", d, len(f))
+        else:
+            log.info("No lookahead cache for %s (build it: scripts/build_lookahead.py --date %s)", d, d)
+    if not frames:
+        log.error("No lookahead featured cache for any MB date %s — run scripts/build_lookahead.py.", dates); return
+    featured = pd.concat(frames, ignore_index=True)
     model = joblib.load(os.path.join(MODEL_DIR, "model.joblib"))
     meta = joblib.load(os.path.join(MODEL_DIR, "meta.joblib"))
     sel = score_and_select(featured, mb, model, meta["feature_cols"],
