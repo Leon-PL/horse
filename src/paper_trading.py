@@ -110,17 +110,18 @@ def score_and_select(
     for c in MARKET_FEATS:
         j[c] = mfeat[c].to_numpy()
 
-    # Reindex to the model's exact training columns. The live lookahead cache can
-    # lack a few store-only columns (data-dependent one-hots like sex_H, some
-    # race-relative *_vs_field features); training fills numeric NaN with 0 and an
-    # absent one-hot is correctly 0, so 0-fill the missing ones (and warn).
+    # Every model feature must be genuinely present — live features are never
+    # guessed or imputed at scoring time. The lookahead cache is built via
+    # FeatureStore.featurize_live (correct ratings + completed one-hot schema), so
+    # a missing column here is a real FE/serving bug, not a benign absence. Fail
+    # loudly rather than silently 0-fill.
     missing = [c for c in feature_cols if c not in j.columns]
     if missing:
-        import logging
-        logging.getLogger(__name__).warning(
-            "score_and_select: %d/%d model features absent in live cache, 0-filled: %s",
-            len(missing), len(feature_cols), missing)
-    X = j.reindex(columns=feature_cols, fill_value=0.0)
+        raise KeyError(
+            f"score_and_select: {len(missing)}/{len(feature_cols)} model features "
+            f"absent from the live featurised card — rebuild the lookahead cache "
+            f"(scripts/build_lookahead.py). Missing: {missing}")
+    X = j[feature_cols]
     j["p_place"] = model.predict_proba(X)[:, 1]
     j["mb_place_odds"] = pd.to_numeric(j["mb_place_odds"], errors="coerce")
     j["ev"] = j["p_place"] * j["mb_place_odds"] - 1.0

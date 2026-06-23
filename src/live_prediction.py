@@ -289,16 +289,26 @@ def clear_lookahead_cache() -> int:
 
 
 def build_lookahead_cache(
-    processed_history: pd.DataFrame,
+    processed_history: pd.DataFrame | None = None,
     days_ahead: int = 7,
     progress_fn=None,
 ) -> dict[str, int]:
     """Scrape racecards for the next *days_ahead* days and pre-compute features.
 
-    Returns ``{date_str: num_rows}`` for each date that was cached.
+    Features are built via ``FeatureStore.featurize_live`` — the card is
+    featurised against the store's persisted rating + counts state (read-only),
+    giving correct current ratings without recomputing (or OOM-ing on) the full
+    history. *processed_history* is retained for backwards compatibility but is no
+    longer used. Returns ``{date_str: num_rows}`` for each date cached.
     """
     from src.data_collector import get_scraped_racecards
     from src.data_processor import process_data
+    from src.feature_store import FeatureStore
+
+    store = FeatureStore()
+    if not store.exists():
+        logger.warning("Lookahead: FeatureStore is empty — build it first; nothing cached.")
+        return {}
 
     today = datetime.now().date()
     results: dict[str, int] = {}
@@ -332,9 +342,7 @@ def build_lookahead_cache(
             continue
 
         try:
-            featured = feature_engineer_with_history_core(
-                processed_history, proc,
-            )
+            featured = store.featurize_live(proc)
         except Exception as exc:
             logger.warning("Lookahead: FE failed for %s: %s", target_str, exc)
             continue

@@ -15,25 +15,14 @@ import pandas as pd
 import config
 from src.data_collector import get_scraped_racecards
 from src.data_processor import process_data
-from src.live_prediction import (
-    feature_engineer_with_history_core, save_lookahead_cache, cards_signature,
-)
+from src.feature_store import FeatureStore
+from src.live_prediction import save_lookahead_cache, cards_signature
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("build_lookahead")
 
 
-def _load_history() -> pd.DataFrame:
-    pq = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.parquet")
-    csv = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.csv")
-    path = pq if os.path.exists(pq) else csv
-    if not os.path.exists(path):
-        raise SystemExit(f"No processed history at {pq} / {csv} — run the pipeline first.")
-    log.info("Loading processed history: %s", path)
-    return pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
-
-
-def build_for_date(history: pd.DataFrame, date_str: str) -> int:
+def build_for_date(store: FeatureStore, date_str: str) -> int:
     cards = get_scraped_racecards(date_str=date_str)
     if cards is None or cards.empty:
         log.info("No racecards for %s", date_str)
@@ -44,7 +33,9 @@ def build_for_date(history: pd.DataFrame, date_str: str) -> int:
     cards["finish_time_secs"] = 0.0
     cards["lengths_behind"] = float("nan")
     proc = process_data(df=cards, save=False)
-    featured = feature_engineer_with_history_core(history, proc)
+    # Featurise the card against the store's persisted rating + counts state
+    # (read-only): correct current ratings, no full-history recompute, no OOM.
+    featured = store.featurize_live(proc)
     save_lookahead_cache(date_str, featured, cards_signature(cards))
     log.info("Cached %d featured runners for %s", len(featured), date_str)
     return len(featured)
@@ -62,8 +53,10 @@ def main():
         today = date.today()
         dates = [(today + timedelta(days=d)).strftime("%Y-%m-%d") for d in range(0, args.days_ahead + 1)]
 
-    history = _load_history()
-    total = {d: build_for_date(history, d) for d in dates}
+    store = FeatureStore()
+    if not store.exists():
+        raise SystemExit("FeatureStore is empty — build it first (get_featured_dataset).")
+    total = {d: build_for_date(store, d) for d in dates}
     print("Built lookahead cache:", total)
 
 

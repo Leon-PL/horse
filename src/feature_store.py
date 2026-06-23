@@ -30,6 +30,7 @@ state above is the template for that work.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -254,6 +255,78 @@ class FeatureStore:
         )
         self._save_counts_state(counts_state)  # advanced in place by the stages
         return featured_new, advanced
+
+    # Entity → its expanding-frequency column (data_processor.encode_categoricals:
+    # ``cumcount()+1`` over the full frame; ``track`` is collapsed to a per-race min).
+    _FREQ_COLS = {"horse_name": "horse_name_freq", "jockey": "jockey_freq",
+                  "trainer": "trainer_freq", "track": "track_freq"}
+
+    def _continue_freq_counts(self, card: pd.DataFrame) -> pd.DataFrame:
+        """Continue the cumulative ``*_freq`` counts from full history.
+
+        ``encode_categoricals`` builds ``*_freq`` as a per-frame ``cumcount``; on a
+        card processed alone each entity restarts at 1, leaving e.g.
+        ``trainer_freq`` (and its race-relative derivatives) on the wrong scale vs
+        training. Offset the card's per-entity freq by that entity's historical
+        appearance count (from the store's processed history) so the count resumes
+        where training left off. Read-only."""
+        present = {e: f for e, f in self._FREQ_COLS.items()
+                   if e in card.columns and f in card.columns}
+        if not present:
+            return card
+        card = card.copy()
+        hist = pd.read_parquet(self.processed_path, columns=list(present))
+        for ent, fcol in present.items():
+            prior = hist[ent].value_counts()  # historical appearances per entity
+            card[fcol] = pd.to_numeric(card[fcol], errors="coerce").fillna(0) \
+                + card[ent].map(prior).fillna(0)
+            card[fcol] = card[fcol].astype(int)
+        if "track" in present and "race_id" in card.columns:  # race-level: per-race min
+            card["track_freq"] = card.groupby("race_id")["track_freq"].transform("min")
+        return card
+
+    def featurize_live(self, card: pd.DataFrame) -> pd.DataFrame:
+        """Feature-engineer an UNSETTLED future *card* against the store's
+        persisted rating + counts state — **read-only**.
+
+        Same bounded fast path as :meth:`append` (ratings seeded from persisted
+        state, every stateful stage resumed from carried ``counts_state``,
+        ``skip_ratings=True``), so live features match training exactly. Unlike
+        ``append`` it operates on a COPY of the carried state and never persists,
+        so result-less rows can't corrupt the store. This is the correct live-FE
+        path: it avoids both the all-default ratings of a from-scratch sweep over
+        stale/empty history AND the OOM of feature-engineering full history in one
+        shot."""
+        if not self.exists():
+            raise RuntimeError("FeatureStore is empty; build() it before live featurisation.")
+        if self.load_counts_state() is None:
+            raise RuntimeError(
+                "FeatureStore lacks carried state (pre-flip store); rebuild via "
+                "get_featured_dataset(rebuild=True) before live featurisation.")
+        card = self._continue_freq_counts(card)
+        seed = self.load_state()
+        keyed_ratings, _rating_cols, _advanced = self._seeded_rating_frame(card, seed)
+        card_rated = card.merge(keyed_ratings, on=["race_id", "horse_name"], how="left")
+        # Deep-copy the carried state so the in-place stage advances are discarded
+        # (the card has no results — the store must not move forward).
+        counts_state = copy.deepcopy(self.load_counts_state() or {})
+        featured = engineer_features(
+            card_rated, save=False, skip_ratings=True, counts_state=counts_state)
+
+        # Complete the one-hot categorical schema to the TRAINING category domain.
+        # get_dummies only emits columns for categories present in the card, so a
+        # category absent today (e.g. no 'H' entire horse → no sex_H, a card with
+        # no chases → no race_type_Chase) is silently missing. Such a column is a
+        # genuine all-zero (none of these runners is in that category), not an
+        # imputation — add any one-hot column the store has but the card lacks,
+        # using the store schema as the authoritative category set.
+        oh_prefixes = ("going_", "race_class_", "race_type_", "region_",
+                       "sex_", "surface_", "season_")
+        have = set(featured.columns)
+        for col in self.featured_schema_names():
+            if col.startswith(oh_prefixes) and col not in have:
+                featured[col] = 0
+        return featured
 
     def append(self, processed_new: pd.DataFrame) -> pd.DataFrame:
         """Feature-engineer and append new race dates (NEW ROWS ONLY).
