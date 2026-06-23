@@ -19,13 +19,27 @@ def event_date_str(event: dict[str, Any]) -> str:
 
 
 def event_track_and_off_time(event: dict[str, Any]) -> tuple[str, str]:
+    """Return ``(track, off_time)`` for a Matchbook event.
+
+    The track comes from the event name (e.g. ``"14:00 Carlisle"`` → ``Carlisle``).
+    The off-time is taken from the **UTC** ``start`` timestamp, NOT the name: the
+    name carries the *local* post time (e.g. BST = UTC+1), which is offset by an
+    hour from our UTC-aligned racecard data and silently breaks every join. We
+    fall back to the name's time only if ``start`` is unusable.
+    """
     name = str(event.get("name") or "").strip()
     match = re.match(r"^(\d{1,2}:\d{2})\s+(.+)$", name)
-    if match:
-        return match.group(2).strip(), match.group(1)
+    track = match.group(2).strip() if match else name
     start = str(event.get("start") or "")
-    off_time = start[11:16] if len(start) >= 16 else ""
-    return name, off_time
+    off_time = start[11:16] if len(start) >= 16 else (match.group(1) if match else "")
+    return track, off_time
+
+
+def clean_runner_name(name: Any) -> str:
+    """Strip Matchbook's leading saddlecloth number from a runner name
+    (e.g. ``"1 Louis The Fifth"`` → ``"Louis The Fifth"``) so it matches our
+    racecard horse names under :func:`normalise_horse_key`."""
+    return re.sub(r"^\s*\d+\s+", "", str(name or "")).strip()
 
 
 def _best_price(prices: list[dict[str, Any]], sides: set[str]) -> tuple[float | None, float | None]:
@@ -94,7 +108,7 @@ def build_fake_prediction_frame(
             "off_time": off_time,
             "race_date": race_date,
             "race_name": race_name,
-            "horse_name": runner.get("name"),
+            "horse_name": clean_runner_name(runner.get("name")),
             "win_probability_raw": base_prob * tilt,
         })
 
@@ -152,8 +166,8 @@ def build_signal_frame(
         best_back, back_available = _best_price(prices, {"back", "win"})
         best_lay, lay_available = _best_price(prices, {"lay", "lose"})
         runner_rows.append({
-            "horse_name": runner.get("name"),
-            "_hn": _normalise_horse_key(runner.get("name")),
+            "horse_name": clean_runner_name(runner.get("name")),
+            "_hn": _normalise_horse_key(clean_runner_name(runner.get("name"))),
             "best_back_odds": best_back,
             "best_back_available": back_available,
             "best_lay_odds": best_lay,

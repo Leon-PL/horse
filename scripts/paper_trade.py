@@ -16,7 +16,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from src.matchbook_client import MatchbookClient
-from src.matchbook_signals import event_track_and_off_time, event_date_str, _best_price
+from src.matchbook_signals import event_track_and_off_time, event_date_str, _best_price, clean_runner_name
 from src.live_prediction import load_lookahead_cache
 from src.paper_trading import score_and_select, log_selections, settle, DEFAULT_LEDGER
 import joblib
@@ -67,10 +67,10 @@ def matchbook_prices(client, *, hours_ahead=24, debug=False) -> pd.DataFrame:
         # reliable source; fall back to the API fields if the name lacks it.
         places_paid = (_places_from_name(place.get("name"))
                        or place.get("number-of-winners") or place.get("places"))
-        win_px = {str(r.get("name")): _best_price(r.get("prices") or [], {"back", "win"})[0]
+        win_px = {clean_runner_name(r.get("name")): _best_price(r.get("prices") or [], {"back", "win"})[0]
                   for r in win.get("runners") or []}
         for r in place.get("runners") or []:
-            name = str(r.get("name"))
+            name = clean_runner_name(r.get("name"))
             pb, pa = _best_price(r.get("prices") or [], {"back", "win"})
             if pb is None:
                 continue
@@ -85,6 +85,21 @@ def matchbook_prices(client, *, hours_ahead=24, debug=False) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     log.info("MB prices: %d runners across %d races", len(df), df.groupby(["track", "off_time"]).ngroups if not df.empty else 0)
     return df
+
+
+def _load_place_model():
+    """Prefer the PROMOTED training run's place-market model; fall back to the
+    standalone script artifact (data/processed/place_paper_model/)."""
+    from src.run_store import production_place_market_paths
+    paths = production_place_market_paths()
+    if paths:
+        model_p, meta_p = paths
+        log.info("Using promoted run's place-market model: %s", model_p)
+    else:
+        model_p = os.path.join(MODEL_DIR, "model.joblib")
+        meta_p = os.path.join(MODEL_DIR, "meta.joblib")
+        log.info("No promoted place-market model; using standalone artifact %s", MODEL_DIR)
+    return joblib.load(model_p), joblib.load(meta_p)
 
 
 def generate(args):
@@ -113,8 +128,7 @@ def generate(args):
     if not frames:
         log.error("No lookahead featured cache for any MB date %s — run scripts/build_lookahead.py.", dates); return
     featured = pd.concat(frames, ignore_index=True)
-    model = joblib.load(os.path.join(MODEL_DIR, "model.joblib"))
-    meta = joblib.load(os.path.join(MODEL_DIR, "meta.joblib"))
+    model, meta = _load_place_model()
     sel = score_and_select(featured, mb, model, meta["feature_cols"],
                            ev_threshold=args.ev, stake=args.stake, jumps_only=args.jumps_only)
     if sel.empty:

@@ -27,6 +27,7 @@ import pandas as pd
 
 import config
 from src.utils import normalise_horse_key, normalise_track_key, normalise_off_time_key
+from src.bet_settlement import settle_place_exchange_bets
 
 # The win-market features the place model was trained with (see
 # scripts/train_place_paper_model.py). Built identically at train (BF pre-off
@@ -109,7 +110,17 @@ def score_and_select(
     for c in MARKET_FEATS:
         j[c] = mfeat[c].to_numpy()
 
-    X = j[feature_cols]
+    # Reindex to the model's exact training columns. The live lookahead cache can
+    # lack a few store-only columns (data-dependent one-hots like sex_H, some
+    # race-relative *_vs_field features); training fills numeric NaN with 0 and an
+    # absent one-hot is correctly 0, so 0-fill the missing ones (and warn).
+    missing = [c for c in feature_cols if c not in j.columns]
+    if missing:
+        import logging
+        logging.getLogger(__name__).warning(
+            "score_and_select: %d/%d model features absent in live cache, 0-filled: %s",
+            len(missing), len(feature_cols), missing)
+    X = j.reindex(columns=feature_cols, fill_value=0.0)
     j["p_place"] = model.predict_proba(X)[:, 1]
     j["mb_place_odds"] = pd.to_numeric(j["mb_place_odds"], errors="coerce")
     j["ev"] = j["p_place"] * j["mb_place_odds"] - 1.0
@@ -168,7 +179,7 @@ def settle(results: pd.DataFrame, ledger_path: str = DEFAULT_LEDGER, commission:
     placed = (fp > 0) & (fp <= pd.to_numeric(m["places_paid"], errors="coerce"))
     odds = pd.to_numeric(m["mb_place_odds"], errors="coerce")
     stake = pd.to_numeric(m["stake"], errors="coerce").fillna(1.0)
-    pnl = np.where(placed, stake * (odds - 1.0) * (1.0 - commission), -stake)
+    pnl = settle_place_exchange_bets(odds, placed, stake=stake, commission=commission)
     m.loc[has, "finish_position"] = fp[has]
     m.loc[has, "placed"] = placed[has].astype(int)
     m.loc[has, "pnl"] = pnl[has]

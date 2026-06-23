@@ -103,6 +103,7 @@ class MatchbookClient:
         after: int | None = None,
         before: int | None = None,
         per_page: int = 20,
+        offset: int | None = None,
         include_prices: bool = False,
         price_depth: int = 3,
         include_event_participants: bool = False,
@@ -129,6 +130,8 @@ class MatchbookClient:
             params["after"] = int(after)
         if before is not None:
             params["before"] = int(before)
+        if offset is not None:
+            params["offset"] = int(offset)
         if currency:
             params["currency"] = currency
 
@@ -146,15 +149,29 @@ class MatchbookClient:
         now = datetime.now(timezone.utc)
         after = int(now.timestamp())
         before = int((now + timedelta(hours=int(hours_ahead))).timestamp())
-        return self.get_events(
-            sport_ids=config.MATCHBOOK_HORSE_RACING_SPORT_ID,
-            after=after,
-            before=before,
-            per_page=per_page,
-            include_prices=include_prices,
-            price_depth=price_depth,
-            currency=currency or config.MATCHBOOK_DEFAULT_CURRENCY,
-        )
+        # The /events endpoint sorts by start time and PAGINATES — a single page
+        # truncates to the most imminent races (e.g. US/AUS), hiding the UK cards
+        # further out in the window. Page through the full `total`.
+        events: list[dict[str, Any]] = []
+        offset, total = 0, None
+        while True:
+            resp = self.get_events(
+                sport_ids=config.MATCHBOOK_HORSE_RACING_SPORT_ID,
+                after=after,
+                before=before,
+                per_page=per_page,
+                offset=offset,
+                include_prices=include_prices,
+                price_depth=price_depth,
+                currency=currency or config.MATCHBOOK_DEFAULT_CURRENCY,
+            )
+            page = resp.get("events", []) if isinstance(resp, dict) else []
+            events.extend(page)
+            if total is None:
+                total = int(resp.get("total", len(page))) if isinstance(resp, dict) else len(page)
+            offset += len(page)
+            if not page or offset >= total or len(events) >= total:
+                return {"events": events, "total": total, "offset": 0, "per-page": per_page}
 
     def get_event_markets(
         self,
