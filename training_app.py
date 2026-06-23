@@ -250,12 +250,13 @@ elif page == "🤖 Train":
         col1, col2, col3 = st.columns(3)
         with col1:
             refresh = st.checkbox("Catch-up scrape first", value=False)
-            catchup = st.number_input("Catch-up days", 1, 90, 14, disabled=not refresh)
+            catchup = st.number_input("Catch-up days", 1, 90, 14,
+                                      help="Only used when 'Catch-up scrape first' is ticked.")
         with col2:
             full_hist = st.checkbox("Full history", value=True)
             window = st.number_input("Train window (days)", 90, 3000, 600,
-                                     disabled=full_hist,
-                                     help="Only the last N days when 'Full history' is off.")
+                                     help="Used only when 'Full history' is UNticked "
+                                          "(ignored otherwise).")
         with col3:
             clf = st.selectbox("Win framework", ["lgbm", "cat", "xgb"],
                                index=["lgbm", "cat", "xgb"].index(
@@ -278,13 +279,14 @@ elif page == "🤖 Train":
                                 help="Also fit & evaluate the +EV place model settled at "
                                      "Betfair place BSP. Needs the place-BSP parquet.")
         with colp2:
-            pm_feats = st.checkbox("Win-market features", value=True, disabled=not pm_on,
-                                   help="Form + pre-off win-market (+15% recipe; needs a live "
+            pm_feats = st.checkbox("Win-market features", value=True,
+                                   help="(Used only when 'Train place-market model' is on.) "
+                                        "Form + pre-off win-market (+15% recipe; needs a live "
                                         "win price at inference). Off = odds-free form-only (+9%).")
         with colp3:
             pm_ev = st.number_input("Place EV threshold", 0.0, 1.0, 0.10, step=0.05,
-                                    disabled=not pm_on,
-                                    help="Select place bets with ev = p_place·price − 1 above this.")
+                                    help="(Used only when place-market training is on.) Select "
+                                         "place bets with ev = p_place·price − 1 above this.")
         submitted = st.form_submit_button("🚀 Train", type="primary")
 
     if submitted:
@@ -350,7 +352,7 @@ elif page == "🧭 Tune":
         with c3:
             t_full = st.checkbox("Full history", value=False)
             t_window = st.number_input("Window (days)", 90, 3000, 600,
-                                       disabled=t_full)
+                                       help="Used only when 'Full history' is UNticked.")
         tf1, tf2 = st.columns(2)
         with tf1:
             t_clf = st.selectbox("Win framework", ["lgbm", "cat", "xgb"], key="t_clf")
@@ -437,7 +439,8 @@ elif page == "🔬 Backtest":
             with b3:
                 b_full = st.checkbox("Full history", value=True, key="bt_full")
                 b_window = st.number_input("Window (days)", 180, 3000, 900,
-                                           disabled=b_full, key="bt_window")
+                                           key="bt_window",
+                                           help="Used only when 'Full history' is UNticked.")
             bsub = st.form_submit_button("▶️ Run walk-forward", type="primary")
 
         if bsub:
