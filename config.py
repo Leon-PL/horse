@@ -4,6 +4,14 @@ Configuration settings for the Horse Racing Prediction Application.
 
 import os
 
+# Load a local .env (Matchbook creds etc.) so os.getenv below sees it. No-op if
+# python-dotenv isn't installed or there's no .env. Real env vars still win.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except Exception:
+    pass
+
 # --- Paths ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
