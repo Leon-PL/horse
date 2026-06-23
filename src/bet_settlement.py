@@ -146,3 +146,31 @@ def settle_ew_bet(win_odds, place_odds, won, placed) -> float:
     elif placed:
         pnl += float(place_odds)
     return pnl
+
+
+# ── Place-market (exchange) settlement ────────────────────────────────
+# The validated place edge is bet on the EXCHANGE place market (Betfair place
+# BSP), NOT bookmaker each-way terms. Winnings are netted by commission (Betfair
+# charges commission on net market winnings); losers simply lose the stake. This
+# is the single formula shared by the place-market backtest, the walk-forward,
+# and live paper-trade settlement (src/paper_trading.py) — keep it here so all
+# three agree (hard rule #2).
+PLACE_EXCHANGE_COMMISSION = 0.02  # operator-confirmed Betfair commission
+
+
+def settle_place_exchange_bet(place_odds, placed, stake: float = 1.0,
+                              commission: float = PLACE_EXCHANGE_COMMISSION) -> float:
+    """PnL of a single place bet at exchange decimal *place_odds* for *stake*."""
+    if placed:
+        return float(stake) * (float(place_odds) - 1.0) * (1.0 - float(commission))
+    return -float(stake)
+
+
+def settle_place_exchange_bets(place_odds, placed, stake: float = 1.0,
+                               commission: float = PLACE_EXCHANGE_COMMISSION) -> np.ndarray:
+    """Vectorised :func:`settle_place_exchange_bet` over arrays (stake may be
+    scalar or array-like)."""
+    odds_arr = np.asarray(place_odds, dtype=np.float64)
+    placed_arr = np.asarray(placed).astype(bool)
+    stake_arr = np.asarray(stake, dtype=np.float64)
+    return np.where(placed_arr, stake_arr * (odds_arr - 1.0) * (1.0 - commission), -stake_arr)

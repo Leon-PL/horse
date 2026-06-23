@@ -134,6 +134,29 @@ def _render_evals(evals: dict) -> None:
         else:
             st.caption("no matched bets")
 
+    # ── place-market strategy (opt-in) ──
+    pm = evals.get("place_market")
+    if pm:
+        st.markdown("**Place-market strategy — +EV @ exchange place BSP** "
+                    f"({'form + win-market' if pm.get('use_market_features') else 'form-only'})")
+        if pm.get("error"):
+            st.warning(f"Place-market training failed: {pm['error']}")
+        elif pm.get("n_bets"):
+            def _row(d, label):
+                ci = (f"[{d['ci_low']:+.1f}, {d['ci_high']:+.1f}]"
+                      if d.get("ci_low") is not None else "—")
+                return {"segment": label, "bets": d.get("n_bets"),
+                        "ROI%": d.get("roi_pct"), "95% CI": ci,
+                        "hit%": (None if d.get("hit_rate") is None else round(100 * d["hit_rate"], 1)),
+                        "avg odds": d.get("avg_odds"), "pnl": d.get("total_pnl")}
+            rows = [_row(pm, "all"), _row(pm.get("jumps") or {}, "jumps")]
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+            st.caption(f"held-out from {pm.get('test_cutoff', '—')} · "
+                       f"ev>{pm.get('ev_threshold')} · comm {100 * pm.get('commission', 0):.0f}% · "
+                       f"{pm.get('test_rows', 0):,} test rows")
+        else:
+            st.caption("no +EV selections in the held-out window")
+
 
 # ── sidebar ───────────────────────────────────────────────────────────
 st.sidebar.title("🎓 Training")
@@ -247,6 +270,21 @@ elif page == "🤖 Train":
         with colb2:
             wf = st.checkbox("Walk-forward validation", value=False,
                              help="Purged expanding-window backtest after training (slower).")
+        st.markdown("**Place-market strategy** — the validated +EV exchange-place edge, "
+                    "trained alongside the win/EW pipeline.")
+        colp1, colp2, colp3 = st.columns(3)
+        with colp1:
+            pm_on = st.checkbox("Train place-market model", value=False,
+                                help="Also fit & evaluate the +EV place model settled at "
+                                     "Betfair place BSP. Needs the place-BSP parquet.")
+        with colp2:
+            pm_feats = st.checkbox("Win-market features", value=True, disabled=not pm_on,
+                                   help="Form + pre-off win-market (+15% recipe; needs a live "
+                                        "win price at inference). Off = odds-free form-only (+9%).")
+        with colp3:
+            pm_ev = st.number_input("Place EV threshold", 0.0, 1.0, 0.10, step=0.05,
+                                    disabled=not pm_on,
+                                    help="Select place bets with ev = p_place·price − 1 above this.")
         submitted = st.form_submit_button("🚀 Train", type="primary")
 
     if submitted:
@@ -256,6 +294,8 @@ elif page == "🤖 Train":
             frameworks={"classifier": clf, "place": place},
             blend_market_odds=blend, run_walk_forward=wf,
             value_config=dict(DEFAULT_VALUE_CONFIG),
+            train_place_market=pm_on, place_market_features=pm_feats,
+            place_ev_threshold=float(pm_ev),
         )
         prog = st.progress(0.0, text="starting …")
 

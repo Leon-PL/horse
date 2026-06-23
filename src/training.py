@@ -68,6 +68,10 @@ class TrainingConfig:
     blend_market_odds: bool = False
     hyperparams: dict | None = None
     value_config: dict = field(default_factory=lambda: dict(DEFAULT_VALUE_CONFIG))
+    # ── place-market strategy (opt-in, alongside the win/EW pipeline) ──
+    train_place_market: bool = False        # also train the +EV exchange-place model
+    place_market_features: bool = True       # form + pre-off win-market (else form-only)
+    place_ev_threshold: float = 0.10
     # ── walk-forward (optional) ──
     run_walk_forward: bool = False
     wf_min_train_months: int = 3
@@ -173,6 +177,22 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     _tick("Evaluating (calibration / ROI / CLV)", 0.88)
     evals = evaluate(predictor, metrics, featured)
 
+    # 4b) Optional place-market strategy (the validated +EV exchange-place model),
+    #     trained ALONGSIDE the win/EW pipeline. Held-out eval block + artifact.
+    place_market = None
+    if cfg.train_place_market:
+        _tick("Training place-market strategy (+EV @ place BSP)", 0.90)
+        try:
+            from src.place_market_model import train_and_evaluate as _pm_train
+            pm_model, pm_meta, pm_eval = _pm_train(
+                featured, use_market_features=cfg.place_market_features,
+                ev_threshold=cfg.place_ev_threshold)
+            evals["place_market"] = pm_eval
+            place_market = (pm_model, pm_meta)
+        except Exception as exc:  # never fail the whole run over the opt-in strategy
+            logger.warning("Place-market strategy training failed: %s", exc)
+            evals["place_market"] = {"error": str(exc)}
+
     # 5) Optional walk-forward.
     wf_report = None
     if cfg.run_walk_forward:
@@ -209,6 +229,7 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
         wf_report=wf_report,
         featured_df=None,      # lean: do NOT snapshot the featured parquet
         processed_df=None,     # lean: do NOT snapshot the processed parquet
+        place_market_model=place_market,  # (model, meta) or None
     )
     _tick(f"Done: run {run_id}", 1.0)
     return run_id
