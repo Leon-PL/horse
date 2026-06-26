@@ -367,19 +367,25 @@ def encode_categorical(df: pd.DataFrame) -> pd.DataFrame:
     # Uses cumulative count up to each row so that future data is never
     # used.  The DataFrame must already be sorted by race_date.
     #
-    # IMPORTANT: race-level variables (e.g. track) are the same for
-    # every runner in a race, so naive cumcount() produces sequential
-    # numbers within a race that correlate with finish-position order.
-    # We collapse to one value per race to prevent leakage.
+    # IMPORTANT: when an entity appears on MORE THAN ONE row of the same race,
+    # naive cumcount() produces sequential numbers within that race that
+    # correlate with finish-position order (a result leak). This bites two cases:
+    #   * race-level vars (e.g. track): identical for every runner -> the whole
+    #     race is one cumcount run; collapse per race.
+    #   * trainer: a trainer running several horses in one race gets consecutive
+    #     cumcounts in finishing order across its stablemates -> collapse per
+    #     (race, trainer) so all stablemates share one pre-race count.
+    # horse_name/jockey appear once per race, so the per-(race, entity) collapse
+    # is a no-op for them. We collapse ALL high-cardinality freqs per (race,
+    # entity) min (== first/pre-race count) to be uniformly leak-safe.
     race_level_vars = {"track"}
     high_cardinality = ["horse_name", "jockey", "trainer", "track"]
     for col in high_cardinality:
         if col in df.columns:
             df[f"{col}_freq"] = df.groupby(col).cumcount() + 1
-            if col in race_level_vars:
-                # All runners in the same race get the SAME value
-                # (the first/minimum cumcount in that group).
-                df[f"{col}_freq"] = df.groupby("race_id")[f"{col}_freq"].transform("min")
+            if "race_id" in df.columns:
+                grp = "race_id" if col in race_level_vars else ["race_id", col]
+                df[f"{col}_freq"] = df.groupby(grp)[f"{col}_freq"].transform("min")
 
     logger.info("Categorical encoding complete")
     return df

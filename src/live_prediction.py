@@ -171,6 +171,10 @@ def feature_engineer_with_history_core(
         if converted.notna().sum() > non_null * 0.5:
             combined[col] = converted
 
+    # Mirror data_processor.encode_categorical EXACTLY (training/serving parity):
+    # collapse each freq per (race, entity) min so a multi-runner trainer's
+    # stablemates share one pre-race count instead of leaking finish order via
+    # sequential cumcounts. race-level vars collapse per race.
     race_level_vars = {"track"}
     for col, freq_col in [
         ("horse_name", "horse_name_freq"),
@@ -180,8 +184,9 @@ def feature_engineer_with_history_core(
     ]:
         if col in combined.columns:
             combined[freq_col] = combined.groupby(col).cumcount() + 1
-            if col in race_level_vars:
-                combined[freq_col] = combined.groupby("race_id")[freq_col].transform("min")
+            if "race_id" in combined.columns:
+                grp = "race_id" if col in race_level_vars else ["race_id", col]
+                combined[freq_col] = combined.groupby(grp)[freq_col].transform("min")
 
     weather_cols = {
         "weather_temp_max", "weather_temp_min", "weather_precip_mm",
