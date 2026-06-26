@@ -391,6 +391,23 @@ def _fast_grouped_rolling_core(
     gids = _encode_groups(df, group_key)[_perm]
     shifted = _nb_grouped_shift1(values, gids)
 
+    # Race-safe broadcast (leak fix): a multi-runner entity (e.g. a trainer with
+    # several runners in one race) has consecutive same-race rows after the sort,
+    # so the per-row shift(1) only drops the current row and a later stablemate
+    # would absorb an earlier stablemate's same-race result. Broadcast each
+    # (entity, race) block's FIRST row — whose shift already points to the prior
+    # race's last run — across the whole block, so every same-race runner sees
+    # identical pre-race history. No-op for one-row blocks (a horse; a jockey:
+    # one ride per race), the fix for multi-runner trainers. Routes through both
+    # the full build and the seeded/incremental path (which calls this on `aug`).
+    if "race_id" in df.columns and n > 0:
+        _race_sorted = df["race_id"].values[_perm]
+        _new_block = np.empty(n, dtype=bool); _new_block[0] = True
+        _new_block[1:] = (gids[1:] != gids[:-1]) | (_race_sorted[1:] != _race_sorted[:-1])
+        _block_first = np.maximum.accumulate(np.where(_new_block, np.arange(n), 0))
+    else:
+        _block_first = np.arange(n)
+
     results = {}
     for out_name, op, param in operations:
         if op == "mean":
@@ -407,7 +424,7 @@ def _fast_grouped_rolling_core(
             arr = _nb_ewma(shifted, gids, float(param))
         else:
             raise ValueError(f"Unknown rolling op: {op}")
-        results[out_name] = arr[_inv]
+        results[out_name] = arr[_block_first][_inv]   # race-safe broadcast, then back to row order
     return results
 
 
