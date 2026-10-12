@@ -3,10 +3,12 @@
 Does combining a clean fundamental model with the market beat the market,
 after costs, out of sample?
 
-**Rewritten 2026-10-12 because the previous version's answer could not be
-trusted.** It carried three independent biases, all pushing the measured
-combination ROI *downward*, and the project recorded the market-combination
-lead as dead (-2.64% @ BSP) on its output:
+**Rewritten 2026-10-12.** The previous version carried three real
+measurement defects. Fixing them did **not** change the verdict: eight purged
+quarterly folds give combination -3.55% CI[-5.42,-1.55] @ BSP, model-alone
+-4.49%, bet-all -2.68%, mean CLV 1.0076, 1/8 folds positive — the same
+pattern the original reported (-2.64% / -3.65% / -1.83%). The market
+combination is not a bankable edge. The defects were:
 
 1. **The blend was fitted on in-sample model predictions.** The win model was
    trained on the fold's training rows, then the market blend was fitted on
@@ -28,12 +30,22 @@ accumulated on folds where the combination happened to find a bet (so the
 comparison ran over different sets of quarters), and the win model was given
 the *place* model's hyperparameters.
 
-The old output also carried its own refutation: the combination scored worse
-than *both* of its inputs. A market-anchored combination nests the market
-exactly (alpha=0, beta=1), so out of sample it cannot genuinely be far worse
-than the market alone — that signature means the fit is broken, not that the
-signal is absent. It is now an explicit tripwire (``check_combination_nesting``)
-that fails the run instead of inviting a wrong conclusion.
+What the corrected run does establish, and what to do with it:
+
+* **alpha is positive in 8/8 folds** (mean +0.046, beta ~0.97). The
+  fundamental model holds genuine information the price lacks — roughly 20x
+  less than the market, far too little to clear commission on its own.
+* **The weak link is the selection rule, not the blend.** The combination
+  beats the model alone in every measurement yet still loses to backing
+  everything in the band, so ``combo_prob > mkt_imp`` is selecting bets that
+  are *worse than average* inside the band. See
+  ``scripts/audit_selection_rule.py`` (feed it ``--dump``).
+
+A nesting tripwire (``check_combination_nesting``) now fails the run if the
+anchored probabilities score worse on race log loss than the market they
+nest, since that would mean a broken fit rather than an absent signal. Note
+this is a probability-scoring check: losing to "bet everything in the band"
+is a staking comparison and says nothing about the fit.
 
 Usage::
 
@@ -75,7 +87,16 @@ from src.wf_eval import (
 
 logger = logging.getLogger("wf_benter")
 
-DIAG = ["race_id", "race_date", "won", "track", "off_time", "horse_name"]
+DIAG = ["race_id", "race_date", "won", "track", "off_time", "horse_name",
+        "num_runners", "race_type"]
+
+#: Columns written by --dump, for scripts/audit_selection_rule.py. Keeping the
+#: expensive fold refits separate from the analysis means a selection rule can
+#: be re-cut in seconds instead of re-running the walk-forward.
+DUMP_COLS = ["race_id", "race_date", "track", "horse_name", "num_runners",
+             "race_type", "won", "entry_odds", "close_odds", "mkt_imp",
+             "model_prob", "combo_prob", "pnl_bsp", "in_band",
+             "sel_combo", "sel_model", "fold"]
 
 #: Win-model hyperparameters. The previous version used the PLACE model's.
 WIN_PARAMS = dict(
@@ -150,7 +171,8 @@ def load_frame() -> pd.DataFrame:
 
 
 def run(df: pd.DataFrame | None = None, *, max_folds: int | None = None,
-        n_boot: int = 2000, min_train_rows: int = 5000) -> dict:
+        n_boot: int = 2000, min_train_rows: int = 5000,
+        dump_path: str | None = None) -> dict:
     df = load_frame() if df is None else df.reset_index(drop=True)
     features = [
         c for c in get_feature_columns(df)
@@ -168,6 +190,7 @@ def run(df: pd.DataFrame | None = None, *, max_folds: int | None = None,
     races = {"combo": [], "model": [], "all": []}
     clv_chunks, fold_rois, per_fold = [], [], []
     anchored_oos, market_oos, won_oos, race_oos = [], [], [], []
+    dump_frames: list[pd.DataFrame] = []
 
     for fold in folds:
         train = df[fold.train].copy()
@@ -220,6 +243,29 @@ def run(df: pd.DataFrame | None = None, *, max_folds: int | None = None,
                 pnl[key].append(pnl_bsp[mask])
                 races[key].append(race_ids[mask])
 
+        if dump_path:
+            dump_frames.append(pd.DataFrame({
+                "race_id": test["race_id"].to_numpy().astype(str),
+                "race_date": test["race_date"].to_numpy(),
+                "track": test.get("track", pd.Series(index=test.index, dtype=object)).to_numpy(),
+                "horse_name": test.get("horse_name", pd.Series(index=test.index, dtype=object)).to_numpy(),
+                "num_runners": pd.to_numeric(
+                    test.get("num_runners", pd.Series(index=test.index, dtype=float)),
+                    errors="coerce").to_numpy(),
+                "race_type": test.get("race_type", pd.Series(index=test.index, dtype=object)).astype(str).to_numpy(),
+                "won": test["won"].to_numpy().astype(np.int8),
+                "entry_odds": test["_entry"].to_numpy(),
+                "close_odds": test["_close"].to_numpy(),
+                "mkt_imp": test["mkt_imp"].to_numpy(),
+                "model_prob": test["_mp"].to_numpy(),
+                "combo_prob": test["_combo"].to_numpy(),
+                "pnl_bsp": pnl_bsp,
+                "in_band": band,
+                "sel_combo": sel_combo,
+                "sel_model": sel_model,
+                "fold": fold.label,
+            }))
+
         anchored_oos.append(test["_combo"].to_numpy()[band])
         market_oos.append(test["mkt_imp"].to_numpy()[band])
         won_oos.append(test["won"].to_numpy()[band])
@@ -266,6 +312,12 @@ def run(df: pd.DataFrame | None = None, *, max_folds: int | None = None,
         race_logloss(market_all, won_all, race_all),
     )
     alphas = [f["alpha"] for f in per_fold]
+
+    if dump_path and dump_frames:
+        pd.concat(dump_frames, ignore_index=True)[DUMP_COLS].to_parquet(
+            dump_path, index=False, engine="pyarrow",
+        )
+        print(f"wrote per-bet rows -> {dump_path}", flush=True)
 
     return {
         "combo": summarise("combo"),
@@ -324,10 +376,12 @@ def main() -> int:
                         help="limit folds for a quick smoke run")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--dump", default=None, metavar="PATH",
+                        help="write per-bet rows for scripts/audit_selection_rule.py")
     args = parser.parse_args()
     logging.disable(logging.INFO)
 
-    report = run(max_folds=args.max_folds, n_boot=args.n_boot)
+    report = run(max_folds=args.max_folds, n_boot=args.n_boot, dump_path=args.dump)
     print(json.dumps(report, indent=2, default=str) if args.json else render(report))
     # A failed nesting check means the measurement itself is untrustworthy.
     return 0 if report.get("nesting_check", {}).get("ok", False) else 1
