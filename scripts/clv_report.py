@@ -46,6 +46,7 @@ from src.betfair import (  # noqa: E402
     load_bsp,
 )
 from src.utils import normalise_off_time_key as _ok  # noqa: E402
+from src.wf_eval import bootstrap_roi_ci  # noqa: E402
 
 
 def _latest_run() -> str:
@@ -65,13 +66,17 @@ def _off_time_by_race_id(race_ids, db="data/races.db") -> dict:
     return dict(zip(m["race_id"], m["off_time"]))
 
 
-def _boot_ci(x, n=2000, seed=0):
+def _boot_ci(x, n=2000, seed=0, clusters=None):
+    """Bootstrap CI, resampling *clusters* (races) when they are available.
+
+    Bets struck in the same race share its conditions, so resampling
+    individual bets reports a narrower interval than the data supports.
+    """
     x = np.asarray(x, dtype="float64")
     if len(x) == 0:
         return (np.nan, np.nan)
-    rng = np.random.default_rng(seed)
-    means = x[rng.integers(0, len(x), size=(n, len(x)))].mean(axis=1)
-    return (np.percentile(means, 2.5), np.percentile(means, 97.5))
+    out = bootstrap_roi_ci(x, clusters=clusters, n_boot=n, seed=seed, scale=1.0)
+    return (out["ci_low"], out["ci_high"])
 
 
 def main() -> None:
@@ -146,7 +151,10 @@ def main() -> None:
         bsp_pnl = settle(d["bsp"].to_numpy(), d["won"].to_numpy(), stake)
         roi_sp = sp_pnl.sum() / stake.sum()
         roi_bsp = bsp_pnl.sum() / stake.sum()
-        lo, hi = _boot_ci(bsp_pnl / stake.mean())
+        lo, hi = _boot_ci(
+            bsp_pnl / stake.mean(),
+            clusters=d["race_id"].to_numpy().astype(str) if "race_id" in d.columns else None,
+        )
         print(f"{strat:<12}{len(d):>6}{roi_sp:>9.1%}{roi_bsp:>10.1%}"
               f"{f'[{lo:+.1%}, {hi:+.1%}]':>22}")
 

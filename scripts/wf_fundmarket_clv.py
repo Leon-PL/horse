@@ -16,11 +16,20 @@ import lightgbm as lgb
 import config
 from src.feature_store import FeatureStore
 from src.model import get_feature_columns
-from src.place_market_model import PLACE_PARAMS
 from src.betfair import attach_bsp
+from src.bet_settlement import settle_win_exchange_bets
+from src.wf_eval import bootstrap_roi_ci, expanding_period_folds, fold_summary
+
+#: Win-model hyperparameters. This script previously trained the win model with
+#: the PLACE model's parameters.
+WIN_PARAMS = dict(
+    n_estimators=600, num_leaves=35, max_depth=6, learning_rate=0.03,
+    min_child_samples=50, subsample=0.6, colsample_bytree=0.6,
+    reg_alpha=0.5, reg_lambda=3.0, objective="binary",
+    subsample_freq=1, n_jobs=-1, verbose=-1, random_state=config.RANDOM_SEED,
+)
 
 DIAG = ["race_id", "race_date", "won", "track", "off_time", "horse_name"]
-COMM = 0.02
 
 
 def _pred_metrics(te, col):
@@ -64,12 +73,18 @@ def main():
 
     quarters = sorted(df["_q"].unique())
     pf_pred_fm, pf_pred_mk = [], []
-    clv_chunks, pnl_chunks, pnl_bsp_chunks, per_fold = [], [], [], []
-    for q in quarters[args.min_train_quarters:]:
-        tr = df[df["_q"] < q]; te = df[df["_q"] == q].copy()
-        if len(tr) < 1000 or te.empty:
+    clv_chunks, pnl_chunks, pnl_bsp_chunks, race_chunks, per_fold = [], [], [], [], []
+    # Purged expanding folds, matching the production training protocol.
+    df = df.reset_index(drop=True)
+    for fold in expanding_period_folds(
+        df["race_date"], freq="Q",
+        min_train_periods=args.min_train_quarters, min_train_rows=1000,
+    ):
+        q = fold.label
+        tr = df[fold.train]; te = df[fold.test].copy()
+        if te.empty:
             continue
-        m = lgb.LGBMClassifier(**PLACE_PARAMS).fit(tr[form + mkt], tr["won"])
+        m = lgb.LGBMClassifier(**WIN_PARAMS).fit(tr[form + mkt], tr["won"])
         te["_p"] = m.predict_proba(te[form + mkt])[:, 1]
         te["wp_fm"] = te["_p"] / te.groupby("race_id")["_p"].transform("sum")
         pf_pred_fm.append(_pred_metrics(te, "wp_fm")); pf_pred_mk.append(_pred_metrics(te, "mkt_imp"))
@@ -81,10 +96,13 @@ def main():
             close = pd.to_numeric(sel["bsp"], errors="coerce").to_numpy()
             won = sel["won"].to_numpy().astype(bool)
             clv = entry / close
-            pnl = np.where(won, (entry - 1.0) * (1 - COMM), -1.0)       # ROI@entry (ltp_300s)
-            pnl_bsp = np.where(won, (close - 1.0) * (1 - COMM), -1.0)   # ROI@BSP — artifact-proof
+            # Shared settlement maths (hard rule #2) so these ROIs stay
+            # comparable with the backtester and live settlement.
+            pnl = settle_win_exchange_bets(entry, won)          # ROI@entry (ltp_300s)
+            pnl_bsp = settle_win_exchange_bets(close, won)      # ROI@BSP — artifact-proof
             clv_chunks.append(clv); pnl_chunks.append(pnl); pnl_bsp_chunks.append(pnl_bsp)
-            per_fold.append({"q": str(q), "bets": int(len(sel)),
+            race_chunks.append(sel["race_id"].to_numpy().astype(str))
+            per_fold.append({"q": str(q), "bets": int(len(sel)), "purged_rows": fold.n_purged,
                              "mean_clv": round(float(clv.mean()), 4),
                              "roi_entry": round(float(pnl.mean() * 100), 2),
                              "roi_bsp": round(float(pnl_bsp.mean() * 100), 2)})
@@ -94,10 +112,12 @@ def main():
         return {k: round(float(np.mean([m[k] for m in ms])), 4) for k in ("top1", "logloss")}
     clv = np.concatenate(clv_chunks); pnl = np.concatenate(pnl_chunks)
     pnl_bsp = np.concatenate(pnl_bsp_chunks); n = len(pnl)
-    rng = np.random.default_rng(0)
+    races = np.concatenate(race_chunks)
+
     def _ci(a, scale=100):
-        b = a[rng.integers(0, n, size=(2000, n))].mean(axis=1) * scale
-        return [round(float(np.percentile(b, 2.5)), 4), round(float(np.percentile(b, 97.5)), 4)]
+        """Race-clustered interval: bets in one race are not independent."""
+        out = bootstrap_roi_ci(a, clusters=races, scale=scale)
+        return [out["ci_low"], out["ci_high"]]
     out = {
         "predictive": {"FUND+MARKET": _pool(pf_pred_fm), "MARKET-RAW": _pool(pf_pred_mk)},
         "tradeable": {
@@ -106,6 +126,8 @@ def main():
             "roi_entry": round(float(pnl.mean() * 100), 2), "roi_entry_ci": _ci(pnl),
             "roi_bsp": round(float(pnl_bsp.mean() * 100), 2), "roi_bsp_ci": _ci(pnl_bsp),
             "folds_bsp_positive": int(sum(f["roi_bsp"] > 0 for f in per_fold)),
+            "n_races": int(len(set(races))),
+            "across_folds_bsp": fold_summary([f["roi_bsp"] for f in per_fold]),
         },
         "per_fold": per_fold,
     }

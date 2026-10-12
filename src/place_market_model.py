@@ -1,12 +1,20 @@
 """
-Place-market strategy — the validated +EV place model
-======================================================
-Single source of truth for the project's one statistically-positive edge: an
-odds-free form place model (optionally **+ pre-off win-market features**) bet
-+EV against the EXCHANGE place price (Betfair place BSP), settled at the
-operator's commission. Walk-forward validated at +9.31% (form-only) / +15.24%
-(form + win-market) ROI @ place BSP, 2% commission, 12/12 folds (see the
-place-market-edge notes).
+Place-market strategy — +EV place model (NO CONFIRMED EDGE)
+============================================================
+An odds-free form place model (optionally **+ pre-off win-market features**)
+bet +EV against the EXCHANGE place price (Betfair place BSP), settled at the
+operator's commission.
+
+.. warning::
+   **The headline +9.31% / +15.24% ROI this module was built on did not
+   survive.** Those figures came from a feature store that had been built by
+   older FE code than the evaluation assumed. On a correctly rebuilt store the
+   same walk-forward gives roughly **+1.5% with a confidence interval spanning
+   zero**, and it is negative on jumps. Treat this module as a strategy under
+   test, not a validated edge. See ``docs/NEGATIVE_RESULTS.md`` section 1.
+
+   The walk-forward here now uses purged folds and race-clustered confidence
+   intervals (``src/wf_eval.py``); the original numbers used neither.
 
 Used by:
   * scripts/train_place_paper_model.py — the paper-trading artifact, and
@@ -34,6 +42,7 @@ from src.betfair import attach_bsp, bf_track_key, bf_horse_key
 from src.utils import normalise_off_time_key
 from src.paper_trading import build_market_features, MARKET_FEATS
 from src.bet_settlement import settle_place_exchange_bets, PLACE_EXCHANGE_COMMISSION
+from src.wf_eval import bootstrap_roi_ci, expanding_period_folds, fold_summary
 
 logger = logging.getLogger(__name__)
 
@@ -163,13 +172,20 @@ def evaluate_place_market(df: pd.DataFrame, model, feature_cols: list[str], *,
         placed = _placed_target(sel).to_numpy().astype(bool)
         odds = pd.to_numeric(sel["place_bsp"], errors="coerce").to_numpy()
         pnl = settle_place_exchange_bets(odds, placed, stake=1.0, commission=commission)
-        rng = np.random.default_rng(seed)
-        boots = pnl[rng.integers(0, n, size=(n_boot, n))].mean(axis=1) * 100.0
+        # Resample races, not bets: several runners from one race are backed
+        # together and share its conditions, so an i.i.d. bootstrap over bets
+        # reports an interval narrower than the data supports.
+        ci = bootstrap_roi_ci(
+            pnl, clusters=sel["race_id"].to_numpy() if "race_id" in sel.columns else None,
+            n_boot=n_boot, seed=seed,
+        )
         return {
             "n_bets": int(n),
+            "n_races": ci["n_clusters"],
             "roi_pct": round(float(pnl.mean() * 100.0), 2),
-            "ci_low": round(float(np.percentile(boots, 2.5)), 2),
-            "ci_high": round(float(np.percentile(boots, 97.5)), 2),
+            "ci_low": ci["ci_low"],
+            "ci_high": ci["ci_high"],
+            "ci_clustered": ci["clustered"],
             "total_pnl": round(float(pnl.sum()), 1),
             "hit_rate": round(float(placed.mean()), 3),
             "avg_odds": round(float(odds.mean()), 2),
@@ -248,14 +264,20 @@ def walk_forward_place_market(featured: pd.DataFrame, *, use_market_features: bo
         raise ValueError("No rows with a Betfair places-paid match.")
     if jumps_only and "race_type" in matched.columns:
         matched = matched[matched["race_type"].astype(str).str.contains("Hurdle|Chase", case=False, na=False)]
-    matched["_q"] = matched["race_date"].dt.to_period("Q")
-    quarters = sorted(matched["_q"].unique())
+    matched = matched.reset_index(drop=True)
+    # Purged expanding folds, so the research protocol matches the production
+    # training path (config.PURGE_DAYS) rather than quietly being easier.
+    folds = expanding_period_folds(
+        matched["race_date"], freq="Q",
+        min_train_periods=min_train_quarters, min_train_rows=1000,
+    )
 
-    pnl_chunks, per_fold = [], []
-    for q in quarters[min_train_quarters:]:
-        tr = matched[matched["_q"] < q]
-        te = matched[matched["_q"] == q]
-        if len(tr) < 1000 or te.empty:
+    pnl_chunks, race_chunks, per_fold = [], [], []
+    for fold in folds:
+        q = fold.label
+        tr = matched[fold.train]
+        te = matched[fold.test]
+        if te.empty:
             continue
         model = train_place_market_model(tr, feature_cols, params=params)
         p = model.predict_proba(te[feature_cols])[:, 1]
@@ -269,23 +291,38 @@ def walk_forward_place_market(featured: pd.DataFrame, *, use_market_features: bo
         placed = _placed_target(te_sel).to_numpy().astype(bool)
         pnl = settle_place_exchange_bets(price[sel], placed, commission=commission)
         pnl_chunks.append(pnl)
+        # Cluster key for the bootstrap. Without race_id each bet becomes its
+        # own cluster, which is the (weaker) i.i.d. case rather than wrong.
+        race_chunks.append(
+            te_sel["race_id"].to_numpy().astype(str) if "race_id" in te_sel.columns
+            else np.array([f"{q}#{i}" for i in range(len(pnl))])
+        )
         per_fold.append({"quarter": str(q), "n_bets": int(sel.sum()),
-                         "roi_pct": round(float(pnl.mean() * 100.0), 2)})
+                         "roi_pct": round(float(pnl.mean() * 100.0), 2),
+                         "purged_rows": fold.n_purged})
         logger.info("WF fold %s: %d bets, ROI %.2f%%", q, int(sel.sum()), float(pnl.mean() * 100))
 
     if not pnl_chunks:
         return {"n_folds": 0, "n_bets": 0, "roi_pct": None}
     pnl_all = np.concatenate(pnl_chunks)
-    n = len(pnl_all)
-    rng = np.random.default_rng(seed)
-    boots = pnl_all[rng.integers(0, n, size=(n_boot, n))].mean(axis=1) * 100.0
+    # Race-clustered CI, plus the across-time fold spread: a tight pooled
+    # interval can still come from one lucky quarter.
+    ci = bootstrap_roi_ci(
+        pnl_all, clusters=np.concatenate(race_chunks), n_boot=n_boot, seed=seed,
+    )
+    across_time = fold_summary([f["roi_pct"] for f in per_fold])
     return {
-        "n_folds": len(per_fold), "n_bets": int(n),
+        "n_folds": len(per_fold), "n_bets": int(len(pnl_all)),
+        "n_races": ci["n_clusters"],
         "roi_pct": round(float(pnl_all.mean() * 100.0), 2),
-        "ci_low": round(float(np.percentile(boots, 2.5)), 2),
-        "ci_high": round(float(np.percentile(boots, 97.5)), 2),
+        "ci_low": ci["ci_low"], "ci_high": ci["ci_high"],
+        "ci_clustered": ci["clustered"],
         "total_pnl": round(float(pnl_all.sum()), 1),
-        "folds_positive": int(sum(f["roi_pct"] > 0 for f in per_fold)),
+        "folds_positive": across_time["folds_positive"],
+        "fold_roi_median": across_time["median"],
+        "fold_roi_std": across_time["std"],
+        "fold_roi_worst": across_time["worst"],
+        "fold_roi_best": across_time["best"],
         "use_market_features": bool(use_market_features), "jumps_only": bool(jumps_only),
         "ev_threshold": ev_threshold, "commission": commission,
         "per_fold": per_fold,
