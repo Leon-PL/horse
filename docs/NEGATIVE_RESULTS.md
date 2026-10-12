@@ -273,6 +273,124 @@ market microstructure (traded volume, ladder depth) is the only live
 hypothesis left that attacks the informational gap rather than re-processing
 public form.
 
+## 2c. Why the model loses: its disagreements are uninformative (2026-10-12)
+
+A head-to-head of the market-blind fundamental model against the market on
+**25,388 walk-forward races**, each with exactly one recorded winner:
+
+| | top-1 accuracy |
+|---|---|
+| model's top pick | 0.2921 |
+| market's top pick | 0.3398 |
+| they pick the same horse in | 55.1% of races |
+| when they agree, that horse wins | 0.3878 |
+
+**The entire deficit is in the 44.9% of races where they disagree**, and there
+the market wins the head-to-head 0.2809 to 0.1746.
+
+### The decisive test
+
+In those disagreement races, compare the model's pick to what the market
+already charged for it:
+
+| | actual win rate | market-implied | edge |
+|---|---|---|---|
+| the horse the model **promoted** | 0.1746 | 0.1788 | **−0.43 pp** |
+| the horse the model **demoted** | 0.2809 | 0.2814 | **−0.05 pp** |
+
+**The model's disagreement carries no information.** Its preferred horse wins
+exactly as often as the price says, and the horse it rejects wins exactly as
+often as the price says. This holds in every disagreement-magnitude bucket
+(−0.80 to +0.54 pp from 1.2× through 3.5×+), every field-size band, every
+exposure band and every race type — nothing exceeds ±1.9 pp, and nothing
+survives a race-clustered interval.
+
+So the model is **not mis-ranking correctable things**. It is re-ordering
+horses whose probabilities the market has already got right.
+
+### The mechanism
+
+Standardised mean difference between the model's pick and the market's pick,
+across all 11,389 disagreement races:
+
+| feature | model's pick minus market's pick (SD) |
+|---|---|
+| `horse_glicko_rank` | **−0.65** (lower = better) |
+| `horse_glicko_vs_field` | **+0.56** |
+| `horse_elo_momentum_vs_best_in_race` | **+0.54** |
+| `horse_elo_momentum_vs_field` | +0.51 |
+| `horse_elo_momentum` | +0.43 |
+| `combined_elo_vs_field_z_in_race` | +0.37 |
+| `horse_avg_pos_3` | −0.36 (better recent finishes) |
+
+**When the model overrules the market it is keying on rating momentum and
+relative rating strength** — recent trajectory and "rates better than this
+field". These are the most public, most cheaply computed signals in racing,
+which thousands of market participants also calculate.
+
+And that basis is worse than useless. Conditioning on the quartile where each
+driver most favoured the model's pick:
+
+| driver | model pick's edge vs its price |
+|---|---|
+| `horse_elo_momentum` strongest | **−1.11 pp** |
+| `horse_glicko_vs_field` strongest | **−1.16 pp** |
+| `horse_glicko_rank` strongest | −0.38 pp |
+
+### What is NOT wrong
+
+- **Not calibration.** Model probability over actual win rate is 0.98–1.04× in
+  *every* prior-starts bucket (0, 1, 2-3, 4-7, 8-19, 20+) and every momentum
+  quintile — as tight as the market's own 0.98–1.02×.
+- **Not a broken subgroup.** No exposure band, field size or race type shows
+  an edge distinguishable from zero.
+- **Not a bias toward unexposed horses.** The model's top pick has a median 9
+  prior starts and is a debutant 3.0% of the time; the *market's* pick is a
+  debutant 5.9% of the time. If anything the model under-backs newcomers.
+
+### A fix was tested, and it failed
+
+The model's most *confident* errors do cluster on lightly-raced horses with
+spectacular ratings — a horse with one good run gets a huge
+`glicko_vs_field` and momentum with no record to regress it toward the mean.
+Bets on 1-start horses returned −11.57% against a −4.83% matched baseline.
+
+But declining those bets does nothing:
+
+| rule | n | ROI @ BSP | vs matched baseline |
+|---|---|---|---|
+| current (`combo_prob > mkt_imp`) | 104,146 | −3.55% | −0.87 |
+| drop thin-form, hot-momentum bets | 96,837 | −3.31% | **−0.63** |
+| the dropped bets alone | 7,309 | −6.70% | −4.02 |
+
+0.24 points of improvement, and none of the segment effects survive a
+race-clustered interval (1-start bets: CI[−20.10, −3.45] against a −4.83%
+baseline that sits inside it). The tail is real-looking and too small and too
+noisy to bank.
+
+### Methodological note, recorded because it nearly produced a wrong answer
+
+Three example races were first selected as "the model's most confident errors"
+and all three showed the same vivid pattern: the model backing a 1-start horse
+on a huge rating while a well-fancied debutant won. It was a **cherry-pick** —
+that selection filter surfaces precisely those cases, and the aggregate
+contradicts the story (see "What is NOT wrong"). Hand-picked extremes in this
+project have repeatedly suggested structure that the population does not have.
+Always put the aggregate next to the anecdote.
+
+### Can it be resolved?
+
+Not by calibration, not by excluding a segment, and not by better ranking —
+no re-ordering of the same information can beat a price that already contains
+it. The one fix this diagnosis points at directly is **§4c of the action
+plan**: the model has no way to know *which of its features the market has
+already priced*, so it spends its capacity, and its disagreements, on momentum.
+Training with the market log-odds as a fixed offset (`init_score`) would force
+it to learn only the residual. That is the untried item, and this is the
+strongest argument yet for trying it.
+
+Beyond that the ceiling is informational, not architectural (§1c).
+
 ## 3. `trainer_freq` stablemate leak — RESOLVED (2026-06-26)
 
 A **+56.8% ROI@BSP** was traced to `trainer_freq`, built with a `cumcount`

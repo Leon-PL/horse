@@ -40,7 +40,37 @@ ECE 0.0054, the best of the three, and the selection-rule audit found
 predicted win rate within 0.0023 of actual in *every* price band. Platt +
 isotonic are doing their job. Further calibration work has no upside.
 
-### 1b. It may be a *model* problem, and that is the cheapest thing to check
+### 1b-prime. The sharper diagnosis (2026-10-12): the disagreements are noise
+
+A head-to-head on **25,388 walk-forward races** (ledger §2c) locates the
+deficit exactly. The model and the market pick the same horse in 55% of races,
+and that horse wins 38.8% of the time. The whole gap is in the other 45%,
+where the market wins 0.2809 to 0.1746 — and there:
+
+- the horse the model **promotes** wins 0.1746 against a market-implied
+  **0.1788** (−0.43 pp), and
+- the horse it **demotes** wins 0.2809 against **0.2814** (−0.05 pp).
+
+**The disagreement carries no information.** The model is re-ordering runners
+the market has already priced correctly. When it overrules, it keys on
+`horse_elo_momentum` and `horse_glicko_vs_field` — the most public signals in
+racing — and conditioning on those drivers makes the pick *worse* than its
+price (−1.11 and −1.16 pp).
+
+This narrows §1b below. Calibration is right at every exposure band and
+momentum quintile (0.98–1.04×), no subgroup is broken, and a tested fix
+(declining thin-form hot-momentum bets) moved the rule by 0.24 points, inside
+noise. So the remaining §1b question is only whether the *configuration* is
+costing discrimination — worth the day it takes (§4b), but it can no longer be
+the main explanation, because a perfect re-rank of priced information still
+cannot beat the price.
+
+**What it promotes:** §4c (market log-odds as `init_score`) is now the
+best-motivated item in this plan. The model's defect is that it does not know
+which of its features the market has already priced; an offset is the one
+design that forces it to learn only the residual.
+
+### 1b. Is the *configuration* costing discrimination?
 
 The model loses to **plain logistic regression** on every ranking metric
 (top-1 0.268 vs 0.292, NDCG@1 0.374 vs 0.399). A 2,000-tree LightGBM with 151
