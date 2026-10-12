@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -217,68 +218,155 @@ def _lookahead_paths(date_str: str) -> dict[str, str]:
     }
 
 
+def feature_store_signature(store=None) -> str:
+    """Tie live features to both the persisted history and current FE implementation."""
+    from src.feature_store import FeatureStore
+    from src.featured_dataset import fe_signature
+
+    store = store or FeatureStore()
+    parts = {"fe_signature": fe_signature(), "meta": store.meta()}
+    for name in ("featured_path", "processed_path", "state_path", "counts_state_path"):
+        path = getattr(store, name)
+        try:
+            stat = os.stat(path)
+            parts[name] = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            parts[name] = None
+    return hashlib.sha256(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:20]
+
+
 def save_lookahead_cache(
     date_str: str,
     featured_df: pd.DataFrame,
     cards_sig: str,
+    *,
+    history_sig: str | None = None,
 ) -> None:
     paths = _lookahead_paths(date_str)
-    featured_df.to_parquet(paths["parquet"], index=False, engine="pyarrow")
+    # Publish complete files and bind metadata to this exact parquet generation.
+    fd, temporary = tempfile.mkstemp(dir=LOOKAHEAD_CACHE_DIR, suffix=".parquet")
+    os.close(fd)
+    try:
+        featured_df.to_parquet(temporary, index=False, engine="pyarrow")
+        artifact = os.stat(temporary)
+        os.replace(temporary, paths["parquet"])
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
     meta = {
         "date": date_str,
+        "artifact": [artifact.st_mtime_ns, artifact.st_size],
         "cards_sig": cards_sig,
+        "history_sig": history_sig or feature_store_signature(),
         "version": int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)),
         "rows": len(featured_df),
         "cols": len(featured_df.columns),
         "built": datetime.now().isoformat(),
     }
-    with open(paths["meta"], "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, indent=2, default=str)
+    fd, temporary = tempfile.mkstemp(dir=LOOKAHEAD_CACHE_DIR, suffix=".json")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(meta, fh, indent=2, default=str)
+        os.replace(temporary, paths["meta"])
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
     logger.info("Lookahead cache saved for %s: %d rows", date_str, len(featured_df))
+
+
+def lookahead_cache_valid(
+    date_str: str,
+    current_cards_sig: str | None = None,
+    *,
+    history_sig: str | None = None,
+) -> bool:
+    """Reject incomplete, outdated or mismatched feature caches."""
+    paths = _lookahead_paths(date_str)
+    if not os.path.isfile(paths["parquet"]) or not os.path.isfile(paths["meta"]):
+        return False
+    try:
+        with open(paths["meta"], encoding="utf-8") as fh:
+            meta = json.load(fh)
+        if int(meta.get("version", -1)) != int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)):
+            return False
+        if meta.get("date") != date_str:
+            return False
+        artifact = os.stat(paths["parquet"])
+        if meta.get("artifact") != [artifact.st_mtime_ns, artifact.st_size]:
+            return False
+        if meta.get("history_sig") != (history_sig or feature_store_signature()):
+            return False
+        if current_cards_sig is not None and meta.get("cards_sig") != current_cards_sig:
+            return False
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    return True
 
 
 def load_lookahead_cache(
     date_str: str,
     current_cards_sig: str | None = None,
+    *,
+    history_sig: str | None = None,
 ) -> pd.DataFrame | None:
-    """Load pre-computed features for *date_str*.
-
-    If *current_cards_sig* is given, only returns cached data when the
-    racecard signature matches (runners haven't changed since cache was built).
-    """
-    paths = _lookahead_paths(date_str)
-    if not os.path.exists(paths["parquet"]):
+    """Load only a complete cache matching the current feature implementation/history."""
+    if not lookahead_cache_valid(date_str, current_cards_sig, history_sig=history_sig):
         return None
-    if current_cards_sig is not None and os.path.exists(paths["meta"]):
-        with open(paths["meta"], encoding="utf-8") as fh:
-            meta = json.load(fh)
-        if int(meta.get("version", 1)) != int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)):
-            logger.info("Lookahead cache stale for %s (schema version changed)", date_str)
-            return None
-        if meta.get("cards_sig") != current_cards_sig:
-            logger.info(
-                "Lookahead cache stale for %s (cards changed)", date_str
-            )
-            return None
     try:
-        return pd.read_parquet(paths["parquet"], engine="pyarrow")
+        path = _lookahead_paths(date_str)["parquet"]
+        before = os.stat(path)
+        frame = pd.read_parquet(path, engine="pyarrow")
+        after = os.stat(path)
+        if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+            return None
+        if not lookahead_cache_valid(date_str, current_cards_sig, history_sig=history_sig):
+            return None
+        return frame
     except Exception:
+        logger.warning("Unreadable lookahead cache for %s", date_str, exc_info=True)
         return None
 
 
-def lookahead_cache_valid(date_str: str, current_cards_sig: str | None = None) -> bool:
-    """Lightweight check: is there a valid lookahead cache for *date_str*?"""
-    paths = _lookahead_paths(date_str)
-    if not os.path.exists(paths["parquet"]):
-        return False
-    if current_cards_sig is not None and os.path.exists(paths["meta"]):
-        with open(paths["meta"], encoding="utf-8") as fh:
-            meta = json.load(fh)
-        if int(meta.get("version", 1)) != int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)):
-            return False
-        if meta.get("cards_sig") != current_cards_sig:
-            return False
-    return True
+def features_for_live_cards(
+    cards: pd.DataFrame, date_str: str, *, store=None, use_cache: bool = True,
+) -> pd.DataFrame:
+    """Reuse an exact cache or rebuild this card using the bounded, read-only store path.
+
+    Any runner, odds, going or other card change triggers the complete card FE
+    pass. Patching odds onto old features leaves race-relative predictors stale.
+    """
+    from src.data_processor import process_data
+    from src.feature_store import FeatureStore
+    from src.featured_dataset import fe_signature
+
+    store = store or FeatureStore()
+    if not store.exists():
+        raise RuntimeError("Build the feature store on the training app's Data page first.")
+    stored_fe_sig = store.meta().get("fe_signature")
+    if stored_fe_sig is not None and stored_fe_sig != fe_signature():
+        raise RuntimeError("Feature code has changed; rebuild the feature store on the training app's Data page.")
+    last = store.last_date()
+    if last is not None and pd.Timestamp(date_str).normalize() <= pd.Timestamp(last).normalize():
+        raise ValueError("Live prediction requires a race date after the stored results; use saved evaluations for historical races.")
+    sig = cards_signature(cards)
+    history_sig = feature_store_signature(store)
+    if use_cache:
+        cached = load_lookahead_cache(date_str, sig, history_sig=history_sig)
+        if cached is not None and not cached.empty:
+            return cached
+    card = cards.copy()
+    card["won"] = 0
+    card["finish_position"] = 0
+    card["finish_time_secs"] = 0.0
+    card["lengths_behind"] = float("nan")
+    processed = process_data(df=card, save=False)
+    featured = store.featurize_live(processed)
+    # Never publish features from a mixture of concurrent history generations.
+    if feature_store_signature(store) != history_sig:
+        raise RuntimeError("The feature store changed while building picks; refresh once its update completes.")
+    if use_cache:
+        save_lookahead_cache(date_str, featured, sig, history_sig=history_sig)
+    return featured
 
 
 def clear_lookahead_cache() -> int:
@@ -298,7 +386,7 @@ def build_lookahead_cache(
     days_ahead: int = 7,
     progress_fn=None,
 ) -> dict[str, int]:
-    """Scrape racecards for the next *days_ahead* days and pre-compute features.
+    """Pre-compute today and the next *days_ahead* days of racecards.
 
     Features are built via ``FeatureStore.featurize_live`` — the card is
     featurised against the store's persisted rating + counts state (read-only),
@@ -307,7 +395,6 @@ def build_lookahead_cache(
     longer used. Returns ``{date_str: num_rows}`` for each date cached.
     """
     from src.data_collector import get_scraped_racecards
-    from src.data_processor import process_data
     from src.feature_store import FeatureStore
 
     store = FeatureStore()
@@ -318,12 +405,12 @@ def build_lookahead_cache(
     today = datetime.now().date()
     results: dict[str, int] = {}
 
-    for offset in range(1, days_ahead + 1):
+    for offset in range(days_ahead + 1):
         target = today + timedelta(days=offset)
         target_str = target.strftime("%Y-%m-%d")
 
         if progress_fn:
-            progress_fn(offset, days_ahead, target_str)
+            progress_fn(offset + 1, days_ahead + 1, target_str)
 
         try:
             cards = get_scraped_racecards(date_str=target_str)
@@ -334,26 +421,11 @@ def build_lookahead_cache(
             logger.info("Lookahead: no racecards for %s", target_str)
             continue
 
-        # Prepare racecard rows (pre-race placeholders)
-        cards["won"] = 0
-        cards["finish_position"] = 0
-        cards["finish_time_secs"] = 0.0
-        cards["lengths_behind"] = float('nan')
-
         try:
-            proc = process_data(df=cards, save=False)
-        except Exception as exc:
-            logger.warning("Lookahead: process_data failed for %s: %s", target_str, exc)
-            continue
-
-        try:
-            featured = store.featurize_live(proc)
+            featured = features_for_live_cards(cards, target_str)
         except Exception as exc:
             logger.warning("Lookahead: FE failed for %s: %s", target_str, exc)
             continue
-
-        sig = cards_signature(cards)
-        save_lookahead_cache(target_str, featured, sig)
         results[target_str] = len(featured)
 
     return results

@@ -98,6 +98,36 @@ def normalise_horse_key(name) -> str:
     return re.sub(r"\s+", " ", str(name).strip().title())
 
 
+# Common venue-name divergences between external feeds (BHA stewards reports,
+# IHRB titles) and our results: the feeds append "Park"/"Bridge"/"Racecourse"
+# or use the postal town name. ``canonical_track_key`` collapses these so a
+# fixture in a report can be joined to the same fixture in race_results.
+_TRACK_ALIAS: dict[str, str] = {
+    "stratford-on-avon": "stratford",
+    "stratford on avon": "stratford",
+    "bangor on dee": "bangor-on-dee",
+    "newmarket (july)": "newmarket",
+    "newmarket july": "newmarket",
+}
+_TRACK_SUFFIX_RE = re.compile(r"\s+(park|bridge|racecourse|races|races\.)$")
+
+
+def canonical_track_key(track) -> str:
+    """Aggressively canonicalise a track name for cross-feed fixture joins.
+
+    Builds on :func:`normalise_track_key` (lower/space-collapse) then strips the
+    trailing "Park"/"Bridge"/"Racecourse" qualifier and applies an explicit
+    alias map. Apply it to *both* sides of the join so it is self-consistent
+    regardless of which spelling either source uses. Kept separate from
+    ``normalise_track_key`` so existing joins are unaffected.
+    """
+    key = normalise_track_key(track)
+    key = _TRACK_ALIAS.get(key, key)
+    stripped = _TRACK_SUFFIX_RE.sub("", key)
+    # Re-alias after suffix strip (e.g. "stratford-on-avon" handled above).
+    return _TRACK_ALIAS.get(stripped, stripped)
+
+
 def compact_numeric_dtypes(df: pd.DataFrame | None, *, label: str = "dataset") -> pd.DataFrame | None:
     """Downcast numeric columns to reduce dataset size in memory and on disk."""
     if df is None or df.empty:

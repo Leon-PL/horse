@@ -31,7 +31,7 @@ STAGE_TAXONOMY: dict[str, str] = {
     "add_horse_features": "C",
     "add_hidden_form_features": "R",
     "add_pedigree_features": "C",
-    "add_medical_features": "L",
+    "add_medical_features": "C",  # wind_ops_prior cumulative (gelding part is L)
     "add_prize_money_features": "C",
     "add_collateral_form_features": "F",
     "add_jockey_features": "C",
@@ -51,7 +51,7 @@ STAGE_TAXONOMY: dict[str, str] = {
     "add_surface_features": "C",
     "add_trainer_specialisation_features": "C",
     "add_speed_figure_features": "B",
-    "add_rtv_features": "B",
+    "add_atr_features": "B",
     "add_market_features": "R",
     "add_trainer_runner_intent_features": "W",
     "add_jockey_intent_features": "L",
@@ -60,6 +60,7 @@ STAGE_TAXONOMY: dict[str, str] = {
     "add_field_quality_features": "W",
     "add_track_config_features": "R",
     "add_course_dynamics_features": "C",
+    "add_trainer_travel_features": "W",  # static joins + same-meeting runner count
     "add_weather_features": "R",
     "add_supplementary_features": "B",
     "add_race_relative_signal_features": "W",

@@ -247,7 +247,9 @@ FEATURE_CORR_THRESHOLD = 0.95
 #   python scripts/model_lab.py --write-allowlist <K>
 # then point this at the written file. Applied AFTER it, FEATURE_PRUNE_FRACTION
 # still trims within the allow-list (set it to 0.0 to keep exactly the list).
-FEATURE_ALLOWLIST = os.path.join(PROCESSED_DATA_DIR, "feature_allowlist.txt")
+# Versioned selection: fresh checkouts must use the same features as research
+# runs. New experimental lists can still be supplied here explicitly.
+FEATURE_ALLOWLIST = os.path.join(BASE_DIR, "feature_sets", "win.txt")
 
 # --- Early Stopping ---
 # Number of boosting rounds without improvement before stopping.

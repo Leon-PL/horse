@@ -94,18 +94,29 @@ def score_and_select(
     """
     feat = featured.copy()
     mb = mb_prices.copy()
+    feat["race_date"] = pd.to_datetime(feat["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if feat["race_date"].isna().any():
+        raise ValueError("Featured runners must have valid race dates.")
+    if "race_date" not in mb.columns:
+        # Backwards compatibility for callers explicitly scoring one day.
+        dates = feat["race_date"].unique()
+        if len(dates) != 1:
+            raise ValueError("Market prices require race_date when scoring multiple dates.")
+        mb["race_date"] = dates[0]
+    mb["race_date"] = pd.to_datetime(mb["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    if mb["race_date"].isna().any():
+        raise ValueError("Market prices must have valid race dates.")
     fk, mk = _merge_keys(feat), _merge_keys(mb)
     feat = pd.concat([feat.reset_index(drop=True), fk.reset_index(drop=True)], axis=1)
     mb = pd.concat([mb.reset_index(drop=True), mk.reset_index(drop=True)], axis=1)
-    cols = ["track_key", "off_key", "horse_key", "mb_win_odds", "mb_place_odds",
-            "mb_place_available", "places_paid"]
-    j = feat.merge(mb[cols].drop_duplicates(["track_key", "off_key", "horse_key"]),
-                   on=["track_key", "off_key", "horse_key"], how="inner")
+    keys = ["race_date", "track_key", "off_key", "horse_key"]
+    cols = keys + ["mb_win_odds", "mb_place_odds", "mb_place_available", "places_paid"]
+    j = feat.merge(mb[cols].drop_duplicates(keys), on=keys, how="inner", validate="many_to_one")
     if j.empty:
         return pd.DataFrame(columns=SELECTION_COLS)
 
     # a race_id for per-race normalisation of the win-market features
-    j["race_id"] = j["track_key"] + "|" + j["off_key"]
+    j["race_id"] = j["race_date"] + "|" + j["track_key"] + "|" + j["off_key"]
     mfeat = build_market_features(j, "mb_win_odds")
     for c in MARKET_FEATS:
         j[c] = mfeat[c].to_numpy()
@@ -136,7 +147,7 @@ def score_and_select(
     sel["finish_position"] = np.nan
     sel["pnl"] = np.nan
     keep = [c for c in SELECTION_COLS if c in sel.columns]
-    return sel[keep].sort_values(["off_time", "ev"], ascending=[True, False]).reset_index(drop=True)
+    return sel[keep].sort_values(["race_date", "off_time", "ev"], ascending=[True, True, False]).reset_index(drop=True)
 
 
 def log_selections(selections: pd.DataFrame, ledger_path: str = DEFAULT_LEDGER) -> int:

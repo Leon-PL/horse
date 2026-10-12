@@ -87,3 +87,40 @@ def test_settle_is_idempotent(tmp_path):
     s2 = settle(results, ledger_path=ledger)            # re-settling must not double-count
     assert s2["newly_settled"] == 0
     assert s1["pnl"] == s2["pnl"]
+
+
+def test_multiday_prices_and_market_normalisation_are_date_specific():
+    today = _featured().iloc[:2].copy()
+    tomorrow = today.copy()
+    tomorrow["race_date"] = "2026-06-24"
+    first_prices = _mb().iloc[:2].copy()
+    first_prices["race_date"] = "2026-06-23"
+    first_prices["mb_win_odds"] = [2.0, 4.0]
+    second_prices = first_prices.copy()
+    second_prices["race_date"] = "2026-06-24"
+    second_prices["mb_win_odds"] = [8.0, 2.0]
+    second_prices["mb_place_odds"] = [5.0, 6.0]
+
+    class CapturingModel(_ConstModel):
+        def predict_proba(self, X):
+            self.scored = X.copy()
+            return super().predict_proba(X)
+
+    model = CapturingModel(0.8)
+    result = score_and_select(
+        pd.concat([today, tomorrow], ignore_index=True),
+        pd.concat([first_prices, second_prices], ignore_index=True),
+        model, MARKET_FEATS, ev_threshold=0.0,
+    )
+    assert len(result) == 4
+    assert result.set_index(["race_date", "horse_name"]).loc[("2026-06-24", "Alpha"), "mb_place_odds"] == 5.0
+    np.testing.assert_allclose(model.scored["mkt_win_prob"], [2/3, 1/3, 0.2, 0.8])
+    assert model.scored["win_ltp300"].tolist() == [2.0, 4.0, 8.0, 2.0]
+
+
+def test_multiday_selection_rejects_undated_market_prices():
+    first = _featured()
+    second = first.copy()
+    second["race_date"] = "2026-06-24"
+    with pytest.raises(ValueError, match="require race_date"):
+        score_and_select(pd.concat([first, second]), _mb(), _ConstModel(0.8), MARKET_FEATS)

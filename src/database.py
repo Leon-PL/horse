@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS results (
     age               INTEGER,
     sex               TEXT,
     headgear          TEXT,
+    wind_surgery      INTEGER,
     weight_lbs        REAL,
     draw              INTEGER,
     form              TEXT,
@@ -120,6 +121,9 @@ def init_db() -> None:
             ("weather_precip_mm", "REAL"),
             ("weather_wind_kmh", "REAL"),
             ("weather_precip_prev3", "REAL"),
+            # NULL = not yet backfilled; 0/1 once scraped/backfilled
+            # (scripts/backfill_wind_surgery.py).
+            ("wind_surgery", "INTEGER"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
@@ -136,7 +140,8 @@ _COLUMNS = [
     "race_id", "race_date", "off_time", "track", "region",
     "race_name", "race_class", "race_type", "distance_furlongs",
     "going", "prize_money", "num_runners", "horse_name", "horse_id",
-    "jockey", "trainer", "age", "sex", "headgear", "weight_lbs",
+    "jockey", "trainer", "age", "sex", "headgear", "wind_surgery",
+    "weight_lbs",
     "draw", "form", "days_since_last_run", "odds",
     "official_rating",
     "finish_position", "won", "lengths_behind", "horse_runs",

@@ -136,3 +136,46 @@ class TestBuildVsAppend:
         )
         get_featured_dataset(processed=proc)
         assert fake.calls == ["append", "load"]
+
+
+@pytest.mark.parametrize("column,value", [
+    ("odds", 99.0), ("official_rating", 120.0), ("sire", "Different sire"),
+    ("atr_early_pace", 55.0), ("wind_surgery", 1),
+])
+def test_signature_detects_all_feature_input_edits(column, value):
+    df = _toy(["2023-01-01", "2023-01-02"])
+    df[column] = "Original" if isinstance(value, str) else 0.0
+    edited = df.copy()
+    edited.loc[0, column] = value
+    assert data_signature(df) != data_signature(edited)
+
+
+def test_signature_detects_result_swaps_with_unchanged_totals():
+    df = _toy(["2023-01-01", "2023-01-02"])
+    edited = df.copy()
+    edited["finish_position"] = edited["finish_position"].iloc[::-1].to_numpy()
+    assert data_signature(df) != data_signature(edited)
+
+
+def test_signature_ignores_future_only_one_hot_categories_and_numeric_promotion():
+    hist = _toy(["2023-01-01", "2023-01-02"])
+    hist["going"] = "Good"
+    hist["going_Good"] = 1
+    future_schema = hist.copy()
+    future_schema["going_Heavy"] = 0
+    future_schema["draw"] = future_schema["draw"].astype(float)
+    assert data_signature(hist) == data_signature(future_schema)
+
+
+@pytest.mark.parametrize("relative_path", [
+    "src/data_processor.py", "src/fe_incremental.py", "src/atr_features.py",
+    "src/track_config.py", "src/trainer_locations.py",
+])
+def test_signature_tracks_feature_dependencies(tmp_path, monkeypatch, relative_path):
+    monkeypatch.setattr(config, "BASE_DIR", str(tmp_path))
+    path = tmp_path / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# first revision", encoding="utf-8")
+    before = fe_signature()
+    path.write_text("# corrected feature", encoding="utf-8")
+    assert fe_signature() != before

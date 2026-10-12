@@ -226,6 +226,27 @@ def _parse_lengths_behind(dist_str: str) -> float:
     return total
 
 
+_WINNING_TIME_RE = re.compile(r"(?:(\d+)\s*m)?\s*([\d.]+)\s*s", re.I)
+
+
+def _parse_winning_time_secs(raw) -> float:
+    """Parse a Sporting Life winning time into seconds.
+
+    ``'1m 13.24s'`` -> 73.24, ``'59.34s'`` -> 59.34. Empty/garbage -> NaN.
+    Mirrors ``par_time_features.parse_winning_time`` (kept local so the scraper
+    has no dependency on feature code).
+    """
+    if not raw:
+        return float('nan')
+    m = _WINNING_TIME_RE.search(str(raw).strip())
+    if not m:
+        return float('nan')
+    mins = float(m.group(1)) if m.group(1) else 0.0
+    secs = float(m.group(2))
+    v = mins * 60.0 + secs
+    return v if 5.0 < v < 1200.0 else float('nan')
+
+
 def _infer_race_type(race_name: str, run_type: str = "") -> str:
     """Infer race type from race name or ``run_type`` field."""
     if run_type:
@@ -512,6 +533,10 @@ class SportingLifeScraper:
             distance = summary.get("distance", "")
             race_class = str(summary.get("race_class", ""))
             off_time = summary.get("time", "")
+            winning_time_secs = _parse_winning_time_secs(
+                summary.get("winning_time", "")
+            )
+            off_time_actual = summary.get("off_time", "")
             num_runners = _safe_int(summary.get("ride_count", 0))
             has_handicap = summary.get("has_handicap", False)
             surface = summary.get("course_surface", {})
@@ -549,6 +574,8 @@ class SportingLifeScraper:
                     surface_str=surface_str,
                     has_handicap=has_handicap,
                     is_result=True,
+                    winning_time_secs=winning_time_secs,
+                    off_time_actual=off_time_actual,
                 )
                 if row:
                     runners.append(row)
@@ -751,6 +778,8 @@ class SportingLifeScraper:
         surface_str: str,
         has_handicap: bool,
         is_result: bool,
+        winning_time_secs: float = float('nan'),
+        off_time_actual: str = "",
     ) -> Optional[dict]:
         """
         Convert a single Sporting Life *ride* object into a flat dict
@@ -813,6 +842,22 @@ class SportingLifeScraper:
             )
         else:
             headgear = str(headgear_data) if headgear_data else ""
+
+        # --- wind surgery ---
+        # ``medication`` is ``[{"short_name": "WS"}]`` when the horse has had
+        # a declared wind operation since its last run (BHA declarations began
+        # 2018; the flag appears on both racecard and historical result pages).
+        # Lower-case "ws" occurs on some result pages, so compare folded.
+        wind_surgery = 0
+        med_list = ride.get("medication") or []
+        if isinstance(med_list, list):
+            for med in med_list:
+                if (
+                    isinstance(med, dict)
+                    and str(med.get("short_name", "")).strip().lower() == "ws"
+                ):
+                    wind_surgery = 1
+                    break
 
         # --- odds ---
         # bookmakerOdds is a list of per-bookmaker prices; prefer the
@@ -882,6 +927,7 @@ class SportingLifeScraper:
             "age": age,
             "sex": sex,
             "headgear": headgear,
+            "wind_surgery": wind_surgery,
             "weight_lbs": weight_lbs,
             "draw": draw,
             "form": form,
@@ -897,6 +943,10 @@ class SportingLifeScraper:
             "horse_places": places,
             "surface": surface_str,
             "handicap": 1 if has_handicap else 0,
+            # Race-level result fields (same for every runner). off_time stays the
+            # SCHEDULED time (used by merge keys); these are the actual values.
+            "winning_time_secs": winning_time_secs,
+            "off_time_actual": off_time_actual,
         }
 
 

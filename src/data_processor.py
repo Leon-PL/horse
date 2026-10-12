@@ -265,26 +265,15 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["handicap"] = 0
 
-    # --- Handle official_rating zeros ---
-    # Many non-handicap runners have OR = 0 (unrated).  Replace with the
-    # race-field median so the model doesn't confuse 'unrated' with 'low'.
+    # Unrated runners may use their own field's available ratings. An entirely
+    # unrated race stays unknown; borrowing the dataset median uses future races
+    # and differs when a live card is processed by itself.
     if "official_rating" in df.columns:
-        df["official_rating"] = pd.to_numeric(
-            df["official_rating"], errors="coerce"
-        ).astype(float).fillna(0.0)
-        df["has_official_rating"] = (df["official_rating"] > 0).astype(int)
-        # Fill 0s with per-race median (or global median as fallback)
-        global_median_or = df.loc[
-            df["official_rating"] > 0, "official_rating"
-        ].median()
-        if pd.isna(global_median_or):
-            global_median_or = 0
-        race_median_or = df.groupby("race_id")["official_rating"].transform(
-            lambda x: x[x > 0].median() if (x > 0).any() else global_median_or
-        )
-        mask_zero = df["official_rating"] == 0
-        df.loc[mask_zero, "official_rating"] = race_median_or[mask_zero]
-        df["official_rating"] = df["official_rating"].fillna(global_median_or)
+        ratings = pd.to_numeric(df["official_rating"], errors="coerce")
+        df["has_official_rating"] = (ratings > 0).astype(int)
+        ratings = ratings.where(ratings > 0)
+        race_median_or = ratings.groupby(df["race_id"]).transform("median")
+        df["official_rating"] = ratings.fillna(race_median_or)
 
     # --- Handle days_since_last_run ---
     if "days_since_last_run" in df.columns:
@@ -302,30 +291,12 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         # Keep entries with position 0 (racecards) or positive (results)
         df = df[df["finish_position"] >= 0]
 
-    # Odds: replace 0 or negative with NaN, then fill with median
+    # Preserve unavailable prices. An invented median price contaminates
+    # market normalisation, the market anchor, and simulated settlement.
     if "odds" in df.columns:
-        df.loc[df["odds"] <= 0, "odds"] = np.nan
-        median_odds = df["odds"].median()
-        if pd.isna(median_odds):
-            median_odds = 5.0
-        df["odds"] = df["odds"].fillna(median_odds)
-
-    # Implausibly short odds (< 1.01) indicate a data error — an SP of 1.01
-    # or below means the horse was a near-certainty, which almost never occurs
-    # legitimately and typically reflects scraping artefacts.  Clamp rather
-    # than drop so we don't remove the whole race.
-    if "odds" in df.columns:
-        implausible_odds_mask = df["odds"] < 1.01
-        if implausible_odds_mask.any():
-            df.loc[implausible_odds_mask, "odds"] = np.nan
-            # Re-fill with race median to avoid NaN propagation
-            race_med = df.groupby("race_id")["odds"].transform(
-                lambda x: x.median() if x.notna().any() else 5.0
-            )
-            df["odds"] = df["odds"].fillna(race_med).fillna(5.0)
-            logger.info(
-                f"Clamped {implausible_odds_mask.sum()} implausible odds values (< 1.01)"
-            )
+        df["odds"] = df["odds"].where(
+            np.isfinite(df["odds"]) & (df["odds"] >= 1.01)
+        )
 
     removed = initial_len - len(df)
     if removed > 0:
@@ -333,10 +304,10 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Handle missing numeric values ---
     if "weight_lbs" in df.columns:
-        df["weight_lbs"] = df["weight_lbs"].fillna(df["weight_lbs"].median())
+        field_weight = df.groupby("race_id")["weight_lbs"].transform("median")
+        df["weight_lbs"] = df["weight_lbs"].fillna(field_weight)
 
-    if "draw" in df.columns:
-        df["draw"] = df["draw"].fillna(df["draw"].median())
+    # Missing stalls are unknown, not an average draw from unrelated races.
 
     if "prize_money" in df.columns:
         df["prize_money"] = df["prize_money"].fillna(0)

@@ -18,11 +18,18 @@ for a genuinely pre-race feature).
 import numpy as np
 import pandas as pd
 import pytest
+import config
 
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.live_prediction import feature_engineer_with_history_core
 from src.model import get_feature_columns
+
+
+@pytest.fixture(autouse=True)
+def all_feature_parity(monkeypatch):
+    """Validate every feature, independently of a local/private allowlist."""
+    monkeypatch.setattr(config, "FEATURE_ALLOWLIST", None)
 
 
 def _synthetic_raw(n_days: int = 100, races_per_day: int = 2, field: int = 6, seed: int = 7) -> pd.DataFrame:

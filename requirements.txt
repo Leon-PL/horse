@@ -5,6 +5,10 @@ xgboost>=2.0.0
 lightgbm>=4.0.0
 catboost>=1.2.0
 requests>=2.31.0
+# curl_cffi impersonates a browser TLS fingerprint so the At The Races
+# scraper (src/attheraces_scraper.py) clears the Fastly JS/TLS challenge.
+# Optional: the scraper falls back to the system `curl` binary if absent.
+curl_cffi>=0.7.0
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 streamlit>=1.28.0

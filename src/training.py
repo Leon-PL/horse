@@ -166,7 +166,7 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
 
     # 3) Train.
     _tick("Training models", 0.30)
-    predictor = RacePredictor(frameworks=dict(cfg.frameworks))
+    predictor = RacePredictor(frameworks=dict(cfg.frameworks), random_seed=cfg.seed)
     metrics = predictor.train(
         featured, params=cfg.hyperparams, value_config=cfg.value_config,
         blend_market_odds=cfg.blend_market_odds, dataset_start=dataset_start,
@@ -198,7 +198,23 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     if cfg.run_walk_forward:
         _tick("Walk-forward validation", 0.92)
         from src.backtester import walk_forward_validation
-        wf_report = walk_forward_validation(featured)
+        wf_report = walk_forward_validation(
+            featured,
+            min_train_months=cfg.wf_min_train_months,
+            frameworks=dict(cfg.frameworks),
+            params=cfg.hyperparams,
+            fast_fold=cfg.wf_fast_fold,
+            blend_market_odds=cfg.blend_market_odds,
+            random_seed=cfg.seed,
+            value_threshold=cfg.value_config.get("value_threshold", 0.05),
+            value_min_odds=cfg.value_config.get("value_min_odds", 1.0),
+            value_max_odds=cfg.value_config.get("value_max_odds", 101.0),
+            ew_enabled=cfg.value_config.get("ew_enabled", True),
+            ew_min_place_edge=cfg.value_config.get("ew_min_place_edge", 0.15),
+            ew_min_odds=cfg.value_config.get("ew_min_odds", 4.0),
+            ew_max_odds=cfg.value_config.get("ew_max_odds", 51.0),
+            progress_callback=(lambda m, p: _tick(m, 0.92 + 0.05 * p)) if progress_cb else None,
+        )
 
     # 6) Save a LEAN run (no featured/processed parquet — reproducible from the
     #    store via the recorded signatures).

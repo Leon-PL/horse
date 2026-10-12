@@ -26,6 +26,7 @@ warnings.filterwarnings(
 import numpy as np
 import pandas as pd
 import joblib
+from scipy.special import expit
 from sklearn.model_selection import train_test_split
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import (
@@ -537,6 +538,9 @@ EXCLUDE_COLUMNS = [
     "race_type",
     "finish_position",
     "won",
+    "placed",
+    "placed_bf",
+    "relevance",
     "finish_time_secs",
     "lengths_behind",
     "season",
@@ -612,6 +616,11 @@ EXCLUDE_COLUMNS = [
 # These columns stay in the DataFrame (the anchor and betting analysis read
 # the raw ``odds``), but are always excluded from the model feature set.
 ODDS_DERIVED_COLUMNS = [
+    # Exchange joins may already be attached when feature selection runs
+    # (notably in prepare_place_data). Settlement prices and archived market
+    # snapshots must never silently become form-model features.
+    "bsp", "place_bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_last",
+    "win_ltp300_raw",
     # Opening price: scraping was removed, but stale datasets / the DB
     # column still carry it — exclude defensively so it can never leak in
     # as a feature (it was the dominant feature in a "pure form" run).
@@ -780,28 +789,36 @@ def _resolve_feature_allowlist() -> set[str] | None:
     if raw is None:
         return None
     if isinstance(raw, (list, tuple, set)):
-        return {str(c) for c in raw}
+        if not raw or any(not isinstance(c, str) or not c.strip() for c in raw):
+            raise ValueError("FEATURE_ALLOWLIST must contain non-empty feature names; use None to select all features.")
+        return {c.strip() for c in raw}
+    if isinstance(raw, os.PathLike):
+        raw = os.fspath(raw)
     if not isinstance(raw, str):
-        logger.warning("FEATURE_ALLOWLIST=%r is not a list or path; ignoring.", raw)
-        return None
+        raise ValueError("FEATURE_ALLOWLIST must be a list of names, a file path, or None.")
     if not os.path.isfile(raw):
-        logger.warning("FEATURE_ALLOWLIST file not found: %s — ignoring.", raw)
-        return None
+        raise FileNotFoundError(f"Configured FEATURE_ALLOWLIST file not found: {raw}")
     mtime = os.path.getmtime(raw)
     if _ALLOWLIST_CACHE[0] == raw and _ALLOWLIST_CACHE[1] == mtime:
         return _ALLOWLIST_CACHE[2]
-    txt = open(raw, encoding="utf-8").read().strip()
+    with open(raw, encoding="utf-8") as handle:
+        txt = handle.read().strip()
     names: set[str] = set()
     if txt:
         if txt[0] == "[":
             try:
-                names = {str(c) for c in json.loads(txt)}
-            except Exception:
-                logger.warning("FEATURE_ALLOWLIST %s looks like JSON but failed to parse.", raw)
+                parsed = json.loads(txt)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid FEATURE_ALLOWLIST JSON: {raw}") from exc
+            if not isinstance(parsed, list) or any(not isinstance(c, str) or not c.strip() for c in parsed):
+                raise ValueError(f"FEATURE_ALLOWLIST must contain a JSON list of non-empty feature names: {raw}")
+            names = {c.strip() for c in parsed}
         else:
             names = {ln.strip() for ln in txt.splitlines()
                      if ln.strip() and not ln.lstrip().startswith("#")}
-    result = names or None
+    if not names:
+        raise ValueError(f"FEATURE_ALLOWLIST contains no feature names: {raw}; use None to select all features.")
+    result = names
     _ALLOWLIST_CACHE = (raw, mtime, result)
     return result
 
@@ -827,11 +844,10 @@ def get_feature_columns(df: pd.DataFrame) -> list[str]:
     if allow is not None:
         kept = [c for c in cols if c in allow]
         if not kept:
-            logger.warning(
-                "FEATURE_ALLOWLIST matched 0 of %d candidate columns — "
-                "ignoring it (check the names).", len(cols),
+            raise ValueError(
+                f"FEATURE_ALLOWLIST matched none of {len(cols)} eligible numeric feature columns. "
+                "Check the feature names or use None to select all eligible features."
             )
-            return cols
         n_missing = len(allow) - len(kept)
         if n_missing > 0:
             logger.info(
@@ -1580,6 +1596,7 @@ class RacePredictor:
     def __init__(
         self,
         frameworks: dict[str, str] | None = None,
+        random_seed: int | None = None,
         **_ignored,
     ):
         self.clf_model = None
@@ -1587,9 +1604,10 @@ class RacePredictor:
         self.scaler = None
         self.feature_cols = None
         self.frameworks = {
-            "classifier": "cat", "place": "cat",
+            **getattr(config, "SUB_MODEL_FRAMEWORKS", DEFAULT_FRAMEWORKS),
             **(frameworks or {}),
         }
+        self.random_seed = int(config.RANDOM_SEED if random_seed is None else random_seed)
         # Win-classifier calibration (Platt)
         self.calibration_temp = 1.0  # kept for serialisation compat
         self.platt_a = 1.0
@@ -1906,6 +1924,10 @@ class RacePredictor:
             f"b={self.place_platt_b:.4f}"
         )
 
+        # A refit must learn the same Platt -> isotonic chain used at
+        # inference, never compose an old isotonic mapping into its inputs.
+        self.win_iso_cal = None
+        self.place_iso_cal = None
         # Isotonic calibration on OOF Platt-calibrated probs
         _oof_win_cal = self._calibrate_win_probs(_all_clf_logits, _all_groups)
         self.win_iso_cal = self._fit_isotonic(_oof_win_cal, (_all_fp == 1).astype(np.float64))
@@ -2124,6 +2146,7 @@ class RacePredictor:
             model_params=_p,
             sample_weight=sw_full,
             race_dates=race_dates_idx,
+            soft_y=_win_soft_full,
         )
         if _used_training_slab_cal:
             logger.info("  Calibration refit on latest training slab; holdout left untouched.")
@@ -2790,7 +2813,7 @@ class RacePredictor:
                 objective=_focal_binary_objective,
                 **hp,
                 subsample_freq=1,
-                random_state=config.RANDOM_SEED,
+                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
                 n_jobs=self._autotune_njobs,
                 verbose=-1,
             )
@@ -2812,7 +2835,7 @@ class RacePredictor:
             model = CatBoostClassifier(
                 loss_function="Logloss",
                 auto_class_weights="Balanced",
-                random_seed=config.RANDOM_SEED,
+                random_seed=getattr(self, "random_seed", config.RANDOM_SEED),
                 verbose=False,
                 **hp_cat,
             )
@@ -2828,7 +2851,7 @@ class RacePredictor:
                 scale_pos_weight=scale_pos_weight,
                 eval_metric="logloss",
                 **hp,
-                random_state=config.RANDOM_SEED,
+                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
                 n_jobs=self._autotune_njobs,
             )
             fit_kw = {"sample_weight": sample_weight}
@@ -2883,7 +2906,7 @@ class RacePredictor:
             from lightgbm import LGBMRegressor, early_stopping as _lgb_es
             reg = LGBMRegressor(
                 objective="cross_entropy", **hp, subsample_freq=1,
-                random_state=config.RANDOM_SEED, n_jobs=self._autotune_njobs, verbose=-1,
+                random_state=getattr(self, "random_seed", config.RANDOM_SEED), n_jobs=self._autotune_njobs, verbose=-1,
             )
             fit_kw = {"sample_weight": sample_weight}
             if eval_set is not None:
@@ -2904,7 +2927,7 @@ class RacePredictor:
                 objective="binary",
                 **hp,
                 subsample_freq=1,
-                random_state=config.RANDOM_SEED,
+                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
                 n_jobs=self._autotune_njobs,
                 verbose=-1,
             )
@@ -2925,7 +2948,7 @@ class RacePredictor:
             hp_cat.update(self._filter_params(params, "cat"))
             model = CatBoostClassifier(
                 loss_function="Logloss",
-                random_seed=config.RANDOM_SEED,
+                random_seed=getattr(self, "random_seed", config.RANDOM_SEED),
                 verbose=False,
                 **hp_cat,
             )
@@ -2940,7 +2963,7 @@ class RacePredictor:
                 objective="binary:logistic",
                 eval_metric="logloss",
                 **hp,
-                random_state=config.RANDOM_SEED,
+                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
                 n_jobs=self._autotune_njobs,
             )
             fit_kw = {"sample_weight": sample_weight}
@@ -2985,7 +3008,7 @@ class RacePredictor:
                 objective="binary",
                 **hp,
                 subsample_freq=1,
-                random_state=config.RANDOM_SEED,
+                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
                 n_jobs=self._autotune_njobs,
                 verbose=-1,
             )
@@ -3006,7 +3029,7 @@ class RacePredictor:
             hp_cat.update(self._filter_params(params, "cat"))
             model = CatBoostClassifier(
                 loss_function="Logloss",
-                random_seed=config.RANDOM_SEED,
+                random_seed=getattr(self, "random_seed", config.RANDOM_SEED),
                 verbose=False,
                 **hp_cat,
             )
@@ -3022,7 +3045,7 @@ class RacePredictor:
                 scale_pos_weight=scale_pos_weight,
                 eval_metric="logloss",
                 **hp,
-                random_state=config.RANDOM_SEED,
+                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
                 n_jobs=self._autotune_njobs,
             )
             fit_kw = {"sample_weight": sample_weight}
@@ -3360,7 +3383,7 @@ class RacePredictor:
 
         def _logloss_platt(params: np.ndarray) -> float:
             a, b = float(params[0]), float(params[1])
-            raw = 1.0 / (1.0 + np.exp(-(a * logit_p + b)))
+            raw = expit(a * logit_p + b)
             cal = _grouped_normalize(raw, _groups)
             cal = np.clip(cal, _eps_ll, 1 - _eps_ll)
             return -float(np.mean(won * np.log(cal) + (1 - won) * np.log(1 - cal)))
@@ -3388,7 +3411,7 @@ class RacePredictor:
             a, b = ab
             lp = np.log(np.clip(probs, _eps, 1 - _eps)
                         / np.clip(1 - probs, _eps, 1))
-            cal = 1.0 / (1.0 + np.exp(-(a * lp + b)))
+            cal = expit(a * lp + b)
             return float(np.mean((cal - placed) ** 2))
 
         res = minimize(
@@ -3431,6 +3454,8 @@ class RacePredictor:
         model_params: dict[str, dict] | None,
         sample_weight: np.ndarray | None,
         race_dates=None,
+        soft_y: np.ndarray | None = None,
+        market_odds: np.ndarray | None = None,
     ) -> bool:
         """Fit Platt + isotonic calibrators on a training-only slab.
 
@@ -3456,14 +3481,27 @@ class RacePredictor:
         if len(cal_groups) < 5:
             return False
 
-        X_cal_tr = X_train[:cal_row_start]
+        # Calibration must be strictly later than every training race,
+        # including when a race-count boundary falls in the middle of a day.
+        cal_train_races = cal_bnd
+        if race_dates is not None:
+            dates = pd.DatetimeIndex(race_dates)
+            cutoff = dates[cal_bnd] - pd.Timedelta(days=max(0, int(getattr(config, "PURGE_DAYS", 7))))
+            allowed = (dates[:cal_bnd] < dates[cal_bnd]) & (dates[:cal_bnd] <= cutoff)
+            if not allowed.any():
+                return False
+            cal_train_races = int(np.flatnonzero(allowed)[-1]) + 1
+        cal_train_end = int(cum_g[cal_train_races - 1])
+
+        X_cal_tr = X_train[:cal_train_end]
         X_cal_vl = X_train[cal_row_start:]
         if len(X_cal_tr) < 100 or len(X_cal_vl) < 50:
             return False
 
-        sw_cal = sample_weight[:cal_row_start] if sample_weight is not None else None
-        y_won_cal_tr = y_won[:cal_row_start]
-        y_placed_cal_tr = y_placed[:cal_row_start]
+        sw_cal = sample_weight[:cal_train_end] if sample_weight is not None else None
+        soft_cal = soft_y[:cal_train_end] if soft_y is not None else None
+        y_won_cal_tr = y_won[:cal_train_end]
+        y_placed_cal_tr = y_placed[:cal_train_end]
         won_cal_vl = y_won[cal_row_start:].astype(np.float64)
         placed_cal_vl = y_placed[cal_row_start:].astype(np.float64)
         fp_cal_vl = finish_positions[cal_row_start:]
@@ -3478,7 +3516,7 @@ class RacePredictor:
         # disposable models don't train the full n_estimators.
         _slab_es = (
             self._early_stop_split(
-                groups_train[:cal_bnd], race_dates[:cal_bnd],
+                groups_train[:cal_train_races], race_dates[:cal_train_races],
                 purge_days=int(getattr(config, "PURGE_DAYS", 7)),
             )
             if race_dates is not None and int(getattr(config, "EARLY_STOPPING_ROUNDS", 0)) > 0
@@ -3490,10 +3528,12 @@ class RacePredictor:
             _s_eval_w = [(X_cal_tr[_s_vl_beg:], y_won_cal_tr[_s_vl_beg:])]
             _s_eval_p = [(X_cal_tr[_s_vl_beg:], y_placed_cal_tr[_s_vl_beg:])]
             _s_y_won, _s_y_placed = y_won_cal_tr[:_s_tr_end], y_placed_cal_tr[:_s_tr_end]
+            _s_soft = soft_cal[:_s_tr_end] if soft_cal is not None else None
         else:
             _s_X, _s_sw = X_cal_tr, sw_cal
             _s_eval_w = _s_eval_p = None
             _s_y_won, _s_y_placed = y_won_cal_tr, y_placed_cal_tr
+            _s_soft = soft_cal
 
         n_pos_w = max(int(_s_y_won.sum()), 1)
         cal_clf = self._train_win_classifier(
@@ -3503,6 +3543,7 @@ class RacePredictor:
             params=clf_params,
             sample_weight=_s_sw,
             eval_set=_s_eval_w,
+            soft_y=_s_soft,
         )
         n_pos_p = max(int(_s_y_placed.sum()), 1)
         cal_place = self._train_place_classifier(
@@ -3528,10 +3569,24 @@ class RacePredictor:
             placed_cal_vl,
         )
 
+        # Phase 1 already installed OOF isotonic maps. Discard them before
+        # fitting their replacements, otherwise the new maps learn from the
+        # old maps' outputs but inference feeds them direct Platt outputs.
+        self.win_iso_cal = None
+        self.place_iso_cal = None
         cal_win_probs = self._calibrate_win_probs(cal_clf_probs, cal_groups)
         self.win_iso_cal = self._fit_isotonic(cal_win_probs, won_cal_vl)
         cal_place_probs = self._calibrate_place_probs(cal_place_raw)
         self.place_iso_cal = self._fit_isotonic(cal_place_probs, placed_cal_vl)
+        if market_odds is not None:
+            market_probs, market_valid = market_probs_from_odds(
+                np.asarray(market_odds)[cal_row_start:], cal_groups,
+            )
+            self.market_anchor = fit_market_anchor(
+                self._calibrate_win_probs(cal_clf_probs, cal_groups),
+                market_probs, cal_groups, won_cal_vl,
+                race_valid=market_valid,
+            )
         return True
 
     # ── Calibration application ──────────────────────────────────
@@ -3551,7 +3606,7 @@ class RacePredictor:
             _eps = 1e-9
             lp = np.log(np.clip(probs, _eps, 1 - _eps)
                         / np.clip(1 - probs, _eps, 1))
-            raw = 1.0 / (1.0 + np.exp(-(self.platt_a * lp + self.platt_b)))
+            raw = expit(self.platt_a * lp + self.platt_b)
             probs = _grouped_normalize(raw, groups)
         else:
             probs = _grouped_normalize(probs, groups)
@@ -3572,7 +3627,7 @@ class RacePredictor:
             _eps = 1e-9
             lp = np.log(np.clip(raw_probs, _eps, 1 - _eps)
                          / np.clip(1 - raw_probs, _eps, 1))
-            probs = 1.0 / (1.0 + np.exp(-(self.place_platt_a * lp + self.place_platt_b)))
+            probs = expit(self.place_platt_a * lp + self.place_platt_b)
 
         # Isotonic refinement
         if self.place_iso_cal is not None:
@@ -3652,8 +3707,15 @@ class RacePredictor:
         if "race_id" not in featured_df.columns:
             raise ValueError("predict_races requires a race_id column.")
 
-        predict_df, X_scaled = self._prepare_prediction_frame(featured_df)
-        race_ids = pd.Index(pd.unique(predict_df["race_id"]))
+        # Grouped probability operations use contiguous slices. Input rows
+        # may be interleaved (for example after a merge or a shuffle), so
+        # assemble race blocks in first-appearance order before scoring.
+        if featured_df["race_id"].isna().any():
+            raise ValueError("predict_races requires a race_id for every runner.")
+        race_codes, race_ids = pd.factorize(featured_df["race_id"], sort=False)
+        row_order = np.argsort(race_codes, kind="stable")
+        predict_df, X_scaled = self._prepare_prediction_frame(featured_df.iloc[row_order])
+        race_ids = pd.Index(race_ids)
         groups = predict_df.groupby("race_id", sort=False).size().values.astype(np.int64)
         offsets = _group_offsets(groups)
         n = len(predict_df)
@@ -3852,6 +3914,7 @@ class RacePredictor:
                 "place_iso_cal": self.place_iso_cal,
                 "market_anchor": self.market_anchor,
                 "frameworks": self.frameworks,
+                "random_seed": getattr(self, "random_seed", config.RANDOM_SEED),
             },
             path,
         )
@@ -3876,6 +3939,7 @@ class RacePredictor:
         self.place_iso_cal = data.get("place_iso_cal")
         self.market_anchor = data.get("market_anchor")
         self.frameworks = data.get("frameworks", {"classifier": "cat", "place": "cat"})
+        self.random_seed = int(data.get("random_seed", config.RANDOM_SEED))
         logger.info(f"Models loaded (frameworks: {self.frameworks})")
 
     # ── Walk-forward fold helper ─────────────────────────────────
@@ -3891,8 +3955,9 @@ class RacePredictor:
         return_place_probs: bool = False,
         fast_fold: bool = False,
         test_df: pd.DataFrame | None = None,
-    ) -> np.ndarray | tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Train 3 models on a pre-split fold with calibration.
+        blend_market_odds: bool | None = None,
+    ) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+        """Train win and place models on a pre-split fold with calibration.
 
         Uses the last 20 % of the training data as a held-out slab to
         fit temperature + Platt calibration (same pipeline as full
@@ -3903,25 +3968,22 @@ class RacePredictor:
         trained and the models are disposable).
         """
         self.feature_cols = feature_cols
-        fold_params = params or {}
+        self.scaler = _IdentityScaler()
+        fold_params = {role: dict(values) for role, values in (params or {}).items()}
 
-        # Fast-fold overrides: halve n_estimators + cap depth for speed
-        _saved_params: dict | None = None
+        # Keep speed overrides local to this fold, including on failure.
+        # Mutating config here used to affect later training runs and did not
+        # shorten the place model at all.
         if fast_fold:
-            _saved_params = {
-                "clf_n_est": config.CLASSIFIER_PARAMS.get("n_estimators", 500),
-                "clf_depth": config.CLASSIFIER_PARAMS.get("max_depth", 7),
-                "xgb_n_est": config.XGBOOST_PARAMS.get("n_estimators", 500),
-                "xgb_depth": config.XGBOOST_PARAMS.get("max_depth", 6),
-                "lgb_n_est": config.LIGHTGBM_PARAMS.get("n_estimators", 500),
-                "lgb_depth": config.LIGHTGBM_PARAMS.get("max_depth", 6),
-            }
-            config.CLASSIFIER_PARAMS["n_estimators"] = max(100, _saved_params["clf_n_est"] // 2)
-            config.CLASSIFIER_PARAMS["max_depth"] = min(_saved_params["clf_depth"], 5)
-            config.XGBOOST_PARAMS["n_estimators"] = max(100, _saved_params["xgb_n_est"] // 2)
-            config.XGBOOST_PARAMS["max_depth"] = min(_saved_params["xgb_depth"], 5)
-            config.LIGHTGBM_PARAMS["n_estimators"] = max(100, _saved_params["lgb_n_est"] // 2)
-            config.LIGHTGBM_PARAMS["max_depth"] = min(_saved_params["lgb_depth"], 5)
+            for role, defaults in (
+                ("classifier", config.CLASSIFIER_PARAMS),
+                ("place", config.PLACE_CLASSIFIER_PARAMS),
+            ):
+                hp = fold_params.setdefault(role, {})
+                hp["n_estimators"] = max(1, int(hp.get("n_estimators", defaults.get("n_estimators", 500))) // 2)
+                depth_key = "depth" if self.frameworks[role] == "cat" else "max_depth"
+                depth = int(hp.get(depth_key, defaults.get("max_depth", 6)))
+                hp[depth_key] = min(depth, 5) if depth > 0 else 5
 
         fp = train_df["finish_position"].values.astype(np.float32)
         y_won = train_df["won"].fillna(0).values.astype(int)
@@ -3959,6 +4021,31 @@ class RacePredictor:
         # Recency sample weights
         dates = pd.to_datetime(train_df["race_date"])
         sw = compute_recency_sample_weights(dates).copy()
+        race_starts = _group_offsets(groups_train)
+        race_dates = pd.DatetimeIndex(dates.iloc[race_starts])
+
+        # Use the same optional market-probability teacher as train().
+        win_soft = None
+        if bool(getattr(config, "WIN_SOFT_LABEL_DISTILL", False)):
+            teacher_df = train_df.copy()
+            if "bsp" not in teacher_df.columns:
+                bsp = load_bsp()
+                if bsp is not None and {"track", "off_time", "horse_name"}.issubset(teacher_df.columns):
+                    teacher_df["race_date"] = pd.to_datetime(teacher_df["race_date"]).dt.strftime("%Y-%m-%d")
+                    teacher_df = attach_bsp(teacher_df, bsp, cols=("bsp",))
+            teacher = normalise_implied_prob_by_race(teacher_df)
+            if "bsp" in teacher_df.columns:
+                bsp_probs = bsp_implied_prob(teacher_df["bsp"].to_numpy(), teacher_df["race_id"].to_numpy())
+                teacher = np.where(np.isfinite(bsp_probs), bsp_probs, teacher)
+            blend = float(getattr(config, "WIN_SOFT_LABEL_BLEND", 1.0))
+            win_soft = np.where(teacher > 0, blend * teacher + (1.0 - blend) * y_won, y_won)
+
+        self.market_anchor = None
+        use_anchor = bool(getattr(config, "MARKET_ANCHOR", False)) if blend_market_odds is None else bool(blend_market_odds)
+        calibration_odds = (
+            pd.to_numeric(train_df["odds"], errors="coerce").to_numpy()
+            if use_anchor and "odds" in train_df.columns else None
+        )
 
         if not self._fit_training_slab_calibrators(
             X_train=X_train,
@@ -3968,6 +4055,9 @@ class RacePredictor:
             finish_positions=fp,
             model_params=fold_params,
             sample_weight=sw,
+            race_dates=race_dates,
+            soft_y=win_soft,
+            market_odds=calibration_odds,
         ):
             # Too few races — skip calibration
             self.calibration_temp = 1.0
@@ -3983,6 +4073,7 @@ class RacePredictor:
             scale_pos_weight=(len(y_won) - n_pw) / n_pw,
             params=fold_params.get("classifier"),
             sample_weight=sw,
+            soft_y=win_soft,
         )
         n_pp = max(int(y_placed.sum()), 1)
         self.place_model = self._train_place_classifier(
@@ -3997,16 +4088,8 @@ class RacePredictor:
         place_probs_raw = self.place_model.predict_proba(X_test)[:, 1]
 
         win_probs = self._calibrate_win_probs(clf_probs_raw, groups_test)
+        win_probs = self._apply_market_anchor(win_probs, groups_test, test_df)
         place_probs = self._calibrate_place_probs(place_probs_raw)
-
-        # Restore config if fast_fold
-        if fast_fold and _saved_params is not None:
-            config.CLASSIFIER_PARAMS["n_estimators"] = _saved_params["clf_n_est"]
-            config.CLASSIFIER_PARAMS["max_depth"] = _saved_params["clf_depth"]
-            config.XGBOOST_PARAMS["n_estimators"] = _saved_params["xgb_n_est"]
-            config.XGBOOST_PARAMS["max_depth"] = _saved_params["xgb_depth"]
-            config.LIGHTGBM_PARAMS["n_estimators"] = _saved_params["lgb_n_est"]
-            config.LIGHTGBM_PARAMS["max_depth"] = _saved_params["lgb_depth"]
 
         if return_place_probs:
             return win_probs, place_probs

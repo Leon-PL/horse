@@ -9,12 +9,19 @@ drift.
 import numpy as np
 import pandas as pd
 import pytest
+import config
 
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.feature_store import FeatureStore
 from src.model import get_feature_columns
 from tests.test_live_parity import _synthetic_raw
+
+
+@pytest.fixture(autouse=True)
+def all_feature_parity(monkeypatch):
+    """Validate every feature, independently of a local/private allowlist."""
+    monkeypatch.setattr(config, "FEATURE_ALLOWLIST", None)
 
 
 @pytest.fixture(scope="module")

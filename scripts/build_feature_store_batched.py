@@ -37,7 +37,6 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 import config
@@ -120,7 +119,6 @@ def main() -> None:
         rated = chunk.merge(keyed, on=["race_id", "horse_name"], how="left")
         featured = engineer_features(
             rated, save=False, skip_ratings=True, counts_state=counts_state,
-            defer_global_imputation=True,  # leave speed_fig NaN; global fill below
         )
 
         part = os.path.join(parts_dir, f"part_{i:04d}.parquet")
@@ -142,29 +140,7 @@ def main() -> None:
     schemas = [pq.read_schema(p) for p in part_paths]
     unified = pa.unify_schemas(schemas)
 
-    # ── global speed-figure median (the one non-chunk-invariant imputation) ──
-    # engineer_features deferred this fill per chunk; compute ONE median per
-    # speed_fig column over the whole consolidated set so the build is identical
-    # to a monolithic engineer_features, and stamp the medians into counts_state
-    # so later appends reuse them (see engineer_features' speed-fill comment).
-    speed_cols = [n for n in unified.names if "speed_fig" in n.lower()]
-    med_map: dict[str, float] = {}
-    if speed_cols:
-        logger.info("Computing global medians for %d speed_fig columns…", len(speed_cols))
-        acc = {c: [] for c in speed_cols}
-        for p in part_paths:
-            present = [c for c in speed_cols if c in set(pq.read_schema(p).names)]
-            t = pq.read_table(p, columns=present)
-            for c in present:
-                arr = t.column(c).to_numpy(zero_copy_only=False).astype("float64")
-                acc[c].append(arr[~np.isnan(arr)])
-        for c in speed_cols:
-            vals = np.concatenate(acc[c]) if acc[c] else np.array([])
-            med_map[c] = float(np.median(vals)) if vals.size else 0.0
-        del acc
-        gc.collect()
-        for c in speed_cols:
-            counts_state[f"median::{c}"] = med_map[c]
+    # Preserve missing speed histories; no future-dependent global fill.
 
     # ── save processed + carried state + meta BEFORE the streaming write, so a
     # consolidation hiccup never discards the expensive per-chunk work. ─────
@@ -186,8 +162,7 @@ def main() -> None:
 
     # ── consolidate parts → single featured.parquet (streaming, pyarrow) ──
     # Conform each part to the unified schema (add missing columns as typed
-    # nulls; never .cast a narrower table) and fill the speed medians in arrow
-    # so no pandas round-trip can choke on a null integer column.
+    # nulls; never .cast a narrower table) without imputing unknown histories.
     def _conform(tbl: pa.Table) -> pa.Table:
         have = set(tbl.schema.names)
         arrays = [
@@ -203,9 +178,6 @@ def main() -> None:
         pf = pq.ParquetFile(p)
         for batch in pf.iter_batches(batch_size=50_000):
             tbl = _conform(pa.Table.from_batches([batch]))
-            for c, m in med_map.items():
-                i = unified.get_field_index(c)
-                tbl = tbl.set_column(i, unified.field(i), pc.fill_null(tbl.column(c), m))
             writer.write_table(tbl)
         del pf  # release the file handle so the cleanup below can unlink it (Windows)
     writer.close()

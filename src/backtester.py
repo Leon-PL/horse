@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import brier_score_loss
+from sklearn.metrics import brier_score_loss, log_loss
 
 import config
 from src.model import (
@@ -101,6 +101,7 @@ class FoldResult:
 
     # Ranking / calibration metrics
     brier_score: float = 0.0
+    log_loss: float = 0.0
     ndcg_at_1: float = 0.0
     top1_accuracy: float = 0.0
     win_in_top3: float = 0.0
@@ -135,6 +136,13 @@ def walk_forward_validation(
     progress_callback=None,
     fast_fold: bool = True,
     ew_min_place_edge: float | None = None,
+    blend_market_odds: bool = False,
+    random_seed: int | None = None,
+    value_min_odds: float = 1.0,
+    value_max_odds: float = 101.0,
+    ew_enabled: bool = True,
+    ew_min_odds: float = 4.0,
+    ew_max_odds: float = 51.0,
 ) -> dict:
     """
     Run walk-forward (expanding-window) validation.
@@ -160,6 +168,8 @@ def walk_forward_validation(
     def _cb(msg: str, pct: float = 0.0) -> None:
         if progress_callback is not None:
             progress_callback(msg, pct)
+    if min_train_months < 1 or test_window_months < 1:
+        raise ValueError("Training and test windows must be positive numbers of months.")
     df = df.copy()
     df["race_date"] = pd.to_datetime(df["race_date"])
     df["_event_dt"] = _event_sort_key(df)
@@ -181,6 +191,9 @@ def walk_forward_validation(
     # --- Build month boundaries ---
     df["_ym"] = df["race_date"].dt.to_period("M")
     months = sorted(df["_ym"].unique())
+
+    if not months:
+        raise ValueError("No dated race results available for walk-forward validation.")
 
     if len(months) < min_train_months + 1:
         raise ValueError(
@@ -254,7 +267,7 @@ def walk_forward_validation(
         groups_train = train_df.groupby("race_id", sort=False).size().values
 
         groups_test_arr = test_df.groupby("race_id", sort=False).size().values
-        _te = RacePredictor(frameworks=frameworks)
+        _te = RacePredictor(frameworks=frameworks, random_seed=random_seed)
         win_probs_cal, place_probs = _te.train_on_fold(
             X_train_s, X_test_s, train_df,
             groups_train, groups_test_arr, feature_cols,
@@ -262,6 +275,7 @@ def walk_forward_validation(
             return_place_probs=True,
             fast_fold=fast_fold,
             test_df=test_df,
+            blend_market_odds=blend_market_odds,
         )
         # train_on_fold returns calibrated probabilities
         y_prob = win_probs_cal
@@ -300,6 +314,7 @@ def walk_forward_validation(
                       else (test_df["finish_position"].values == 1)).astype(int)
         probs_clipped = np.clip(y_prob, 1e-15, 1 - 1e-15)
         fold_brier = float(brier_score_loss(y_won_test, probs_clipped))
+        fold_log_loss = float(log_loss(y_won_test, probs_clipped, labels=[0, 1]))
 
         # --- P&L simulation (flat 1-unit stakes) ---
         test_with_probs = test_df.copy()
@@ -361,7 +376,8 @@ def walk_forward_validation(
             value_threshold,
             implied_prob=test_with_probs["implied_prob"].values,
         )
-        _vb = test_with_probs[_vb_sel["mask"]]
+        _odds_in_range = test_with_probs["odds"].between(value_min_odds, value_max_odds).to_numpy()
+        _vb = test_with_probs[_vb_sel["mask"] & _odds_in_range]
         _vb_won = _vb["won"].values.astype(int)
         _vb_pnl_arr = settle_win_bets(_vb["odds"].values, _vb_won == 1)
         value_bets_n = len(_vb)
@@ -389,7 +405,7 @@ def walk_forward_validation(
         ew_placed_n = 0
         ew_pnl = 0.0
 
-        if place_probs is not None and "place_prob" in test_with_probs.columns:
+        if ew_enabled and place_probs is not None and "place_prob" in test_with_probs.columns:
             from src.each_way import adjust_place_probs_for_race as _adj_pp
 
             for race_id, race_group in test_with_probs.groupby("race_id"):
@@ -403,7 +419,7 @@ def walk_forward_validation(
                     _adj_place = _adj_pp(_raw_pp, _win_pp, ew_terms.places_paid)
 
                     for _ew_i, (_, ep) in enumerate(race_group.iterrows()):
-                        if not ew_odds_in_band(ep["odds"]):
+                        if not ew_odds_in_band(ep["odds"], ew_min_odds, ew_max_odds):
                             continue
                         ev_result = _ew_value(
                             ep["model_prob"], float(_adj_place[_ew_i]),
@@ -447,6 +463,7 @@ def walk_forward_validation(
             test_size=len(test_df),
             test_races=test_races,
             brier_score=round(fold_brier, 6),
+            log_loss=round(fold_log_loss, 6),
             ndcg_at_1=round(fold_ndcg1, 4),
             top1_accuracy=round(fold_top1, 4),
             win_in_top3=round(fold_win3, 4),

@@ -1,0 +1,187 @@
+"""Regression coverage for production identity and pre-race feature reuse."""
+import ast
+from functools import lru_cache
+from pathlib import Path
+from types import SimpleNamespace
+import json
+
+import pandas as pd
+import pytest
+
+import config
+from src import live_prediction as live
+from src import run_store as registry
+
+
+@pytest.fixture
+def registry_dirs(tmp_path, monkeypatch):
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    models = tmp_path / "models"
+    models.mkdir()
+    monkeypatch.setattr(registry, "RUNS_DIR", str(runs))
+    monkeypatch.setattr(registry, "PRODUCTION_POINTER", str(models / "production.json"))
+    monkeypatch.setattr(config, "MODELS_DIR", str(models))
+    for rid in ("20260101_120000", "20260201_120000", "20260301_120000"):
+        (runs / rid).mkdir()
+        (runs / rid / "model.joblib").write_bytes(rid.encode())
+    return runs
+
+
+def test_production_survives_direct_delete_and_pruning(registry_dirs):
+    rid = "20260101_120000"
+    assert registry.promote(rid)
+    assert registry.delete_run(rid) is False
+    assert registry.prune_runs(keep_latest=1) == ["20260201_120000"]
+    assert registry.get_production_run_id() == rid
+    assert (registry_dirs / rid / "model.joblib").is_file()
+
+
+def test_delete_cannot_escape_registry(registry_dirs):
+    with pytest.raises(ValueError):
+        registry.delete_run("..")
+
+
+def test_model_revision_changes_on_promotion_and_replacement(registry_dirs):
+    registry.promote("20260101_120000")
+    first = registry.production_model_revision()
+    registry.promote("20260201_120000")
+    second = registry.production_model_revision()
+    assert first != second
+    (registry_dirs / second[0] / "model.joblib").write_bytes(b"replacement model")
+    assert registry.production_model_revision() != second
+
+
+def test_serving_cache_loads_exact_promoted_revision(registry_dirs, monkeypatch):
+    # Execute the actual cached loader without running the network/UI page body.
+    source = Path(__file__).resolve().parents[1] / "picks_app.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    loader = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_cached_load_model")
+    st = SimpleNamespace(cache_resource=lambda **kw: lru_cache(maxsize=kw["max_entries"]))
+    calls = []
+    monkeypatch.setattr(registry, "load_run_predictor", lambda rid: calls.append(rid) or object())
+    namespace = {"st": st}
+    exec(compile(ast.Module(body=[loader], type_ignores=[]), str(source), "exec"), namespace)
+    load = namespace["_cached_load_model"]
+    assert load(None) is None
+    registry.promote("20260101_120000")
+    first = load(registry.production_model_revision())
+    assert load(registry.production_model_revision()) is first
+    registry.promote("20260201_120000")
+    assert load(registry.production_model_revision()) is not first
+    assert calls == ["20260101_120000", "20260201_120000"]
+
+
+@pytest.fixture
+def cache_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "LOOKAHEAD_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(live, "feature_store_signature", lambda store=None: "history-v1")
+    return tmp_path
+
+
+def test_cache_requires_metadata_version_and_history_even_without_card_signature(cache_dir, monkeypatch):
+    frame = pd.DataFrame({"horse_name": ["A"]})
+    date = "2026-10-12"
+    live.save_lookahead_cache(date, frame, "cards-v1")
+    assert live.load_lookahead_cache(date) is not None
+    assert live.load_lookahead_cache(date, "other-cards") is None
+    monkeypatch.setattr(live, "feature_store_signature", lambda store=None: "history-v2")
+    assert live.load_lookahead_cache(date) is None
+    monkeypatch.setattr(live, "feature_store_signature", lambda store=None: "history-v1")
+    meta_path = cache_dir / f"{date}.json"
+    meta = json.loads(meta_path.read_text())
+    meta["version"] = -1
+    meta_path.write_text(json.dumps(meta))
+    assert not live.lookahead_cache_valid(date)
+    meta_path.write_text("incomplete json")
+    assert not live.lookahead_cache_valid(date)
+    meta_path.unlink()
+    assert live.load_lookahead_cache(date) is None
+
+
+def test_live_card_changes_recompute_all_race_features(cache_dir, monkeypatch):
+    from src import feature_store, featured_dataset, data_processor
+    calls = []
+
+    class Store:
+        def exists(self): return True
+        def meta(self): return {"fe_signature": "current"}
+        def last_date(self): return pd.Timestamp("2026-10-10")
+        def featurize_live(self, card):
+            calls.append(card.copy())
+            result = card.copy()
+            result["odds_rank"] = card.groupby("race_id")["odds"].rank()
+            return result
+
+    monkeypatch.setattr(feature_store, "FeatureStore", Store)
+    monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "current")
+    monkeypatch.setattr(data_processor, "process_data", lambda df, save=False: df)
+    cards = pd.DataFrame({"race_id": ["r1", "r1"], "horse_name": ["A", "B"], "odds": [2.0, 4.0]})
+    first = live.features_for_live_cards(cards, "2026-10-11")
+    assert first["odds_rank"].tolist() == [1.0, 2.0]
+    live.features_for_live_cards(cards, "2026-10-11")
+    assert len(calls) == 1
+    changed = cards.copy()
+    changed["odds"] = [6.0, 2.0]
+    assert live.features_for_live_cards(changed, "2026-10-11")["odds_rank"].tolist() == [2.0, 1.0]
+    added = pd.concat([changed, pd.DataFrame({"race_id": ["r1"], "horse_name": ["C"], "odds": [3.0]})], ignore_index=True)
+    assert len(live.features_for_live_cards(added, "2026-10-11")) == 3
+    assert len(calls) == 3
+    manual = changed.copy()
+    manual["race_id"] = "custom"
+    live.features_for_live_cards(manual, "2026-10-11", use_cache=False)
+    assert len(calls) == 4
+    # Manual what-if races must not overwrite the scheduled racecard cache.
+    assert len(live.load_lookahead_cache("2026-10-11", live.cards_signature(added))) == 3
+    with pytest.raises(ValueError, match="after the stored results"):
+        live.features_for_live_cards(cards, "2026-10-10")
+
+
+def test_lookahead_includes_today(cache_dir, monkeypatch):
+    from src import data_collector, feature_store
+    monkeypatch.setattr(feature_store, "FeatureStore", lambda: SimpleNamespace(exists=lambda: True))
+    cards = pd.DataFrame({"horse_name": ["A"]})
+    monkeypatch.setattr(data_collector, "get_scraped_racecards", lambda date_str: cards.copy())
+    built = []
+    monkeypatch.setattr(live, "features_for_live_cards", lambda frame, day: built.append(day) or frame)
+    progress = []
+    result = live.build_lookahead_cache(days_ahead=1, progress_fn=lambda *args: progress.append(args))
+    today = live.datetime.now().date()
+    assert built == [today.isoformat(), (today + live.timedelta(days=1)).isoformat()]
+    assert len(result) == 2
+    assert progress[-1][:2] == (2, 2)
+
+
+def test_promotion_clears_existing_session_predictions():
+    source = Path(__file__).resolve().parents[1] / "picks_app.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    sync = next(n for n in tree.body if isinstance(n, ast.If)
+                and isinstance(n.test, ast.Compare)
+                and any(isinstance(c, ast.Name) and c.id == "_production_revision" for c in n.test.comparators))
+
+    class State(dict):
+        __getattr__ = dict.__getitem__
+        __setattr__ = dict.__setitem__
+
+    state = State(_production_revision=("old", 1, 1), predictor=object(),
+                  active_run_id="old", picks_preds=object(), picks_meta=object(),
+                  picks_explanations={"old": "explanation"}, _prediction_result_cache={"old": object()})
+    namespace = {"st": SimpleNamespace(session_state=state),
+                 "_production_revision": ("new", 2, 2),
+                 "load_run_meta": lambda rid: {"metrics": {"run": rid}}}
+    exec(compile(ast.Module(body=[sync], type_ignores=[]), str(source), "exec"), namespace)
+    assert state.predictor is None
+    assert state.active_run_id == "new"
+    assert state.metrics == {"run": "new"}
+    assert "picks_preds" not in state
+    assert "picks_explanations" not in state
+    assert "_prediction_result_cache" not in state
+
+
+def test_cache_rejects_parquet_from_another_writer(cache_dir):
+    date = "2026-10-12"
+    live.save_lookahead_cache(date, pd.DataFrame({"horse_name": ["A"]}), "cards-A")
+    assert live.load_lookahead_cache(date, "cards-A") is not None
+    # A competing cache writer published a different field before its metadata.
+    pd.DataFrame({"horse_name": ["B", "C"]}).to_parquet(cache_dir / f"{date}.parquet", index=False)
+    assert live.load_lookahead_cache(date, "cards-A") is None
