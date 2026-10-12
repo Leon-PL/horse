@@ -1,8 +1,9 @@
 # CLAUDE.md
 
 Read **[PROJECT_OUTLINE.md](PROJECT_OUTLINE.md)** first — it is the full
-architecture and handover document. The rules below are the ones that
-cause real damage when violated.
+architecture and handover document. For what to work on next, and why the
+model loses to the market, see **[docs/ACTION_PLAN.md](docs/ACTION_PLAN.md)**.
+The rules below are the ones that cause real damage when violated.
 
 ## Hard rules
 

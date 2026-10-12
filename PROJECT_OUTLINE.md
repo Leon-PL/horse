@@ -97,6 +97,9 @@ favourites and debutants) that no public source proxies.
 
 ### 4.2 Ranked next steps
 
+The full version, with success criteria, costs and decision gates, is
+**[docs/ACTION_PLAN.md](docs/ACTION_PLAN.md)** — start there. Summary:
+
 1. **Rebuild the measuring instrument first.** Refresh results, rebuild the
    store, retrain, promote — then `project_status.py` goes green. Until then
    every number produced is untrustworthy, which is how two phantom edges

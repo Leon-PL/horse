@@ -1,0 +1,419 @@
+# Action Plan
+
+**Written 2026-10-12.** Supersedes `plan.txt`, whose Stage 2–5 assumptions
+predate the refutations in [NEGATIVE_RESULTS.md](NEGATIVE_RESULTS.md).
+
+Read in this order: [NEGATIVE_RESULTS.md](NEGATIVE_RESULTS.md) for what is
+already dead, then §1 here for why the model loses, then pick up at §2.
+
+Every item below states a **success criterion** that can fail. Items without
+one are not work, they are hope.
+
+---
+
+## 1. Diagnosis: why is the model wrong?
+
+From run `20260623_223148` (646 test races — indicative, not definitive; see
+the caveat at the end of this section):
+
+| metric | model | logistic baseline | **market** |
+|---|---|---|---|
+| top-1 accuracy | 0.268 | 0.292 | **0.348** |
+| NDCG@1 | 0.374 | 0.399 | **0.446** |
+| winner in top 3 | 0.605 | 0.629 | **0.691** |
+| log loss | 0.295 | 0.297 | **0.276** |
+| Brier | 0.0855 | 0.0860 | **0.0808** |
+| RPS | 0.246 | 0.258 | **0.213** |
+| ECE (calibration) | **0.0054** | 0.0075 | 0.0147 |
+
+Read the last row against the first. **The model is the best-calibrated of the
+three and the worst at discrimination.** It knows how often it is right; it
+does not know *which* horse wins. The market picks the winner ~30% more often
+(0.348 vs 0.268 — eight percentage points).
+
+That splits the problem into five separate failures with five different fixes,
+and they are not equally expensive to attack.
+
+### 1a. It is NOT a calibration problem — stop working on calibration
+
+ECE 0.0054, the best of the three, and the selection-rule audit found
+predicted win rate within 0.0023 of actual in *every* price band. Platt +
+isotonic are doing their job. Further calibration work has no upside.
+
+### 1b. It may be a *model* problem, and that is the cheapest thing to check
+
+The model loses to **plain logistic regression** on every ranking metric
+(top-1 0.268 vs 0.292, NDCG@1 0.374 vs 0.399). A 2,000-tree LightGBM with 151
+engineered features should not rank worse than a linear model on the same
+data. Candidate causes, in order of likelihood:
+
+- **Class weighting distorts ranking.** The win classifier trains with
+  `scale_pos_weight ≈ (N−1)` / `auto_class_weights="Balanced"`. For a
+  one-winner-per-race problem that massively upweights winners and reshapes
+  where the model spends capacity. It is the right choice for balanced
+  accuracy and the wrong one for ranking within a race.
+- **Over-regularisation.** `learning_rate 0.008` with `reg_alpha 0.5`,
+  `reg_lambda 3.0`, `min_child_samples 50` is a heavily damped configuration;
+  combined with early stopping it may be underfitting the discriminative
+  signal while fitting the marginal rate well (which is what good ECE
+  measures).
+- **The binary-then-normalise architecture** ignores that exactly one horse
+  wins. See §4a.
+
+**Caveat on the numbers:** 646 test races puts the standard error on top-1 at
+roughly 1.8 points, so model-vs-logistic (2.4 points) is suggestive, not
+established — about 1.3σ. Model-vs-market (8.0 points) is ~4.4σ and is real.
+**Re-measuring this properly on the rebuilt store is item 3a** and it is the
+single cheapest high-information check available.
+
+### 1c. It is under-informed relative to the market — partly irreducibly
+
+Even fixed, the model would still trail. The market price is a weighted
+consensus of thousands of opinions including professional syndicates running
+their own models, and it contains information no public source carries:
+
+- **Private stable information** — gallop reports, fitness, intent, undisclosed
+  niggles. Previously characterised: the gap concentrates on **favourites and
+  debutants** and vanishes once that information is exposed. The sale-price
+  work confirmed the debutant gap is genuinely private, not a public price
+  anyone can scrape (ledger §5).
+- **Aggregation.** Beating a consensus requires being better than its best
+  participants, not better than its average one.
+
+This part is **not rectifiable from public data**. Any plan that implicitly
+assumes it is will fail the way the last four months did.
+
+### 1d. 216 sectional features exist and the model has never seen them
+
+The feature store holds **1,178 columns**, of which **216 are `atr_*`** —
+velocity curves, finishing-speed percentages, stride length and frequency,
+energy distribution, sectional-adjusted placings, from the At The Races / TPD
+scrape that cost a Fastly-challenge workaround and a resumable multi-week
+backfill at ~2.5s per request.
+
+**The allowlist is 151 features and contains zero of them.** Its composition:
+
+| family | count |
+|---|---|
+| trainer | 29 |
+| horse | 28 |
+| jockey | 19 |
+| jockey×trainer | 7 |
+| field/context | 7 |
+| days-since | 6 |
+| sire/damsire | 9 |
+| official rating | 5 |
+| speed figures | 3 |
+| Elo | 3 |
+| other | ~35 |
+
+Three-quarters of it is entity history — trainer, horse and jockey form. That
+is precisely the public form the market prices most efficiently, and precisely
+what the saturation finding said adds nothing. Meanwhile the one dataset that
+is genuinely hard to obtain and hard to process is sitting unused.
+
+**This is the largest identified gap between what the project owns and what it
+uses.** It is also the cheapest to close: the data is already in the store.
+
+### 1e. The selection rule then gives back whatever edge survives
+
+The value filter costs **0.87 points** against backing everything in the band,
+concentrated in the middle of the book (6–25, 59% of stakes). Full breakdown in
+ledger §2. Fixing the model without fixing the rule banks nothing.
+
+### Summary
+
+| failure | fixable? | cost | where |
+|---|---|---|---|
+| calibration | already fine | — | stop |
+| model under-discriminates | probably | low | §3a, §4a |
+| sectionals unused | yes | low | §3b |
+| selection rule loses value | probably | low | §4c |
+| market holds private info | **no** | — | accept |
+| market aggregates many opinions | **no** | — | accept |
+
+---
+
+## 2. Phase 0 — restore the instrument (blocking everything else)
+
+`scripts/project_status.py` currently reports **not ready** on three counts.
+Nothing measured before this is finished can be trusted, and two of this
+project's largest "edges" were artifacts of exactly this.
+
+| # | task | success criterion |
+|---|---|---|
+| 2a | Refresh results: ~4 months of races (last stored date 2026-06-20). Hours of scraping at a 2s delay — run it overnight. | database check green |
+| 2b | Rebuild the feature store. The current store was built by older FE code (`fe_signature` mismatch), so a rebuild is required regardless. | store check green, signatures match |
+| 2c | Retrain and promote. The newest saved run predates the `trainer_freq` leak fix, so **no existing run should be promoted.** | `project_status.py` exits 0 |
+| 2d | Flat **draw backfill**, still pending from the draw-bug fix. | draw non-null rate at flat tracks matches expectation |
+
+---
+
+## 3. Phase 1 — data correctness, and use what you own
+
+Highest information per unit of effort. Do all of this before touching
+modelling architecture or buying data.
+
+### 3a. Re-measure the model-vs-logistic gap properly *(≈1 day)*
+
+Re-run the §1 comparison on the rebuilt store with the full test set, not 646
+races. **Success criterion:** a definitive answer to "does a 2,000-tree GBM
+rank worse than logistic regression on the same features?" If yes, §4b is the
+priority and the whole modelling configuration is suspect. If no, §1b closes
+and attention moves to §3b.
+
+### 3b. Triage the 216 sectional features *(≈2 days)* — **biggest cheap upside**
+
+The ATR work was built and never validated; the session that produced it ended
+mid-flight. Run the established triage on each family:
+
+1. correlation with the market residual (`won − mkt_imp`) — ~0 means priced, stop;
+2. CLV at BSP under the locked walk-forward, with the ROI-vs-CLV tripwire.
+
+Priority order, most-orthogonal first:
+
+- **Sectional-derived trouble** — horses closing fastest at the line but
+  beaten ("staying on", trip short, traffic). This is the complete,
+  full-coverage, no-text-parsing version of the signal that stewards reports
+  failed to provide (ledger §7), and it captures incidents the stewards never
+  reported.
+- **Stride biomechanics** — length × frequency, and how a horse *produces*
+  speed. Much harder for the market to price than split times.
+- **Energy distribution / closing speed in hand** — did the horse have more to
+  give?
+- **Race-level pace projection** (§3c) built on the sectional pace styles.
+
+**Success criterion:** each family either enters the allowlist on a CLV
+improvement, or gets an entry in the ledger. Either outcome is progress; the
+current state — 216 columns with no verdict — is not.
+
+**Caveat to respect:** ATR coverage is GB-only and starts partway through the
+history. Gate on a coverage flag; do not median-fill (the RTV lesson).
+
+### 3c. Build the race-shape model *(≈2 days)*
+
+The store has per-horse `pace_style_index` but no **race-level** pace scenario:
+count the likely front-runners, project whether the race sets up as a
+lone-leader steal or a collapse, then score each horse's fit to that scenario
+and to the draw. Pace fit is technical enough that the market plausibly prices
+it imperfectly, and this is a derived feature — no new data.
+
+**Success criterion:** CLV improvement under the walk-forward, or a ledger entry.
+
+### 3d. Label correctness audit *(≈1 day)* — never done
+
+`plan.txt` Stage 1 called for this and it was never carried out. Cross-check
+against Betfair: `won` / `placed`, non-runners, **dead heats**, voids,
+places-paid, and the horse-name/track/off-time merge keys. Labels that are
+wrong even 0.5% of the time put a ceiling on achievable accuracy and quietly
+flatter or punish every experiment.
+
+**Success criterion:** a disagreement rate, and a fix or a documented
+explanation for each category.
+
+### 3e. Retire dead weight *(≈half a day)*
+
+- `par_time_features` and `stewards_features` are tested but **never called**;
+  they are hashed into `fe_signature`, so editing dead code forces a multi-GB
+  rebuild. Either wire them or unregister them.
+- `add_rtv_features` is retired and still defined.
+- 2 of 8 runs carry no feature signature.
+- Prune the allowlist: ablate under the locked walk-forward and drop what does
+  not pay. 151 features, three-quarters entity history, and the saturation
+  finding says the marginal ones add nothing.
+
+---
+
+## 4. Phase 2 — modelling
+
+Only after Phase 1. Ordered by expected value given §1.
+
+### 4a. Race-aware modelling *(≈3–4 days)*
+
+The current design trains a per-horse binary classifier and normalises within
+race, which ignores that exactly one horse wins. Given §1 — well calibrated,
+poorly discriminating — the gain from respecting race structure should land
+exactly where the deficit is.
+
+- **Conditional logit / softmax over the field** (Harville/Henery), or
+  **learning-to-rank** (LambdaMART, native in LightGBM).
+- **Place probabilities derived from win probabilities** (Harville) instead of
+  a separate place classifier — more coherent, and one less thing to break.
+
+**Honest prior:** a Plackett-Luce LightGBM objective already lost to the plain
+binary classifier once (2026-06-12). But that test predates the leak fix and
+the current store, and — per §1b — "beats the binary classifier" may be a low
+bar if the binary classifier ranks worse than logistic regression. Re-test, and
+**judge on ranking metrics (top-1, NDCG) not log loss**, since log loss is the
+one metric where the current model is already competitive.
+
+**Success criterion:** top-1 and NDCG@1 beat the current model *and* the
+logistic baseline on the locked walk-forward.
+
+### 4b. Fix the objective before changing the architecture *(≈1 day)* — cheapest
+
+Two configuration experiments that follow directly from §1b:
+
+- **Drop class weighting** (`scale_pos_weight` / `auto_class_weights`) and
+  compare ranking metrics. Balanced weighting serves calibration, which is
+  already solved, and may be costing discrimination.
+- **Loosen regularisation / raise the learning rate** and compare. The current
+  configuration is heavily damped.
+
+**Success criterion:** ranking metrics improve, or both are ruled out with
+numbers.
+
+### 4c. Train on the market's residual, not on the outcome *(≈2 days)*
+
+This is the genuinely different idea, and it has not been tried. Three things
+have: market probabilities as *features* (fund+market), as *soft labels*
+(`WIN_SOFT_LABEL_DISTILL` — which teaches the model to **imitate** the market),
+and as a *post-hoc blend* (the Benter anchor).
+
+What has not been tried is the market log-odds as a **fixed offset**
+(LightGBM `init_score`, XGBoost `base_margin`). A model trained on `won`
+spends nearly all its capacity relearning what the market already knows — the
+large, easy signal of class and ability — leaving a sliver for the residual.
+With the market as an offset, the model can *only* learn what the market
+misses. That is Benter's actual design, and it attacks §1c from the one angle
+that is not structurally blocked.
+
+**Success criterion:** positive CLV at BSP under the locked walk-forward. Watch
+the ROI-vs-CLV tripwire — an odds-derived target makes leakage easy.
+
+### 4d. Conditional edge: find *where* you beat the market *(≈1 day)*
+
+Stop asking "do we beat the market" and ask "where". Fit the Benter α
+separately by price band, field size, race type and runner exposure. The
+selection-rule audit already hints at structure: the filter adds value at
+odds < 6 and 25–50 and loses in the middle, and the model is better calibrated
+than the market at the extremes.
+
+Related: a **new selection rule**. The current `combo_prob > mkt_imp` is
+vacuous at the margin — because β ≈ 0.97 pins the anchored probability to the
+market, `combo_prob/mkt_imp > 1.10` matches 16 bets out of 104,146. Any
+replacement must use **rank or relative edge within a race**, not an absolute
+ratio threshold.
+
+**Success criterion:** a segment with α materially above the pooled +0.046 that
+survives out-of-sample, or the conclusion that no such segment exists.
+
+### 4e. Specialised sub-models + stacking *(only if 4a–4d show signal)*
+
+Flat vs jumps, distance bands, handicap vs non-handicap, with isotonic
+calibration per race type and a stacked meta-model. Low prior — GBMs on
+segmented data usually just lose sample size — so do not start here.
+
+---
+
+## 5. Phase 3 — new public data
+
+Most public form is priced; the ledger records seven refutations. Only three
+categories are plausibly orthogonal, and they are ranked by
+(orthogonality × availability) ÷ effort.
+
+### 5a. Betfair market microstructure — **the top remaining candidate**
+
+The project holds the *price trajectory* (`ltp_300s`, `ltp_60s`,
+`ltp_preoff`, `bsp`) but **no traded volume and no ladder depth**. Volume-
+weighted moves, which side of the book money enters, and how late it arrives
+are the most direct available proxy for the private information in §1c — and
+it is a latency/processing edge rather than a form edge, which is the category
+that has not already failed here.
+
+Source: Betfair historic data (`historicdata.betfair.com`); the richer files
+carry matched volume per runner over time. Licence tiers differ — check what
+the account allows before planning around it. Live equivalent: the Exchange
+Stream API ladder.
+
+**Caveat learned the hard way:** features built *from odds* can show apparent
+CLV purely by proxying the price move itself, which is not tradeable (the
+jockey-booking result, ledger §6). Validate on **continuation**, not
+correlation: does the signal predict the move *after* the observation point?
+
+### 5b. GoingStick numeric readings — cheap, low ceiling
+
+The official penetrometer value (e.g. 7.2) rather than the verbal "good to
+soft", published per GB meeting and rarely used quantitatively. The going
+*category* is priced; the numeric reading is finer-grained and readable pre-off
+from the early races on a card. Pairs naturally with the par-time work, which
+was CLV-flat on its own but whose underlying data is sound and kept.
+
+### 5c. GPS / stride biomechanics beyond sectionals — highest ceiling, commercial
+
+Total Performance Data (`totalperformancedata.com`) is the official tracking
+provider for a large set of GB tracks: stride length and frequency,
+position-in-running, speed by furlong. Commercial licence. Only worth pursuing
+if §3b shows the ATR sectionals already carry signal — if the cheap version of
+this data is priced, the expensive version will be too.
+
+### 5d. Jurisdiction expansion — a strategic choice, not a task
+
+The single most valuable biometric, **run-to-run bodyweight change**, is
+published in Hong Kong, Japan and Australia and **not** in GB/IRE. Expanding
+jurisdiction would also mean smaller fields and different market structure. It
+is a months-long rebuild of scrapers, merge keys, track config and ratings, so
+treat it as a decision about what the project is, not as a backlog item.
+
+### Do not bother
+
+Weather (held, priced), going category (held, priced), pedigree (held, priced —
+and only conditionally useful for debutants and new trips), anything derived
+purely from past finishing positions, and public sale prices (ledger §5). See
+the ledger before adding to this list.
+
+---
+
+## 6. Phase 4 — strategy and staking
+
+**Gate: do not start until CLV at BSP is positive on an unbiased estimator**
+(`median_clv` / `geometric_mean_clv`, never the mean ratio — see ledger).
+
+Then: Kelly fraction and bankroll under realistic liquidity, execution against
+the ladder rather than at an assumed price, commission tiers, and the each-way
+1/5-odds re-run that is still parked. All of it is worthless without a
+positive closing-line edge, and all of it is cheap once there is one.
+
+---
+
+## 7. Decision gates
+
+Checkpoints where the honest move may be to stop:
+
+1. **After Phase 0.** If `project_status.py` cannot be made green without
+   disproportionate effort, the system is not maintainable as configured.
+2. **After 3a + 4b.** If the model still ranks no better than logistic
+   regression once weighting and regularisation are addressed, the feature set
+   — not the model — is the binding constraint, and §1d/§5a are the only
+   remaining levers.
+3. **After 3b.** The sectionals are the last unexploited asset in hand. If 216
+   purpose-built features from the hardest dataset to acquire produce no CLV,
+   that is strong evidence the market prices everything reachable, and §5a
+   becomes the only live hypothesis.
+4. **After 4c + 5a.** Residual-targeted training and market microstructure are
+   the two approaches that attack the informational gap rather than
+   re-processing public form. If both fail, there is no public-data edge to
+   find and continuing is a hobby rather than an investment — which is a
+   perfectly good reason to continue, but should be a conscious one.
+
+**What success looks like:** median CLV > 1.0 with a race-clustered confidence
+interval excluding 1.0, on a locked walk-forward, holding on a golden hold-out
+never used for tuning. Nothing short of that is an edge, whatever the ROI says.
+
+---
+
+## Appendix: non-negotiables
+
+Carried from `CLAUDE.md`, each corresponding to a bug that actually shipped:
+
+1. History features must exclude the current race; never a grouped cumulative
+   followed by a global `.shift()`.
+2. Bet selection and settlement live in `src/bet_settlement.py`.
+3. Merge keys live in `src/utils.py`.
+4. Anything that can change a feature value is registered in
+   `_FE_SOURCE_FILES`.
+5. Check `scripts/project_status.py` before trusting any number.
+6. Walk-forward evaluation uses `src/wf_eval.py` — purged folds, out-of-fold
+   second stages, race-clustered intervals.
+7. Read CLV from `src.clv.summarise_clv`; never the mean ratio alone.
+8. Compare a selection rule against the **same universe it bets in**.

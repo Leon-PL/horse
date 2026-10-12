@@ -1,3 +1,14 @@
+SUPERSEDED 2026-10-12 by docs/ACTION_PLAN.md.
+
+Kept for provenance. Stages 0-1 of this document were largely carried out; its
+Stage 2-5 assumptions predate the refutations recorded in
+docs/NEGATIVE_RESULTS.md, so several of the leads below are known dead:
+the market-combination layer, sale prices, wind surgery, trainer travel,
+jockey booking, stewards reports and par-time speed figures. Do not pick work
+from here without checking the ledger first.
+
+=== ORIGINAL BELOW ===
+
 Stage 0 — Make the measuring instrument trustworthy (do this first)
 The whole place-edge mirage came from a stale store + silent feature gaps. Before any modeling, lock evaluation down:
 
