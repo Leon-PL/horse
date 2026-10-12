@@ -111,20 +111,23 @@ def test_save_run_is_lean(tmp_path, monkeypatch):
 
 
 # ── train_run orchestration (mocked) ──────────────────────────────────
-def test_train_run_orchestration(monkeypatch):
+@pytest.mark.parametrize("walk_forward", [False, True])
+def test_train_run_orchestration(monkeypatch, walk_forward):
     feat = pd.DataFrame({
         "race_id": ["r1", "r1"], "race_date": pd.to_datetime(["2025-01-01"] * 2),
         "horse_name": ["A", "B"], "off_time": ["14:30", "14:30"],
     })
 
+    captured = {}
+
     class _FakePred:
         def __init__(self, *a, **k):
+            captured["predictor_options"] = k
             self.test_analysis = {"stats": {"value": {"roi": 5.0, "bets": 3}}, "bets": pd.DataFrame()}
             self.train_metrics = {}
         def train(self, df, **k):
+            captured["train_options"] = k
             return {"win_classifier": {"brier_score": 0.12, "log_loss": 0.3}}
-
-    captured = {}
 
     def _fake_save_run(**kwargs):
         captured.update(kwargs)
@@ -139,7 +142,21 @@ def test_train_run_orchestration(monkeypatch):
     monkeypatch.setattr(tr, "compute_clv", lambda bets, ref_df=None: {"overall": {"mean_clv": 1.2}})
     monkeypatch.setattr(tr, "save_run", _fake_save_run)
 
-    cfg = tr.TrainingConfig(name="t", refresh_data=False)
+    import src.backtester as bt
+
+    def _fake_walk_forward(df, **kwargs):
+        captured["walk_forward_options"] = kwargs
+        return {"summary": pd.DataFrame()}
+
+    monkeypatch.setattr(bt, "walk_forward_validation", _fake_walk_forward)
+    cfg = tr.TrainingConfig(
+        name="t", refresh_data=False, seed=123,
+        frameworks={"classifier": "xgb", "place": "lgbm"},
+        hyperparams={"classifier": {"n_estimators": 75}},
+        run_walk_forward=walk_forward, wf_min_train_months=6,
+        wf_fast_fold=False, blend_market_odds=True,
+        value_config={"value_threshold": 0.08, "ew_enabled": False},
+    )
     rid = tr.train_run(cfg)
     assert rid == "20250101_000000"
     # lean: no dataset frames passed to save_run
@@ -149,3 +166,16 @@ def test_train_run_orchestration(monkeypatch):
     assert set(tc["evals"]) == {"calibration", "roi", "clv"}
     assert tc["signatures"] == {"fe_signature": "FE", "data_signature": "DS"}
     assert tc["config"]["name"] == "t"
+    assert captured["predictor_options"] == {"frameworks": cfg.frameworks, "random_seed": 123}
+    if walk_forward:
+        wf = captured["walk_forward_options"]
+        assert wf["frameworks"] == cfg.frameworks
+        assert wf["params"] == captured["train_options"]["params"] == cfg.hyperparams
+        assert wf["random_seed"] == 123
+        assert wf["min_train_months"] == 6
+        assert wf["fast_fold"] is False
+        assert wf["blend_market_odds"] is True
+        assert wf["value_threshold"] == 0.08
+        assert wf["ew_enabled"] is False
+    else:
+        assert "walk_forward_options" not in captured
