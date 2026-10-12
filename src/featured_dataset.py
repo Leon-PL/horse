@@ -51,7 +51,7 @@ FE_CONFIG_KEYS = [
 _FE_SOURCE_FILES = (
     "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
     "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
-    "src/atr_features.py", "src/par_time_features.py", "src/stewards_features.py",
+    "src/atr_features.py",
     "src/pedigree_backfill.py", "src/track_config.py", "src/trainer_locations.py",
     "src/weather.py", "src/utils.py",
     # Merge/column contracts consumed by FE stages: the sectional joins feed
@@ -59,6 +59,14 @@ _FE_SOURCE_FILES = (
     # trainer_locations -> add_trainer_travel_features.
     "src/attheraces_scraper.py", "src/rtv_scraper.py", "src/bha_stewards_scraper.py",
 )
+
+#: Deliberately NOT hashed: built, tested, and never called by the pipeline.
+#: Both were triaged as redundant (docs/NEGATIVE_RESULTS.md 4 and 7) and left
+#: in place in case they are revisited. While they are unwired, hashing them
+#: only means that editing dead code forces a multi-GB store rebuild. If
+#: either is ever added to a FE stage, tests/test_fe_signature_coverage.py
+#: will fail until it is registered above - which is the point of that test.
+_FE_UNWIRED_SOURCES = ("src/par_time_features.py", "src/stewards_features.py")
 
 #: Modules reachable from the FE entry points that provably cannot change a
 #: feature value, with the reason. Raw-data access is covered separately by
