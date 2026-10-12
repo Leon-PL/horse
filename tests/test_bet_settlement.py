@@ -12,6 +12,10 @@ from src.bet_settlement import (
     EW_MAX_ODDS,
     EW_MIN_ODDS,
     EW_STAKE_UNITS,
+    EXCHANGE_COMMISSION,
+    PLACE_EXCHANGE_COMMISSION,
+    settle_win_exchange_bet,
+    settle_win_exchange_bets,
     dynamic_value_threshold,
     ew_bet_selected,
     ew_odds_in_band,
@@ -121,3 +125,60 @@ class TestEachWayRules:
     def test_unplaced_loses_both_units(self):
         pnl = settle_ew_bet(10.0, 3.25, won=False, placed=False)
         assert pnl == pytest.approx(-EW_STAKE_UNITS)
+
+
+class TestWinExchangeSettlement:
+    """Win bets struck on the exchange, netted by commission.
+
+    Four research harnesses in ``scripts/`` each carried their own
+    ``COMM = 0.02`` and open-coded ``np.where(won, (odds-1)*(1-COMM), -1)``.
+    They now call this function, so the walk-forward ROIs they report stay
+    comparable with the backtester and live settlement (hard rule #2). These
+    tests pin the formula to what those scripts computed, so the consolidation
+    cannot silently move a published number.
+    """
+
+    @staticmethod
+    def _legacy(odds, won, commission=0.02):
+        """The expression the scripts used before consolidation."""
+        return np.where(
+            np.asarray(won).astype(bool),
+            (np.asarray(odds, dtype=float) - 1.0) * (1.0 - commission),
+            -1.0,
+        )
+
+    def test_matches_the_formula_the_scripts_used(self):
+        odds = np.array([1.5, 2.0, 4.5, 11.0, 100.0])
+        won = np.array([True, False, True, False, True])
+        np.testing.assert_allclose(
+            settle_win_exchange_bets(odds, won), self._legacy(odds, won),
+        )
+
+    def test_winner_keeps_profit_net_of_commission(self):
+        # 5.0 decimal => 4.0 profit, less 2% commission on winnings.
+        assert settle_win_exchange_bet(5.0, won=True) == pytest.approx(4.0 * 0.98)
+
+    def test_loser_loses_exactly_the_stake(self):
+        """Commission applies to winnings only, never to a losing stake."""
+        assert settle_win_exchange_bet(5.0, won=False) == pytest.approx(-1.0)
+        assert settle_win_exchange_bet(5.0, won=False, stake=2.5) == pytest.approx(-2.5)
+
+    def test_stake_scales_both_outcomes(self):
+        assert settle_win_exchange_bet(3.0, True, stake=10.0) == pytest.approx(2.0 * 10 * 0.98)
+        odds, won = np.array([3.0, 3.0]), np.array([True, False])
+        np.testing.assert_allclose(
+            settle_win_exchange_bets(odds, won, stake=np.array([2.0, 4.0])),
+            [2.0 * 2.0 * 0.98, -4.0],
+        )
+
+    def test_commission_is_overridable_but_shared_by_default(self):
+        assert settle_win_exchange_bet(5.0, True, commission=0.0) == pytest.approx(4.0)
+        # Win and place markets are charged the same rate; the place alias is
+        # kept only so existing callers keep working.
+        assert PLACE_EXCHANGE_COMMISSION == EXCHANGE_COMMISSION
+
+    def test_evens_at_commission_is_a_small_loss(self):
+        """A fair 2.0 shot is -EV on the exchange: the house edge is real."""
+        odds = np.full(10_000, 2.0)
+        won = np.arange(10_000) % 2 == 0  # exactly 50% strike rate
+        assert settle_win_exchange_bets(odds, won).mean() == pytest.approx(-0.01)

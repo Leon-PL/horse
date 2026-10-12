@@ -20,16 +20,16 @@ from src.feature_store import FeatureStore
 from src.model import get_feature_columns
 from src.place_market_model import PLACE_PARAMS
 from src.betfair import attach_bsp
+from src.bet_settlement import settle_win_exchange_bets
 
-CUT = "2025-04-25"; COMM = 0.02
-DIAG = ["race_id", "race_date", "won", "horse_id", "horse_name", "track",
+CUT = "2025-04-25"; DIAG = ["race_id", "race_date", "won", "horse_id", "horse_name", "track",
         "off_time", "horse_prev_races"]
 NEW = ["log_sale_price", "has_sale_price"]
 
 
 def roi_bsp(s):
     b = pd.to_numeric(s["bsp"], errors="coerce").to_numpy(); w = s["won"].to_numpy().astype(bool)
-    return float(np.where(w, (b - 1) * (1 - COMM), -1.0).mean()) * 100
+    return float(settle_win_exchange_bets(b, w).mean()) * 100
 
 
 def mean_clv(s):

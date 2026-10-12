@@ -148,14 +148,36 @@ def settle_ew_bet(win_odds, place_odds, won, placed) -> float:
     return pnl
 
 
-# ── Place-market (exchange) settlement ────────────────────────────────
-# The validated place edge is bet on the EXCHANGE place market (Betfair place
-# BSP), NOT bookmaker each-way terms. Winnings are netted by commission (Betfair
-# charges commission on net market winnings); losers simply lose the stake. This
-# is the single formula shared by the place-market backtest, the walk-forward,
-# and live paper-trade settlement (src/paper_trading.py) — keep it here so all
-# three agree (hard rule #2).
-PLACE_EXCHANGE_COMMISSION = 0.02  # operator-confirmed Betfair commission
+# ── Exchange settlement (win and place markets) ───────────────────────
+# Exchange bets are settled on Betfair prices (BSP or LTP), NOT bookmaker
+# each-way terms. Winnings are netted by commission (Betfair charges commission
+# on net market winnings); losers simply lose the stake. These are the single
+# formulas shared by the place-market backtest, the walk-forwards, the research
+# harnesses in scripts/, and live paper-trade settlement (src/paper_trading.py)
+# — keep them here so all of them agree (hard rule #2). Four research scripts
+# previously carried their own `COMM = 0.02` and open-coded this expression,
+# which is exactly the drift that makes two ROI figures incomparable.
+EXCHANGE_COMMISSION = 0.02  # operator-confirmed Betfair commission
+
+#: Backwards-compatible alias; the rate is the same on both markets.
+PLACE_EXCHANGE_COMMISSION = EXCHANGE_COMMISSION
+
+
+def settle_win_exchange_bet(odds, won, stake: float = 1.0,
+                            commission: float = EXCHANGE_COMMISSION) -> float:
+    """PnL of a single win bet struck at exchange decimal *odds* for *stake*."""
+    if won:
+        return float(stake) * (float(odds) - 1.0) * (1.0 - float(commission))
+    return -float(stake)
+
+
+def settle_win_exchange_bets(odds, won, stake: float = 1.0,
+                             commission: float = EXCHANGE_COMMISSION) -> np.ndarray:
+    """Vectorised :func:`settle_win_exchange_bet` (stake may be scalar or array)."""
+    odds_arr = np.asarray(odds, dtype=np.float64)
+    won_arr = np.asarray(won).astype(bool)
+    stake_arr = np.asarray(stake, dtype=np.float64)
+    return np.where(won_arr, stake_arr * (odds_arr - 1.0) * (1.0 - commission), -stake_arr)
 
 
 def settle_place_exchange_bet(place_odds, placed, stake: float = 1.0,
