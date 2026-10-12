@@ -83,7 +83,7 @@ their own models, and it contains information no public source carries:
 This part is **not rectifiable from public data**. Any plan that implicitly
 assumes it is will fail the way the last four months did.
 
-### 1d. 216 sectional features exist and the model has never seen them
+### 1d. 216 sectional features existed unused — now triaged, and mostly priced
 
 The feature store holds **1,178 columns**, of which **216 are `atr_*`** —
 velocity curves, finishing-speed percentages, stride length and frequency,
@@ -110,10 +110,18 @@ backfill at ~2.5s per request.
 Three-quarters of it is entity history — trainer, horse and jockey form. That
 is precisely the public form the market prices most efficiently, and precisely
 what the saturation finding said adds nothing. Meanwhile the one dataset that
-is genuinely hard to obtain and hard to process is sitting unused.
+is genuinely hard to obtain and hard to process was sitting unused.
 
-**This is the largest identified gap between what the project owns and what it
-uses.** It is also the cheapest to close: the data is already in the store.
+**Closed 2026-10-12, and the answer was not the hoped-for one.** Triaging all
+216 columns (ledger §2b) found **20 of 21 signals already priced**, all under
+|0.0075| partial correlation with the market residual. Only
+`atr_closing_in_hand` clears the bar, at +0.0105 — marginal, and still owing a
+CLV test.
+
+So this was the largest gap between what the project owns and what it uses,
+and closing it did not produce an edge. It does, however, settle the question:
+**public-form feature engineering is finished here.** The market prices even
+velocity curves and stride biomechanics. What remains is §5a.
 
 ### 1e. The selection rule then gives back whatever edge survives
 
@@ -127,7 +135,7 @@ ledger §2. Fixing the model without fixing the rule banks nothing.
 |---|---|---|---|
 | calibration | already fine | — | stop |
 | model under-discriminates | probably | low | §3a, §4a |
-| sectionals unused | yes | low | §3b |
+| sectionals unused | closed — 20/21 priced | done | ledger §2b |
 | selection rule loses value | probably | low | §4c |
 | market holds private info | **no** | — | accept |
 | market aggregates many opinions | **no** | — | accept |
