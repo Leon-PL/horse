@@ -21,7 +21,10 @@ Bitter experience produced this bar. Apply it to every candidate:
    (`won − market_implied_prob`), not with the outcome. If the correlation is
    ~0, the market already prices it — stop, whatever the raw predictiveness.
 2. **CLV at BSP is the metric; ROI is secondary.** Betfair Starting Price is
-   sharp. Beating it on closing-line value is the only durable claim.
+   sharp. Beating it on closing-line value is the only durable claim. Read it
+   from `median_clv` / `geometric_mean_clv` / `pct_beat_close`
+   (`src.clv.summarise_clv`), **never the mean ratio alone** — the mean is
+   upward-biased at long prices and has reversed a verdict here (§2).
 3. **The ROI@BSP-vs-CLV consistency check is the leak tripwire.** A strategy
    with high ROI and CLV ≈ 1.0 is almost always leaking, not winning. This is
    what caught the `trainer_freq` leak (§3).
@@ -69,7 +72,7 @@ different harnesses, and the answer held both times.**
 | Combination ROI @ BSP | **−2.64%** CI[−4.45, −0.81] | **−3.55%** CI[−5.42, −1.55] |
 | Model alone | −3.65% | −4.49% |
 | Bet all (in band) | −1.83% | −2.68% |
-| Mean CLV | 1.0047 | 1.0076 |
+| Mean CLV (biased; see below) | 1.0047 | 1.0076 |
 | Folds positive | 2/13 | 1/8 |
 
 The 2026-10-12 figures come from a rewritten harness: blend fitted
@@ -93,8 +96,10 @@ backing everything in the band.
   lacks, consistent with the production golden hold-out. It is simply far too
   small to overcome commission: β sits at ~0.97, i.e. the market is ~20× more
   informative.
-- CLV is marginally above 1 while ROI is below bet-all — the picks shorten
-  slightly into the close but still lose money at the close.
+- **CLV does not clear 1 on an unbiased estimator.** The mean ratio reads
+  1.0076, but the median is 0.9865 and the geometric mean lower still; the
+  picks edge out bet-all on CLV while still drifting against the close. See
+  the measurement note below.
 
 **Conclusion: no bankable edge in the market combination.** Do not re-run this
 without a *new* selection rule or a materially better fundamental model; the
@@ -117,6 +122,76 @@ combination layer itself has now been measured twice and is not the lever.
 4. The model-alone and bet-all baselines were only accumulated on folds where
    the combination happened to bet, and the win model was given the *place*
    model's hyperparameters. Both fixed.
+
+### Where the loss actually comes from (2026-10-12)
+
+The combination beats the model alone yet loses to backing the whole band, so
+the damage is in the **selection rule**. `scripts/audit_selection_rule.py`
+localised it on 196,664 runners across the eight folds:
+
+| price band | share of stakes | ROI selected | ROI whole band | gap | median CLV |
+|---|---|---|---|---|---|
+| 1.5-3 | 4.6% | -1.12% | -2.55% | **+1.43** | 1.0000 |
+| 3-6 | 18.4% | -2.15% | -3.03% | **+0.88** | 0.9962 |
+| 6-12 | 30.4% | -0.79% | +0.42% | **-1.21** | 0.9804 |
+| 12-25 | 28.7% | -6.41% | -2.87% | **-3.54** | 0.9843 |
+| 25-50 | 17.9% | -3.49% | -4.99% | **+1.49** | 0.9691 |
+
+**The longshot hypothesis was wrong.** The obvious explanation — that a value
+filter is a longshot filter in disguise, since that is where a model least
+agrees with the price — does not hold. The selection rate barely rises with
+price (45% to 55%), and at the *longest* prices the filter is one of its best.
+The loss is concentrated in the **middle of the book**, 6-25, which carries
+59% of stakes.
+
+Nor is it a calibration failure. Predicted win rate is within 0.0023 of actual
+in every band. What separates the losing bands is that the **market** is
+closer to the outcome than the model is; the filter only adds value where the
+model is the better of the two.
+
+Measured against a **matched** baseline (backing everything in the same
+universe the rule bets in, not the whole band), the only sub-rule that beats
+no-filter is `odds < 6`: **+0.98 points**, n=23,584 — still -1.95% absolute,
+so useful as a diagnosis rather than a strategy. Note the trap: `odds < 12`
+scores -1.29% against a whole-band baseline of -2.68% and looks like a
++1.39-point win, but backing *everything* at odds < 12 returns -1.07%, so
+inside its own universe the filter is 0.22 points worse. Essentially all of
+the apparent gain was avoiding long prices.
+
+One structural finding for any future selection rule: an **absolute edge
+threshold is vacuous here.** Because the fitted beta sits at ~0.97, the
+anchored probability stays very close to the market, so `combo_prob/mkt_imp >
+1.10` matches only **16 bets out of 104,146**. A rule has to work on rank or
+relative edge within a race, not on a ratio threshold.
+
+### Measurement note: never read CLV off the mean alone (2026-10-12)
+
+CLV is this project's primary metric, and the research harnesses were
+reporting it as the **mean of `entry_odds / close_odds`**. That estimator is
+upward-biased, badly so at long prices, because the upside of a price ratio is
+unbounded and the downside is not: a 25.0 shot closing at 12.5 scores 2.0,
+closing at 50.0 scores 0.5, and averaging those gives 1.25 for two moves that
+are symmetric in probability terms.
+
+It changes verdicts. The same selections scored:
+
+| price band | mean CLV | median CLV | geometric mean |
+|---|---|---|---|
+| 1.5-6 | 1.0006 | 0.9982 | 0.9873 |
+| 6-12 | 0.9969 | 0.9804 | 0.9719 |
+| 12-25 | **1.0147** | 0.9843 | 0.9739 |
+| 25-50 | **1.0229** | 0.9691 | 0.9594 |
+
+The mean says these picks beat the close; the median and geometric mean say
+they drift. On the honest measures the combination's picks have **median CLV
+0.9865 against 0.9786 for bet-all** — better than backing everything, but
+still below 1, so there is no closing-line value to bank.
+
+`src/clv.py` always reported median, geometric mean and %-beat-close
+correctly; it was the harnesses that quoted only the mean.
+`src/wf_eval.clv_summary` now routes every harness through the same function,
+and any CLV figure quoted in this ledger from before this date that came from
+a harness mean should be treated as optimistic.
 
 ### A caution about how this entry was nearly mis-corrected
 

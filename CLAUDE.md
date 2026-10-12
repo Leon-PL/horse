@@ -46,6 +46,17 @@ Judge candidates by **orthogonality to the market** (correlation with
 `won − market_implied_prob`) and by **CLV at BSP**, not raw predictiveness.
 High ROI with CLV ≈ 1.0 means a leak, not an edge.
 
+Read CLV from `src.clv.summarise_clv` — `median_clv`, `geometric_mean_clv`,
+`pct_beat_close`. **Never the mean of `taken_odds / bsp` alone:** a price
+ratio has unbounded upside and bounded downside, so its mean runs high at long
+prices, and that has already reversed a verdict (mean 1.0229 vs median 0.9691
+on the same bets).
+
+When comparing a selection rule to "no filter", compare against the **same
+universe the rule bets in**, not the whole band. A price-capped rule looks
+like a big win against an unrestricted baseline purely for avoiding long
+prices; `scripts/audit_selection_rule.py` reports both.
+
 ## Practical notes
 
 - Environment: local `.venv` on Windows; plain `pip` with

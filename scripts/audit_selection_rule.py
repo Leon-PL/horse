@@ -9,15 +9,19 @@ very band they are drawn from. A filter that is worse than no filter is doing
 real work in the wrong direction, and nothing in this project has ever looked
 at where.
 
-The leading hypothesis is that the value filter is a **longshot filter in
-disguise**. A model is least well calibrated at long odds, so that is where it
-most often disagrees with the price; and long odds carry the worst effective
-exchange return. If so, the filter concentrates stakes exactly where both the
-model is weakest and the price is worst, and the fix is a price-aware rule
-rather than a better model.
+The hypothesis going in was that the value filter is a **longshot filter in
+disguise** — a model is least calibrated at long prices, so that is where it
+most often disagrees with the market, and long prices pay worst. **The data
+did not support that.** On 196,664 runners over eight folds the selection rate
+barely rises with price (45% to 55%), and at the *longest* prices (25-50) the
+filter actually beats the band by +1.49 points. The loss is concentrated in
+the **middle**: -3.54 points at 12-25 and -1.21 at 6-12, together 59% of
+stakes. The model's calibration is in fact excellent everywhere (predicted
+within 0.0023 of actual in every band); what distinguishes the losing bands is
+that the *market* is closer to the outcome than the model is.
 
-This script tests that, plus the obvious alternatives, on the per-bet rows
-dumped by the walk-forward:
+This script produced that finding and remains the tool for re-cutting it, on
+the per-bet rows dumped by the walk-forward:
 
     python scripts/wf_benter_combination.py --max-folds 8 --dump data/processed/benter_bets.parquet
     python scripts/audit_selection_rule.py --bets data/processed/benter_bets.parquet
@@ -41,7 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import pandas as pd
 
-from src.wf_eval import bootstrap_roi_ci, fold_summary
+from src.wf_eval import bootstrap_roi_ci, clv_summary, fold_summary
 
 DEFAULT_BETS = os.path.join("data", "processed", "benter_bets.parquet")
 
@@ -68,11 +72,17 @@ def _roi(frame: pd.DataFrame, n_boot: int = 1000) -> dict:
             "ci_high": ci["ci_high"], "races": ci["n_clusters"]}
 
 
-def _clv(frame: pd.DataFrame) -> float | None:
+def _clv(frame: pd.DataFrame) -> dict | None:
+    """CLV on all measures. The mean alone is upward-biased at long odds."""
     if frame.empty:
         return None
-    ratio = frame["entry_odds"].to_numpy() / frame["close_odds"].to_numpy()
-    return round(float(np.nanmean(ratio)), 4)
+    out = clv_summary(frame["entry_odds"], frame["close_odds"])
+    return {k: round(v, 4) if isinstance(v, float) else v for k, v in out.items()}
+
+
+def _clv_median(frame: pd.DataFrame) -> float | None:
+    summary = _clv(frame)
+    return summary.get("median_clv") if summary else None
 
 
 def load_bets(path: str) -> pd.DataFrame:
@@ -114,6 +124,7 @@ def by_band(bets: pd.DataFrame) -> list[dict]:
                             if sel_roi["roi"] is not None and all_roi["roi"] is not None
                             else None),
             "clv_selected": _clv(selected),
+            "clv_median_selected": _clv_median(selected),
             "mean_combo_prob": round(float(selected["combo_prob"].mean()), 4) if len(selected) else None,
             "actual_win_rate": round(float(selected["won"].mean()), 4) if len(selected) else None,
         })
@@ -172,42 +183,65 @@ def calibration_by_band(bets: pd.DataFrame) -> list[dict]:
 
 
 def candidate_rules(bets: pd.DataFrame) -> list[dict]:
-    """Would a price-aware rule have done better than the flat one?
+    """Does the filter add value *within the universe it bets in*?
 
-    Each candidate is only a re-cut of rows already scored, so this is a
-    like-for-like comparison and cheap enough to iterate on. It is a *diagnostic*
-    on one dataset, not a validated strategy: anything promising here must be
-    re-run through the walk-forward before it means anything.
+    Each candidate declares two masks: the bets it strikes, and the **universe**
+    those bets are drawn from. The comparison that matters is against backing
+    everything in that same universe — not against backing everything in the
+    whole band.
+
+    This distinction is not pedantic; getting it wrong inverts the conclusion.
+    "current + odds < 12" scores -1.29% against a whole-band baseline of
+    -2.68%, which looks like the filter gaining 1.39 points. But backing
+    *everything* at odds < 12 scores -1.07%, so inside its own universe the
+    filter is 0.22 points **worse** than no filter at all. Essentially the
+    entire apparent gain was avoiding long prices, which is a statement about
+    the price band, not about the rule.
+
+    Diagnostic only: these are re-cuts of one dataset, and anything promising
+    has to go back through the walk-forward before it means anything.
     """
-    band_all = _roi(bets)
-    rules = {
-        "bet all in band (baseline)": pd.Series(True, index=bets.index),
-        "combo_prob > mkt_imp (current)": bets["sel_combo"].astype(bool),
-        "model_prob > mkt_imp": bets["sel_model"].astype(bool),
-        "current + odds < 12": bets["sel_combo"].astype(bool) & (bets["entry_odds"] < 12),
-        "current + odds < 6": bets["sel_combo"].astype(bool) & (bets["entry_odds"] < 6),
-        "current + edge > 10%": bets["sel_combo"].astype(bool) & (bets["edge_ratio"] > 1.10),
-        "current + edge > 25%": bets["sel_combo"].astype(bool) & (bets["edge_ratio"] > 1.25),
-        "odds < 6 + edge > 10%": (bets["sel_combo"].astype(bool)
-                                  & (bets["entry_odds"] < 6)
-                                  & (bets["edge_ratio"] > 1.10)),
-        # The inverse: if the filter is anti-predictive, its complement should
-        # beat the band. A sharp result here says the rule has real but
-        # inverted information.
-        "INVERSE of current": ~bets["sel_combo"].astype(bool),
-    }
+    everything = pd.Series(True, index=bets.index)
+    selected = bets["sel_combo"].astype(bool)
+    short_12 = bets["entry_odds"] < 12
+    short_6 = bets["entry_odds"] < 6
+    edge_10 = bets["edge_ratio"] > 1.10
+    edge_25 = bets["edge_ratio"] > 1.25
+
+    # (name, bets struck, universe drawn from)
+    rules = [
+        ("bet all in band (baseline)", everything, everything),
+        ("combo_prob > mkt_imp (current)", selected, everything),
+        ("model_prob > mkt_imp", bets["sel_model"].astype(bool), everything),
+        ("current, odds < 12", selected & short_12, short_12),
+        ("current, odds < 6", selected & short_6, short_6),
+        ("current, edge > 10%", selected & edge_10, everything),
+        ("current, edge > 25%", selected & edge_25, everything),
+        ("current, odds<6 & edge>10%", selected & short_6 & edge_10, short_6 & edge_10),
+        # If the filter were anti-predictive its complement would beat the
+        # band. Note this is arithmetically forced once the filter trails
+        # bet-all, so it is a consistency check rather than a finding.
+        ("INVERSE of current", ~selected, everything),
+    ]
     out = []
-    for name, mask in rules.items():
+    whole_band = _roi(bets)
+    for name, mask, universe in rules:
         chunk = bets[mask]
         stats = _roi(chunk)
+        matched = _roi(bets[universe])
         out.append({
-            "rule": name, "n": stats["n"], "races": stats["races"],
-            "roi": stats["roi"], "ci": [stats["ci_low"], stats["ci_high"]],
+            "rule": name,
+            "n": stats["n"], "races": stats["races"], "roi": stats["roi"],
+            "ci": [stats["ci_low"], stats["ci_high"]],
             "clv": _clv(chunk),
-            "vs_bet_all": (round(stats["roi"] - band_all["roi"], 2)
-                           if stats["roi"] is not None else None),
-            "beats_bet_all": (stats["roi"] is not None
-                              and stats["roi"] > band_all["roi"]),
+            "universe_n": matched["n"],
+            "roi_matched_baseline": matched["roi"],
+            "vs_matched_baseline": (round(stats["roi"] - matched["roi"], 2)
+                                    if None not in (stats["roi"], matched["roi"]) else None),
+            "vs_whole_band": (round(stats["roi"] - whole_band["roi"], 2)
+                              if stats["roi"] is not None else None),
+            "beats_matched_baseline": (None not in (stats["roi"], matched["roi"])
+                                       and stats["roi"] > matched["roi"]),
         })
     return out
 
@@ -250,17 +284,18 @@ def render(report: dict) -> str:
         f"  selected ROI {sel['roi']:+.2f}%  CI[{sel['ci_low']:+.2f}, {sel['ci_high']:+.2f}]  n={sel['n']:,}",
         f"  the filter is worth {sel['roi'] - bet_all['roi']:+.2f} points vs no filter",
         "",
-        "  -- by price band (does the filter chase longshots?) --",
-        f"  {'band':>10} {'runners':>8} {'sel':>7} {'sel%':>6} {'stake%':>7} "
-        f"{'ROI sel':>9} {'ROI band':>9} {'gap':>7} {'CLV':>7}",
+        "  -- by price band: filter vs backing the whole band --",
+        f"  {'band':>10} {'runners':>8} {'sel%':>6} {'stake%':>7} "
+        f"{'ROI sel':>9} {'ROI band':>9} {'gap':>7} {'CLVmed':>8}",
     ]
     for r in report["by_price_band"]:
+        clv = r["clv_median_selected"]
         lines.append(
-            f"  {r['band']:>10} {r['runners']:>8,} {r['selected']:>7,} "
+            f"  {r['band']:>10} {r['runners']:>8,} "
             f"{r['select_rate']*100:>5.1f}% {r['share_of_bets']*100:>6.1f}% "
             f"{r['roi_selected']:>+8.2f}% {r['roi_band']:>+8.2f}% "
             f"{(r['gap_vs_band'] if r['gap_vs_band'] is not None else 0):>+6.2f} "
-            f"{(r['clv_selected'] if r['clv_selected'] is not None else float('nan')):>7.4f}"
+            f"{(clv if clv is not None else float('nan')):>8.4f}"
         )
     lines += ["", "  -- calibration of the selected bets --",
               f"  {'band':>10} {'n':>8} {'predicted':>10} {'actual':>8} {'over':>8} {'mkt':>8}"]
@@ -269,17 +304,29 @@ def render(report: dict) -> str:
             f"  {r['band']:>10} {r['n']:>8,} {r['predicted']:>10.4f} "
             f"{r['actual']:>8.4f} {r['over_prediction']:>+8.4f} {r['market_implied']:>8.4f}"
         )
-    lines += ["", "  -- candidate rules (diagnostic only; re-validate in the WF) --",
-              f"  {'rule':<32} {'n':>8} {'ROI':>9} {'vs bet-all':>11} {'CLV':>8}"]
+    lines += [
+        "",
+        "  -- candidate rules (diagnostic only; re-validate in the WF) --",
+        "  'matched' = backing EVERYTHING in the same universe the rule bets in.",
+        "  Only the matched column says whether the filter itself adds value.",
+        f"  {'rule':<30} {'n':>8} {'ROI':>9} {'matched':>9} {'vs match':>9} {'CLVmed':>8}",
+    ]
     for r in report["candidate_rules"]:
         if r["roi"] is None:
             continue
-        mark = " *" if r["beats_bet_all"] else ""
+        mark = " *" if r["beats_matched_baseline"] else ""
+        clv = (r["clv"] or {}).get("median_clv", float("nan"))
         lines.append(
-            f"  {r['rule']:<32} {r['n']:>8,} {r['roi']:>+8.2f}% "
-            f"{r['vs_bet_all']:>+10.2f} {(r['clv'] or float('nan')):>8.4f}{mark}"
+            f"  {r['rule']:<30} {r['n']:>8,} {r['roi']:>+8.2f}% "
+            f"{r['roi_matched_baseline']:>+8.2f}% {r['vs_matched_baseline']:>+8.2f} "
+            f"{clv:>8.4f}{mark}"
         )
-    lines.append("")
+    lines += [
+        "",
+        "  CLV shown as the MEDIAN ratio. The mean of entry/close is biased high",
+        "  at long prices (upside unbounded, downside not) - see src/clv.py.",
+        "",
+    ]
     return "\n".join(lines)
 
 

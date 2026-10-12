@@ -130,6 +130,8 @@ class TestRoiAttribution:
         assert overall["bet_all"]["n"] > overall["selected"]["n"]
         rendered = audit_mod.render(report)
         assert "worth" in rendered and "vs no filter" in rendered
+        # The median must be what the table shows; the mean is biased high.
+        assert "MEDIAN" in rendered
 
     def test_intervals_are_race_clustered(self, audit_mod, tmp_path):
         report = audit_mod.audit(_write(tmp_path, make_bets(seed=6)))
@@ -152,8 +154,38 @@ class TestCandidateRules:
         report = audit_mod.audit(_write(tmp_path, make_bets(seed=8)))
         baseline = next(r for r in report["candidate_rules"]
                         if r["rule"] == "bet all in band (baseline)")
-        assert baseline["vs_bet_all"] == pytest.approx(0.0, abs=1e-6)
-        assert baseline["beats_bet_all"] is False
+        assert baseline["vs_matched_baseline"] == pytest.approx(0.0, abs=1e-6)
+        assert baseline["beats_matched_baseline"] is False
+
+    def test_a_price_restricted_rule_is_judged_against_its_own_universe(
+        self, audit_mod, tmp_path,
+    ):
+        """Comparing a price-capped rule to the whole band inverts the verdict.
+
+        Make short prices profitable and long prices terrible, with a filter
+        that adds nothing. Against the whole band an "odds < 12" rule looks
+        brilliant purely for avoiding long prices; against its own universe it
+        must show no gain.
+        """
+        def pnl(odds, won):
+            edge = np.where(odds < 12, 0.20, -0.80)
+            return np.where(won, (odds - 1.0) * 0.98, -1.0) + edge
+
+        report = audit_mod.audit(
+            _write(tmp_path, make_bets(n_races=6000, seed=13, pnl_by_odds=pnl)),
+        )
+        rule = next(r for r in report["candidate_rules"] if r["rule"] == "current, odds < 12")
+        assert rule["vs_whole_band"] > 10.0, (
+            "against the whole band the price cap should look like a big win"
+        )
+        # The point of the matched baseline: it strips out the gain that came
+        # from the price restriction rather than from the filter.
+        inflation = rule["vs_whole_band"] - rule["vs_matched_baseline"]
+        assert inflation > 10.0, (
+            "the whole-band comparison should be inflated relative to the "
+            f"matched one; got vs_whole_band={rule['vs_whole_band']}, "
+            f"vs_matched={rule['vs_matched_baseline']}"
+        )
 
     def test_an_odds_capped_rule_wins_when_long_odds_are_the_problem(
         self, audit_mod, tmp_path,
@@ -166,7 +198,7 @@ class TestCandidateRules:
             _write(tmp_path, make_bets(longshot_bias=2.0, seed=9, pnl_by_odds=pnl)),
         )
         rules = {r["rule"]: r for r in report["candidate_rules"]}
-        assert rules["current + odds < 12"]["roi"] > rules["combo_prob > mkt_imp (current)"]["roi"]
+        assert rules["current, odds < 12"]["roi"] > rules["combo_prob > mkt_imp (current)"]["roi"]
 
 
 class TestRobustness:

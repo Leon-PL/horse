@@ -79,6 +79,7 @@ from src.model import (
 from src.wf_eval import (
     bootstrap_roi_ci,
     check_combination_nesting,
+    clv_summary,
     expanding_period_folds,
     fold_summary,
     oof_predict_expanding,
@@ -272,9 +273,10 @@ def run(df: pd.DataFrame | None = None, *, max_folds: int | None = None,
         race_oos.append(race_ids[band])
 
         if sel_combo.any():
-            clv_chunks.append(
-                (test["_entry"].to_numpy() / test["_close"].to_numpy())[sel_combo],
-            )
+            clv_chunks.append(np.column_stack([
+                test["_entry"].to_numpy()[sel_combo],
+                test["_close"].to_numpy()[sel_combo],
+            ]))
             roi = float(pnl_bsp[sel_combo].mean() * 100)
             fold_rois.append(roi)
             per_fold.append({
@@ -323,8 +325,12 @@ def run(df: pd.DataFrame | None = None, *, max_folds: int | None = None,
         "combo": summarise("combo"),
         "model_only": summarise("model"),
         "bet_all": summarise("all"),
-        "mean_clv": (round(float(np.concatenate(clv_chunks).mean()), 4)
-                     if clv_chunks else None),
+        # Full CLV summary: the mean of entry/close is biased high at long
+        # prices, so a mean above 1 with a median below it means a price tail,
+        # not closing-line value. See src/clv.summarise_clv.
+        "clv": ({k: (round(v, 4) if isinstance(v, float) else v)
+                 for k, v in clv_summary(*np.vstack(clv_chunks).T).items()}
+                if clv_chunks else None),
         "folds": fold_summary(fold_rois),
         "nesting_check": nesting,
         "alpha": {
@@ -341,7 +347,7 @@ def render(report: dict) -> str:
         return f"\n  {report['error']}\n"
     combo, model_only, bet_all = report["combo"], report["model_only"], report["bet_all"]
     folds, nesting = report["folds"], report["nesting_check"]
-    clv = report["mean_clv"]
+    clv = (report.get("clv") or {}).get("median_clv")
     lines = [
         "",
         "  === Benter combination, walk-forward @ BSP ===",
@@ -350,7 +356,7 @@ def render(report: dict) -> str:
         f"  COMBINATION  ROI {combo['mean']:+.2f}%  "
         f"CI[{combo['ci_low']:+.2f}, {combo['ci_high']:+.2f}]  "
         f"bets={combo['n']:,} races={combo['n_clusters']:,}"
-        + (f"  meanCLV {clv:.4f}" if clv is not None else ""),
+        + (f"  medianCLV {clv:.4f}" if clv is not None else ""),
         f"  MODEL ALONE  ROI {model_only['mean']:+.2f}%  "
         f"CI[{model_only['ci_low']:+.2f}, {model_only['ci_high']:+.2f}]  bets={model_only['n']:,}",
         f"  BET ALL      ROI {bet_all['mean']:+.2f}%  "

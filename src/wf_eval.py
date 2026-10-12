@@ -233,6 +233,20 @@ def bootstrap_roi_ci(
     }
 
 
+def clv_summary(entry_odds, close_odds) -> dict:
+    """CLV of a set of bets, reported on every measure that matters.
+
+    Delegates to :func:`src.clv.summarise_clv`, which documents why the mean
+    of a price ratio must never be read on its own.
+    """
+    from src.clv import summarise_clv
+
+    entry = np.asarray(entry_odds, dtype=np.float64)
+    close = np.asarray(close_odds, dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return summarise_clv(entry / close)
+
+
 def fold_summary(fold_rois: Sequence[float]) -> dict:
     """Across-time dispersion of per-fold ROI — the read that survives.
 

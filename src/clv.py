@@ -37,17 +37,42 @@ def _race_date_str(s: pd.Series) -> pd.Series:
     return dt.dt.strftime("%Y-%m-%d")
 
 
-def _summarise(clv: np.ndarray) -> dict:
-    clv = clv[np.isfinite(clv)]
+def summarise_clv(clv) -> dict:
+    """Summarise ``taken_odds / bsp`` ratios. Shared by every CLV report.
+
+    .. warning::
+       **Never judge CLV on the mean alone.** The mean of a price *ratio* is
+       upward-biased, and badly so at long odds, because the upside is
+       unbounded while the downside is not: a 25.0 shot closing at 12.5 scores
+       2.0, closing at 50.0 scores 0.5. Averaging those gives 1.25 for a pair
+       of moves that are symmetric in probability terms.
+
+       Measured on real selections this is the difference between a positive
+       and a negative verdict. At odds 25-50 one set of picks scored mean CLV
+       **1.0229** while its median was **0.9691** and its geometric mean
+       **0.9594** — the mean said the picks beat the close, the other two said
+       they drifted. ``median_clv``, ``geometric_mean_clv`` and
+       ``pct_beat_close`` are the honest readings; prefer them, and treat a
+       mean that disagrees with them as evidence of a long-price tail rather
+       than of an edge.
+    """
+    clv = np.asarray(clv, dtype=np.float64).ravel()
+    clv = clv[np.isfinite(clv) & (clv > 0)]
     if clv.size == 0:
         return {"n": 0}
+    log_clv = np.log(clv)
     return {
         "n": int(clv.size),
-        "mean_clv": float(np.mean(clv)),            # taken_odds / bsp; >1 = beat close
+        "mean_clv": float(np.mean(clv)),            # biased high; see the warning
         "median_clv": float(np.median(clv)),
-        "mean_log_clv": float(np.mean(np.log(clv))),
+        "geometric_mean_clv": float(np.exp(np.mean(log_clv))),
+        "mean_log_clv": float(np.mean(log_clv)),
         "pct_beat_close": float(np.mean(clv > 1.0)),
     }
+
+
+#: Backwards-compatible private alias.
+_summarise = summarise_clv
 
 
 def compute_clv(
