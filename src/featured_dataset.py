@@ -16,6 +16,9 @@ import hashlib
 import json
 import logging
 import os
+import re
+
+import numpy as np
 
 import pandas as pd
 
@@ -39,7 +42,59 @@ FE_CONFIG_KEYS = [
     "MARGIN_ELO_SCALE", "MARGIN_ELO_REF_DIST", "MARGIN_ELO_DNF_PENALTY",
 ]
 
-_FE_SOURCE_FILES = ("src/feature_engineer.py", "src/ratings.py")
+#: Every module whose code can change a *feature value*. A change to any of
+#: these invalidates the store. Completeness is enforced by
+#: ``tests/test_fe_signature_coverage.py``, which walks the import graph from
+#: the FE entry points and fails on anything that is neither registered here
+#: nor exempted below — a missing entry silently serves stale features, which
+#: is how the 2026-06 "place-market edge" mirage happened.
+_FE_SOURCE_FILES = (
+    "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
+    "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
+    "src/atr_features.py", "src/par_time_features.py", "src/stewards_features.py",
+    "src/pedigree_backfill.py", "src/track_config.py", "src/trainer_locations.py",
+    "src/weather.py", "src/utils.py",
+    # Merge/column contracts consumed by FE stages: the sectional joins feed
+    # add_atr_features / add_rtv_features, and the BHA trainer directory feeds
+    # trainer_locations -> add_trainer_travel_features.
+    "src/attheraces_scraper.py", "src/rtv_scraper.py", "src/bha_stewards_scraper.py",
+)
+
+#: Modules reachable from the FE entry points that provably cannot change a
+#: feature value, with the reason. Raw-data access is covered separately by
+#: :func:`data_signature`; downstream consumers only read features.
+FE_SIGNATURE_EXEMPT: dict[str, str] = {
+    "database": "raw-data access only; values covered by data_signature",
+    "data_scraper": "raw-data access only; values covered by data_signature",
+    "data_collector": "raw-data access only; values covered by data_signature",
+    "model": "downstream consumer (column selection only), not a value source",
+    "bet_analysis": "downstream of FE (bet settlement/reporting)",
+    "bet_settlement": "downstream of FE (bet settlement/reporting)",
+    "each_way": "downstream of FE (bet settlement/reporting)",
+    "betfair": "post-race prices joined at eval time, not an FE input",
+}
+
+
+def _portable_config_value(value):
+    """Make a config value independent of where the project is checked out.
+
+    Several hashed modules reference path settings (``BASE_DIR``, ``DATA_DIR``
+    …). Hashing them verbatim would change the signature whenever the
+    checkout moves, forcing a spurious multi-GB store rebuild and making
+    signatures incomparable across machines. The *location* of the data says
+    nothing about how features are computed — and the data's contents are
+    already fingerprinted by :func:`data_signature` — so paths inside the
+    project are reduced to a stable project-relative form. A renamed
+    sub-directory still changes the signature; a moved project does not.
+    """
+    if isinstance(value, str) and os.path.isabs(value):
+        try:
+            rel = os.path.relpath(value, config.BASE_DIR)
+        except ValueError:  # different drive on Windows
+            return value
+        if not rel.startswith(".."):
+            return rel.replace(os.sep, "/")
+    return value
 
 
 def fe_signature() -> str:
@@ -50,40 +105,66 @@ def fe_signature() -> str:
     rebuilt.
     """
     h = hashlib.sha256()
+    config_keys = set(FE_CONFIG_KEYS)
     for rel in _FE_SOURCE_FILES:
         path = os.path.join(config.BASE_DIR, rel)
         try:
             with open(path, "rb") as fh:
-                h.update(fh.read())
+                source = fh.read()
+            h.update(rel.encode("utf-8"))
+            h.update(source)
+            text = source.decode("utf-8")
+            config_keys.update(re.findall(r"config\.([A-Z][A-Z0-9_]*)", text))
+            config_keys.update(re.findall(
+                r"getattr\(config,\s*['\"]([A-Z][A-Z0-9_]*)['\"]", text
+            ))
         except OSError:
+            # Missing optional sources are part of the signature too.
+            h.update(f"missing:{rel}".encode("utf-8"))
             logger.warning("fe_signature: could not read %s", rel)
-    cfg = {k: getattr(config, k, None) for k in FE_CONFIG_KEYS}
+    cfg = {k: _portable_config_value(getattr(config, k, None)) for k in config_keys}
     h.update(json.dumps(cfg, sort_keys=True, default=str).encode("utf-8"))
     h.update(str(STORE_SCHEMA_VERSION).encode("utf-8"))
     return h.hexdigest()[:16]
 
 
 def data_signature(processed: pd.DataFrame, *, cutoff=None) -> str:
-    """Cheap fingerprint of the processed history (optionally up to *cutoff*).
+    """Fingerprint historical input values, not just aggregate checksums.
 
-    The append model assumes history is immutable: rows at-or-before the
-    store's last date never change. But data backfills/cleanups (e.g. the
-    draw backfill, the non-runner purge) edit historical rows *in place*. The
-    ``fe_signature`` guard only catches code/config changes, so we also
-    fingerprint the data: row count + date span + value sums over a few
-    columns (one cheap pass). The sums catch in-place value edits (a draw
-    backfill changes ``draw``'s sum) that a row-count check would miss.
+    Sum-only signatures miss swapped results and edits to odds, pedigree,
+    ratings, sectionals, and other inputs. Hash each canonical column in row
+    order, bounded chunks at a time. Numeric types are normalised so a later
+    missing value promoting integers to floats does not invalidate history.
+    One-hot columns are derivable from their raw categories and are omitted so
+    a category appearing only in new races does not change the old signature.
     """
     rd = pd.to_datetime(processed["race_date"], errors="coerce")
     sub = processed if cutoff is None else processed[rd <= pd.Timestamp(cutoff)]
-    sub_rd = rd if cutoff is None else rd[rd <= pd.Timestamp(cutoff)]
-    parts: list = [int(len(sub))]
-    if len(sub):
-        parts += [str(sub_rd.min()), str(sub_rd.max())]
-    for col in ("draw", "won", "finish_position", "num_runners"):
-        if col in sub.columns:
-            parts.append(float(pd.to_numeric(sub[col], errors="coerce").sum()))
-    h = hashlib.sha256(json.dumps(parts, default=str).encode("utf-8"))
+    h = hashlib.sha256()
+    h.update(str(len(sub)).encode("ascii"))
+    categorical = ("going", "race_class", "race_type", "region", "sex", "surface")
+    derived_prefixes = tuple(f"{c}_" for c in categorical if c in sub.columns)
+    # A processed frame also has season dummies, derived from race_date.
+    derived_prefixes += ("season_",)
+    columns = sorted(c for c in sub.columns if not (
+        c.startswith(derived_prefixes)
+        and pd.api.types.is_numeric_dtype(sub[c])
+        and sub[c].dropna().isin([0, 1]).all()
+    ))
+    for col in columns:
+        h.update(json.dumps(col).encode("utf-8"))
+        series = sub[col]
+        for start in range(0, len(series), 131072):
+            chunk = series.iloc[start:start + 131072]
+            if pd.api.types.is_numeric_dtype(series):
+                values = chunk.to_numpy(dtype="float64", na_value=np.nan).copy()
+                values[values == 0] = 0.0  # canonicalise signed zero
+                values[np.isnan(values)] = np.nan
+                h.update(values.tobytes())
+            else:
+                # String normalisation matches parquet's object serialisation.
+                values = chunk.astype("string")
+                h.update(pd.util.hash_pandas_object(values, index=False).values.tobytes())
     return h.hexdigest()[:16]
 
 

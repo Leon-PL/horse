@@ -46,14 +46,19 @@ from src.data_collector import (
 from src.data_processor import process_data
 from src.live_prediction import (
     feature_engineer_with_history_core,
-    load_lookahead_cache,
-    lookahead_cache_valid,
+    features_for_live_cards,
+    feature_store_signature,
 )
 from src.model import RacePredictor
 from src.run_store import (
+    GENERATION_MATCH,
+    GENERATION_MISMATCH,
+    GENERATION_UNKNOWN,
+    feature_generation_status,
     get_run_processed_path,
     get_run_featured_path,
     get_production_run_id,
+    production_model_revision,
 )
 from src.utils import (
     kelly_criterion,
@@ -83,7 +88,6 @@ from src.app_helpers import (
     _render_shap_explanation,
     _value_bet_mask,
     _value_odds_range,
-    load_run,
     load_run_meta,
 )
 
@@ -153,33 +157,26 @@ if "did_cache_cleanup" not in st.session_state:
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="Loading model …")
-def _cached_load_model():
-    """Load the promoted **production** model via the registry pointer, falling
-    back to the legacy MODELS_DIR artifact. Cached so joblib deserialization
-    happens once per session. The serving app loads ONLY the lean model — never
-    a featured dataset — so startup stays fast."""
-    try:
-        from src.run_store import load_production_predictor
-        p = load_production_predictor()
-        if p is not None:
-            return p
-    except Exception:
-        pass
-    try:
-        p = RacePredictor()
-        p.load()
-        return p
-    except FileNotFoundError:
+@st.cache_resource(show_spinner="Loading model …", max_entries=2)
+def _cached_load_model(revision):
+    """Cache exactly the promoted artifact, with promotion/replacement invalidation."""
+    if revision is None:
         return None
+    from src.run_store import load_run_predictor
+    return load_run_predictor(revision[0])
 
 
 def load_existing_model():
-    p = _cached_load_model()
-    if p is not None:
-        st.session_state.predictor = p
-        return True
-    return False
+    revision = production_model_revision()
+    try:
+        p = _cached_load_model(revision)
+    except Exception:
+        logger.exception("Failed to load the production model")
+        st.session_state.predictor = None
+        return False
+    st.session_state.predictor = p
+    st.session_state.active_run_id = revision[0] if revision else None
+    return p is not None
 
 
 def _cached_load_history_context(path: str, _mtime: float) -> tuple[pd.DataFrame, object]:
@@ -203,9 +200,7 @@ def _cached_load_history_context(path: str, _mtime: float) -> tuple[pd.DataFrame
 def _predictor_runtime_token(predictor: RacePredictor | None) -> str:
     if predictor is None:
         return "no-predictor"
-    model_path = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
-    model_mtime = os.path.getmtime(model_path) if os.path.exists(model_path) else 0.0
-    return f"{id(predictor)}:{model_mtime:.6f}"
+    return f"{id(predictor)}:{st.session_state.get('_production_revision')}"
 
 
 def _frame_signature(df: pd.DataFrame | None) -> str:
@@ -466,63 +461,23 @@ def feature_engineer_with_history(
     return feature_engineer_with_history_core(hist, live_processed, extra_history=extra_history)
 
 
-# ── Auto-restore production run metadata (lightweight; no dataset load) ──
-# The lean picks app never loads the multi-GB featured dataset at startup —
-# the predictor is loaded lazily by the page bodies (load_existing_model),
-# and the featured set only when a tab that needs it asks for it.
-if st.session_state.active_run_id is None and st.session_state.metrics is None:
-    _prod_id = get_production_run_id()
-    if _prod_id is not None:
+# Refresh session state whenever another process promotes/replaces a model.
+# The cache identity and displayed run must always describe the same artifact.
+_production_revision = production_model_revision()
+if st.session_state.get("_production_revision") != _production_revision:
+    st.session_state["_production_revision"] = _production_revision
+    st.session_state.predictor = None
+    st.session_state.active_run_id = _production_revision[0] if _production_revision else None
+    st.session_state.metrics = None
+    st.session_state.test_analysis = None
+    for _key in ("picks_preds", "picks_meta", "picks_model_fp", "picks_explanations",
+                 "_prediction_result_cache", "_prediction_result_cache_order"):
+        st.session_state.pop(_key, None)
+    if _production_revision:
         try:
-            _run = load_run(_prod_id)
-            st.session_state.active_run_id = _prod_id
-            st.session_state.metrics = _run.get("metrics")
-            _ta_meta = _run.get("test_analysis", {})
-            if _ta_meta:
-                st.session_state.test_analysis = {
-                    "bets": _run.get("bets_df", pd.DataFrame()),
-                    "curves": _run.get("curves_df", pd.DataFrame()),
-                    "stats": _ta_meta.get("stats", {}),
-                    "calibration": _ta_meta.get("calibration", []),
-                    "test_date_range": _ta_meta.get("test_date_range", ("?", "?")),
-                    "test_races": _ta_meta.get("test_races", 0),
-                    "test_runners": _ta_meta.get("test_runners", 0),
-                }
-        except Exception:
-            pass  # no production run yet or corrupt — graceful fallback
-
-
-# ── Default hyperparameter dictionaries ──────────────────────────────
-DEFAULT_HP = {
-    "classifier": {
-        "n_estimators": 500, "max_depth": 6, "learning_rate": 0.05,
-        "subsample": 0.8, "colsample_bytree": 0.8,
-    },
-}
-
-# Per-model config defaults keyed by model_key
-_MODEL_KEY_DEFAULTS = {
-    "classifier": config.CLASSIFIER_PARAMS,
-    "place": config.PLACE_CLASSIFIER_PARAMS,
-}
-
-PRESETS = {
-    "Conservative": {
-        "n_estimators": 200, "max_depth": 4, "learning_rate": 0.01,
-        "subsample": 0.7, "colsample_bytree": 0.7,
-    },
-    "Balanced (default)": {
-        "n_estimators": 500, "max_depth": 6, "learning_rate": 0.05,
-        "subsample": 0.8, "colsample_bytree": 0.8,
-    },
-    "Aggressive": {
-        "n_estimators": 1000, "max_depth": 8, "learning_rate": 0.1,
-        "subsample": 0.9, "colsample_bytree": 0.9,
-    },
-}
-
-_CUSTOM_PRESET_LABEL = "Custom"
-_LR_OPTIONS = [0.001, 0.005, 0.01, 0.02, 0.03, 0.05, 0.08, 0.1, 0.15, 0.2, 0.3]
+            st.session_state.metrics = load_run_meta(_production_revision[0]).get("metrics")
+        except (OSError, ValueError):
+            logger.warning("Could not load production run metadata", exc_info=True)
 
 
 def _mask_token(token: str | None) -> str:
@@ -609,8 +564,6 @@ if _db and _db.get("total_runners", 0) > 0:
 else:
     st.sidebar.info("🌐 Data via **Sporting Life** scraper — no keys needed.")
 
-_ENSEMBLE_MODEL_PATH = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
-
 # ── Active (production) model ─────────────────────────────────────────
 # The serving app loads the promoted model lazily via the registry pointer —
 # no run-switcher and no featured-dataset load at startup, so it stays fast.
@@ -625,7 +578,7 @@ if st.session_state.predictor is not None:
             st.sidebar.caption(f"🚀 {load_run_meta(_prod_id).get('name', _prod_id)}  ({_prod_id})")
         except Exception:
             pass
-elif _prod_id or os.path.exists(_ENSEMBLE_MODEL_PATH):
+elif _prod_id:
     if st.sidebar.button("Load model", key="sidebar_load_model"):
         if load_existing_model():
             st.session_state.active_run_id = _prod_id
@@ -634,6 +587,19 @@ elif _prod_id or os.path.exists(_ENSEMBLE_MODEL_PATH):
             st.sidebar.error("Failed to load model.")
 else:
     st.sidebar.warning("⚠️ No model — train & promote one in the training app.")
+
+# Always state whether the promoted model and the feature store agree. Silence
+# here would read as "fine", and an unverifiable model is not fine.
+if _prod_id:
+    _gen_status = feature_generation_status(_prod_id)
+    if _gen_status["state"] == GENERATION_MISMATCH:
+        st.sidebar.error("🚫 **Stale model** — trained on different features.")
+        st.sidebar.caption(_gen_status["message"])
+    elif _gen_status["state"] == GENERATION_UNKNOWN:
+        st.sidebar.warning("❓ Feature generation unverified.")
+        st.sidebar.caption(_gen_status["message"])
+    elif _gen_status["state"] == GENERATION_MATCH:
+        st.sidebar.caption(f"🔒 Features verified ({_gen_status['run_fe_signature']})")
 
 # Apply pending value-strategy updates before sidebar widgets are instantiated.
 _pending_vc = st.session_state.pop("_pending_value_config", None)
@@ -831,8 +797,7 @@ if page == "💰 Today's Picks":
                 st.markdown(f"**Frameworks:** {' · '.join(parts)}")
         st.caption(
             "This is the model used for all picks below. "
-            "To switch, go to **\U0001f9ea Experiments** and click "
-            "**\U0001f504 Activate This Model** on any saved run."
+            "To switch, promote a saved run on the training app’s **Registry** page."
         )
 
     # ── settings bar ─────────────────────────────────────────────
@@ -914,7 +879,9 @@ if page == "💰 Today's Picks":
 
     # Fingerprint of the current model state — detect model changes
     _picks_model_fp = (
-        st.session_state.get("active_run_id", ""),
+        st.session_state.get("_production_revision"),
+        feature_store_signature(),
+        st.session_state.value_config.get("ew_fraction"),
     )
     _cached_pick_preds = st.session_state.get("picks_preds")
     _cached_pick_feat = st.session_state.get("picks_featured", {}).get(_picks_date_str)
@@ -930,150 +897,34 @@ if page == "💰 Today's Picks":
     if _needs_preds:
         cards_df = cards_df.reset_index(drop=True)
 
-        # ── Load featured data from the cache hierarchy ──────────
-        # The predictions page must NEVER feature-engineer on the fly:
-        # Prepare Data / Train pre-computes features for the next 7 days
-        # (the lookahead cache) over the identical training code path.
-        # Each tier records why it missed, so a total miss is surfaced as
-        # a loud, actionable error rather than a silent dead end.
-        _feat_cache = st.session_state.get("picks_featured", {})
-        _has_lookahead = lookahead_cache_valid(_picks_date_str, current_cards_sig=None)
-
-        all_feat = None
-        _feat_source = None
-        _cache_diag: list[str] = []
-        progress = st.progress(10, text="Loading features …")
-
-        # 1. In-memory cache (this session)
-        if _odds_refresh:
-            _cache_diag.append("in-memory cache: skipped (odds refresh forces a reload)")
-        elif _picks_date_str in _feat_cache:
-            if _has_pace_diagnostics(_feat_cache[_picks_date_str]):
-                all_feat = _feat_cache[_picks_date_str]
-                _feat_source = "in-memory cache (this session)"
-                progress.progress(50, text="⚡ Using cached features …")
-            else:
-                _cache_diag.append("in-memory cache: present but predates pace diagnostics")
-        else:
-            _cache_diag.append("in-memory cache: nothing for this date this session")
-
-        # 2. Lookahead cache (built by Prepare Data / Train, 7 days ahead)
-        if all_feat is None:
-            if _has_lookahead:
-                _lookahead_feat = load_lookahead_cache(_picks_date_str, current_cards_sig=None)
-                if _lookahead_feat is None or _lookahead_feat.empty:
-                    _cache_diag.append("lookahead cache: file present but empty/unreadable")
-                elif not _has_pace_diagnostics(_lookahead_feat):
-                    _cache_diag.append("lookahead cache: present but predates pace diagnostics — rebuild needed")
-                else:
-                    all_feat = _lookahead_feat
-                    _feat_source = "lookahead cache (7-day pre-build)"
-                    progress.progress(50, text="⚡ Loaded lookahead cache …")
-            else:
-                _cache_diag.append(
-                    "lookahead cache: no entry for this date "
-                    "(outside the 7-day build window, or Prepare Data not run yet)"
-                )
-
-        # 3. Live feature cache on disk — scan for any cached file for this date
-        if all_feat is None:
-            _date_cache_dir = os.path.join(config.PROCESSED_DATA_DIR, "live_feature_cache", _picks_date_str)
-            _pq_files = []
-            if os.path.isdir(_date_cache_dir):
-                _pq_files = sorted(
-                    (f for f in os.scandir(_date_cache_dir) if f.name.endswith(".parquet")),
-                    key=lambda f: f.stat().st_mtime,
-                    reverse=True,
-                )
-            if _pq_files:
-                try:
-                    _loaded = pd.read_parquet(_pq_files[0].path, engine="pyarrow")
-                    if _loaded.empty or not _has_pace_diagnostics(_loaded):
-                        _cache_diag.append("live feature cache: file present but empty or predates pace diagnostics")
-                    else:
-                        all_feat = _loaded
-                        _feat_source = "live feature cache (disk fallback)"
-                        progress.progress(50, text="⚡ Loaded live feature cache …")
-                except Exception as _lfc_exc:
-                    _cache_diag.append(f"live feature cache: failed to read ({_lfc_exc})")
-            else:
-                _cache_diag.append("live feature cache: no file on disk for this date")
-
-        # 4. Global featured dataset (today/past only)
-        if all_feat is None:
-            if _picks_date > datetime.now().date():
-                _cache_diag.append(
-                    "global featured dataset: skipped (date is in the future — "
-                    "only the lookahead cache covers future dates)"
-                )
-            else:
-                _gfp = _global_featured_dataset_path()
-                if not _gfp:
-                    _cache_diag.append("global featured dataset: none built yet")
-                else:
-                    progress.progress(20, text="Loading featured dataset …")
-                    _full_feat = _cached_load_df(_gfp, os.path.getmtime(_gfp))
-                    if _full_feat is None or "race_date" not in _full_feat.columns:
-                        _cache_diag.append("global featured dataset: unreadable or missing race_date")
-                    else:
-                        _date_mask = (
-                            pd.to_datetime(_full_feat["race_date"], errors="coerce")
-                            .dt.strftime("%Y-%m-%d") == _picks_date_str
-                        )
-                        _date_slice = _full_feat.loc[_date_mask]
-                        if _date_slice.empty:
-                            _cache_diag.append("global featured dataset: no rows for this date")
-                        else:
-                            all_feat = _date_slice.copy()
-                            _feat_source = "global featured dataset"
-                            progress.progress(50, text="⚡ Loaded from featured dataset …")
-
-        if all_feat is None or all_feat.empty:
-            progress.empty()
+        # The model must have been trained on the feature generation that will
+        # now be fed to it. A mismatch yields confident, meaningless prices, so
+        # refuse to price the card rather than publish numbers nobody can trust.
+        _gen = feature_generation_status()
+        if _gen["state"] == GENERATION_MISMATCH:
             st.error(
-                f"🚩 **No featured data found for {_picks_date_str}.**\n\n"
-                "This page never feature-engineers on the fly — it reads the "
-                "cache that **Prepare Data / Train** builds (which pre-computes "
-                "features for the next 7 days). A total miss means the cache is "
-                "missing, stale, or this date is outside the build window."
+                f"🚫 **Model / feature mismatch — picks withheld.**\n\n{_gen['message']}"
             )
-            with st.expander("🔍 Why each cache tier missed", expanded=True):
-                for _d in _cache_diag:
-                    st.caption(f"• {_d}")
-                st.markdown(
-                    "**Fix:** run **🎓 Train & Tune → Prepare Data** to rebuild "
-                    "the featured dataset and refresh the 7-day lookahead cache, "
-                    "then reload this page."
-                )
             st.stop()
 
-        st.session_state["picks_feat_source"] = _feat_source
-
-        # ── Merge fresh odds from racecards ──────────────────────
-        _match_cols = ["race_id", "horse_name"]
-        if all(c in all_feat.columns for c in _match_cols) and all(c in cards_df.columns for c in _match_cols):
-            # Align dtypes so the merge doesn't fail on int vs object
-            all_feat["race_id"] = all_feat["race_id"].astype(str)
-            cards_df["race_id"] = cards_df["race_id"].astype(str)
-            _current_keys = cards_df[_match_cols].drop_duplicates()
-            all_feat = all_feat.merge(_current_keys, on=_match_cols, how="inner")
-            if "odds" in cards_df.columns:
-                _odds_map = cards_df[_match_cols + ["odds"]].drop_duplicates(subset=_match_cols)
-                all_feat = all_feat.drop(columns=["odds"], errors="ignore")
-                all_feat = all_feat.merge(_odds_map, on=_match_cols, how="left")
-
-        # Cache in memory
+        progress = st.progress(10, text="Checking live features …")
+        try:
+            # Exact card/history cache validation lives in the callable serving
+            # core. A miss rebuilds only this card from persisted history state.
+            all_feat = features_for_live_cards(cards_df, _picks_date_str)
+        except (RuntimeError, ValueError) as exc:
+            progress.empty()
+            st.error(str(exc))
+            st.stop()
+        if all_feat is None or all_feat.empty:
+            progress.empty()
+            st.error("No usable runners were found in the current racecard.")
+            st.stop()
+        all_feat = all_feat.copy()
+        all_feat["race_id"] = all_feat["race_id"].astype(str)
+        cards_df["race_id"] = cards_df["race_id"].astype(str)
+        st.session_state["picks_feat_source"] = "validated live card features"
         st.session_state.setdefault("picks_featured", {})[_picks_date_str] = all_feat
-
-        # ── Coerce numeric columns that may have arrived as object ──
-        _numeric_cols = [
-            "distance_furlongs", "prize_money", "num_runners", "age",
-            "weight_lbs", "draw", "horse_runs", "odds", "finish_position",
-            "finish_time_secs", "lengths_behind",
-        ]
-        for _nc in _numeric_cols:
-            if _nc in all_feat.columns and all_feat[_nc].dtype == object:
-                all_feat[_nc] = pd.to_numeric(all_feat[_nc], errors="coerce")
 
         # ── Run predictions ──────────────────────────────────────
         progress.progress(70, text="Running predictions …")
@@ -1934,18 +1785,19 @@ if page == "💰 Today's Picks":
         if st.button("🔮 Predict Custom Race", type="primary"):
             custom_df = pd.DataFrame(horses_data)
             custom_df["race_id"] = "CUSTOM_001"
-            custom_df["race_date"] = pd.Timestamp.now().strftime(
-                "%Y-%m-%d",
-            )
+            custom_df["race_date"] = _picks_date_str
             custom_df["won"] = 0
             custom_df["finish_position"] = 0
             custom_df["finish_time_secs"] = 0
             custom_df["lengths_behind"] = np.nan
 
-            processed_custom = process_data(df=custom_df, save=False)
-            featured_custom = feature_engineer_with_history(
-                processed_custom,
-            )
+            try:
+                featured_custom = features_for_live_cards(
+                    custom_df, _picks_date_str, use_cache=False,
+                )
+            except (RuntimeError, ValueError) as exc:
+                st.error(str(exc))
+                st.stop()
             predictions = _predict_featured_frame(
                 st.session_state.predictor,
                 featured_custom,

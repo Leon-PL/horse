@@ -23,7 +23,11 @@ import config
 from src.featured_dataset import fe_signature, get_featured_dataset
 from src.feature_store import FeatureStore
 from src.run_store import (
+    GENERATION_MATCH,
+    GENERATION_MISMATCH,
+    GENERATION_UNKNOWN,
     delete_run,
+    feature_generation_status,
     get_production_run_id,
     list_runs,
     load_run,
@@ -95,6 +99,32 @@ def _window_days(featured: pd.DataFrame, days: int | None) -> pd.DataFrame:
 
 def _evals_of(meta: dict) -> dict:
     return (meta.get("training_config") or {}).get("evals", {}) or {}
+
+
+def _promote_with_feedback(run_id: str, *, key: str) -> None:
+    """Promote *run_id*, explaining a refusal instead of failing silently.
+
+    ``promote`` blocks a model whose feature generation no longer matches the
+    store — serving it would score features it was never trained on. Show the
+    reason and require an explicit tick to override.
+    """
+    status = feature_generation_status(run_id)
+    override = False
+    if status["state"] == GENERATION_MISMATCH:
+        st.error(status["message"])
+        override = st.checkbox(
+            "Promote anyway (I know these features do not match)", key=f"{key}_override",
+        )
+    elif status["state"] == GENERATION_UNKNOWN:
+        st.warning(status["message"])
+
+    if st.button("🚀 Promote to production", type="primary", key=key,
+                 disabled=not run_has_model(run_id)):
+        if promote(run_id, allow_feature_mismatch=override):
+            st.success("Promoted. The serving app will load this model.")
+            st.rerun()
+        else:
+            st.error("Promotion refused — see the feature-generation warning above.")
 
 
 def _render_evals(evals: dict) -> None:
@@ -323,10 +353,7 @@ elif page == "🤖 Train":
         evals = _evals_of(meta)
         st.markdown(f"### Results — {meta.get('name')} ({last})")
         _render_evals(evals)
-        if st.button("🚀 Promote to production", type="primary"):
-            if promote(last):
-                st.success("Promoted. The serving app will load this model.")
-                st.rerun()
+        _promote_with_feedback(last, key="promote_after_train")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -658,9 +685,7 @@ elif page == "🗂️ Registry":
 
     a1, a2, a3 = st.columns(3)
     with a1:
-        if st.button("🚀 Promote", disabled=not run_has_model(sel)):
-            if promote(sel):
-                st.success("Promoted."); st.rerun()
+        _promote_with_feedback(sel, key="promote_registry")
     with a2:
         if st.button("🗑️ Delete", disabled=(sel == _prod_id)):
             delete_run(sel); st.success("Deleted."); st.rerun()

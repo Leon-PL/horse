@@ -677,7 +677,7 @@ def _cumulative(keys, race_ids, metrics: dict) -> dict:
 
 def _cumulative_plain(keys, metrics: dict) -> dict:
     """Seed-aware **plain** cumulative counts (cumsum - current) for a class-C
-    stage that is deliberately not race-safe (e.g. track×draw). Mirrors
+    stage with at most one observation per entity per race. Mirrors
     ``_cumulative`` but threads ``PlainCountsAccumulator`` state."""
     out, new_state = cumulative_counts_plain(keys, metrics, state=_COUNTS_STATE)
     if _COUNTS_STATE is not None:
@@ -2312,7 +2312,9 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
         # Multiplicative adjustment leaves all winners (lengths_behind=0.0) at 0.0,
         # which fails to distinguish a Class 1 winner from a Class 7 winner.
         # We apply an additive penalty proportional to the quality gap (max penalty 0.5 units).
-        df["_adj_lpf"] = df["_lb_per_furlong"].fillna(0) + (1.0 - _quality) * 0.5
+        # A non-finisher or unavailable margin is not a zero-length defeat.
+        # Preserve missingness so it cannot become the horse's best speed run.
+        df["_adj_lpf"] = df["_lb_per_furlong"] + (1.0 - _quality) * 0.5
 
         _adj_ops = [
             ("speed_fig_adj_avg_5", "mean", 5),
@@ -2350,10 +2352,18 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ── RacingTV RACEiQ-derived features ────────────────────────────
+# ── RacingTV RACEiQ-derived features (RETIRED) ──────────────────
 
 def add_rtv_features(df: pd.DataFrame) -> pd.DataFrame:
     """Derive historical features from RacingTV RACEiQ comparison metrics.
+
+    .. warning::
+       **Retired — not in the pipeline.** :func:`add_atr_features` replaced
+       this stage (broader coverage and a far richer per-run record), and no
+       ``rtv_*`` feature is on the allowlist. It is kept only so the RacingTV
+       cache in ``data/rtv_cache`` stays readable. Do not re-add it to the
+       stage list without re-running the sectional comparison first; see
+       ``docs/NEGATIVE_RESULTS.md``.
 
     **Leakage prevention**: The raw metrics (``rtv_top_speed``, ``rtv_fsp``,
     etc.) are *post-race outcomes* — they describe how a horse performed in
@@ -2476,22 +2486,147 @@ def add_rtv_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_atr_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Derive historical features from At The Races (TPD) sectionals.
+
+    ATR replaces RacingTV (:func:`add_rtv_features`) as the sectional source:
+    broader coverage and a far richer per-run record (full velocity curve,
+    energy distribution, stride, sectional-adjusted placing and the in-running
+    comment).  See :mod:`src.atr_features` for the per-run derivations.
+
+    **Leakage prevention** is identical to RTV: the raw ``atr_*`` columns are
+    *post-race outcomes*.  We turn each run into per-run scalars/tags, roll
+    them over the horse's PRIOR runs only (``_rolling`` → ``shift(1)``), then
+    **drop every raw/per-run column** so nothing from the current race reaches
+    the model.
+
+    Feature families: (1) in-running comment rates, (2) cleaned sectional
+    upgrade, (3) early-pace / closing run-style (feeds ``add_pace_style``),
+    (4) closing speed "in hand", (5) stride biomechanics + energy efficiency.
+    """
+    from src.attheraces_scraper import merge_atr_sectionals, ALL_ATR_COLS
+    from src.atr_features import compute_atr_run_features, RUN_METRICS, COMMENT_TAGS
+
+    logger.info("Engineering ATR sectional features...")
+
+    df = merge_atr_sectionals(df)
+
+    # ── Per-run scalars + comment tags (current race; rolled below) ──
+    # Concat in one shot, replacing the raw passthrough columns that
+    # compute_atr_run_features re-emits (avoids duplicate columns and the
+    # block-fragmentation that many single-column inserts would cause).
+    run = compute_atr_run_features(df)
+    df = df.drop(columns=[c for c in run.columns if c in df.columns], errors="ignore")
+    df = pd.concat([df, run], axis=1)
+
+    hkey = _horse_key(df)
+    race_ids = df["race_id"] if "race_id" in df.columns else None
+    # Accumulate all output columns here, then attach in a single concat.
+    new: dict[str, np.ndarray] = {}
+
+    # ── Roll continuous ability/style metrics over prior runs ────
+    for metric, hib in RUN_METRICS:
+        if metric not in df.columns:
+            continue
+        short = metric.replace("atr_", "")
+        ops = [
+            (f"atr_{short}_avg_3", "mean", 3),
+            (f"atr_{short}_avg_5", "mean", 5),
+            (f"atr_{short}_best_3", "max" if hib else "min", 3),
+        ]
+        new.update(_rolling(df, hkey, metric, ops))
+        a3, a5 = f"atr_{short}_avg_3", f"atr_{short}_avg_5"
+        if a3 in new and a5 in new:
+            new[f"atr_{short}_trend"] = np.asarray(new[a3]) - np.asarray(new[a5])
+
+    # ── Closing speed "in hand" (gated finishing %) — recent average ──
+    if "atr_closing_in_hand" in df.columns:
+        new.update(_rolling(df, hkey, "atr_closing_in_hand", [
+            ("atr_closing_in_hand_avg_3", "mean", 3),
+            ("atr_closing_in_hand_avg_5", "mean", 5),
+        ]))
+
+    # ── In-running comment tag RATES over recent runs ────────────
+    # eased/comfortable are internal gating signals only, not features.
+    _internal_tags = {"atr_cmt_eased", "atr_cmt_comfortable"}
+    for tag in COMMENT_TAGS:
+        if tag not in df.columns or tag in _internal_tags:
+            continue
+        new.update(_rolling(df, hkey, tag, [
+            (f"{tag}_rate_3", "mean", 3), (f"{tag}_rate_5", "mean", 5),
+        ]))
+
+    # ── Race-relative (vs field): compares PRIOR-form averages ───
+    if race_ids is not None:
+        for metric, _hib in RUN_METRICS:
+            a3 = f"atr_{metric.replace('atr_', '')}_avg_3"
+            if a3 in new:
+                s = pd.Series(new[a3], index=df.index)
+                new[f"{a3}_vs_field"] = (s - s.groupby(race_ids).transform("mean")).to_numpy()
+
+    # ── Composite sectional speed score (z(top) + z(finish)) ─────
+    ms, fs = "atr_max_speed_avg_3", "atr_finishing_speed_pct_avg_3"
+    if ms in new and fs in new:
+        z = []
+        for c in (ms, fs):
+            s = pd.Series(new[c], index=df.index)
+            sd = s.std()
+            z.append(((s - s.mean()) / sd).to_numpy() if sd and sd > 0 else np.zeros(len(df)))
+        new["atr_speed_score"] = (z[0] + z[1]) / 2.0
+
+    # ── Family 5: long-strider × galloping-track interaction ─────
+    if "atr_peak_stride_length_avg_3" in new and "track" in df.columns:
+        try:
+            from src.track_config import get_track_config as _gtc
+            circ = pd.to_numeric(
+                df["track"].astype(str).map(lambda t: _gtc(t).get("circumference_f", np.nan)),
+                errors="coerce",
+            )
+            sd = circ.std()
+            cz = (circ - circ.mean()) / sd if sd and sd > 0 else circ * 0.0
+            new["atr_stride_x_gallop"] = (
+                pd.Series(new["atr_peak_stride_length_avg_3"], index=df.index) * cz
+            ).to_numpy()
+        except Exception:  # pragma: no cover - track config drift
+            pass
+
+    # ── Coverage flag ────────────────────────────────────────────
+    if "atr_finishing_speed_pct_avg_3" in new:
+        new["has_atr_history"] = (~pd.isna(new["atr_finishing_speed_pct_avg_3"])).astype(np.int8)
+    else:
+        new["has_atr_history"] = np.zeros(len(df), dtype=np.int8)
+
+    # Attach all new columns in one block, then drop raw/per-run (leakage).
+    if new:
+        df = pd.concat([df, pd.DataFrame(new, index=df.index)], axis=1)
+    drop = [c for c in ALL_ATR_COLS if c in df.columns]
+    drop += [m for m, _ in RUN_METRICS if m in df.columns]
+    drop += [c for c in ("atr_closing_in_hand", *COMMENT_TAGS) if c in df.columns]
+    df = df.drop(columns=list(dict.fromkeys(drop)), errors="ignore")
+
+    return df
+
+
 def add_pace_style_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Build pace-style proxies from historical RTV speed metrics."""
+    """Build pace-style proxies from historical ATR sectional metrics.
+
+    Early-pace history (first-section speed vs field) drives the front-runner
+    ↔ closer axis; finishing-speed % history is the balance/closing component.
+    Replaces the old RacingTV inputs (see :func:`add_atr_features`).
+    """
     logger.info("Engineering pace-style features...")
 
     pace_components = [
-        ("rtv_entry_speed_avg_3_vs_field", 1.00),
-        ("rtv_top_speed_avg_3_vs_field", 0.75),
-        ("rtv_acceleration_avg_3_vs_field", -1.00),
+        ("atr_early_pace_avg_3_vs_field", 1.00),    # faster early → front-runner
+        ("atr_max_speed_avg_3_vs_field", 0.50),
     ]
     balance_components = [
-        ("rtv_fsp_avg_3_vs_field", 1.00),
+        ("atr_finishing_speed_pct_avg_3_vs_field", 1.00),  # strong finish → closer
     ]
     trend_components = [
-        ("rtv_entry_speed_trend", 1.00),
-        ("rtv_top_speed_trend", 0.50),
-        ("rtv_acceleration_trend", -1.00),
+        ("atr_early_pace_trend", 1.00),
+        ("atr_max_speed_trend", 0.50),
+        ("atr_finishing_speed_pct_trend", 0.50),
     ]
 
     def _weighted_history_score(components: list[tuple[str, float]]) -> pd.Series:
@@ -2834,6 +2969,73 @@ def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
     # Wind × distance interaction: wind matters more over longer trips
     dist = df["distance_f"].fillna(8.0) if "distance_f" in df.columns else 8.0
     df["weather_wind_x_dist"] = wind * dist / 100.0  # scaled
+
+    return df
+
+
+def add_trainer_travel_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Yard-to-track travel distance and lone-runner intent.
+
+    Yard locations come from the BHA licensed-trainer directory (county
+    centroid — see ``src.trainer_locations``); track coordinates from
+    ``track_config``. Vanning one horse a long way on an ordinary card is a
+    classic trainer-intent signal: the trip only pays if connections expect
+    the horse to be competitive.
+
+    Columns:
+        trainer_travel_km          – haversine yard → track (120 when unknown)
+        trainer_travel_known       – 1 if both endpoints resolved
+        trainer_travel_far         – known trip over 250 km
+        trainer_runners_at_meeting – yard's runners on this (date, track)
+        trainer_lone_long_trip     – far trip AND sole runner at the meeting
+    """
+    from src.track_config import TRACK_CONFIG, get_track_config
+    from src.trainer_locations import haversine_km, resolve_trainer_latlon
+
+    if "trainer" not in df.columns or "track" not in df.columns:
+        return df
+    logger.info("Engineering trainer travel features...")
+
+    trainer_loc = resolve_trainer_latlon(df["trainer"].dropna().unique())
+
+    # Track coords: only trust explicit entries (the get_track_config default
+    # is a UK-centroid placeholder that would fabricate distances).
+    known_tracks = {k.lower() for k in TRACK_CONFIG}
+
+    def _track_latlon(t: str) -> tuple[float, float]:
+        if str(t).strip().lower() in known_tracks:
+            cfg = get_track_config(str(t))
+            return (cfg.get("lat", np.nan), cfg.get("lon", np.nan))
+        return (np.nan, np.nan)
+
+    track_loc = {t: _track_latlon(t) for t in df["track"].dropna().unique()}
+
+    t_lat = df["trainer"].map(lambda n: trainer_loc.get(n, (np.nan, np.nan))[0])
+    t_lon = df["trainer"].map(lambda n: trainer_loc.get(n, (np.nan, np.nan))[1])
+    c_lat = df["track"].map(lambda t: track_loc.get(t, (np.nan, np.nan))[0])
+    c_lon = df["track"].map(lambda t: track_loc.get(t, (np.nan, np.nan))[1])
+
+    dist_km = pd.Series(
+        haversine_km(t_lat, t_lon, c_lat, c_lon), index=df.index
+    )
+    df["trainer_travel_known"] = dist_km.notna().astype(np.int8)
+    # Fixed fallback (typical GB trip), NOT a frame statistic — a frame-level
+    # median would make the feature depend on the batch it was computed in.
+    df["trainer_travel_km"] = dist_km.fillna(120.0)
+    df["trainer_travel_far"] = (
+        (df["trainer_travel_known"] == 1) & (dist_km > 250.0)
+    ).astype(np.int8)
+
+    # Lone-runner intent: yard sent exactly one horse to this meeting.
+    if "race_date" in df.columns:
+        meeting_runners = df.groupby(
+            [df["race_date"], df["track"], df["trainer"]]
+        )["trainer"].transform("count")
+        df["trainer_runners_at_meeting"] = meeting_runners.astype(np.int16)
+        df["trainer_lone_long_trip"] = (
+            (meeting_runners == 1) & (df["trainer_travel_far"] == 1)
+        ).astype(np.int8)
 
     return df
 
@@ -3190,32 +3392,59 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
             df = df.drop(columns=["_temp_runs_cond", "_temp_wins_cond", "_temp_places_cond"], errors="ignore")
 
         df = df.drop(columns=temp_cols, errors="ignore")
+        # All cards for a day are predicted before any of that day's results
+        # exist. Progeny in later races must share the day's opening history.
+        pedigree_cols = [c for c in df.columns if c.startswith(f"{col}_")
+                         and (c.endswith("_shrunk") or c.endswith("_edge"))]
+        df = _entity_day_start_view(df, [col], pedigree_cols)
 
     return df
 
 
 def add_medical_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Derive medical procedure flags, e.g., first run since gelding."""
-    if "sex" not in df.columns:
-        return df
-
-    logger.info("Engineering medical procedure features (gelding)...")
+    """Derive medical procedure flags: first run since gelding / wind surgery."""
+    logger.info("Engineering medical procedure features (gelding, wind ops)...")
     hkey = _horse_key(df)
-    
-    # Sex is usually "Colt", "Filly", "Mare", "Horse", "Gelding"
-    # First time gelding - looking for transition from Colt/Horse to Gelding
-    df["_is_gelding"] = (df["sex"].astype(str).str.lower() == "gelding").astype(int)
-    
-    horse_groups = df.groupby(hkey)
-    # Track the previous known sex (shifting by 1)
-    df["_prev_is_gelding"] = _lag(df, hkey, "_is_gelding").fillna(0)
-    
-    # First time gelding is 1 if it is now a gelding but previously was not
-    df["first_time_gelded"] = (
-        (df["_is_gelding"] == 1) & (df["_prev_is_gelding"] == 0) & (df.get("horse_prev_races", 0) > 0)
-    ).astype(np.int8)
-    
-    df = df.drop(columns=["_prev_is_gelding", "_is_gelding"], errors="ignore")
+
+    if "sex" in df.columns:
+        # Sex is usually "Colt", "Filly", "Mare", "Horse", "Gelding"
+        # First time gelding - looking for transition from Colt/Horse to Gelding
+        df["_is_gelding"] = (df["sex"].astype(str).str.lower() == "gelding").astype(int)
+
+        # Track the previous known sex (shifting by 1)
+        df["_prev_is_gelding"] = _lag(df, hkey, "_is_gelding").fillna(0)
+
+        # First time gelding is 1 if it is now a gelding but previously was not
+        df["first_time_gelded"] = (
+            (df["_is_gelding"] == 1) & (df["_prev_is_gelding"] == 0) & (df.get("horse_prev_races", 0) > 0)
+        ).astype(np.int8)
+
+        df = df.drop(columns=["_prev_is_gelding", "_is_gelding"], errors="ignore")
+
+    # ── Wind surgery (declared operation since last run) ─────────────
+    # ``wind_surgery`` = 1 when this run is the FIRST since a declared wind
+    # operation (BHA racecard declaration; NULL on rows the backfill hasn't
+    # reached → treated as 0).
+    if "wind_surgery" in df.columns:
+        ws = (
+            pd.to_numeric(df["wind_surgery"], errors="coerce")
+            .fillna(0)
+            .astype(np.int8)
+        )
+        df["wind_surgery_run"] = ws
+        # Declared ops strictly BEFORE this race (race-safe cumulative;
+        # repeat ops signal a chronic breathing problem).
+        df["wind_ops_prior"] = _cumulative(
+            df[hkey].to_numpy(), df["race_id"].to_numpy(),
+            {"wind_ops_prior": ws.to_numpy(np.float64)},
+        )["wind_ops_prior"]
+        df["first_wind_surgery"] = (
+            (ws == 1) & (df["wind_ops_prior"] <= 0)
+        ).astype(np.int8)
+        # Second run after an op — fitness often improves on the first
+        df["prev_run_wind_surgery"] = (
+            _lag(df, hkey, "wind_surgery_run").fillna(0).astype(np.int8)
+        )
     return df
 
 
@@ -3423,6 +3652,36 @@ def add_trainer_runner_intent_features(df: pd.DataFrame) -> pd.DataFrame:
                 df["trainer_first_string_by_odds"] * df["is_stable_jockey"]
             ).astype(np.int8)
 
+    # ── Jockey-booking strength ──────────────────────────────────────
+    # Which stablemate got the better rider, and is the booked jockey
+    # stronger than the horse's market position implies ("top jockey on
+    # an outsider" — connections don't waste a first-choice booking).
+    if "jockey_elo" in df.columns:
+        stable_jgroup = df.groupby(["race_id", "trainer"], sort=False)
+        df["trainer_runner_rank_by_jockey"] = stable_jgroup["jockey_elo"].rank(
+            ascending=False,
+            method="min",
+        )
+        df["trainer_first_string_by_jockey"] = (
+            (df["trainer_has_multiple_runners"] == 1)
+            & (df["trainer_runner_rank_by_jockey"] == 1)
+        ).astype(np.int8)
+        stable_best_jelo = stable_jgroup["jockey_elo"].transform("max")
+        df["jockey_elo_vs_best_stablemate"] = df["jockey_elo"] - stable_best_jelo
+
+        if "odds" in df.columns:
+            # Percentile ranks within the race: 1.0 = best jockey / most
+            # fancied horse. Positive gap = rider outranks the horse's
+            # market slot.
+            jockey_pct = df.groupby("race_id")["jockey_elo"].rank(
+                ascending=True, pct=True, method="average"
+            )
+            implied = 1.0 / df["odds"].replace(0, np.nan)
+            market_pct = implied.groupby(df["race_id"]).rank(
+                ascending=True, pct=True, method="average"
+            )
+            df["jockey_booking_vs_market"] = (jockey_pct - market_pct).fillna(0.0)
+
     return df
 
 
@@ -3457,13 +3716,11 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
 
         for draw_pos in ["low", "mid", "high"]:
             mask = (df["_draw_third"] == draw_pos).to_numpy()
-            # Track × draw-third win-rate (plain prior-only cumsum-minus-current,
-            # not race-safe — same-race peers are intentionally included as in
-            # the original). Seed-aware via _cumulative_plain so the append can
-            # carry per-(draw_pos, track) state. Keyed on track within the
-            # draw-third subset; metric keys unique per draw_pos.
-            _td = _cumulative_plain(
+            # Exclude every runner in the current race, including earlier
+            # rows (results are commonly stored in finishing order).
+            _td = _cumulative(
                 df["track"].to_numpy()[mask],
+                df["race_id"].to_numpy()[mask],
                 {
                     f"_td_wins_{draw_pos}": df["won"].to_numpy()[mask],
                     f"_td_runs_{draw_pos}": np.ones(int(mask.sum())),
@@ -3487,6 +3744,11 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
             df["track_draw_wr_runs"] > 5,
             df["track_draw_wr_wins"] / df["track_draw_wr_runs"],
             0.0,
+        )
+
+        # Match the pre-race card view: exclude earlier races on this day.
+        df = _entity_day_start_view(
+            df, ["track", "_draw_third"], ["track_draw_win_rate"]
         )
 
         # Clean up
@@ -4431,35 +4693,47 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
         "horse_elo_surface_edge",
         "horse_elo_rt_edge",
         "horse_elo_dist_cat_edge",
-        "rtv_top_speed_avg_3",
-        "rtv_top_speed_avg_5",
-        "rtv_top_speed_best_3",
-        "rtv_top_speed_trend",
-        "rtv_fsp_avg_3",
-        "rtv_fsp_avg_5",
-        "rtv_fsp_best_3",
-        "rtv_fsp_trend",
-        "rtv_jump_index_avg_3",
-        "rtv_jump_index_avg_5",
-        "rtv_jump_index_best_3",
-        "rtv_jump_index_trend",
-        "rtv_lengths_gained_jumping_avg_3",
-        "rtv_lengths_gained_jumping_avg_5",
-        "rtv_lengths_gained_jumping_best_3",
-        "rtv_lengths_gained_jumping_trend",
-        "rtv_speed_lost_avg_3",
-        "rtv_speed_lost_avg_5",
-        "rtv_speed_lost_best_3",
-        "rtv_speed_lost_trend",
-        "rtv_entry_speed_avg_3",
-        "rtv_entry_speed_avg_5",
-        "rtv_entry_speed_best_3",
-        "rtv_entry_speed_trend",
-        "rtv_stride_length_avg_3",
-        "rtv_stride_length_avg_5",
-        "rtv_stride_length_best_3",
-        "rtv_stride_length_trend",
-        "rtv_speed_score",
+        # ── ATR (TPD) sectional history (replaces RTV) ──
+        "atr_finishing_speed_pct_avg_3",
+        "atr_finishing_speed_pct_avg_5",
+        "atr_finishing_speed_pct_best_3",
+        "atr_finishing_speed_pct_trend",
+        "atr_max_speed_avg_3",
+        "atr_max_speed_avg_5",
+        "atr_max_speed_best_3",
+        "atr_max_speed_trend",
+        "atr_closing_speed_avg_3",
+        "atr_closing_speed_avg_5",
+        "atr_closing_speed_best_3",
+        "atr_closing_speed_trend",
+        "atr_turn_of_foot_avg_3",
+        "atr_turn_of_foot_avg_5",
+        "atr_turn_of_foot_best_3",
+        "atr_efficiency_score_avg_3",
+        "atr_efficiency_score_avg_5",
+        "atr_efficiency_score_best_3",
+        "atr_energy_eff_avg_3",
+        "atr_energy_eff_avg_5",
+        "atr_peak_stride_length_avg_3",
+        "atr_peak_stride_length_avg_5",
+        "atr_peak_stride_freq_avg_3",
+        "atr_upgrade_clean_avg_3",
+        "atr_upgrade_clean_avg_5",
+        "atr_upgrade_clean_best_3",
+        "atr_closing_in_hand_avg_3",
+        "atr_closing_in_hand_avg_5",
+        "atr_early_pace_avg_3",
+        "atr_speed_score",
+        "atr_stride_x_gallop",
+        # Comment-tag recent rates
+        "atr_cmt_trouble_rate_5",
+        "atr_cmt_stayed_on_rate_5",
+        "atr_cmt_weakened_rate_5",
+        "atr_cmt_outpaced_rate_5",
+        "atr_cmt_front_rate_5",
+        "atr_cmt_held_up_rate_5",
+        "atr_cmt_green_rate_5",
+        "atr_cmt_nh_error_rate_5",
     ]
     _add_relative_family_batch(higher_better_cols, higher_is_better=True)
 
@@ -4689,15 +4963,16 @@ def engineer_features(
         add_surface_features,
         add_trainer_specialisation_features,  # needs dist_category
         add_speed_figure_features,
-        add_rtv_features,
+        add_atr_features,
         add_market_features,
         add_trainer_runner_intent_features,  # stable pecking-order / intent
         add_jockey_intent_features,        # needs is_favourite + jockey_elo
         add_race_context_features,
-        add_pace_style_features,           # needs RTV history + draw/field context
+        add_pace_style_features,           # needs ATR history + draw/field context
         add_field_quality_features,
         add_track_config_features,         # static venue data
         add_course_dynamics_features,      # course experience/handedness/pace-bias/travel
+        add_trainer_travel_features,       # yard→track distance + lone-runner intent
         add_weather_features,              # Open-Meteo historical weather
         add_supplementary_features,        # consistency, class, campaign, seasonal
         add_race_relative_signal_features,
@@ -4733,26 +5008,10 @@ def engineer_features(
     # Prefer semantic defaults where they truly exist, and otherwise leave
     # missing values intact so the tree models can learn from cold starts
     # and unknown context directly.
-    numeric_cols = df.select_dtypes(include=[np.number]).columns
-
-    # Speed figure columns: fill with column median (unknown = average).
-    # This median is a GLOBAL statistic over the frame, so it is not chunk-
-    # invariant: a full rebuild and an incremental append (new rows only) would
-    # otherwise impute cold-start rows with different medians. To keep the
-    # append faithful to a rebuild we persist the build-time median per column
-    # in ``counts_state`` and reuse it on later appends. ``defer_global_
-    # imputation`` skips the fill entirely (the batched builder leaves NaN and
-    # applies one global median over the consolidated frame, then stamps the
-    # medians into counts_state for subsequent appends).
-    speed_cols = [c for c in numeric_cols if "speed_fig" in c.lower()]
-    if not defer_global_imputation:
-        for c in speed_cols:
-            med = counts_state.get(f"median::{c}") if counts_state is not None else None
-            if med is None:
-                med = float(df[c].median()) if df[c].notna().any() else 0.0
-                if counts_state is not None:
-                    counts_state[f"median::{c}"] = med
-            df[c] = df[c].fillna(med)
+    # Unknown speed history stays missing. Full-frame medians include future
+    # results and make old rows change when history is appended; tree models
+    # can use missingness directly. The legacy defer_global_imputation argument
+    # remains accepted for callers, but no global imputation is performed.
 
     # RTV RACEiQ rolling columns: keep NaN (LightGBM handles missing
     # natively) and expose coverage explicitly. The previous global

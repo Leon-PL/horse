@@ -25,6 +25,7 @@ import json
 import os
 import shutil
 import logging
+import tempfile
 from datetime import datetime
 
 import pandas as pd
@@ -262,8 +263,14 @@ def load_run_meta(run_id: str) -> dict:
 
 
 def delete_run(run_id: str) -> bool:
-    """Delete a run folder. Returns ``True`` if successfully removed."""
-    run_dir = os.path.join(RUNS_DIR, run_id)
+    """Delete an unpromoted run; the production artifact is always retained."""
+    if run_id == get_production_run_id():
+        logger.warning("Refusing to delete production run %s; promote another run first.", run_id)
+        return False
+    root = os.path.realpath(RUNS_DIR)
+    run_dir = os.path.realpath(os.path.join(root, run_id))
+    if os.path.dirname(run_dir) != root:
+        raise ValueError("run_id must identify one run directory")
     if os.path.isdir(run_dir):
         shutil.rmtree(run_dir)
         logger.info(f"Run {run_id} deleted")
@@ -313,6 +320,7 @@ def prune_runs(keep_latest: int = 5) -> list[str]:
     """Delete all but the *keep_latest* most recent runs.
 
     Run folders sort chronologically by id (``YYYYMMDD_HHMMSS``).
+    The production run is retained even when it is older than this limit.
     Returns the list of deleted run ids.
     """
     if keep_latest < 1:
@@ -427,17 +435,129 @@ def run_has_model(run_id: str) -> bool:
 PRODUCTION_POINTER = os.path.join(config.MODELS_DIR, "production.json")
 
 
-def promote(run_id: str) -> bool:
-    """Mark *run_id* as the production model. Returns ``True`` on success."""
+# ── Model ↔ feature-generation contract ───────────────────────────────
+# A model is only meaningful against features built by the same FE code it was
+# trained on. ``train_run`` records the ``fe_signature`` of the build it
+# consumed; the live path (``live_prediction.features_for_live_cards``) already
+# refuses to featurise when the store disagrees with the current FE code. The
+# missing link was the model itself: without this check a model trained on one
+# feature generation can be served against another, which produces confidently
+# wrong probabilities and no error. The project has already lost months to this
+# class of bug (the 2026-06 stale-store "place edge", the trainer_freq leak),
+# so the mismatch is surfaced rather than discovered in the P&L.
+
+GENERATION_MATCH = "match"
+GENERATION_MISMATCH = "mismatch"
+GENERATION_UNKNOWN = "unknown"      # run predates signature recording
+GENERATION_NO_MODEL = "no_model"
+
+
+def run_signatures(run_id: str) -> dict:
+    """The data/FE signatures recorded when *run_id* was trained (may be empty)."""
+    try:
+        meta = load_run_meta(run_id)
+    except (FileNotFoundError, OSError, ValueError):
+        return {}
+    config_block = meta.get("training_config")
+    if not isinstance(config_block, dict):
+        return {}
+    signatures = config_block.get("signatures")
+    return signatures if isinstance(signatures, dict) else {}
+
+
+def store_fe_signature() -> str | None:
+    """The ``fe_signature`` stamped on the feature store, or ``None``.
+
+    Reads the store's ``meta.json`` directly — a few hundred bytes — so the
+    serving app can check the contract without touching the 2 GB parquet.
+    """
+    from src.feature_store import FeatureStore
+
+    return FeatureStore().meta().get("fe_signature")
+
+
+def feature_generation_status(run_id: str | None = None) -> dict:
+    """Does *run_id* (default: production) match the store's feature generation?
+
+    Returns ``{"state", "run_id", "run_fe_signature", "store_fe_signature",
+    "message"}``. ``state`` is one of the ``GENERATION_*`` constants;
+    ``unknown`` means the run was trained before signatures were recorded and
+    the match cannot be verified either way.
+    """
+    rid = run_id if run_id is not None else get_production_run_id()
+    if not rid:
+        return {
+            "state": GENERATION_NO_MODEL, "run_id": None,
+            "run_fe_signature": None, "store_fe_signature": None,
+            "message": "No model is promoted to production.",
+        }
+
+    run_sig = run_signatures(rid).get("fe_signature")
+    try:
+        store_sig = store_fe_signature()
+    except Exception:  # pragma: no cover - unreadable store meta
+        logger.warning("Could not read the feature-store signature", exc_info=True)
+        store_sig = None
+
+    result = {
+        "state": GENERATION_UNKNOWN, "run_id": rid,
+        "run_fe_signature": run_sig, "store_fe_signature": store_sig,
+        "message": "",
+    }
+    if not run_sig:
+        result["message"] = (
+            f"Run {rid} records no feature signature (trained before signatures "
+            "were tracked), so it cannot be verified against the current "
+            "feature store. Retrain to make it checkable."
+        )
+    elif not store_sig:
+        result["message"] = (
+            "The feature store carries no signature; rebuild it on the training "
+            "app's Data page before trusting live picks."
+        )
+    elif run_sig == store_sig:
+        result["state"] = GENERATION_MATCH
+        result["message"] = f"Run {rid} matches the feature store ({run_sig})."
+    else:
+        result["state"] = GENERATION_MISMATCH
+        result["message"] = (
+            f"Run {rid} was trained on feature generation {run_sig} but the "
+            f"store now holds {store_sig}. Live features would not match the "
+            "model's training features — retrain and promote before betting."
+        )
+    return result
+
+
+def promote(run_id: str, *, allow_feature_mismatch: bool = False) -> bool:
+    """Mark *run_id* as the production model. Returns ``True`` on success.
+
+    Refuses a run whose recorded feature generation disagrees with the store,
+    because serving it would score live features the model never saw. Pass
+    ``allow_feature_mismatch=True`` to override deliberately (for example to
+    promote a model while a rebuild is still in flight).
+    """
     if not run_has_model(run_id):
         logger.warning("Cannot promote %s: no model snapshot.", run_id)
         return False
+    status = feature_generation_status(run_id)
+    if status["state"] == GENERATION_MISMATCH and not allow_feature_mismatch:
+        logger.warning("Refusing to promote %s: %s", run_id, status["message"])
+        return False
+    if status["state"] in (GENERATION_UNKNOWN, GENERATION_MISMATCH):
+        logger.warning("Promoting %s unverified: %s", run_id, status["message"])
     os.makedirs(config.MODELS_DIR, exist_ok=True)
-    with open(PRODUCTION_POINTER, "w", encoding="utf-8") as fh:
-        json.dump(
-            {"run_id": run_id, "promoted_at": datetime.now().isoformat(timespec="seconds")},
-            fh, indent=2,
-        )
+    # Readers must never observe a partially written pointer.
+    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(PRODUCTION_POINTER), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"run_id": run_id, "promoted_at": datetime.now().isoformat(timespec="seconds")},
+                fh, indent=2,
+            )
+        os.replace(temporary, PRODUCTION_POINTER)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
     logger.info("Promoted run %s to production", run_id)
     return True
 
@@ -453,6 +573,18 @@ def get_production_run_id() -> str | None:
         return None
     # Guard against a pointer to a deleted/incomplete run.
     return rid if rid and run_has_model(rid) else None
+
+
+def production_model_revision() -> tuple[str, int, int] | None:
+    """Identity for serving caches; changes on promotion or artifact replacement."""
+    rid = get_production_run_id()
+    if rid is None:
+        return None
+    try:
+        stat = os.stat(os.path.join(RUNS_DIR, rid, "model.joblib"))
+    except OSError:
+        return None
+    return rid, stat.st_mtime_ns, stat.st_size
 
 
 def production_model_path() -> str | None:
