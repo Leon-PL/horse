@@ -17,6 +17,34 @@ cause real damage when violated.
 3. **Merge keys live in `src/utils.py`** (`normalise_horse_key`,
    `normalise_track_key`, `normalise_off_time_key`). Use them for any
    horse/track/off-time join.
+4. **A module that can change a feature value must be registered in
+   `_FE_SOURCE_FILES`** (`src/featured_dataset.py`), or exempted in
+   `FE_SIGNATURE_EXEMPT` with a reason. Otherwise `fe_signature()` stays
+   unchanged, the store is not rebuilt, and stale features are served
+   silently — this is what produced the phantom "+15% place edge".
+   `tests/test_fe_signature_coverage.py` enforces it.
+5. **Never trust a number without checking the instrument first:**
+   `.venv/Scripts/python.exe scripts/project_status.py`. It verifies that
+   results → store → model → promoted model all agree, and exits non-zero
+   when they do not. Two of this project's biggest "edges" were artifacts of
+   links that silently disagreed.
+6. **Walk-forward evaluation primitives live in `src/wf_eval.py`.** Use
+   `expanding_period_folds` (purged), `oof_predict_expanding` (never fit a
+   second stage on in-sample predictions) and `bootstrap_roi_ci` (resamples
+   races, not bets). Hand-rolled fold loops produced a biased result that
+   closed a real lead for three months.
+
+## Before proposing a new feature or data source
+
+Read **[docs/NEGATIVE_RESULTS.md](docs/NEGATIVE_RESULTS.md)**. It records what
+has already been built, measured and refuted, with numbers: sale price, wind
+surgery, trainer travel, jockey booking, stewards reports and par-time speed
+figures are all dead, as is the market combination (measured twice, on two
+different harnesses).
+
+Judge candidates by **orthogonality to the market** (correlation with
+`won − market_implied_prob`) and by **CLV at BSP**, not raw predictiveness.
+High ROI with CLV ≈ 1.0 means a leak, not an edge.
 
 ## Practical notes
 
