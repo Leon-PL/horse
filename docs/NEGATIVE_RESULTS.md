@@ -209,6 +209,70 @@ losing to it is not evidence of a broken fit. The genuine nesting check is
 `wf_eval.check_combination_nesting`, which compares race log loss against
 market-only; it **passes** in the corrected runs.
 
+## 2b. ATR sectionals — 20 of 21 signals already priced (2026-10-12)
+
+The At The Races / TPD sectional scrape is the most expensive dataset this
+project has acquired: a Fastly TLS/JS challenge to clear, `curl_cffi` or a
+system `curl` binary, ~2.5s per request, GB-only, a resumable multi-week
+backfill. It produced **216 `atr_*` columns** in the store — velocity curves,
+finishing-speed percentages, closing speed, turn of foot, energy efficiency,
+stride length and frequency, sectional-adjusted upgrades, and nine
+in-running comment tags.
+
+**None of them were ever in the allowlist, and none had ever been triaged.**
+That work was in flight when the session that built it ended.
+
+Triaged with `scripts/triage_features.py` on 184,035 rows that carry the data
+(coverage 2024-01-04 to 2026-06-10, 31% of priced rows), scoring each column's
+partial correlation with the market residual — both demeaned within race, with
+the price partialled out on probability, log-odds and quadratic terms:
+
+| signal (strongest column of family) | coverage | partial corr | t | verdict |
+|---|---|---|---|---|
+| `atr_closing_in_hand` | 100% | **+0.0105** | +4.5 | shortlist |
+| `atr_turn_of_foot` | 100% | +0.0073 | +3.1 | priced |
+| `atr_efficiency_score` | 100% | +0.0070 | +3.0 | priced |
+| `atr_stride_x_gallop` | 80% | −0.0060 | −2.3 | priced |
+| `atr_max_speed` | 100% | +0.0057 | +2.4 | priced |
+| `atr_closing_speed` | 100% | −0.0056 | −2.4 | priced |
+| `atr_energy_eff` | 100% | −0.0054 | −2.3 | priced |
+| `atr_finishing_speed_pct` | 100% | +0.0051 | +2.2 | priced |
+| `atr_peak_stride_length` | 80% | +0.0035 | +1.3 | priced |
+| `atr_speed_score` | 100% | +0.0032 | +1.4 | priced |
+| `atr_cmt_trouble` | 100% | **−0.0014** | −0.6 | priced |
+
+(11 of 21 shown; the remaining comment-tag families all score below ±0.005.)
+
+**One signal clears the bar, marginally.** `atr_closing_in_hand` — a horse
+finishing fast while apparently not fully extended — at +0.0105 with t=+4.5.
+For scale, the dead sale-price feature scored 0.0000 and the best *rejected*
+sectional signal here is 0.0073, so this is barely separated from the pack. A
+partial correlation of 0.01 explains about 0.01% of residual variance.
+
+**The one genuinely interesting structural finding:** the *derived* "had more
+to give" measure is the strongest signal in the family, while the *explicit*
+in-running trouble comment (`atr_cmt_trouble`) is the **weakest of all 21** at
+−0.0014. The prediction that a data-native trouble signal would beat parsed
+text was correct in direction — and both are too small to matter. That also
+closes the idea, recorded in §7, that sectionals would succeed where stewards
+reports failed: they fail the same way.
+
+**Status:** the shortlisted signal still needs the CLV test at BSP under the
+locked walk-forward; correlation is necessary, not sufficient. Expect it to
+fail — the market-combination work established that β sits at ~0.97, so a
+signal this small cannot clear commission.
+
+**Caveat:** this ran against the store built 2026-07-03, whose `fe_signature`
+differs from the current FE code. The result is uniform enough (20 of 21 under
+0.0075) that code drift is very unlikely to reverse it, but re-confirm after
+the store rebuild before treating it as final.
+
+**This fires decision gate 3 in [ACTION_PLAN.md](ACTION_PLAN.md):** the
+sectionals were the last unexploited asset already in hand. With them priced,
+market microstructure (traded volume, ladder depth) is the only live
+hypothesis left that attacks the informational gap rather than re-processing
+public form.
+
 ## 3. `trainer_freq` stablemate leak — RESOLVED (2026-06-26)
 
 A **+56.8% ROI@BSP** was traced to `trainer_freq`, built with a `cumcount`

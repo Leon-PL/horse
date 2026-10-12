@@ -24,6 +24,7 @@ Usage::
 
 import logging
 import os
+import sys
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -451,6 +452,18 @@ def db_stats() -> dict:
 
 if __name__ == "__main__":
     import argparse
+
+    # This CLI's progress output contains emoji, and on Windows a redirected
+    # stdout defaults to cp1252, which cannot encode them. The resulting
+    # UnicodeEncodeError is raised by the very first print — before any
+    # scraping starts — so `python -m src.database --sync N > log.txt` exited
+    # non-zero having silently done nothing at all. Force UTF-8 with
+    # replacement so a console encoding can never abort a long scrape.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):  # pragma: no cover
+            pass
 
     parser = argparse.ArgumentParser(
         description="Manage the historical race database"

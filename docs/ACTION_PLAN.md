@@ -162,10 +162,22 @@ rank worse than logistic regression on the same features?" If yes, §4b is the
 priority and the whole modelling configuration is suspect. If no, §1b closes
 and attention moves to §3b.
 
-### 3b. Triage the 216 sectional features *(≈2 days)* — **biggest cheap upside**
+### 3b. Triage the 216 sectional features — **DONE 2026-10-12, mostly negative**
 
-The ATR work was built and never validated; the session that produced it ended
-mid-flight. Run the established triage on each family:
+**Result: 20 of 21 signals are already priced** (ledger §2b). Only
+`atr_closing_in_hand` clears the orthogonality bar, at partial correlation
++0.0105 (t=+4.5 on 184k rows) — marginal, and still owing a CLV test. The
+derived "had more to give" measure beat the explicit in-running trouble
+comment, which scored weakest of all 21, so the data-native-beats-text
+prediction was directionally right and economically irrelevant.
+
+This fires **decision gate 3** below. The remaining work on this item is the
+CLV test of the one shortlisted signal, and re-confirming the triage after the
+store rebuild (it ran against a store whose `fe_signature` is stale).
+
+<details><summary>Original plan for this item, for reference</summary>
+
+Run the established triage on each family:
 
 1. correlation with the market residual (`won − mkt_imp`) — ~0 means priced, stop;
 2. CLV at BSP under the locked walk-forward, with the ROI-vs-CLV tripwire.
@@ -189,6 +201,8 @@ current state — 216 columns with no verdict — is not.
 
 **Caveat to respect:** ATR coverage is GB-only and starts partway through the
 history. Gate on a coverage flag; do not median-fill (the RTV lesson).
+
+</details>
 
 ### 3c. Build the race-shape model *(≈2 days)*
 
@@ -386,10 +400,11 @@ Checkpoints where the honest move may be to stop:
    regression once weighting and regularisation are addressed, the feature set
    — not the model — is the binding constraint, and §1d/§5a are the only
    remaining levers.
-3. **After 3b.** The sectionals are the last unexploited asset in hand. If 216
-   purpose-built features from the hardest dataset to acquire produce no CLV,
-   that is strong evidence the market prices everything reachable, and §5a
-   becomes the only live hypothesis.
+3. **After 3b — FIRED 2026-10-12.** The sectionals were the last unexploited
+   asset in hand, and 20 of 21 signals are priced (ledger §2b). That is strong
+   evidence the market prices everything reachable from public form, and it
+   promotes §5a (market microstructure) to the only live hypothesis. Treat
+   further *public-form* feature engineering as closed.
 4. **After 4c + 5a.** Residual-targeted training and market microstructure are
    the two approaches that attack the informational gap rather than
    re-processing public form. If both fail, there is no public-data edge to
