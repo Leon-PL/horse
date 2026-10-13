@@ -146,3 +146,30 @@ microstructure screen -> wf_ranking_compare -> wf_market_offset t5/morning.
 21. **Matchbook harness works** (read-only check: login, 71 events/12h,
     markets with prices). No balance/account calls made.
 22. Production training running (`train.py --no-refresh --promote`).
+
+### 2026-10-13 night
+
+23. **Production run `20261013_162640` trained and promoted; project_status
+    went fully green (gate 1)** - then invalidated, correctly, by item 25.
+24. **Plan 4c first run: +11.62% at BSP with CLV < 1 - tripwire fired.**
+25. **Found the leak: `sex` is scrape-time** (encodes each horse's future
+    career; impossible-coded runners +21.5% model-free). Fixed in `e689d98`
+    (birth sex only), store rebuilt at `63d88ff721a02632`. Without the leak
+    plan 4c's race log loss gain is 0.0000; on the clean store -0.00010
+    [-0.00040, +0.00020], all rules' CIs span zero. Official rating verified
+    race-day. Ledger 15. New guard: `scripts/audit_field_timing.py`.
+26. **Honest early-price timing tests** (`ltp_1100`/`ltp_3600s` extracted):
+    following morning money at 11:00 reaches break-even (CLV 1.0000, CI
+    touches 1.0; ROI +0.85% CI spans 0), gone by T-60. Fails ACTION_PLAN 7.
+27. **Canonical Betfair parquet was missing 99,917 runners** (2020Q3-Q4,
+    2021Q3-Q4: two tars never extracted). Fixed.
+28. **BHA going reports complete**: 9,311 fixtures, 100% GB meeting join.
+    Draw-signal feature work deferred (low prior, days of parsing).
+29. **ATR triage re-confirmed on the clean store** (20/21 priced);
+    **closing-in-hand closed** (offset model with it alone: 0.0000).
+30. **Gate 4 has fired.** Roadmap drafted in `docs/ROADMAP.md`.
+31. Running: `wf_ranking_compare.py --last-folds 8` (gate 2) and the clean
+    production retrain (`train.py --promote`).
+
+**Next:** ranking result -> roadmap's last line -> live end-to-end check on
+the new model -> final status check -> report.
