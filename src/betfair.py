@@ -110,13 +110,24 @@ def attach_bsp(
     off_col: str = "off_time",
     horse_col: str = "horse_name",
     cols: tuple[str, ...] = ("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_last"),
+    overwrite: bool = False,
 ) -> pd.DataFrame:
     """Left-join Betfair price columns onto *df* by date/track/off/horse.
 
     *df* must carry race_date, track, off_time and horse_name (any naming via
     the ``*_col`` args). Returns a copy of *df* with *cols* added (NaN where no
     Betfair match). Does not mutate the input.
+
+    Refuses to replace a column *df* already has unless ``overwrite=True``:
+    asking for ``cols=("won",)`` used to swap the caller's own label for
+    Betfair's without a word, so an audit compared the exchange with itself.
     """
+    clash = [c for c in cols if c in df.columns]
+    if clash and not overwrite:
+        raise ValueError(
+            f"attach_bsp would replace existing column(s) {clash} with Betfair's; "
+            "rename yours first, or pass overwrite=True if that is the intent"
+        )
     out = df.copy()
     if bsp is None:
         bsp = load_bsp()

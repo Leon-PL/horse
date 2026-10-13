@@ -115,3 +115,23 @@ class TestArabianGuard:
         assert not _is_arabian_race(
             "Melissa, Arabella And Oriana Hawthorne Handicap", "Bath", runners
         )
+
+    def test_results_listing_drops_arabian_races(self, monkeypatch):
+        """Sporting Life files Arabian races under a "TRP Extras" pseudo-course
+        that passes the UK/IRE filter (country England). Listed, they entered
+        the sync ledger as races that can never complete."""
+        from src.data_scraper import SportingLifeScraper
+
+        def meeting(course, races):
+            return {"meeting_summary": {"course": {
+                        "name": course, "country": {"long_name": "England"}}},
+                    "races": [{"name": n, "time": "14:30",
+                               "race_summary_reference": {"id": i}} for i, n in races]}
+
+        page = {"props": {"pageProps": {"meetings": [
+            meeting("Wolverhampton", [(1, "Novice Stakes"), (2, "Handicap (Arab)")]),
+            meeting("TRP Extras", [(3, "Arab Race - Wolverhampton - Novice Stakes")]),
+        ]}}}
+        scraper = SportingLifeScraper()
+        monkeypatch.setattr(scraper, "_fetch_next_data", lambda url: page)
+        assert [r["race_id"] for r in scraper.get_results_urls("2020-10-22")] == ["1"]

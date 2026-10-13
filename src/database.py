@@ -325,6 +325,32 @@ def _validate_race_results(df: pd.DataFrame, date_str: str, race_id: str) -> Non
             raise ValueError(f"Incomplete field: {len(df)} of {expected:g} runners")
 
 
+def queue_history_audit(start: str | None = None, end: str | None = None) -> int:
+    """Queue stored legacy dates for a one-off completeness relist.
+
+    Dates stored before the sync ledger existed are trusted by default, but
+    the old date-level sync could leave a day incomplete without ever saying
+    so: it kept only the first 50 listed races per day, and a race page that
+    failed to fetch was logged and skipped while its date counted as present.
+    Queued dates are relisted by the next ``sync_database`` whose window
+    covers them; races already stored complete are adopted, not refetched.
+    Returns the number of dates queued.
+    """
+    init_db()
+    with _get_conn() as conn:
+        dates = [r[0] for r in conn.execute("""
+            SELECT DISTINCT race_date FROM results
+            WHERE race_date >= COALESCE(?, '') AND race_date <= COALESCE(?, '9999')
+              AND race_date NOT IN (SELECT race_date FROM result_sync_dates)
+        """, (start, end))]
+        conn.executemany(
+            "INSERT INTO result_sync_dates (race_date) VALUES (?)",
+            [(d,) for d in dates],
+        )
+    logger.info("Queued %d legacy dates for a completeness relist", len(dates))
+    return len(dates)
+
+
 def sync_database(days_back: int = 90) -> pd.DataFrame:
     """Resume incomplete race scrapes and return/export the full history.
 
@@ -550,6 +576,12 @@ if __name__ == "__main__":
         help="Sync missing/incomplete races within DAYS, rechecking recent listings",
     )
     parser.add_argument(
+        "--audit-history",
+        action="store_true",
+        help="Before syncing, queue every stored legacy date for a completeness "
+             "relist (use with a --sync window that covers the history)",
+    )
+    parser.add_argument(
         "--stats",
         action="store_true",
         help="Print database statistics",
@@ -569,6 +601,11 @@ if __name__ == "__main__":
         for k, v in s.items():
             print(f"  {k:20s}: {v}")
         print()
+
+    if args.audit_history:
+        if not args.sync:
+            parser.error("--audit-history needs --sync DAYS covering the dates to relist")
+        print(f"  Queued {queue_history_audit()} legacy dates for a completeness relist")
 
     if args.sync:
         print(f"\n🔄 Syncing database (last {args.sync} days)...")

@@ -174,6 +174,25 @@ def test_legacy_migration_rechecks_recent_dates_only_and_repairs_fragments(sync_
     assert "older legacy dates without a completeness audit" in caplog.text
 
 
+def test_history_audit_relists_legacy_dates_and_fetches_only_the_gaps(sync_env):
+    """The old sync kept 50 races a day and skipped failed pages silently."""
+    old = "2026-10-04"
+    database.insert_results(pd.DataFrame(runners("kept", old)))
+    fake = sync_env.scraper
+    fake.listings[old] = ["kept", "truncated"]
+    fake.listings[YESTERDAY] = []
+
+    assert database.queue_history_audit() == 1
+    database.sync_database(days_back=10)
+
+    assert old in fake.listed
+    assert fake.fetched == {"truncated": 1}  # the stored race is adopted
+    assert database.queue_history_audit() == 0  # now ledger-managed
+    with database._get_conn() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM results WHERE race_date = ?",
+                            (old,)).fetchone()[0] == 4
+
+
 def test_recent_relisting_discovers_late_races(sync_env):
     fake = sync_env.scraper
     fake.listings[YESTERDAY] = ["a"]

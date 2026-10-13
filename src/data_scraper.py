@@ -479,6 +479,11 @@ class SportingLifeScraper:
 
                     if not race_id or not course_slug:
                         continue
+                    # The page scraper rejects these anyway; dropping them
+                    # here keeps them out of the sync ledger, where they
+                    # would otherwise stay "pending" and be refetched forever.
+                    if _is_arabian_race(race_name, course_name, []):
+                        continue
 
                     race_url = (
                         f"{SPORTING_LIFE_BASE}/racing/results/"
