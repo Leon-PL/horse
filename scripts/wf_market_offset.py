@@ -275,6 +275,11 @@ def run(protocol: str, *, holdout: bool = False, max_folds: int | None = None,
         features = [c for c in only_features if c in df.columns]
         if not features:
             raise SystemExit(f"none of {only_features} are in the store")
+        # A coverage-gated signal (e.g. sectionals, which start 2023-08) is
+        # judged on races that carry it; elsewhere a fold has nothing to learn.
+        signal = [c for c in features if not c.startswith("has_")] or features
+        covered = df[signal].notna().any(axis=1).groupby(df["race_id"]).transform("any")
+        df = df[covered.to_numpy()].reset_index(drop=True)
     else:
         features = [c for c in get_feature_columns(df)
                     if c not in ("bsp", "ltp_300s", "morningwap", "_entry", "_close", "mkt", "offset")

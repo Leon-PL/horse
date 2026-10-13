@@ -1247,6 +1247,17 @@ exactly on their race's rating-to-weight line, winners and losers alike
 (86.9% vs 86.7%), and the handicapper's reassessment appears in the *next*
 race's rating (winners +4.62 lb, losers -0.84).
 
+### The last shortlisted sectional signal, given its economic test
+
+`atr_closing_in_hand_avg_3` (+0.0115 partial, 2b) as the residual model's
+*only* feature (`wf_market_offset.py --only`), on races that carry sectionals:
+4 purged folds 2025Q3-2026Q2 (sectionals start 2023-08, so the locked
+8-quarter burn-in leaves four), 9,462 races. Race log loss vs market
+**-0.00000 [-0.00040, +0.00030]**; edge > 0.10 finds 63 bets; every rule's
+median CLV is *below* the matched band's (0.9750-0.9773 vs 0.9811). A partial
+correlation of 0.0115 is real and worth nothing. **Closed** - the last of the
+brief's two unsettled leads (the other, sibling form, failed on the hold-out).
+
 ### Consequences
 
 - **Fixed in `e689d98`**: sex is collapsed to the sex at birth

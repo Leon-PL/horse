@@ -40,25 +40,28 @@ any number, ever (hard rule 5).
 
 ---
 
-## 2. State of the tree as of 2026-10-13 12:15
+## 2. State of the tree (updated 2026-10-13 evening)
+
+**The first long session ran on 2026-10-13; read `docs/SESSION_LOG.md` and
+`docs/ROADMAP.md` first.** In one line: the instrument is restored, a
+look-ahead leak in `sex` was found and fixed, and decision gate 4 has fired -
+no public-data edge survives.
 
 | Thing | State |
 |---|---|
-| Branch | `checkpoint/eval-harness-and-guards` at `12f73a8`, 19 commits ahead of `main` |
-| Results database | 79,121 races to 2026-10-11 — **2 days behind** |
-| Feature store | 749,296 rows / 1,178 columns, built through 2026-10-11, **STALE**: stamped `724ce1afe9ad7611`, code is now `3e3b9bbb5d79bacc` |
-| Promoted model | **none** — `models/production.json` does not exist |
-| Saved runs | 8; only 2 record a feature signature, so `feature_generation_status` is `unknown` for six |
-| Tests | 528 pass in the working tree; 450 at `HEAD` — the 78-test gap is three untracked test files, not silent skips |
-| Uncommitted | 9 modified + 3 untracked files from **a concurrent session that is not yours** (see §6) |
+| Branch | `checkpoint/eval-harness-and-guards`, many commits ahead of `main`; the concurrent session's work was committed as one unit (`c59ad23`) |
+| Results database | to 2026-10-12, census-complete (543 truncated races restored; only 3 Sporting Life omissions vs Betfair's public census) |
+| Feature store | rebuilt at `63d88ff721a02632`, verified on code, data and ATR cache by `project_status.py` |
+| Promoted model | retrained on that store after the sex fix (check `project_status.py`; any store rebuild invalidates it) |
+| Golden hold-out | races from **2026-06-11**, pre-registered (`config.GOLDEN_HOLDOUT_START`); used once so far (sibling lead: failed) |
+| Betfair data | canonical `betfair_bsp.parquet` now complete 2020Q3-2026Q2 (+ `ltp_1100`, `ltp_3600s`); public BSP files with volume to 2026-10-12 |
+| New data | BHA going reports (stalls, rail) for every GB fixture since 2020 - collected, not yet turned into features |
 
-**The store must be rebuilt (~56 minutes) before any measurement counts.** It
-was stamped mid-edit, so its signature describes neither the code that built it
-nor the current code. The arguments for why its *values* are probably fine are
-in ledger §12 — **do not act on them.** Re-stamping a store on an argument
-rather than a measurement is exactly what produced the phantom +15%. Rebuild it.
-
----
+The section 3-5 checklist below is the one that session worked; what it found
+and fixed is ledger sections 13-15. Treat the queue in section 4 as worked:
+4b's class-weighting premise was wrong, 4c and free 5a failed, the sibling
+lead failed on the hold-out, `atr_closing_in_hand` has its economic test in
+ledger 15.
 
 ## 3. Phase A — audit every stage
 
