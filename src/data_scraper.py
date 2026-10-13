@@ -268,6 +268,20 @@ def _infer_race_type(race_name: str, run_type: str = "") -> str:
     return "Flat"
 
 
+#: Sporting Life ``race_stage`` values for a listed race that has no result.
+NOT_RUN_STAGES = frozenset({"ABANDONED", "RACEVOID", "DORMANT"})
+
+
+class RaceNotRun(Exception):
+    """A listed race with no result to store: abandoned, void, never run, or
+    an Arabian race this dataset excludes. Raised only on request, so callers
+    can tell "nothing to store" apart from "the fetch or the parse failed"."""
+
+    def __init__(self, reason: str, url: str = ""):
+        super().__init__(f"{reason}: {url}")
+        self.reason = reason
+
+
 def _is_arabian_race(race_name: str, course_name: str, runners: list[dict]) -> bool:
     """True if a race is a Purebred Arabian race (not Thoroughbred).
 
@@ -507,10 +521,15 @@ class SportingLifeScraper:
     # ==================================================================
 
     def scrape_race_result(
-        self, race_url: str, date_str: str = ""
+        self, race_url: str, date_str: str = "", *, raise_if_not_run: bool = False,
     ) -> list[dict]:
         """
         Scrape a single race-result page and return pipeline-ready dicts.
+
+        Returns ``[]`` when there is nothing to store. With
+        ``raise_if_not_run=True`` a race that was abandoned, voided, never run
+        or is Arabian raises :class:`RaceNotRun` instead, so the sync ledger
+        can close it rather than retry it forever.
         """
         data = self._fetch_next_data(race_url)
         if not data:
@@ -518,6 +537,7 @@ class SportingLifeScraper:
             return []
 
         runners: list[dict] = []
+        race_stage = ""
         try:
             page_props = data["props"]["pageProps"]
             race_data = page_props.get("race", {})
@@ -525,6 +545,7 @@ class SportingLifeScraper:
                 return []
 
             summary = race_data.get("race_summary", {})
+            race_stage = str(summary.get("race_stage") or "").upper()
 
             # ---- race-level metadata ----
             race_id = str(
@@ -589,23 +610,27 @@ class SportingLifeScraper:
         # Purebred Arabian races must not pollute the Thoroughbred dataset.
         if runners and _is_arabian_race(race_name, course_name, runners):
             logger.info("Skipping Purebred Arabian race: %s", race_url)
+            if raise_if_not_run:
+                raise RaceNotRun("ARABIAN", race_url)
             return []
 
         # Some Sporting Life "result" URLs occasionally resolve to an
         # unresolved or non-settled page shape (for example entries-like
         # pages with all runners at finish_position=0 and blank jockeys).
         # Those must not be stored as historical results.
-        if runners:
-            settled_count = sum(
-                1 for row in runners
-                if _safe_int(row.get("finish_position", 0)) > 0
-            )
-            if settled_count == 0:
+        settled_count = sum(
+            1 for row in runners
+            if _safe_int(row.get("finish_position", 0)) > 0
+        )
+        if settled_count == 0:
+            if raise_if_not_run and race_stage in NOT_RUN_STAGES:
+                raise RaceNotRun(race_stage, race_url)
+            if runners:
                 logger.warning(
                     "Skipping unresolved result page with no settled finishers: %s",
                     race_url,
                 )
-                return []
+            return []
 
         return runners
 

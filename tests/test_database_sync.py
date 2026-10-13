@@ -49,10 +49,12 @@ def sync_env(tmp_path, monkeypatch):
             return [{"race_id": race_id, "url": f"https://example.test/{race_id}"}
                     for race_id in ids]
 
-        def scrape_race_result(self, url, date_str):
+        def scrape_race_result(self, url, date_str, raise_if_not_run=False):
             race_id = url.rsplit("/", 1)[-1]
             self.fetched[race_id] += 1
             response = self.responses.get(race_id, runners(race_id, date_str))
+            if isinstance(response, data_scraper.RaceNotRun) and not raise_if_not_run:
+                return []
             if isinstance(response, Exception):
                 raise response
             return response
@@ -234,3 +236,31 @@ def test_up_to_date_path_returns_and_exports_full_history(sync_env):
     snapshot = pd.read_csv(sync_env.root / "race_results.csv")
     assert set(snapshot.race_id) == {"a", "old"}
     assert fake.fetched == {"a": 1}
+
+
+def test_races_that_never_ran_are_closed_not_retried(sync_env):
+    """Abandoned/void races used to stay pending forever (3,445 of them after
+    the 2026-10-13 history audit), refetched on every wide sync."""
+    old = "2026-09-01"
+    fake = sync_env.scraper
+    fake.listings[old] = ["ran", "abandoned"]
+    fake.responses["abandoned"] = data_scraper.RaceNotRun("ABANDONED")
+    database.sync_database(days_back=60)
+    database.sync_database(days_back=60)
+    assert fake.fetched == {"ran": 1, "abandoned": 1}
+    with database._get_conn() as conn:
+        row = conn.execute("SELECT completed, last_error FROM result_sync_races "
+                           "WHERE race_id = 'abandoned'").fetchone()
+    assert row == (1, "not run: ABANDONED")
+
+
+def test_recent_dormant_race_stays_open(sync_env):
+    """A DORMANT page from yesterday may just not be updated yet."""
+    fake = sync_env.scraper
+    fake.listings[YESTERDAY] = ["late"]
+    fake.responses["late"] = data_scraper.RaceNotRun("DORMANT")
+    database.sync_database(days_back=1)
+    fake.responses["late"] = runners("late")
+    database.sync_database(days_back=1)
+    assert fake.fetched == {"late": 2}
+    assert ledger() == [("late", 1, 2)]

@@ -135,3 +135,20 @@ class TestArabianGuard:
         scraper = SportingLifeScraper()
         monkeypatch.setattr(scraper, "_fetch_next_data", lambda url: page)
         assert [r["race_id"] for r in scraper.get_results_urls("2020-10-22")] == ["1"]
+
+    def test_not_run_races_raise_only_on_request(self, monkeypatch):
+        """Abandoned/void/dormant pages have rides but no finishing positions."""
+        from src.data_scraper import RaceNotRun, SportingLifeScraper
+
+        page = {"props": {"pageProps": {"race": {
+            "race_summary": {"race_stage": "ABANDONED", "name": "Some Handicap",
+                             "course_name": "Beverley"},
+            "rides": [{"finish_position": 0, "ride_status": "RUNNER",
+                       "horse": {"name": "Alpha"}}],
+        }}}}
+        scraper = SportingLifeScraper()
+        monkeypatch.setattr(scraper, "_fetch_next_data", lambda url: page)
+        assert scraper.scrape_race_result("https://x/1", "2022-05-25") == []
+        with pytest.raises(RaceNotRun) as caught:
+            scraper.scrape_race_result("https://x/1", "2022-05-25", raise_if_not_run=True)
+        assert caught.value.reason == "ABANDONED"

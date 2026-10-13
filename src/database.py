@@ -447,15 +447,20 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
 
     inserted = 0
     completed = 0
+    not_run = 0
     inserted_dates: set[str] = set()
+    # A DORMANT page inside the relist window may simply not be updated yet;
+    # only older ones are known never to have run.
+    settled_before = (today - timedelta(days=RECENT_RELIST_DAYS)).strftime("%Y-%m-%d")
     if jobs:
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        from src.data_scraper import MAX_WORKERS
+        from src.data_scraper import MAX_WORKERS, RaceNotRun
 
         logger.info("Fetching %d unfinished race pages (%d workers)", len(jobs), MAX_WORKERS)
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
             futures = {
-                pool.submit(scraper.scrape_race_result, url, date_str=ds): (ds, race_id)
+                pool.submit(scraper.scrape_race_result, url, date_str=ds,
+                            raise_if_not_run=True): (ds, race_id)
                 for ds, race_id, url in jobs
             }
             for future in as_completed(futures):
@@ -473,6 +478,18 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
                     completed += 1
                     if added:
                         inserted_dates.add(ds)
+                except RaceNotRun as exc:
+                    # Abandoned, void, never run or Arabian: close it with the
+                    # reason, so "pending" keeps meaning "failed unexplained".
+                    terminal = exc.reason != "DORMANT" or ds < settled_before
+                    with _get_conn() as conn:
+                        conn.execute("""
+                            UPDATE result_sync_races SET completed = ?, last_error = ?
+                            WHERE race_date = ? AND race_id = ?
+                        """, (int(terminal), f"not run: {exc.reason}", ds, race_id))
+                    if terminal:
+                        completed += 1
+                        not_run += 1
                 except Exception as exc:
                     logger.warning("Race %s on %s remains pending: %s", race_id, ds, exc)
                     with _get_conn() as conn:
@@ -480,8 +497,8 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
                             UPDATE result_sync_races SET last_error = ?
                             WHERE race_date = ? AND race_id = ?
                         """, (str(exc), ds, race_id))
-    logger.info("Inserted %d new runner rows; %d race requests remain pending",
-                inserted, len(jobs) - completed)
+    logger.info("Inserted %d new runner rows; %d races closed as not run; "
+                "%d race requests remain pending", inserted, not_run, len(jobs) - completed)
 
     if inserted > 0:
         try:
