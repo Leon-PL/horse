@@ -126,6 +126,17 @@ class FoldResult:
 # Core walk-forward engine
 # -----------------------------------------------------------------------
 
+def restrict_to_development(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop races in or near the golden hold-out (``wf_eval.development_mask``)."""
+    from src.wf_eval import development_mask
+
+    keep = development_mask(pd.to_datetime(df["race_date"]))
+    if not keep.all():
+        logger.info("Walk-forward excludes %d rows in or near the golden hold-out "
+                    "(config.GOLDEN_HOLDOUT_START)", int((~keep).sum()))
+    return df[keep].copy()
+
+
 def walk_forward_validation(
     df: pd.DataFrame,
     model_type: str = "race_predictor",  # informational only — not used to select a model
@@ -145,9 +156,15 @@ def walk_forward_validation(
     ew_enabled: bool = True,
     ew_min_odds: float = 4.0,
     ew_max_odds: float = 51.0,
+    include_golden_holdout: bool = False,
 ) -> dict:
     """
     Run walk-forward (expanding-window) validation.
+
+    Races on or after ``config.GOLDEN_HOLDOUT_START`` are excluded unless
+    ``include_golden_holdout=True``: the hold-out exists so an edge claim can
+    be scored once on data nothing was tuned on, and one Backtest-tab run over
+    it would spend it.
 
     Args:
         df: Feature-engineered DataFrame with ``race_date`` column.
@@ -174,6 +191,8 @@ def walk_forward_validation(
         raise ValueError("Training and test windows must be positive numbers of months.")
     df = df.copy()
     df["race_date"] = pd.to_datetime(df["race_date"])
+    if not include_golden_holdout:
+        df = restrict_to_development(df)
     df["_event_dt"] = _event_sort_key(df)
     # Sort by horse_name within each race to break finish_position
     # ordering from the raw data — prevents row-position from leaking
