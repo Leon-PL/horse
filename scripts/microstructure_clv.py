@@ -71,6 +71,25 @@ def evaluate(df: pd.DataFrame, entry_col: str, n_boot: int) -> dict:
     return out
 
 
+def _with_1100_price(df: pd.DataFrame, path: str) -> pd.DataFrame:
+    """The honest morning protocol: strike at the 11:00 UK last traded price.
+
+    Full-morning volume is known when the morning closes (~11:00 UK), so the
+    bet takes the price available then - never the morning VWAP. Races off
+    before 11:30 UK are dropped so the morning is complete before the
+    decision; races with any runner untraded by 11:00 have no coherent market.
+    """
+    from src.betfair import attach_bsp
+    out = attach_bsp(df.drop(columns=["ltp_1100"], errors="ignore"),
+                     pd.read_parquet(path), cols=("ltp_1100",))
+    out["ltp_1100"] = pd.to_numeric(out["ltp_1100"], errors="coerce")
+    off = pd.to_datetime(out["race_date"].astype(str) + " " + out["off_time"].astype(str), errors="coerce")
+    local = off.dt.tz_localize("UTC").dt.tz_convert("Europe/London")
+    late_enough = (local.dt.hour * 60 + local.dt.minute) >= 11 * 60 + 30
+    priced = (out["ltp_1100"] > 1).groupby(out["race_id"]).transform("all")
+    return out[late_enough & priced].copy()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--n-boot", type=int, default=1000)
@@ -86,6 +105,9 @@ def main() -> int:
         print(f"restricted to races off at/after {args.min_off_utc} UTC: {df['race_id'].nunique():,} races")
     report = {"t5": evaluate(df[df["p_t5"].notna()], "ltp_300s", args.n_boot),
               "morning": evaluate(df, "morningwap", args.n_boot)}
+    early = os.path.join("data", "processed", "betfair_bsp_early.parquet")
+    if os.path.exists(early):
+        report["m11"] = evaluate(_with_1100_price(df, early), "ltp_1100", args.n_boot)
     for proto, res in report.items():
         print(f"\n=== protocol {proto} (decision price -> BSP) ===")
         for name, r in res.items():
