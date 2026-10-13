@@ -257,6 +257,53 @@ def bootstrap_roi_ci(
     }
 
 
+def bootstrap_median_ci(
+    values,
+    *,
+    clusters,
+    n_boot: int = DEFAULT_N_BOOT,
+    seed: int = 0,
+    alpha: float = 0.05,
+    log_mean: bool = False,
+) -> dict:
+    """Race-clustered bootstrap CI for the median (or geometric mean) of *values*.
+
+    ACTION_PLAN 7's bar is "median CLV > 1.0 with a race-clustered CI
+    excluding 1.0"; :func:`bootstrap_roi_ci` only handles means. Each
+    replicate draws races with replacement, which is equivalent to giving every
+    value its race's draw count as a weight, so the median is a weighted median
+    over values sorted once. ``log_mean=True`` reports the geometric mean.
+    """
+    v = np.asarray(values, dtype=np.float64).ravel()
+    c = np.asarray(clusters).ravel()
+    keep = np.isfinite(v) & ((v > 0) if log_mean else True)
+    v, c = v[keep], c[keep]
+    if len(v) == 0:
+        return {"estimate": None, "ci_low": None, "ci_high": None, "n": 0, "n_clusters": 0}
+    if log_mean:
+        v = np.log(v)
+    order = np.argsort(v, kind="stable")
+    v, c = v[order], c[order]
+    _, inverse = np.unique(c, return_inverse=True)
+    n_clusters = int(inverse.max()) + 1
+    rng = np.random.default_rng(seed)
+    uniform = np.full(n_clusters, 1.0 / n_clusters)
+    stats = np.empty(n_boot, dtype=np.float64)
+    for b in range(n_boot):
+        weights = rng.multinomial(n_clusters, uniform)[inverse].astype(np.float64)
+        if log_mean:
+            stats[b] = np.dot(weights, v) / weights.sum()
+        else:
+            cum = np.cumsum(weights)
+            stats[b] = v[np.searchsorted(cum, cum[-1] / 2.0)]
+    point = float(v.mean()) if log_mean else float(np.median(v))
+    lo, hi = np.percentile(stats, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+    if log_mean:
+        point, lo, hi = float(np.exp(point)), float(np.exp(lo)), float(np.exp(hi))
+    return {"estimate": round(point, 6), "ci_low": round(float(lo), 6),
+            "ci_high": round(float(hi), 6), "n": int(len(v)), "n_clusters": n_clusters}
+
+
 def clv_summary(entry_odds, close_odds) -> dict:
     """CLV of a set of bets, reported on every measure that matters.
 

@@ -285,3 +285,29 @@ def test_development_and_holdout_masks_partition_with_a_purge_gap(monkeypatch):
     assert dates[hold].min() == pd.Timestamp("2026-06-11")
     gap = dates[~dev & ~hold]
     assert len(gap) == 7  # the purge: 2026-06-04 .. 2026-06-10
+
+
+def test_bootstrap_median_ci_is_wider_when_values_cluster_by_race():
+    """Bets in one race share an outcome; the CI must respect that."""
+    from src.wf_eval import bootstrap_median_ci
+
+    rng = np.random.default_rng(1)
+    race_effect = rng.normal(0, 0.05, size=300)
+    values_clustered = np.repeat(1.0 + race_effect, 10) + rng.normal(0, 0.005, 3000)
+    races = np.repeat(np.arange(300), 10)
+    clustered = bootstrap_median_ci(values_clustered, clusters=races, n_boot=400)
+    naive = bootstrap_median_ci(values_clustered, clusters=np.arange(3000), n_boot=400)
+    assert clustered["n_clusters"] == 300 and naive["n_clusters"] == 3000
+    width = lambda r: r["ci_high"] - r["ci_low"]
+    assert width(clustered) > 1.5 * width(naive)
+    assert clustered["ci_low"] < clustered["estimate"] < clustered["ci_high"]
+
+
+def test_bootstrap_median_ci_geometric_mean_and_point_estimate():
+    from src.wf_eval import bootstrap_median_ci
+
+    values = np.array([0.5, 1.0, 2.0, 1.0])
+    out = bootstrap_median_ci(values, clusters=np.arange(4), n_boot=200, log_mean=True)
+    assert out["estimate"] == pytest.approx(1.0)
+    med = bootstrap_median_ci(values, clusters=np.arange(4), n_boot=200)
+    assert med["estimate"] == pytest.approx(1.0)
