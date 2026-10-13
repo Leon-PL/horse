@@ -14,6 +14,14 @@ Matched baseline: every runner in the band (the universe the rule bets in).
 Reported: CLV (median and geometric mean with race-clustered CIs) and ROI
 both at the taken price and at BSP, 2% commission, per-quarter consistency.
 Development period only; the golden hold-out is not read.
+
+The **morning protocol is look-ahead biased by construction**: excess morning
+volume is only known when the morning ends, but ``morningwap`` averages the
+whole morning's prices, including the longer ones a steamer traded at before
+the money came. Its CLV is reported for completeness and must not be read as
+a result. The T-5 protocol is clean wherever the morning ended before T-5;
+``--min-off-utc 14:00`` checks that the effect survives in races run hours
+after any plausible morning cutoff (Betfair does not publish it).
 """
 
 from __future__ import annotations
@@ -66,9 +74,16 @@ def evaluate(df: pd.DataFrame, entry_col: str, n_boot: int) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--n-boot", type=int, default=1000)
+    ap.add_argument("--min-off-utc", default=None,
+                    help="only races off at/after HH:MM UTC: hours after any morning "
+                         "cutoff, so the morning volume cannot include post-decision trades")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
     df = load()
+    if args.min_off_utc:
+        from src.utils import normalise_off_time_key
+        df = df[df["off_time"].map(normalise_off_time_key) >= args.min_off_utc]
+        print(f"restricted to races off at/after {args.min_off_utc} UTC: {df['race_id'].nunique():,} races")
     report = {"t5": evaluate(df[df["p_t5"].notna()], "ltp_300s", args.n_boot),
               "morning": evaluate(df, "morningwap", args.n_boot)}
     for proto, res in report.items():

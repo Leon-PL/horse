@@ -87,6 +87,19 @@ def _iso_to_epoch_ms(iso: str) -> int | None:
     return int(dt.timestamp() * 1000)
 
 
+def _uk_clock_ms(market_time: str, hour: int, minute: int) -> int | None:
+    """Epoch ms of HH:MM UK local time on the race's date (marketTime is UTC)."""
+    if not market_time or len(market_time) < 10:
+        return None
+    from zoneinfo import ZoneInfo
+    try:
+        local = datetime.strptime(market_time[:10], "%Y-%m-%d").replace(
+            hour=hour, minute=minute, tzinfo=ZoneInfo("Europe/London"))
+    except ValueError:
+        return None
+    return int(local.timestamp() * 1000)
+
+
 def parse_market(stream: bytes) -> list[dict] | None:
     """Parse one market's mcm stream -> list of per-runner rows (or None to skip)."""
     final_def: dict | None = None
@@ -96,6 +109,8 @@ def parse_market(stream: bytes) -> list[dict] | None:
     ltp_60: dict[int, float] = {}
     ltp_300: dict[int, float] = {}
     ltp_pre: dict[int, float] = {}
+    ltp_3600: dict[int, float] = {}
+    ltp_1100: dict[int, float] = {}
     off_ms: int | None = None
 
     # First pass to find off-time (marketTime) — appears in every marketDefinition.
@@ -134,6 +149,13 @@ def parse_market(stream: bytes) -> list[dict] | None:
 
     cut_60 = (off_ms - 60_000) if off_ms else None
     cut_300 = (off_ms - 300_000) if off_ms else None
+    # Early decision prices for the morning-money test (ledger 14): one hour
+    # before the off, and 11:00 UK time on race day - the end of Betfair's
+    # "morning" period, inferred from where the morning share of pre-play
+    # volume collapses. A bet struck on full-morning information can take the
+    # 11:00 price, never the morning VWAP (which includes earlier prices).
+    cut_3600 = (off_ms - 3_600_000) if off_ms else None
+    cut_1100 = _uk_clock_ms(final_def.get("marketTime", ""), 11, 0)
 
     for d in parsed:
         pt = d.get("pt")
@@ -150,6 +172,10 @@ def parse_market(stream: bytes) -> list[dict] | None:
                     ltp_60[rid] = ltp
                 if cut_300 is not None and pt is not None and pt <= cut_300:
                     ltp_300[rid] = ltp
+                if cut_3600 is not None and pt is not None and pt <= cut_3600:
+                    ltp_3600[rid] = ltp
+                if cut_1100 is not None and pt is not None and pt <= cut_1100:
+                    ltp_1100[rid] = ltp
 
     event_name = final_def.get("eventName", "")
     track = _track_from_event(event_name)
@@ -179,6 +205,8 @@ def parse_market(stream: bytes) -> list[dict] | None:
                 "ltp_preoff": ltp_pre.get(rid),
                 "ltp_60s": ltp_60.get(rid),
                 "ltp_300s": ltp_300.get(rid),
+                "ltp_3600s": ltp_3600.get(rid),
+                "ltp_1100": ltp_1100.get(rid),
                 "ltp_last": last_ltp.get(rid),
                 "won": 1 if status == "WINNER" else 0,
                 "n_runners": n_active,
@@ -339,7 +367,7 @@ def main() -> None:
     df = pd.DataFrame(all_rows)
     # Older (2022) streams occasionally encode prices as strings; coerce so the
     # sort/dedup and downstream maths stay numeric.
-    for _c in ("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_last"):
+    for _c in ("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_3600s", "ltp_1100", "ltp_last"):
         if _c in df.columns:
             df[_c] = pd.to_numeric(df[_c], errors="coerce")
     # Incremental update: merge into the existing parquet instead of rebuilding
