@@ -1097,6 +1097,84 @@ races off after ~11:00 UK (median share 1.24 before 11:00, 0.20 at
 11:00-11:30, 0.10 at 11:30-12:00), so `ltp_1100` is being extracted from the
 BASIC stream for that test.
 
+## 15. The `sex` look-ahead leak, and plan 4c without it (2026-10-13)
+
+### The third phantom edge, caught by the tripwire
+
+Plan 4c - a per-race conditional logit with the market's log-probability as a
+fixed offset, so trees can only learn the market's residual
+(`scripts/wf_market_offset.py`, T-5 protocol, 13 purged quarterly folds
+2023Q2-2026Q2, 40,462 races, pre-registered rules) - first came back with:
+
+| rule | n | ROI @ BSP [95% CI] | median CLV |
+|---|---|---|---|
+| edge > 0.10 | 13,681 | **+11.62% [+3.69, +19.77]** | 0.9930 |
+| top-edge | 33,699 | +5.58% [+1.17, +9.97] | 0.9972 |
+
+with a race-log-loss gain of only -0.00040 and median CLV *below* 1.0: the
+ROI-vs-CLV tripwire (0.3) fired. The residual model's top features in almost
+every fold were `sex_H` and `sex_F`.
+
+### The leak
+
+The `sex` column is the horse's sex **on the day its results page was
+scraped** (669k rows in March 2026), not race day:
+
+- 2,842 two-year-olds are coded as mares and 255 as entire horses (both mean
+  five or older); 4.76% of rows carry an impossible age/sex pair, falling
+  toward the scrape date: 6.95% for 2020 races, 6.44% for 2023, 1.85% for
+  2025, 0.06% for 2026;
+- only 2.3% of horses with 8+ runs ever show a second code, although every
+  filly becomes a mare and every entire colt a horse at five.
+
+Sporting Life freezes a retired horse's code and updates the active ones, so
+the code records the horse's *future*: "c" = a colt never gelded (kept entire
+for stud value), "g" includes colts gelded later, "m" on a young filly = she
+raced on past four, "f" on an old race = she retired young. **Model-free, the
+21,292 runners with an impossible race-day code returned +21.5% at BSP
+[+15.5, +28.2].** By sex code in 2020-23, entire males ("h") +43.7%, fillies
+("f") -11.9%; the gap narrows toward the scrape date.
+
+Every other per-race field was checked the same way and is as-of-race: trainer
+changes over 47% of careers, official rating 99.9%, headgear 84%, form 100%
+(and the next race's form string ends with this race's position 96.6% of the
+time).
+
+### Plan 4c without the leak
+
+Same harness, every `sex_*` feature excluded:
+
+| | with `sex_*` | **without** |
+|---|---|---|
+| race log loss vs market | -0.00040 | **-0.00000 [-0.00030, +0.00020]** |
+| edge > 0.10 | +11.62% (13,681 bets) | **-4.98% [-19.83, +10.59]** (2,958) |
+| top-edge | +5.58% | +2.01% [-2.17, +6.31] |
+| edge > 0 | +0.69% | -1.50% [-3.20, +0.21] |
+
+**The market-offset model learns nothing the market does not already know.**
+Early stopping keeps 10-100 trees per fold - the residual signal is so weak
+the model stops almost at once. Plan 4c, the best-motivated untried idea in
+the project, fails cleanly: not a configuration problem but an informational
+one. (Re-confirmed on the rebuilt store with the legitimate `sex_Female`
+below, once it exists.)
+
+### Consequences
+
+- **Fixed in `e689d98`**: sex is collapsed to the sex at birth
+  (`sex_Female` / `sex_Male`) - the only part history supports. Live cards
+  carry race-day sex, so this also removes a train/serve skew. The
+  never-working `first_time_gelded` is removed rather than "fixed" into a
+  leak.
+- **Every model trained on the allowlist since `sex_F`/`sex_H` entered it has
+  used future information**, including the production run promoted earlier
+  today. It is retrained on the rebuilt store.
+- **No refutation in this ledger is weakened.** The leak flattered the model,
+  so every recorded negative (market combination -3.55%, the disagreement
+  analysis, ...) was measured on a model better-informed than any real one
+  could be. They stand, and would only get worse.
+- **The tripwire is now three for three.** High ROI with CLV at or below 1.0
+  has meant a leak every time it has fired here.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
