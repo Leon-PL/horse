@@ -889,6 +889,17 @@ Arabian 2, HTTP 404 2 (95% upper bound on genuine misses ~3.7% of the set).
 The sync now closes such races with their reason (`RaceNotRun`), so its
 "pending" count means "failed, unexplained".
 
+**Checked against an independent census.** Betfair's public files list every
+GB/IE win market, so `scripts/betfair_db_audit.py` run against them is a
+full-history completeness test of the scraper: 79,579 of 79,693 Betfair races
+(99.9%) are in the DB. Of the 114 absent, 45 ran on 2020-09-14, the day before
+the DB starts; 66 are Arabian races the DB excludes by design; **3 are genuine
+omissions** (Chepstow 2023-04-10 13:35, Bellewstown 2024-07-05 18:35, Curragh
+2025-06-27 19:30), races Sporting Life never listed. The same audit exposed a
+join bug: `src/betfair.py` lacked the 2020 abbreviations `Aint`, `List`, `Nott`,
+so 124 Aintree/Listowel/Nottingham races (Sep-Dec 2020, public files only - the
+BASIC parquet never used them) could not join. Fixed.
+
 ### The flat draw backfill was finished, not pending
 
 `draw_backfill_done` covers 46,791 flat races through 2026-06-13, and the

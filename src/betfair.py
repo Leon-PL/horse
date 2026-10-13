@@ -50,6 +50,10 @@ _TRACK_ALIASES = {
 # normalised key to the full DB track key so both sides of the join agree.
 # Without this ~6.5k pre-2022 Betfair races fail to join to data/races.db.
 _TRACK_ABBREVIATIONS = {
+    # aint/list/nott were missing until 2026-10-13: every 2020-21 Aintree,
+    # Listowel and Nottingham race failed to join (124 races in the public
+    # BSP files alone), found by betfair_db_audit against the public census.
+    "aint": "aintree", "list": "listowel", "nott": "nottingham",
     "ballin": "ballinrobe", "bang": "bangor-on-dee", "belle": "bellewstown",
     "bev": "beverley", "carl": "carlisle", "cart": "cartmel",
     "catt": "catterick", "chelmc": "chelmsford city", "chelt": "cheltenham",
