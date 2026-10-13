@@ -148,3 +148,27 @@ def test_signature_changes_when_a_registered_source_changes(tmp_path, monkeypatc
     target = scratch / "src" / "atr_features.py"
     target.write_bytes(target.read_bytes() + b"\n# edit\n")
     assert fd.fe_signature() != before, "editing a hashed source must invalidate"
+
+
+def test_signature_ignores_line_endings(tmp_path, monkeypatch):
+    """git autocrlf rewrites line endings on checkout, stash and worktree add.
+
+    The working tree holds a mix of LF and CRLF sources, so a raw-byte hash
+    changed whenever git touched a file — forcing a ~1 hour rebuild for a
+    change that cannot alter any feature value.
+    """
+    from src import featured_dataset as fd
+
+    scratch = tmp_path / "proj"
+    (scratch / "src").mkdir(parents=True)
+    for rel in _FE_SOURCE_FILES:
+        (scratch / rel).write_bytes((SRC.parent / rel).read_bytes())
+    _relocate_project(monkeypatch, scratch)
+
+    def rewrite(eol: bytes) -> str:
+        for rel in _FE_SOURCE_FILES:
+            raw = (scratch / rel).read_bytes().replace(b"\r\n", b"\n")
+            (scratch / rel).write_bytes(raw.replace(b"\n", eol))
+        return fd.fe_signature()
+
+    assert rewrite(b"\n") == rewrite(b"\r\n"), "line endings must not invalidate"

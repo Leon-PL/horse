@@ -11,7 +11,7 @@ Python tools for collecting UK and Ireland race results, building chronological 
 - **Evaluation:** chronological holdouts and purged walk-forward folds, with Brier score, log loss, ranking metrics, and betting diagnostics. `src/wf_eval.py` provides shared research evaluation helpers.
 - **Serving:** a lightweight picks app loads the explicitly promoted run. Promotion and live features are checked against their recorded feature-generation signatures.
 
-Read [the project audit](docs/PROJECT_AUDIT.md) for verified defects, changes, measurements, and remaining limitations. [The research ledger](docs/NEGATIVE_RESULTS.md) records earlier hypotheses and negative results.
+Start with [the pipeline map](PROJECT_OUTLINE.md) (§2.0) for what is live. [The research ledger](docs/NEGATIVE_RESULTS.md) records every hypothesis measured and refuted, with numbers; [the action plan](docs/ACTION_PLAN.md) explains why the model loses to the market and what is left to try.
 
 ## Install and inspect
 

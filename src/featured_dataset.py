@@ -111,7 +111,10 @@ def fe_signature() -> str:
         path = os.path.join(config.BASE_DIR, rel)
         try:
             with open(path, "rb") as fh:
-                source = fh.read()
+                # Line endings cannot change a feature value (the tokenizer
+                # normalises them), but git's autocrlf rewrites them on any
+                # checkout, which would force a spurious full rebuild.
+                source = fh.read().replace(b"\r\n", b"\n")
             h.update(rel.encode("utf-8"))
             h.update(source)
             text = source.decode("utf-8")
