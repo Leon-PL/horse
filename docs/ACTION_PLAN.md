@@ -288,7 +288,20 @@ rather than a price, but do not expect much.
 **Success criterion:** improves debutant AUC toward the market's 0.825, or a
 ledger entry.
 
-### 3d. Label correctness audit *(≈1 day)* — never done
+### 3d. Label correctness audit — **DONE 2026-10-13, labels are clean**
+
+0 races without a winner, 0 `won`/`finish_position` disagreements, 0 short
+fields, and **0.0429%** disagreement with Betfair's settled result across
+586,970 matched runners (ledger §2f). The residual is amended results
+(disqualifications and placing reversals), ~0.15% of races, which the scrape
+stores as first-past-the-post.
+
+Remaining action, small: the backtesters settle on our `won`, so a bet on a
+horse later disqualified is credited with a win the exchange never paid — a
+bias in our favour, well under 0.1 pp of ROI. Prefer Betfair's settled `won`
+for settlement where it is matched.
+
+<details><summary>Original item</summary>
 
 `plan.txt` Stage 1 called for this and it was never carried out. Cross-check
 against Betfair: `won` / `placed`, non-runners, **dead heats**, voids,
@@ -298,6 +311,8 @@ flatter or punish every experiment.
 
 **Success criterion:** a disagreement rate, and a fix or a documented
 explanation for each category.
+
+</details>
 
 ### 3e. Retire dead weight *(≈half a day)*
 

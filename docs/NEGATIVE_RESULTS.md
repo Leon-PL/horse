@@ -498,6 +498,69 @@ already-collected families will probably also be priced. The stalls-position
 gap is different: it is a genuine collection omission that makes an existing
 allowlisted feature (`draw`) weaker than it needs to be.
 
+## 2f. Label audit: labels are clean, bar amended results (2026-10-13)
+
+`plan.txt` Stage 1 asked for this and it was never done. Every accuracy figure
+and every refutation in this ledger rests on `won` and `finish_position` being
+right, so an unmeasured error rate means every reported gap carries an unknown
+offset. Run with `scripts/audit_labels.py` over 749,296 runners / 79,121 races
+(2020-09-15 to 2026-10-11), cross-checked against Betfair's own settled result.
+
+**Internal consistency is perfect:**
+
+| check | result |
+|---|---|
+| races with no winner stored | **0** |
+| races with >1 winner | 128 (0.162%) — dead heats, legitimate |
+| `won` disagreeing with `finish_position == 1` | **0** |
+| races with fewer rows than the declared field | **0** |
+| non-finishers (`fp <= 0`) | 6.79% of runners (falls, pulled up, unseated) |
+
+**Against Betfair's settled result:** 586,970 runners matched (78.3%), **252
+disagreements = 0.0429%**, near-symmetric (130 where we say won and Betfair
+says lost, 122 the other way). Place labels against the exchange's settled
+place market: 123 of 677,988 = **0.0181%**.
+
+So the labels are not a source of error worth worrying about, and the
+model-versus-market gap in §2c carries no meaningful label offset.
+
+### The residual 0.04% is amended results, not scrape noise
+
+The obvious explanation — dead heats — is wrong: only 9 of the 252 fall in a
+race where our DB records multiple winners. The rest arrive in **pairs**, and
+always the same shape:
+
+```
+2021-02-17 Dundalk    Barretstown      fp=2  ours=0  betfair=1
+2021-02-17 Dundalk    Star Harbour     fp=1  ours=1  betfair=0
+2021-04-24 Sandown    Potterman        fp=2  ours=0  betfair=1
+2021-04-24 Sandown    Enrilo           fp=1  ours=1  betfair=0
+```
+
+Our DB stores the **first past the post**; Betfair settles on the **official
+amended result** after a disqualification or placing reversal. ~243 runners is
+~121 affected races, 0.15% of the history — consistent with the real-world rate
+of amended results in GB/IRE, and spread evenly across years (36/52/51/30/64/10
+for 2021-2026).
+
+**Why it is worth knowing despite being tiny.** For *training* labels 0.15% of
+races is immaterial. For *settlement* it is not neutral: the backtesters settle
+on our `won`, so a bet on a horse later disqualified is credited as a win the
+exchange never paid. The direction is **favourable to us**, which is the
+direction that matters. The magnitude is well under 0.1 pp of ROI on a 104k-bet
+run, so nothing in this ledger changes — but the cheap fix is to prefer
+Betfair's settled `won` for settlement wherever it is matched, and that would
+remove the bias entirely.
+
+### A trap in `attach_bsp` worth knowing
+
+`attach_bsp` assigns `out[c] = merged[c]`, so calling it with `cols=("won",)`
+**silently overwrites the caller's own label** with Betfair's. An audit written
+that way compares the exchange against itself and reports flawless agreement
+forever. This was nearly shipped; `tests/test_audit_labels.py` now constructs a
+deliberate one-race disagreement so the test fails if the label is ever
+clobbered again.
+
 ## 3. `trainer_freq` stablemate leak — RESOLVED (2026-06-26)
 
 A **+56.8% ROI@BSP** was traced to `trainer_freq`, built with a `cumcount`
