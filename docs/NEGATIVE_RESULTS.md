@@ -963,6 +963,28 @@ fails safe but forced ~56-minute rebuilds for no change, and made signatures
 incomparable between checkouts. Now normalised; identical in the main tree and
 a fresh worktree.
 
+### Live picks silently dropped every horse's history on a fresh scrape
+
+Found by running the serving path end to end (brief Stage 8) on the clean
+production model. A **fresh** racecard scrape returns `horse_id` as text; the
+racecard CSV cache, and the training store (whose history also arrives
+through a CSV round trip), hold integers - and the store's carried rating and
+counts state is keyed by those integers. Featurising the same 351-runner card
+both ways: **25 of the model's 149 features differed, on 68-98% of runners**
+(days since last run, previous-race counts, distance/weight/class change,
+place rate, rating interactions); `travel_from_last_km` was 100% missing.
+In the picks app a fresh scrape happens on the first load of each day and on
+every "Refresh odds", so those prices were computed for horses with their
+history erased - with no error anywhere. No test compared a fresh scrape with
+a cached one.
+
+Fixed at two layers outside the FE signature: `get_scraped_racecards` now
+returns a fresh scrape through the cache's own CSV parse, and
+`features_for_live_cards` coerces `horse_id` to the store's integer form
+(`tests/test_serving_safety.py` covers both). Re-verified end to end through a
+forced fresh scrape: integer ids, `travel_from_last_km` 93% present, no model
+feature mostly missing, per-race win probabilities summing to 1.
+
 ### `promote` let unverifiable runs through
 
 It refused a feature-generation **mismatch** but promoted a run with **no

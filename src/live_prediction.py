@@ -269,6 +269,25 @@ def load_lookahead_cache(
         return None
 
 
+def _match_store_id_types(card: pd.DataFrame) -> pd.DataFrame:
+    """Give ``horse_id`` the integer form the store's carried history uses.
+
+    The store's rating and counts state is keyed by integer horse ids (history
+    reaches it through a CSV round trip). A card holding them as text - a
+    fresh scrape, a hand-built what-if race - matched none of it, so 25 of the
+    149 model features lost every horse's history without any error
+    (2026-10-13). Ids that are not all numeric are left alone.
+    """
+    if "horse_id" not in card.columns:
+        return card
+    ids = card["horse_id"]
+    numeric = pd.to_numeric(ids, errors="coerce")
+    if numeric.notna().sum() == ids.notna().sum() and numeric.notna().all():
+        card = card.copy()
+        card["horse_id"] = numeric.astype("int64")
+    return card
+
+
 #: Longest routine gap between UK/IRE race days (22 Dec -> 26 Dec). History
 #: ending further before a card than this means results are missing.
 MAX_HISTORY_GAP_DAYS = 4
@@ -346,6 +365,7 @@ def features_for_live_cards(
         if cached is not None and not cached.empty:
             return cached
     card = cards.copy()
+    card = _match_store_id_types(card)
     card["won"] = 0
     card["finish_position"] = 0
     card["finish_time_secs"] = 0.0

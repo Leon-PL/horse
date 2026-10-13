@@ -231,3 +231,31 @@ def test_christmas_gap_is_tolerated_and_unsigned_store_is_not(live_env, monkeypa
     with pytest.raises(RuntimeError, match="no feature signature"):
         live.features_for_live_cards(live_env, "2025-12-26",
                                      store=_CurrentStore("2025-12-22", signature=None), use_cache=False)
+
+
+def test_fresh_scrape_and_cache_reload_return_identical_id_types(tmp_path, monkeypatch):
+    """A fresh scrape held horse_id as text, the cache reload as integers; the
+    store's carried history is keyed by integers (2026-10-13: 25 of 149 model
+    features lost every horse's history on a freshly scraped card)."""
+    from src import data_scraper as ds
+    monkeypatch.setattr(ds, "_racecard_cache_path", lambda date_str=None: str(tmp_path / "cards.csv"))
+    monkeypatch.setattr(ds, "scrape_todays_racecards", lambda **kw: pd.DataFrame(
+        {"race_id": ["9001", "9001"], "horse_id": ["1235263", "1238030"], "horse_name": ["A", "B"]}))
+    fresh = ds.get_scraped_racecards(date_str="2026-10-14", force_refresh=True)
+    cached = ds.get_scraped_racecards(date_str="2026-10-14")
+    assert fresh["horse_id"].dtype == cached["horse_id"].dtype
+    assert fresh["horse_id"].tolist() == [1235263, 1238030]
+
+
+def test_live_features_receive_integer_horse_ids(live_env, monkeypatch):
+    seen = {}
+
+    class Store(_CurrentStore):
+        def featurize_live(self, card):
+            seen["dtype"] = card["horse_id"].dtype
+            return card.copy()
+
+    monkeypatch.setattr(live, "_results_db_latest", lambda: pd.Timestamp("2026-10-12"))
+    card = live_env.assign(horse_id=["1235263"])
+    live.features_for_live_cards(card, "2026-10-13", store=Store("2026-10-12"), use_cache=False)
+    assert seen["dtype"] == "int64"

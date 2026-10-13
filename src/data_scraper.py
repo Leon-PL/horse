@@ -1293,6 +1293,14 @@ def get_scraped_racecards(
     )
     if df is not None and not df.empty:
         save_racecards_cache(df, date_str)
+        # Return what the cache returns. A fresh scrape holds horse_id as text;
+        # the CSV round trip (and the training store) hold integers, and the
+        # store's carried history is keyed by those integers. Serving a fresh
+        # scrape silently dropped every horse's history from 25 of the 149
+        # model features (2026-10-13).
+        reloaded = load_cached_racecards(date_str)
+        if reloaded is not None:
+            return reloaded
     return df
 
 
