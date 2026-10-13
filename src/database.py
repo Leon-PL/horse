@@ -4,14 +4,14 @@ Historical Database Module
 SQLite-backed persistent storage for scraped race results.
 
 Instead of re-scraping months of data every time you retrain, this module
-stores results in a local ``data/races.db`` file and only fetches *new*
-days that are not yet in the database.
+stores results in a local ``data/races.db`` file and tracks unfinished
+race fetches so a partial scrape can be resumed safely.
 
 Usage::
 
     from src.database import sync_database, load_from_database, db_stats
 
-    # Scrape only the days we're missing (incremental)
+    # Resume missing/incomplete races (incremental)
     sync_database(days_back=90)
 
     # Load everything (or a window) as a DataFrame
@@ -95,6 +95,33 @@ _CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_results_date ON results(race_date);
 """
 
+# Legacy rows have no scrape manifest. Recheck a small recent window without
+# unexpectedly re-scraping years of existing history on the first upgraded run.
+RECENT_RELIST_DAYS = 7
+
+_CREATE_SYNC_DATES = """
+CREATE TABLE IF NOT EXISTS result_sync_dates (
+    race_date TEXT PRIMARY KEY,
+    listing_succeeded INTEGER NOT NULL DEFAULT 0,
+    listing_attempts INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TEXT,
+    last_error TEXT
+);
+"""
+
+_CREATE_SYNC_RACES = """
+CREATE TABLE IF NOT EXISTS result_sync_races (
+    race_date TEXT NOT NULL,
+    race_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_attempt_at TEXT,
+    last_error TEXT,
+    PRIMARY KEY (race_date, race_id)
+);
+"""
+
 
 # -----------------------------------------------------------------------
 # Connection helpers
@@ -112,6 +139,8 @@ def init_db() -> None:
     with _get_conn() as conn:
         conn.execute(_CREATE_TABLE)
         conn.execute(_CREATE_INDEX)
+        conn.execute(_CREATE_SYNC_DATES)
+        conn.execute(_CREATE_SYNC_RACES)
         # Migrate: add columns that may not exist in older databases
         for col, col_type in [
             ("sire", "TEXT"),
@@ -186,6 +215,15 @@ def insert_results(df: pd.DataFrame) -> int:
 
     init_db()
 
+    with _get_conn() as conn:
+        inserted = _insert_results(conn, df)
+    logger.info("  Inserted %d new rows", inserted)
+    return inserted
+
+
+def _insert_results(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """Insert within the caller's transaction (also used by the sync ledger)."""
+
     # Keep only columns that exist in both the DF and the schema
     cols = [c for c in _COLUMNS if c in df.columns]
     subset = df[cols].copy()
@@ -194,15 +232,9 @@ def insert_results(df: pd.DataFrame) -> int:
     col_names = ", ".join(cols)
     sql = f"INSERT OR IGNORE INTO results ({col_names}) VALUES ({placeholders})"
 
-    rows_before = _count_rows()
-
-    with _get_conn() as conn:
-        conn.executemany(sql, subset.values.tolist())
-
-    rows_after = _count_rows()
-    inserted = rows_after - rows_before
-    logger.info(f"  Inserted {inserted} new rows ({rows_after} total in DB)")
-    return inserted
+    changes_before = conn.total_changes
+    conn.executemany(sql, subset.values.tolist())
+    return conn.total_changes - changes_before
 
 
 # -----------------------------------------------------------------------
@@ -271,128 +303,171 @@ def load_from_database(days_back: int | None = None) -> pd.DataFrame:
 # Sync — incremental scrape + store
 # -----------------------------------------------------------------------
 
+def _validate_race_results(df: pd.DataFrame, date_str: str, race_id: str) -> None:
+    """Reject empty, unresolved, misrouted, or visibly truncated race pages."""
+    required = {"race_id", "race_date", "horse_name", "finish_position"}
+    if df.empty or not required.issubset(df.columns):
+        raise ValueError("Empty or incomplete result response")
+    if not (df["race_id"].astype(str).eq(race_id).all()
+            and df["race_date"].eq(date_str).all()):
+        raise ValueError("Result response belongs to another race or date")
+    names = df["horse_name"]
+    if (names.isna().any() or names.astype(str).str.strip().eq("").any()
+            or names.duplicated().any()):
+        raise ValueError("Missing or duplicate runner names")
+    # Non-finishers (including position 99) are legitimate runners. Retain
+    # them, but require a winner before declaring the whole result settled.
+    if not pd.to_numeric(df["finish_position"], errors="coerce").eq(1).any():
+        raise ValueError("Result response has no settled winner")
+    if "num_runners" in df.columns:
+        expected = pd.to_numeric(df["num_runners"], errors="coerce").max()
+        if pd.notna(expected) and len(df) < expected:
+            raise ValueError(f"Incomplete field: {len(df)} of {expected:g} runners")
+
+
 def sync_database(days_back: int = 90) -> pd.DataFrame:
-    """
-    Incrementally update the database.
+    """Resume incomplete race scrapes and return/export the full history.
 
-    1. Determine which dates in the requested window are already stored.
-    2. Scrape only the *missing* dates.
-    3. Insert new results into the DB.
-    4. Return the full dataset for the requested window.
-
-    Args:
-        days_back: How many days of history to ensure are in the DB.
-
-    Returns:
-        DataFrame with all results for the requested window.
+    Each listed unfinished race is attempted once per invocation, within the
+    requested window. Recent dates are relisted to discover delayed results.
+    Older legacy dates without a manifest are preserved, not assumed audited.
+    Empty listings remain retryable: the scraper also returns [] on parse
+    failures, so they cannot certify that a day had no races.
     """
     from src.data_scraper import SportingLifeScraper
 
+    if days_back < 0:
+        raise ValueError("days_back must be non-negative")
     init_db()
-
     existing_dates = get_dates_in_db()
-
-    # Build list of dates we need
     today = datetime.now()
     all_dates = [
         (today - timedelta(days=i + 1)).strftime("%Y-%m-%d")
         for i in range(days_back)
     ]
-    missing_dates = [d for d in all_dates if d not in existing_dates]
-
-    if not missing_dates:
-        logger.info(
-            f"✅ Database is up-to-date — all {days_back} days already stored "
-            f"({len(existing_dates)} dates in DB)"
-        )
-        return load_from_database(days_back=days_back)
-
-    logger.info(
-        f"📦 Database has {len(existing_dates)} dates. "
-        f"Need to scrape {len(missing_dates)} missing day(s)..."
+    date_window = set(all_dates)
+    recent_dates = set(all_dates[:RECENT_RELIST_DAYS])
+    with _get_conn() as conn:
+        managed_dates = {r[0] for r in conn.execute("SELECT race_date FROM result_sync_dates")}
+        incomplete_dates = {r[0] for r in conn.execute("""
+            SELECT d.race_date FROM result_sync_dates d
+            WHERE d.listing_succeeded = 0 OR EXISTS (
+                SELECT 1 FROM result_sync_races r
+                WHERE r.race_date = d.race_date AND r.completed = 0
+            )
+        """)}
+    legacy_dates = (existing_dates & date_window) - managed_dates - recent_dates
+    if legacy_dates:
+        logger.info("Preserving %d older legacy dates without a completeness audit", len(legacy_dates))
+    listing_dates = sorted(
+        (date_window - existing_dates - managed_dates)
+        | (incomplete_dates & date_window) | recent_dates
     )
-
-    # Scrape each missing date — collect all race URLs first, then fetch
-    # individual race pages in parallel across all dates.
     scraper = SportingLifeScraper()
-    new_runners: list[dict] = []
 
-    # Phase 1: gather race URLs (one listing request per date — sequential)
-    all_race_jobs: list[tuple[str, dict]] = []   # (date_str, link_info)
-    for i, date_str in enumerate(sorted(missing_dates)):
-        logger.info(
-            f"  📅 [{i+1}/{len(missing_dates)}] Listing {date_str} …"
-        )
+    # Persist the listing attempt and every expected race before fetching any
+    # result. An interruption or partial failure therefore cannot hide a gap.
+    for date_str in listing_dates:
+        with _get_conn() as conn:
+            conn.execute("""
+                INSERT INTO result_sync_dates
+                    (race_date, listing_attempts, last_attempt_at) VALUES (?, 1, datetime('now'))
+                ON CONFLICT(race_date) DO UPDATE SET listing_succeeded = 0,
+                    listing_attempts = listing_attempts + 1, last_attempt_at = datetime('now')
+            """, (date_str,))
         try:
-            race_links = scraper.get_results_urls(date_str, uk_only=True)
-        except Exception as e:
-            logger.warning(f"    ⚠️ Failed to get listing for {date_str}: {e}")
-            continue
+            links = scraper.get_results_urls(date_str, uk_only=True)
+            if not links:
+                raise ValueError("Empty or unreadable results listing")
+            race_links = {str(info.get("race_id") or ""): info["url"] for info in links}
+            if any(not race_id or not url for race_id, url in race_links.items()):
+                raise ValueError("Listing has a missing race ID or URL")
+            with _get_conn() as conn:
+                for race_id, url in race_links.items():
+                    # Adopt complete legacy races without refetching their
+                    # pages; a stored fragment must still be retried.
+                    stored = conn.execute("""
+                        SELECT COUNT(*), MAX(num_runners), MAX(finish_position = 1)
+                        FROM results WHERE race_date = ? AND race_id = ?
+                    """, (date_str, race_id)).fetchone()
+                    complete = int(bool(stored[0] and stored[2]
+                                        and stored[0] >= (stored[1] or 0)))
+                    conn.execute("""
+                        INSERT INTO result_sync_races (race_date, race_id, url, completed)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(race_date, race_id) DO UPDATE SET url = excluded.url
+                    """, (date_str, race_id, url, complete))
+                conn.execute("""
+                    UPDATE result_sync_dates SET listing_succeeded = 1, last_error = NULL
+                    WHERE race_date = ?
+                """, (date_str,))
+        except Exception as exc:
+            logger.warning("Failed to verify listing for %s: %s", date_str, exc)
+            with _get_conn() as conn:
+                conn.execute("UPDATE result_sync_dates SET last_error = ? WHERE race_date = ?",
+                             (str(exc), date_str))
 
-        if not race_links:
-            logger.info(f"    No races found for {date_str}")
-            continue
+    # Persisted URLs remain usable even when a subsequent listing request
+    # fails or omits the race. Never truncate the number of races in a day.
+    with _get_conn() as conn:
+        jobs = [r for r in conn.execute("""
+            SELECT race_date, race_id, url FROM result_sync_races
+            WHERE completed = 0 ORDER BY race_date, race_id
+        """) if r[0] in date_window]
+        conn.executemany("""
+            UPDATE result_sync_races SET attempts = attempts + 1, last_attempt_at = datetime('now')
+            WHERE race_date = ? AND race_id = ?
+        """, [(ds, race_id) for ds, race_id, _ in jobs])
 
-        race_links = race_links[:50]  # cap per day
-        for link_info in race_links:
-            all_race_jobs.append((date_str, link_info))
-
-    # Phase 2: fetch individual race pages in parallel
-    if all_race_jobs:
+    inserted = 0
+    completed = 0
+    inserted_dates: set[str] = set()
+    if jobs:
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from src.data_scraper import MAX_WORKERS
 
-        logger.info(
-            f"  ⚡ Fetching {len(all_race_jobs)} race pages "
-            f"({MAX_WORKERS} workers) …"
-        )
-
-        def _fetch_race(job: tuple[str, dict]) -> list[dict]:
-            ds, info = job
-            return scraper.scrape_race_result(info["url"], date_str=ds)
-
+        logger.info("Fetching %d unfinished race pages (%d workers)", len(jobs), MAX_WORKERS)
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {pool.submit(_fetch_race, j): j for j in all_race_jobs}
-            done = 0
+            futures = {
+                pool.submit(scraper.scrape_race_result, url, date_str=ds): (ds, race_id)
+                for ds, race_id, url in jobs
+            }
             for future in as_completed(futures):
-                done += 1
-                ds, info = futures[future]
+                ds, race_id = futures[future]
                 try:
-                    runners = future.result()
-                    new_runners.extend(runners)
-                    if done % 50 == 0 or done == len(all_race_jobs):
-                        logger.info(
-                            f"    [{done}/{len(all_race_jobs)}] races fetched"
-                        )
-                except Exception as e:
-                    logger.warning(
-                        f"    ⚠️ Failed {info.get('race_name', '?')}: {e}"
-                    )
+                    frame = pd.DataFrame(future.result())
+                    _validate_race_results(frame, ds, race_id)
+                    with _get_conn() as conn:
+                        added = _insert_results(conn, frame)
+                        conn.execute("""
+                            UPDATE result_sync_races SET completed = 1, last_error = NULL
+                            WHERE race_date = ? AND race_id = ?
+                        """, (ds, race_id))
+                    inserted += added
+                    completed += 1
+                    if added:
+                        inserted_dates.add(ds)
+                except Exception as exc:
+                    logger.warning("Race %s on %s remains pending: %s", race_id, ds, exc)
+                    with _get_conn() as conn:
+                        conn.execute("""
+                            UPDATE result_sync_races SET last_error = ?
+                            WHERE race_date = ? AND race_id = ?
+                        """, (str(exc), ds, race_id))
+    logger.info("Inserted %d new runner rows; %d race requests remain pending",
+                inserted, len(jobs) - completed)
 
-    if new_runners:
-        new_df = pd.DataFrame(new_runners)
-        inserted = insert_results(new_df)
-        logger.info(f"🆕 Scraped {len(new_runners)} runners, inserted {inserted} new rows")
-
-        # Fetch weather for the newly-scraped dates and write it into the DB
-        if inserted > 0:
-            try:
-                from src.weather import backfill_weather_in_db
-                scraped_dates = sorted(set(d for d, _ in all_race_jobs))
-                backfill_weather_in_db(dates=scraped_dates)
-            except Exception as e:
-                logger.warning(f"⚠️ Weather backfill for new rows failed: {e}")
-
-        # Fetch pedigree for first-time runners (one profile request per
-        # horse not yet in horse_pedigree; no-op when none are new).
-        if inserted > 0:
-            try:
-                from src.pedigree_backfill import backfill_pedigree
-                backfill_pedigree()
-            except Exception as e:
-                logger.warning(f"⚠️ Pedigree backfill for new horses failed: {e}")
-    else:
-        logger.info("  No new runners found for missing dates")
+    if inserted > 0:
+        try:
+            from src.weather import backfill_weather_in_db
+            backfill_weather_in_db(dates=sorted(inserted_dates))
+        except Exception as exc:
+            logger.warning("Weather backfill for new rows failed: %s", exc)
+        try:
+            from src.pedigree_backfill import backfill_pedigree
+            backfill_pedigree()
+        except Exception as exc:
+            logger.warning("Pedigree backfill for new horses failed: %s", exc)
 
     # Save a CSV copy for the pipeline. This MUST be the full history, not the
     # scrape window: feature engineering computes cumulative/rolling features
@@ -472,7 +547,7 @@ if __name__ == "__main__":
         "--sync",
         type=int,
         metavar="DAYS",
-        help="Sync the database (scrape missing days within DAYS window)",
+        help="Sync missing/incomplete races within DAYS, rechecking recent listings",
     )
     parser.add_argument(
         "--stats",

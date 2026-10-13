@@ -24,6 +24,7 @@ from src.bet_settlement import (
     ew_placed_flag,
     settle_ew_bet,
     settle_win_bet,
+    valid_decimal_odds,
     value_bet_selection as _value_bet_selection,
 )
 
@@ -143,12 +144,13 @@ def analyse_test_set(
             continue
         best = race_group.loc[race_group["model_prob"].idxmax()]
         odds_val = float(best["odds"]) if has_odds else 0.0
-        pnl = settle_win_bet(odds_val, best["won"] == 1)
 
         rd = best["race_date"]
         rd_str = str(rd.date()) if hasattr(rd, "date") else str(rd)[:10]
 
-        all_bets.append({
+        if valid_decimal_odds(odds_val):
+            pnl = settle_win_bet(odds_val, best["won"] == 1)
+            all_bets.append({
             "race_date": rd_str,
             "race_id": race_id,
             "track": best.get("track", ""),
@@ -160,7 +162,7 @@ def analyse_test_set(
             "stake": 1.0,
             "pnl": round(pnl, 2),
             "clv": round(float(best["model_prob"]) * odds_val, 4) if has_odds else None,
-        })
+            })
 
         # Strategy 2 — Value Bets (odds-dependent threshold)
         # Tighter threshold at short odds (where calibration is better),
@@ -291,7 +293,8 @@ def analyse_test_set(
         avg_odds_all = float(strat["odds"].mean()) if n_bets else 0.0
         avg_stake = total_staked / n_bets if n_bets else 0.0
         max_dd = _max_drawdown(strat["pnl"].values) if n_bets else 0.0
-        # CLV = model_prob × odds; > 1 means we beat the closing market
+        # Legacy field: model_prob * odds is a MODEL expected-return multiple,
+        # not closing-line value. Actual price-to-BSP CLV is computed in src.clv.
         avg_clv = float(strat["clv"].mean()) if (n_bets and "clv" in strat.columns and strat["clv"].notna().any()) else None
 
         stats[strategy] = {

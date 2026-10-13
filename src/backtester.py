@@ -44,6 +44,7 @@ from src.bet_settlement import (
     settle_ew_bet,
     settle_win_bets,
     value_bet_selection,
+    valid_decimal_odds,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -138,6 +139,7 @@ def walk_forward_validation(
     ew_min_place_edge: float | None = None,
     blend_market_odds: bool = False,
     random_seed: int | None = None,
+    win_calibration_method: str | None = None,
     value_min_odds: float = 1.0,
     value_max_odds: float = 101.0,
     ew_enabled: bool = True,
@@ -267,7 +269,10 @@ def walk_forward_validation(
         groups_train = train_df.groupby("race_id", sort=False).size().values
 
         groups_test_arr = test_df.groupby("race_id", sort=False).size().values
-        _te = RacePredictor(frameworks=frameworks, random_seed=random_seed)
+        _te = RacePredictor(
+            frameworks=frameworks, random_seed=random_seed,
+            win_calibration_method=win_calibration_method,
+        )
         win_probs_cal, place_probs = _te.train_on_fold(
             X_train_s, X_test_s, train_df,
             groups_train, groups_test_arr, feature_cols,
@@ -343,6 +348,9 @@ def walk_forward_validation(
         if not _tp_valid.empty:
             _tp_idx = _tp_valid.groupby("race_id", sort=False)[_tp_col].idxmax()
             _tp = test_with_probs.loc[_tp_idx]
+            # Do not substitute a lower-ranked runner when the actual top pick
+            # has no observed settlement price.
+            _tp = _tp[valid_decimal_odds(_tp["odds"].to_numpy())]
         else:
             _tp = pd.DataFrame()
         _tp_won = _tp["won"].values.astype(int) if not _tp.empty else np.array([], dtype=int)

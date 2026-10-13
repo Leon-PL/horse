@@ -79,6 +79,7 @@ from src.bet_settlement import value_bet_selection as _value_bet_selection
 # lives in src.bet_analysis.
 from src.bet_analysis import analyse_test_set, max_drawdown as _max_drawdown  # noqa: F401
 from src.betfair import attach_bsp, bsp_implied_prob, load_bsp
+from src.probability_calibration import fit_temperature, race_temperature
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1583,9 +1584,11 @@ class RacePredictor:
        features and reported in the metrics so tree-model lift is
        always measured against a simple reference. Not persisted.
 
-    Each model is trained independently. Calibration (Platt + isotonic)
-    is fitted on out-of-fold predictions from purged expanding-window
-    CV, optionally refit on the most recent training slab.
+    Each model is trained independently. Win calibration is configurable:
+    Platt + isotonic, or one temperature fitted to race-level winner log loss.
+    Place calibration uses Platt + isotonic. Calibrators are fitted on
+    out-of-fold predictions from purged expanding-window CV, optionally
+    refit on the most recent training slab.
 
     Historical note: this class was previously named
     ``TripleEnsemblePredictor``; a module-level alias is kept so older
@@ -1597,6 +1600,7 @@ class RacePredictor:
         self,
         frameworks: dict[str, str] | None = None,
         random_seed: int | None = None,
+        win_calibration_method: str | None = None,
         **_ignored,
     ):
         self.clf_model = None
@@ -1608,8 +1612,13 @@ class RacePredictor:
             **(frameworks or {}),
         }
         self.random_seed = int(config.RANDOM_SEED if random_seed is None else random_seed)
-        # Win-classifier calibration (Platt)
-        self.calibration_temp = 1.0  # kept for serialisation compat
+        self.win_calibration_method = self._validate_win_calibration_method(
+            getattr(config, "WIN_CALIBRATION_METHOD", "platt_isotonic")
+            if win_calibration_method is None else win_calibration_method
+        )
+        # Temperature is used only by race_temperature. Historical artifacts
+        # may contain this field even though their Platt pipeline ignored it.
+        self.calibration_temp = 1.0
         self.platt_a = 1.0
         self.platt_b = 0.0
         # Place-classifier calibration (Platt)
@@ -1904,13 +1913,9 @@ class RacePredictor:
         _all_placed = np.concatenate(oof_placed_parts)
         _oof_df = pd.concat(oof_df_parts, ignore_index=True) if oof_df_parts else pd.DataFrame()
 
-        # Win-classifier calibration: Platt only (classifier outputs
-        # probabilities directly, no softmax/temperature needed)
-        self.calibration_temp = 1.0  # unused — kept for serialisation compat
-        self.platt_a, self.platt_b = self._optimise_platt_calibration(
+        self._fit_win_calibrator(
             _all_clf_logits, _all_groups, _all_fp,
         )
-        logger.info(f"  Win-clf Platt: a={self.platt_a:.4f}, b={self.platt_b:.4f}")
 
         # Banded Platt removed — it anchors probabilities to market
         # odds bands, washing out the model's genuine edge.
@@ -1926,14 +1931,11 @@ class RacePredictor:
 
         # A refit must learn the same Platt -> isotonic chain used at
         # inference, never compose an old isotonic mapping into its inputs.
-        self.win_iso_cal = None
         self.place_iso_cal = None
-        # Isotonic calibration on OOF Platt-calibrated probs
-        _oof_win_cal = self._calibrate_win_probs(_all_clf_logits, _all_groups)
-        self.win_iso_cal = self._fit_isotonic(_oof_win_cal, (_all_fp == 1).astype(np.float64))
+        # Place isotonic calibration on OOF Platt-calibrated probabilities.
         _oof_place_cal = self._calibrate_place_probs(_all_place_probs)
         self.place_iso_cal = self._fit_isotonic(_oof_place_cal, _all_placed.astype(np.float64))
-        logger.info("  Isotonic calibration fitted on OOF predictions.")
+        logger.info("  Place isotonic calibration fitted on OOF predictions.")
 
         # ── Phase 1b: Per-model Optuna auto-tune (optional) ──────
         if auto_tune is not None and params is None:
@@ -3423,6 +3425,40 @@ class RacePredictor:
         b = float(np.clip(res.x[1], -3.0, 3.0))
         return a, b
 
+    @staticmethod
+    def _validate_win_calibration_method(method: str) -> str:
+        method = str(method).strip().lower()
+        if method not in {"platt_isotonic", "race_temperature"}:
+            raise ValueError(
+                "WIN_CALIBRATION_METHOD must be 'platt_isotonic' or 'race_temperature'."
+            )
+        return method
+
+    def _fit_win_calibrator(self, raw_probs, groups, finish_positions) -> None:
+        """Fit the complete win calibration chain used at inference.
+
+        Shared by OOF and recent-slab fitting, including walk-forward folds.
+        Discard previous fitted state before learning a replacement mapping.
+        """
+        method = self._validate_win_calibration_method(self.win_calibration_method)
+        self.win_calibration_method = method
+        self.calibration_temp = 1.0
+        self.platt_a, self.platt_b = 1.0, 0.0
+        self.win_iso_cal = None
+        won = (np.asarray(finish_positions) == 1).astype(np.float64)
+        if method == "race_temperature":
+            self.calibration_temp = fit_temperature(raw_probs, groups, won)
+            logger.info("  Win race temperature: %.4f", self.calibration_temp)
+        else:
+            self.platt_a, self.platt_b = self._optimise_platt_calibration(
+                raw_probs, groups, np.asarray(finish_positions),
+            )
+            self.win_iso_cal = self._fit_isotonic(
+                self._calibrate_win_probs(raw_probs, groups), won,
+            )
+            logger.info("  Win-clf Platt: a=%.4f, b=%.4f; isotonic=%s",
+                        self.platt_a, self.platt_b, self.win_iso_cal is not None)
+
     # ── Isotonic calibration ──────────────────────────────────────
     @staticmethod
     def _fit_isotonic(
@@ -3457,7 +3493,7 @@ class RacePredictor:
         soft_y: np.ndarray | None = None,
         market_odds: np.ndarray | None = None,
     ) -> bool:
-        """Fit Platt + isotonic calibrators on a training-only slab.
+        """Fit the configured win and place calibrators on a training-only slab.
 
         A disposable pair of models is trained on the earliest 80 % of races,
         then calibrated on the latest 20 % of races from the training split.
@@ -3558,8 +3594,7 @@ class RacePredictor:
         cal_clf_probs = cal_clf.predict_proba(X_cal_vl)[:, 1]
         cal_place_raw = cal_place.predict_proba(X_cal_vl)[:, 1]
 
-        self.calibration_temp = 1.0
-        self.platt_a, self.platt_b = self._optimise_platt_calibration(
+        self._fit_win_calibrator(
             cal_clf_probs,
             cal_groups,
             fp_cal_vl,
@@ -3569,13 +3604,9 @@ class RacePredictor:
             placed_cal_vl,
         )
 
-        # Phase 1 already installed OOF isotonic maps. Discard them before
-        # fitting their replacements, otherwise the new maps learn from the
-        # old maps' outputs but inference feeds them direct Platt outputs.
-        self.win_iso_cal = None
+        # Discard the OOF place map before replacing it, so the replacement
+        # learns from direct Platt outputs, just as it receives at inference.
         self.place_iso_cal = None
-        cal_win_probs = self._calibrate_win_probs(cal_clf_probs, cal_groups)
-        self.win_iso_cal = self._fit_isotonic(cal_win_probs, won_cal_vl)
         cal_place_probs = self._calibrate_place_probs(cal_place_raw)
         self.place_iso_cal = self._fit_isotonic(cal_place_probs, placed_cal_vl)
         if market_odds is not None:
@@ -3594,11 +3625,9 @@ class RacePredictor:
         self, raw_probs: np.ndarray, groups: np.ndarray,
         test_df: pd.DataFrame | None = None,
     ) -> np.ndarray:
-        """Apply Platt scaling to win classifier probabilities → calibrated P(win).
-
-        The win classifier outputs probabilities directly via predict_proba,
-        so no softmax/temperature step is needed — just Platt + per-race normalise.
-        """
+        """Apply the fitted calibration method, returning a distribution per race."""
+        if getattr(self, "win_calibration_method", "platt_isotonic") == "race_temperature":
+            return race_temperature(raw_probs, groups, self.calibration_temp)
         probs = raw_probs.copy()
 
         # Global Platt
@@ -3905,6 +3934,7 @@ class RacePredictor:
                 "place_model": self.place_model,
                 "scaler": self.scaler,
                 "feature_cols": self.feature_cols,
+                "win_calibration_method": getattr(self, "win_calibration_method", "platt_isotonic"),
                 "calibration_temp": self.calibration_temp,
                 "platt_a": self.platt_a,
                 "platt_b": self.platt_b,
@@ -3926,11 +3956,19 @@ class RacePredictor:
         if not os.path.exists(path):
             raise FileNotFoundError(f"No models found at {path}")
         data = joblib.load(path)
+        # The new-training config must never reinterpret a historical model.
+        self.win_calibration_method = self._validate_win_calibration_method(
+            data.get("win_calibration_method", "platt_isotonic")
+        )
         self.clf_model = data.get("clf_model")
         self.place_model = data.get("place_model")
         self.scaler = data.get("scaler") or _IdentityScaler()
         self.feature_cols = data["feature_cols"]
         self.calibration_temp = float(data.get("calibration_temp", 1.0))
+        if self.win_calibration_method == "race_temperature" and (
+            not np.isfinite(self.calibration_temp) or self.calibration_temp <= 0
+        ):
+            raise ValueError("Saved calibration temperature must be finite and positive.")
         self.platt_a = float(data.get("platt_a", 1.0))
         self.platt_b = float(data.get("platt_b", 0.0))
         self.place_platt_a = float(data.get("place_platt_a", 1.0))
@@ -3960,7 +3998,7 @@ class RacePredictor:
         """Train win and place models on a pre-split fold with calibration.
 
         Uses the last 20 % of the training data as a held-out slab to
-        fit temperature + Platt calibration (same pipeline as full
+        fit the configured calibration (same pipeline as full
         ``train()``).  Returns calibrated win/place probabilities.
 
         When *fast_fold* is True, tree counts are halved for speed

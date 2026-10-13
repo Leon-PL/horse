@@ -18,6 +18,9 @@ byte-equivalent store while never holding more than one chunk in memory:
   4. Persist ratings_state + counts_state and stamp meta with the same
      fe_signature / data_signature get_featured_dataset() expects, so the very
      next train APPENDS instead of rebuilding.
+  5. Commit all five outputs together under the feature-store lock. A failed
+     build leaves the previous store intact; an interrupted commit is resumed
+     before the next store operation.
 
 Run:
   .venv/Scripts/python.exe -u scripts/build_feature_store_batched.py --chunk-rows 120000
@@ -31,13 +34,18 @@ import glob
 import json
 import logging
 import os
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
 from src.data_processor import process_data
@@ -86,8 +94,16 @@ def main() -> None:
                     help="approx rows per chunk (split on date boundaries)")
     args = ap.parse_args()
 
-    t0 = time.perf_counter()
     store = FeatureStore()
+    with store._staged_update() as pending:
+        meta = _build(pending, args.chunk_rows)
+    logger.info("Feature store committed: %d featured rows", meta["featured_rows"])
+    print(json.dumps(meta, indent=2))
+
+
+def _build(store: FeatureStore, chunk_rows: int) -> dict:
+    """Build into the supplied staging store without touching the live files."""
+    t0 = time.perf_counter()
     parts_dir = os.path.join(store.root, "_build_parts")
     os.makedirs(parts_dir, exist_ok=True)
     for old in glob.glob(os.path.join(parts_dir, "*.parquet")):
@@ -101,7 +117,7 @@ def main() -> None:
     vc = rd.value_counts()
     dates = np.sort(rd.dropna().unique())
     counts = {d: int(vc[d]) for d in dates}
-    spans = _date_chunks(dates, args.chunk_rows, counts)
+    spans = _date_chunks(dates, chunk_rows, counts)
     logger.info("Full history: %d rows, %d dates → %d chunks (RSS %.1f GB)",
                 len(processed), len(dates), len(spans), _rss_gb())
 
@@ -142,8 +158,8 @@ def main() -> None:
 
     # Preserve missing speed histories; no future-dependent global fill.
 
-    # ── save processed + carried state + meta BEFORE the streaming write, so a
-    # consolidation hiccup never discards the expensive per-chunk work. ─────
+    # Write only to staging. Consolidation must finish before any of these
+    # states, rows or metadata can replace the previous store generation.
     last_date = rd.max()
     _stringify_objects(processed).to_parquet(
         store.processed_path, index=False, engine="pyarrow"
@@ -173,14 +189,12 @@ def main() -> None:
         return pa.Table.from_arrays(arrays, schema=unified)
 
     logger.info("Consolidating %d parts → %s", len(part_paths), store.featured_path)
-    writer = pq.ParquetWriter(store.featured_path, unified)
-    for p in part_paths:
-        pf = pq.ParquetFile(p)
-        for batch in pf.iter_batches(batch_size=50_000):
-            tbl = _conform(pa.Table.from_batches([batch]))
-            writer.write_table(tbl)
-        del pf  # release the file handle so the cleanup below can unlink it (Windows)
-    writer.close()
+    with pq.ParquetWriter(store.featured_path, unified) as writer:
+        for p in part_paths:
+            with pq.ParquetFile(p) as pf:
+                for batch in pf.iter_batches(batch_size=50_000):
+                    tbl = _conform(pa.Table.from_batches([batch]))
+                    writer.write_table(tbl)
     logger.info("featured.parquet written (RSS %.1f GB)", _rss_gb())
 
     with open(store.meta_path, "w", encoding="utf-8") as fh:
@@ -199,11 +213,11 @@ def main() -> None:
         pass
 
     logger.info(
-        "DONE: %d featured rows over %s..%s in %.0fs (RSS %.1f GB)",
+        "Prepared: %d featured rows over %s..%s in %.0fs (RSS %.1f GB)",
         total_rows, str(dates[0])[:10], str(dates[-1])[:10],
         time.perf_counter() - t0, _rss_gb(),
     )
-    print(json.dumps(meta, indent=2))
+    return meta
 
 
 if __name__ == "__main__":

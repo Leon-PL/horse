@@ -35,7 +35,12 @@ import json
 import logging
 import os
 import pickle
+import shutil
+import tempfile
+import threading
+from contextlib import contextmanager
 from datetime import datetime
+from functools import wraps
 
 import pandas as pd
 
@@ -46,6 +51,15 @@ from src.ratings import compute_elo_features, compute_glicko_features
 logger = logging.getLogger(__name__)
 
 STORE_SCHEMA_VERSION = 2  # 2: carries counts_state.pkl for new-rows-only appends
+
+
+def _locked(method):
+    """Keep a store operation on one coherent generation, across processes."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._access():
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 def _event_date(df: pd.DataFrame) -> pd.Series:
@@ -71,6 +85,9 @@ def _stringify_objects(df: pd.DataFrame) -> pd.DataFrame:
 class FeatureStore:
     """An append-only featured dataset backed by parquet + a state file."""
 
+    _FILES = ("featured.parquet", "processed.parquet", "ratings_state.pkl",
+              "counts_state.pkl", "meta.json")
+
     def __init__(self, root: str | None = None):
         self.root = root or os.path.join(config.PROCESSED_DATA_DIR, "feature_store")
         os.makedirs(self.root, exist_ok=True)
@@ -79,11 +96,111 @@ class FeatureStore:
         self.state_path = os.path.join(self.root, "ratings_state.pkl")
         self.counts_state_path = os.path.join(self.root, "counts_state.pkl")
         self.meta_path = os.path.join(self.root, "meta.json")
+        self._journal_path = os.path.join(self.root, ".pending_commit.json")
+        self._mutex = threading.RLock()
+        self._lock_depth = 0
+
+    @contextmanager
+    def _access(self):
+        """Nonblocking OS lock, released automatically even after process death.
+
+        Nested calls on this instance reuse the lock. Other readers/writers
+        must retry, rather than read a mixture during a multi-file commit.
+        Direct file access bypasses this protection.
+        """
+        with self._mutex:
+            if self._lock_depth:
+                yield
+                return
+            with open(os.path.join(self.root, ".store.lock"), "a+b") as fh:
+                if os.name == "nt":
+                    import msvcrt
+                    if os.fstat(fh.fileno()).st_size == 0:
+                        fh.write(b"\0")
+                        fh.flush()
+                    fh.seek(0)
+                    acquire = lambda: msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    release = lambda: msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    acquire = lambda: fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    release = lambda: fcntl.flock(fh, fcntl.LOCK_UN)
+                try:
+                    acquire()
+                except OSError as exc:
+                    raise RuntimeError(
+                        "FeatureStore is in use by another operation; retry shortly."
+                    ) from exc
+                self._lock_depth = 1
+                try:
+                    self._recover_commit()
+                    yield
+                finally:
+                    self._lock_depth = 0
+                    release()
+
+    def _recover_commit(self):
+        """Roll a journaled, fully staged update forward before any read.
+
+        Replacing a staged file atomically removes its source. A missing
+        source therefore means that replacement already completed. The
+        journal stays until ALL five replacements finish, including metadata.
+        """
+        if not os.path.exists(self._journal_path):
+            return
+        with open(self._journal_path, encoding="utf-8") as fh:
+            name = json.load(fh)["stage"]
+        if not isinstance(name, str) or os.path.basename(name) != name or not name.startswith(".commit-"):
+            raise RuntimeError("Invalid feature-store commit journal; rebuild required.")
+        stage = os.path.join(self.root, name)
+        if not os.path.isdir(stage):
+            raise RuntimeError("Feature-store commit files are missing; rebuild required.")
+        for filename in self._FILES:
+            source = os.path.join(stage, filename)
+            target = os.path.join(self.root, filename)
+            if os.path.exists(source):
+                os.replace(source, target)
+            elif not os.path.exists(target):
+                raise RuntimeError(f"Incomplete feature-store commit: {filename} is missing.")
+        os.remove(self._journal_path)
+        shutil.rmtree(stage, ignore_errors=True)
+
+    @contextmanager
+    def _staged_update(self):
+        """Yield a staging store; publish only after every output is complete.
+
+        Used by build/append and the memory-bounded rebuild script. A failure
+        before journaling leaves the old store untouched. After journaling,
+        the next operation finishes the commit before exposing any data.
+        Requires room for both old and new files; no old-data copies are made.
+        """
+        with self._access():
+            stage = tempfile.mkdtemp(prefix=".commit-", dir=self.root)
+            try:
+                yield FeatureStore(stage)
+                # Flush all completed outputs before publishing the journal.
+                for filename in self._FILES:
+                    # Windows _commit requires a writable file descriptor.
+                    with open(os.path.join(stage, filename), "r+b") as fh:
+                        os.fsync(fh.fileno())
+                journal_tmp = self._journal_path + ".tmp"
+                with open(journal_tmp, "w", encoding="utf-8") as fh:
+                    json.dump({"stage": os.path.basename(stage)}, fh)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(journal_tmp, self._journal_path)
+                self._recover_commit()
+            finally:
+                # Never remove files needed to recover a partially applied commit.
+                if not os.path.exists(self._journal_path):
+                    shutil.rmtree(stage, ignore_errors=True)
 
     # ── status ────────────────────────────────────────────────────────
+    @_locked
     def exists(self) -> bool:
         return os.path.exists(self.featured_path) and os.path.exists(self.meta_path)
 
+    @_locked
     def meta(self) -> dict:
         if not os.path.exists(self.meta_path):
             return {}
@@ -95,27 +212,32 @@ class FeatureStore:
         return pd.Timestamp(m["last_date"]) if m.get("last_date") else None
 
     # ── load ──────────────────────────────────────────────────────────
+    @_locked
     def load_featured(self, columns: list[str] | None = None) -> pd.DataFrame | None:
         if not os.path.exists(self.featured_path):
             return None
         return pd.read_parquet(self.featured_path, columns=columns, engine="pyarrow")
 
+    @_locked
     def featured_schema_names(self) -> list[str]:
         """Column names of the stored featured parquet (no data read)."""
         import pyarrow.parquet as pq
         return pq.read_schema(self.featured_path).names if os.path.exists(self.featured_path) else []
 
+    @_locked
     def load_processed(self) -> pd.DataFrame | None:
         if not os.path.exists(self.processed_path):
             return None
         return pd.read_parquet(self.processed_path, engine="pyarrow")
 
+    @_locked
     def load_state(self) -> dict:
         if not os.path.exists(self.state_path):
             return {"elo": None, "glicko": None}
         with open(self.state_path, "rb") as fh:
             return pickle.load(fh)
 
+    @_locked
     def load_counts_state(self) -> dict | None:
         """Carried pandas-stage state (counts/rolling/time-window/lag/extrema/
         expanding). ``None`` if the store predates the incremental flip — the
@@ -194,13 +316,14 @@ class FeatureStore:
             )
         return {"elo": elo_state, "glicko": glicko_state}
 
-    def _write_meta(self, processed: pd.DataFrame, featured: pd.DataFrame, *, op: str):
-        m = self.meta()
+    def _write_meta(self, processed: pd.DataFrame, featured: pd.DataFrame, *, op: str,
+                    previous: dict | None = None):
+        m = dict(previous) if previous is not None else self.meta()
         m.update({
             "schema_version": STORE_SCHEMA_VERSION,
             "last_date": str(_event_date(processed).max().date()),
             "featured_rows": int(len(featured)),
-            "processed_rows": int(len(self.load_processed())),
+            "processed_rows": int(len(processed)),
             f"{op}_at": datetime.now().isoformat(timespec="seconds"),
         })
         with open(self.meta_path, "w", encoding="utf-8") as fh:
@@ -215,6 +338,7 @@ class FeatureStore:
             pickle.dump(state, fh, protocol=pickle.HIGHEST_PROTOCOL)
 
     # ── build / append ────────────────────────────────────────────────
+    @_locked
     def build(self, processed: pd.DataFrame) -> pd.DataFrame:
         """Build the store from scratch over the full processed history.
 
@@ -227,15 +351,17 @@ class FeatureStore:
         counts_state: dict = {}
         featured = engineer_features(processed, save=False, counts_state=counts_state)
 
-        _stringify_objects(featured).to_parquet(self.featured_path, index=False, engine="pyarrow")
-        _stringify_objects(processed).to_parquet(self.processed_path, index=False, engine="pyarrow")
-        self._save_state(self._compute_ratings_state(processed))
-        self._save_counts_state(counts_state)
-        self._write_meta(processed, featured, op="built")
+        state = self._compute_ratings_state(processed)
+        with self._staged_update() as pending:
+            _stringify_objects(featured).to_parquet(pending.featured_path, index=False, engine="pyarrow")
+            _stringify_objects(processed).to_parquet(pending.processed_path, index=False, engine="pyarrow")
+            pending._save_state(state)
+            pending._save_counts_state(counts_state)
+            pending._write_meta(processed, featured, op="built", previous=self.meta())
         logger.info("FeatureStore built: %d featured rows", len(featured))
         return featured
 
-    def _fast_featurize(self, new: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    def _fast_featurize(self, new: pd.DataFrame) -> tuple[pd.DataFrame, dict, dict]:
         """Incremental featurise on NEW ROWS ONLY.
 
         Seed the rating sweeps from persisted state and attach those columns to
@@ -253,8 +379,9 @@ class FeatureStore:
         featured_new = engineer_features(
             new_rated, save=False, skip_ratings=True, counts_state=counts_state
         )
-        self._save_counts_state(counts_state)  # advanced in place by the stages
-        return featured_new, advanced
+        # Stages advance counts in memory only. The caller commits them with
+        # the matching rows and ratings, never before parquet writes succeed.
+        return featured_new, advanced, counts_state
 
     # Entity → its expanding-frequency column (data_processor.encode_categoricals:
     # ``cumcount()+1`` over the full frame; ``track`` is collapsed to a per-race min).
@@ -285,6 +412,7 @@ class FeatureStore:
             card["track_freq"] = card.groupby("race_id")["track_freq"].transform("min")
         return card
 
+    @_locked
     def featurize_live(self, card: pd.DataFrame) -> pd.DataFrame:
         """Feature-engineer an UNSETTLED future *card* against the store's
         persisted rating + counts state — **read-only**.
@@ -328,6 +456,7 @@ class FeatureStore:
                 featured[col] = 0
         return featured
 
+    @_locked
     def append(self, processed_new: pd.DataFrame) -> pd.DataFrame:
         """Feature-engineer and append new race dates (NEW ROWS ONLY).
 
@@ -360,7 +489,7 @@ class FeatureStore:
             logger.info("FeatureStore.append: no rows after %s — nothing to do", last)
             return new
 
-        featured_new, advanced = self._fast_featurize(new)
+        featured_new, advanced, counts_state = self._fast_featurize(new)
 
         # Persist: append featured + processed, advance + save rating state.
         featured_all = pd.concat(
@@ -369,11 +498,12 @@ class FeatureStore:
         processed_all = pd.concat(
             [processed_hist, new], ignore_index=True, sort=False
         )
-        _stringify_objects(featured_all).to_parquet(self.featured_path, index=False, engine="pyarrow")
-        _stringify_objects(processed_all).to_parquet(self.processed_path, index=False, engine="pyarrow")
-
-        self._save_state(advanced)
-        self._write_meta(processed_all, featured_all, op="appended")
+        with self._staged_update() as pending:
+            _stringify_objects(featured_all).to_parquet(pending.featured_path, index=False, engine="pyarrow")
+            _stringify_objects(processed_all).to_parquet(pending.processed_path, index=False, engine="pyarrow")
+            pending._save_state(advanced)
+            pending._save_counts_state(counts_state)
+            pending._write_meta(processed_all, featured_all, op="appended", previous=self.meta())
         logger.info(
             "FeatureStore.append: +%d featured rows (now %d)",
             len(featured_new), len(featured_all),

@@ -42,6 +42,8 @@ def _parse_frameworks(s: str | None) -> dict | None:
     out: dict[str, str] = {}
     for pair in s.split(","):
         k, _, v = pair.strip().partition("=")
+        if k not in config.SUB_MODEL_FRAMEWORKS:
+            raise SystemExit(f"Unknown model role '{k}'. Choose classifier or place.")
         if v not in valid_vals:
             raise SystemExit(f"Invalid framework value '{v}'. Must be one of {valid_vals}.")
         out[k] = v
@@ -79,6 +81,9 @@ def main() -> None:
                     help="e.g. 'classifier=cat,place=lgbm'")
     ap.add_argument("--blend-market-odds", action="store_true",
                     help="enable the Benter market anchor (SP known only at off — optimistic)")
+    ap.add_argument("--win-calibration", choices=("platt_isotonic", "race_temperature"),
+                    default=config.WIN_CALIBRATION_METHOD,
+                    help="win probability calibration method, saved with the run")
     ap.add_argument("--backtest", action="store_true", help="run walk-forward validation")
     ap.add_argument("--promote", action="store_true", help="promote the new run to production")
     args = ap.parse_args()
@@ -90,6 +95,7 @@ def main() -> None:
         train_window_days=args.window_days,
         frameworks=_parse_frameworks(args.frameworks) or dict(config.SUB_MODEL_FRAMEWORKS),
         blend_market_odds=args.blend_market_odds,
+        win_calibration_method=args.win_calibration,
         run_walk_forward=args.backtest,
     )
     run_id = train_run(cfg)

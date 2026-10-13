@@ -1,374 +1,107 @@
-# 🏇 Horse Racing Prediction System
+# Horse racing prediction system
 
-An ML-powered application that predicts UK & Ireland horse race outcomes using **real data scraped from Sporting Life**. Built with Python, XGBoost, LightGBM, and Streamlit.
+Python tools for collecting UK and Ireland race results, building chronological features, training win and place classifiers, and evaluating later races. The main objective is reliable out-of-sample probabilities. Betting simulations are research outputs; the project has not established a profitable betting strategy.
 
-The flagship model is a **6-model ensemble** combining Learning-to-Rank, regression, classification, and pairwise comparison — with Optuna-learned blending weights, race-coherent temperature probability calibration, and per-sub-model framework selection (XGBoost or LightGBM).
+## What actually runs
 
-> ⚠️ **Disclaimer**: This application is for educational and entertainment purposes only. It is not financial advice. Gambling involves risk — always bet responsibly.
+- **Data:** Sporting Life results and racecards in SQLite, with optional pedigree, sectional, weather, and exchange-price enrichment.
+- **Features:** a persisted feature store with historical ratings, form, race context, and date-strict entity statistics. The versioned `feature_sets/win.txt` selects the default model inputs.
+- **Models:** separate win and place classifiers. LightGBM is the default; XGBoost and CatBoost are supported. `TripleEnsemblePredictor` remains an alias for loading older artifacts, not a six-model ensemble.
+- **Calibration:** Platt plus isotonic remains the default. Race-temperature calibration is an experimental option for new win models. Each model artifact records its fitted method.
+- **Evaluation:** chronological holdouts and purged walk-forward folds, with Brier score, log loss, ranking metrics, and betting diagnostics. `src/wf_eval.py` provides shared research evaluation helpers.
+- **Serving:** a lightweight picks app loads the explicitly promoted run. Promotion and live features are checked against their recorded feature-generation signatures.
 
----
+Read [the project audit](docs/PROJECT_AUDIT.md) for verified defects, changes, measurements, and remaining limitations. [The research ledger](docs/NEGATIVE_RESULTS.md) records earlier hypotheses and negative results.
 
-## Features
+## Install and inspect
 
-- **Real Data — No Accounts or Keys Needed** — Scrapes live racecards and historical results directly from [Sporting Life](https://www.sportinglife.com), including SP odds, jockey, trainer, form, official ratings, and more
-- **120+ Predictive Features** — Horse form, jockey/trainer stats, jockey-trainer combos, C&D winners, class changes, headgear signals, track/going/distance preferences, speed figures, market indicators, field quality metrics
-- **Elo Ratings** — Dynamic head-to-head strength ratings for horses, jockeys, and trainers with adaptive K-factors (if A beats B, and B beats C → A is rated above C)
-- **2-Model Ensemble** — Win Classifier + Place Classifier, blended with Optuna-learned weights
-- **Temperature Probability Calibration** — Out-of-sample race-coherent probability scaling fitted on purged CV folds
-- **Framework Selection** — Each sub-model can independently use XGBoost, LightGBM, or CatBoost — configurable via UI, CLI, or `config.py`
-- **Brier Score Optimisation** — All ensemble weight learning targets Brier Score for value betting alignment
-- **Early Stopping** — All sub-models use validation-fold early stopping (50 rounds) to prevent overfitting
-- **Interactive Web UI** — Streamlit dashboard with 7 pages: Train & Tune, Experiments, Predict, Today's Picks, Data Explorer, Model Insights, Guide
-- **Today's Races** — Predict live UK & Ireland racecards with win probabilities, real odds, and value indicators
-- **Value Betting Detection** — Dynamic odds-adjusted threshold highlights horses where the model's probability exceeds the market's implied probability
-- **Walk-Forward Backtesting** — Expanding-window validation with P&L simulation, equity curves, and per-fold metrics
-- **Historical Database** — SQLite-backed persistent storage; only scrapes new days you're missing, so retraining is fast
-- **Auto-Tuning** — Optuna hyperparameter search with configurable trial count
-- **Experiment Tracking** — Save, compare, and replay training runs
-- **Sample Data Fallback** — Synthetic data generator for quick offline testing
+Use a Python version supported by the packages in `requirements.txt`. The existing workspace uses Python 3.14. A virtual environment created elsewhere should be recreated if its base interpreter paths no longer exist.
 
----
-
-## Project Structure
-
-```
-horse/
-├── picks_app.py                    # Lean serving app: Today's Picks + Matchbook (loads the promoted model only)
-├── training_app.py                 # Heavy app: data refresh, training, registry, diagnostics
-├── train.py                        # Command-line training script (thin CLI over src/training.train_run)
-├── config.py                       # Configuration settings
-├── requirements.txt                # Python dependencies (loose)
-├── requirements.lock               # Pinned dependency versions
-├── CLAUDE.md / PROJECT_OUTLINE.md  # Agent handover & architecture docs
-├── .gitignore
-├── README.md
-├── src/
-│   ├── __init__.py
-│   ├── data_scraper.py             # Web scraper (Sporting Life)
-│   ├── data_collector.py           # Unified data collector interface
-│   ├── data_collector_sample.py    # Synthetic data generator (fallback)
-│   ├── database.py                 # Historical SQLite database
-│   ├── data_processor.py           # Data cleaning & preprocessing
-│   ├── feature_engineer.py         # Feature engineering pipeline (120+ features)
-│   ├── ratings.py                  # Elo rating system (horse/jockey/trainer)
-│   ├── model.py                    # ML models, training, evaluation, tuning
-│   ├── bet_settlement.py           # Shared bet-selection & settlement rules
-│   ├── each_way.py                 # Each-way terms & value calculation
-│   ├── backtester.py               # Walk-forward validation & P&L simulation
-│   ├── run_store.py                # Experiment persistence (run snapshots)
-│   └── utils.py                    # Utility functions & merge-key normalisers
-├── tests/                          # Pytest suite (settlement, EW, utils)
-├── data/
-│   ├── races.db                    # Historical SQLite database
-│   ├── raw/                        # Raw collected data (CSV)
-│   ├── processed/                  # Processed & feature-engineered data
-│   └── runs/                       # Experiment run snapshots
-└── models/                         # Saved trained models
-```
-
----
-
-## Quick Start
-
-### 1. Install Dependencies
-
-```bash
-cd horse
+```powershell
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS / Linux
-pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe scripts/project_status.py
 ```
 
-### 2. Train the Model
+`project_status.py` checks the database, feature store, saved runs, and production pointer. A stale feature store or an absent promoted model means the serving pipeline is not ready. `data/` and `models/` are local artifacts and are not shipped with a fresh checkout.
 
-```bash
-# RECOMMENDED — 6-model ensemble with database source
-python train.py --model triple_ensemble --source database --days-back 90
+## Build and train
 
-# First run scrapes all 90 days; subsequent runs only fetch new days
-python train.py --source database --days-back 90
+For a large history, use the memory-bounded feature builder. It processes whole dates and carries historical state across chunks:
 
-# Train with all sub-models using LightGBM
-python train.py --source database --days-back 90 \
-  --frameworks classifier=lgbm,place=lgbm
-
-# Default frameworks (CatBoost)
-python train.py --source sample --races 2000
-
-# Override specific sub-models
-python train.py --model triple_ensemble --source sample \
-  --frameworks classifier=lgbm,pairwise=lgbm
-
-# Train + run walk-forward backtest
-python train.py --source database --days-back 90 --backtest
-
-# Train with sample (synthetic) data — instant, no network needed
-python train.py --source sample --races 3000
-
-# Retrain on already-downloaded data
-python train.py --skip-collection
+```powershell
+.venv\Scripts\python.exe -m scripts.build_feature_store_batched --chunk-rows 120000
+.venv\Scripts\python.exe train.py --no-refresh --window-days 600
 ```
 
-### 3. Launch the Web Apps
+The feature builder reads the existing database. To collect recent missing results first, use the training app's data controls or:
 
-The UI is split into two processes so the day-to-day picks app stays fast.
-
-```bash
-# Lean serving app — loads only the promoted model (fast startup)
-streamlit run picks_app.py
-
-# Heavy app — data refresh, training, registry, diagnostics (separate port)
-streamlit run training_app.py --server.port 8502
+```powershell
+.venv\Scripts\python.exe -m src.database --sync 14
 ```
 
-**`picks_app.py`** (serving) — loads the production-promoted model via the
-registry pointer; it never loads the full feature store at startup.
+The callable entry point is `src.training.train_run(TrainingConfig(...))`. The CLI and training app share it. Examples:
 
-| Page | Description |
-|------|-------------|
-| **💰 Today's Picks** | Auto-scrape current UK racecards with live odds, value picks, and manual custom-race entry |
-| **🔌 Matchbook API** | Connectivity harness for the Matchbook exchange |
+```powershell
+# Train from current local data, without scraping
+.venv\Scripts\python.exe train.py --no-refresh
 
-**`training_app.py`** (training/analysis) — refresh data, train & compare
-runs, and promote a run to production.
+# Include a walk-forward evaluation using the selected model settings
+.venv\Scripts\python.exe train.py --no-refresh --window-days 600 --backtest
 
-| Page | Description |
-|------|-------------|
-| **📦 Data** | Inspect / refresh the feature store |
-| **🤖 Train** | Configure frameworks & hyperparameters, run `train_run`, review calibration / ROI / CLV evals |
-| **🗂️ Registry** | Browse saved runs and promote one to production |
+# Compare the simpler calibration candidate
+.venv\Scripts\python.exe train.py --no-refresh --win-calibration race_temperature
 
-### 4. Run the Tests
-
-```bash
-python -m pytest tests/ -q
+# Override the model framework per role
+.venv\Scripts\python.exe train.py --no-refresh --frameworks classifier=lgbm,place=cat
 ```
 
----
+The old `--source`, `--model`, `--races`, `--days-back`, and `--skip-collection` training examples no longer describe this CLI. Run `train.py --help` for the supported arguments.
 
-## How It Works
+Training saves a run; it does not promote one unless `--promote` is requested. Review the held-out metrics and feature signatures before promoting through the registry. `--blend-market-odds` uses odds in a post-model market blend; historical starting prices do not establish what was available when a live bet would have been placed.
 
-### Data Pipeline
+## Applications
 
-```
-Sporting Life  →  Scraper  →  Processor  →  Feature Engineer  →  6-Model Ensemble
-(sportinglife.com)  (__NEXT_DATA__ JSON)    (cleaning, encoding)   (120+ features)     (blended probabilities)
-```
-
-1. **Collection** — The scraper fetches UK & Ireland race results from Sporting Life. Each page embeds full race data as `__NEXT_DATA__` JSON (no JavaScript execution required). For each race it extracts every runner's finishing position, SP odds, jockey, trainer, form, weight, age, draw, official rating, and lifetime stats.
-
-2. **Processing** — Cleans data types, parses form strings into numeric features, handles missing values, encodes categoricals, and extracts temporal features.
-
-3. **Feature Engineering** — Creates 120+ features per runner across 16 categories:
-
-| Category | Example Features | Description |
-|----------|-----------------|-------------|
-| Horse Form | `horse_avg_pos_3/5/10`, `horse_wins_3/5/10` | Rolling performance over last N races |
-| Form String | `form_last_pos`, `form_avg`, `form_wins_count` | Parsed from form figures (e.g. "2142-31") |
-| Horse History | `horse_win_rate`, `horse_prev_races` | Lifetime cumulative statistics |
-| Consistency | `horse_pos_consistency`, `horse_best/worst_pos_5` | How reliable the horse is |
-| Freshness | `days_since_last_race` | Days since last run |
-| Jockey | `jockey_win_rate`, `jockey_place_rate` | Jockey track record in dataset |
-| Trainer | `trainer_win_rate`, `trainer_place_rate` | Trainer statistics |
-| Jockey–Trainer | `jt_win_rate`, `jt_place_rate`, `jt_prev_runs` | Partnership synergy stats |
-| Jockey–Track | `jockey_track_win_rate` | Jockey performance at specific venues |
-| C&D Winner | `horse_cd_winner`, `horse_cd_win_rate` | Won at same course **and** distance before |
-| Course Winner | `horse_course_winner` | Won at this track before |
-| Class Change | `class_change`, `class_dropped`, `class_raised` | Class movement between runs |
-| Headgear | `has_headgear`, `first_time_headgear`, `headgear_off` | Equipment signals (blinkers, visor, etc.) |
-| Speed Figures | `speed_best`, `speed_recent`, `speed_rolling_avg` | Performance speed ratings |
-| Surface | `surface_type` | Track surface features |
-| Elo Rating | `horse_elo`, `horse_elo_vs_field`, `horse_elo_rank` | Dynamic head-to-head strength (transitive) |
-| Jockey Elo | `jockey_elo`, `jockey_elo_vs_field` | Jockey strength propagated through results |
-| Combined Elo | `combined_elo`, `combined_elo_vs_field` | Horse + 0.3×Jockey composite strength |
-| Track Pref | `horse_track_win_rate` | Performance at specific venues |
-| Going Pref | `horse_going_win_rate` | Performance on ground conditions |
-| Distance Pref | `horse_dist_win_rate` | Performance at race distances |
-| Market | `implied_prob`, `odds_rank`, `is_favourite` | SP odds-based features |
-| Race Context | `draw_pct`, `weight_vs_field`, `field_size` | Race conditions |
-| Field Quality | `field_avg_elo`, `field_strength` | Strength of competition |
-| Interactions | Cross-feature combination features | Non-linear interactions |
-
-4. **Model Training** — The 2-model ensemble trains in two phases:
-  - **Phase 1 (Weight Learning):** Sub-models train on purged expanding-window CV folds. A meta-learner/weighting layer is learned from OOF predictions targeting **Brier Score**, then a race-level temperature calibrator is fitted on OOF probabilities.
-   - **Phase 2 (Final Models):** All sub-models retrain on 100% of training data using the locked-in weights.
-
-### The 2-Model Ensemble
-
-The `TripleEnsemblePredictor` combines two classifiers, each capturing a different aspect of race prediction:
-
-| # | Sub-Model | Task | Framework | What It Learns |
-|---|-----------|------|-----------|----------------|
-| 1 | **Win Classifier** | Binary classification | CatBoost (default) | Win probability with class-weighted loss |
-| 2 | **Place Classifier** | Binary classification | CatBoost (default) | Top-3 finish probability |
-
-**Blending:** Each sub-model's raw scores are min-max normalised per race, then combined using learned weights/meta-learner. The blended scores pass through a softmax layer with global + learned calibration temperature to produce final calibrated win probabilities.
-
-**Framework selection:** Each sub-model can independently use XGBoost, LightGBM, or CatBoost. Change defaults in `config.py` under `SUB_MODEL_FRAMEWORKS`, or override via the Streamlit UI or `--frameworks` CLI flag.
-
-### Prediction Output
-
-For each horse in a race, the model outputs:
-
-- **Win Probability** — Calibrated probability of winning (0–100%)
-- **Predicted Rank** — Horses ranked by calibrated probability
-- **Value Score** — `model_prob − implied_prob` — positive = potential value bet ⭐
-
-### Walk-Forward Backtesting
-
-Standard train/test splits can overestimate real-world performance. Walk-forward validation simulates live deployment:
-
-```
-Fold 1:  Train [Month 1–2]  →  Test [Month 3]
-Fold 2:  Train [Month 1–3]  →  Test [Month 4]
-Fold 3:  Train [Month 1–4]  →  Test [Month 5]
-...
+```powershell
+.venv\Scripts\python.exe -m streamlit run picks_app.py
+.venv\Scripts\python.exe -m streamlit run training_app.py --server.port 8502
 ```
 
-Each fold trains a fresh model on all data *before* the test period, then simulates betting on the test month with two strategies:
+`picks_app.py` serves predictions and the Matchbook connectivity page. `training_app.py` provides data, training, tuning, backtesting, insights, diagnostics, and registry pages. Matchbook credentials are optional and belong in an untracked `.env` file; data collection and offline model evaluation do not require them.
 
-| Strategy | Rule | What it measures |
-|---|---|---|
-| **Top Pick** | Bet the model's #1 pick in every race | Can the model find winners? |
-| **Value** | Bet when `model_prob > implied_prob` (dynamic odds-adjusted threshold) | Can the model find mis-priced horses? |
+The serving app reloads when the production run changes. Cached race features require matching cards, history, and feature-generation metadata. A changed field is recomputed against stored history. Historical cards must be evaluated against history that ends before their date.
 
-The backtest tracks cumulative P&L, strike rate, ROI, and Brier Score per fold.
+## Validation and research
 
-```bash
-# Run backtest after training
-python train.py --source database --days-back 90 --backtest
-
-# Standalone backtester with custom settings
-python -m src.backtester --min-train-months 3
+```powershell
+.venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-### Elo Rating System
+The tests cover race/date leakage, full versus incremental feature parity, calibration, model persistence, cache validity, promotion, data integrity, and shared settlement rules.
 
-Traditional per-horse win-rate features can't capture **transitive strength**. If Horse A beats Horse B, and Horse B beats Horse C, then A should be rated above C — even if they never met.
+A standalone calibration benchmark keeps model fitting, early stopping, calibration, and evaluation in separate date ranges with purge gaps:
 
-The system maintains dynamic Elo ratings (similar to chess) for **horses**, **jockeys**, and **trainers**:
+```powershell
+.venv\Scripts\python.exe scripts/benchmark_calibration.py `
+  --features data/processed/feature_store/featured.parquet `
+  --source-note "Full rebuilt store" `
+  --output data/audit/calibration_benchmark.json
+```
 
-$$E_A = \frac{1}{1 + 10^{(R_B - R_A) / 400}}$$
+Use that source note only after a full rebuild has actually completed. The audit's partial feature repair is explicitly diagnostic and cannot validate a production model. Candidate selection uses the earlier development periods before the last confirmation period is evaluated.
 
-After each race, every pair of finishers is compared and ratings are updated. The K-factor is normalised by field size to prevent big-field races from causing wild swings.
+Assess calibrated predictions using Brier score and log loss together. ECE depends on binning and can look good for a model that barely distinguishes runners. Treat financial returns and closing-line value as separate questions. Compare models on identical complete races and keep final evaluation data out of feature selection, tuning, and calibration fitting.
 
-**Features generated:**
+## Code map
 
-| Feature | Description |
+| Area | Main files |
 |---|---|
-| `horse_elo` | Horse's rating entering the race |
-| `horse_elo_vs_field` | Rating relative to race average |
-| `horse_elo_rank` | Rating rank within the race (1 = highest) |
-| `jockey_elo` / `trainer_elo` | Jockey & trainer strength |
-| `combined_elo` | Horse + 0.3×Jockey composite |
-| `horse_elo_delta` | Rating change after this race |
+| Collection and cleaning | `src/data_scraper.py`, `src/database.py`, `src/data_processor.py` |
+| Features and historical state | `src/feature_engineer.py`, `src/ratings.py`, `src/fe_incremental.py`, `src/feature_store.py` |
+| Cache and provenance | `src/featured_dataset.py`, `src/live_prediction.py` |
+| Models and calibration | `src/model.py`, `src/probability_calibration.py` |
+| Training and evaluation | `src/training.py`, `src/backtester.py`, `src/wf_eval.py` |
+| Run registry | `src/run_store.py` |
+| Settlement and market joins | `src/bet_settlement.py`, `src/each_way.py`, `src/betfair.py`, `src/clv.py` |
 
-> Ratings are computed **chronologically** — each race only uses ratings from *before* that race (no look-ahead leakage).
-
----
-
-## Data Source
-
-### Sporting Life Web Scraper
-
-The scraper extracts data from [sportinglife.com](https://www.sportinglife.com) — a well-known UK racing information site. No accounts, keys, or sign-ups are needed.
-
-**What it scrapes:**
-
-| Data Point | Results | Racecards |
-|-----------|---------|-----------|
-| Horse name, ID, age, sex | ✅ | ✅ |
-| Jockey & trainer | ✅ | ✅ |
-| SP / forecast odds | ✅ | ✅ |
-| Form figures | ✅ | ✅ |
-| Weight (stone-lbs) | ✅ | ✅ |
-| Official rating | ✅ | ✅ |
-| Headgear (blinkers, visor…) | ✅ | ✅ |
-| Days since last run | ✅ | ✅ |
-| Lifetime runs / wins / places | ✅ | ✅ |
-| Finishing position | ✅ | — |
-| Lengths behind winner | ✅ | — |
-| Going, distance, class, prize money | ✅ | ✅ |
-
-**How it works:**
-
-Sporting Life is a Next.js application that embeds the full page data in a `<script id="__NEXT_DATA__">` tag. The scraper makes a simple HTTP GET request and parses this JSON — no browser automation or JavaScript execution is required.
-
-**Rate limiting:** The scraper waits 1.5 seconds between requests to be respectful to the server.
-
-### Direct Scraper Usage
-
-```bash
-# Scrape results + racecards
-python -m src.data_scraper --mode both --days-back 7
-
-# Results only
-python -m src.data_scraper --mode results --days-back 14
-
-# Racecards only (today)
-python -m src.data_scraper --mode racecards
-
-# Include international tracks
-python -m src.data_scraper --mode results --days-back 3 --all-tracks
-```
-
-### Historical Database
-
-The system uses a local SQLite database (`data/races.db`) to store every scraped result. On subsequent runs, only **missing days** are fetched — so a 90-day retrain that previously took hours now takes seconds if you trained yesterday.
-
-```bash
-# Sync the database (scrape only missing days in the last 90-day window)
-python -m src.database --sync 90
-
-# View database statistics
-python -m src.database --stats
-
-# Export the full database to CSV
-python -m src.database --export data/all_results.csv
-```
-
-| First run (empty DB) | Second run (next day) |
-|---|---|
-| Scrapes all 90 days (~1–2 hours) | Scrapes only 1 new day (~2 min) |
-| Stores everything in SQLite | Appends new results, skips duplicates |
-
----
-
-## Configuration
-
-Edit `config.py` to adjust:
-
-- **Data paths** — Where data, models, and experiment runs are stored
-- **Scraper settings** — Request delay, user agent
-- **Database** — SQLite path (`data/races.db`), managed automatically
-- **Feature settings** — Rolling window sizes, form calculation periods
-- **Sub-model frameworks** — `SUB_MODEL_FRAMEWORKS` dict: set each sub-model to `"xgb"`, `"lgbm"`, or `"cat"`
-- **Per-sub-model hyperparameters** — Independent parameter dicts for Win Classifier and Place Classifier
-- **Softmax temperature** — Controls sharpness of probability output (`<1` = sharper, `>1` = softer)
-- **Elo settings** — Base K-factor, minimum K, decay rate per run
-- **Training settings** — Test/train split ratio, random seed
-
----
-
-## Tech Stack
-
-| Component | Library |
-|-----------|---------|
-| Data manipulation | pandas, NumPy |
-| ML models | XGBoost, LightGBM, scikit-learn |
-| Probability calibration | Race-level temperature scaling |
-| Hyperparameter tuning | Optuna |
-| Web dashboard | Streamlit |
-| Visualizations | Plotly |
-| Web scraping | Requests, BeautifulSoup, Selenium |
-| Historical database | SQLite (built-in) |
-| Model persistence | joblib |
-
-Requires **Python 3.10+**.
-
----
-
-## License
-
-This project is for educational purposes. Use responsibly.
+Historical research scripts and optional unwired feature modules are retained for reproducibility. Their existence does not mean that they participate in the current training pipeline.

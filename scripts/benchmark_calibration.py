@@ -21,28 +21,10 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-from scipy.optimize import minimize_scalar
 
 import config
 from src.model import RacePredictor, _grouped_normalize, get_feature_columns
-
-
-def race_temperature(probabilities, groups, temperature):
-    """One positive parameter; keeps the ranking and sums to one per race."""
-    starts = np.r_[0, np.cumsum(groups)[:-1]]
-    scores = np.log(np.clip(probabilities, 1e-12, 1.0)) / temperature
-    scores -= np.repeat(np.maximum.reduceat(scores, starts), groups)
-    return _grouped_normalize(np.exp(scores), groups)
-
-
-def fit_temperature(probabilities, groups, winners):
-    result = minimize_scalar(
-        lambda log_t: -float(np.sum(winners * np.log(np.clip(
-            race_temperature(probabilities, groups, np.exp(log_t)), 1e-12, 1.0
-        ))) / len(groups)),
-        bounds=(np.log(0.25), np.log(4.0)), method="bounded",
-    )
-    return float(np.exp(result.x))
+from src.probability_calibration import fit_temperature, race_temperature
 
 
 def probability_metrics(probabilities, winners, groups):
@@ -136,7 +118,8 @@ def run(args):
         raw_cal, raw_test = model.predict_proba(X[ca])[:, 1], model.predict_proba(X[te])[:, 1]
         gc = df.loc[ca].groupby("race_id", sort=False).size().to_numpy()
         gt = df.loc[te].groupby("race_id", sort=False).size().to_numpy()
-        predictor = RacePredictor(frameworks={"classifier": "lgbm", "place": "lgbm"})
+        predictor = RacePredictor(frameworks={"classifier": "lgbm", "place": "lgbm"},
+                                  win_calibration_method="platt_isotonic")
         fp = df.loc[ca, "finish_position"].to_numpy()
         predictor.platt_a, predictor.platt_b = predictor._optimise_platt_calibration(raw_cal, gc, fp)
         cal_platt = predictor._calibrate_win_probs(raw_cal, gc)
