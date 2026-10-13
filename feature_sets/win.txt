@@ -42,7 +42,7 @@ trainer_place_rate
 trainer_elo_vs_field_vs_field
 trainer_dist_cat_wr_vs_best_in_race
 sire_place_rate_shrunk
-sex_F
+sex_Female
 horse_glicko_rd
 jockey_win_rate_shrunk_vs_best_in_race
 jockey_place_rate_shrunk_vs_best_in_race
@@ -115,7 +115,6 @@ trainer_te_norm_pos
 or_change_vs_field
 trainer_place_rate_shrunk_vs_best_in_race
 trainer_track_win_rate_vs_field
-sex_H
 field_std_or
 sire_soft_place_rate_shrunk
 jt_place_rate_shrunk

@@ -267,10 +267,11 @@ def summarise(blocks: list[dict], tests: list[pd.DataFrame], labels: list[str], 
 
 
 def run(protocol: str, *, holdout: bool = False, max_folds: int | None = None,
-        n_boot: int = 2000, dump: str | None = None) -> dict:
+        n_boot: int = 2000, dump: str | None = None, drop_prefixes: tuple = ()) -> dict:
     df = load_frame(protocol)
     features = [c for c in get_feature_columns(df)
-                if c not in ("bsp", "ltp_300s", "morningwap", "_entry", "_close", "mkt", "offset")]
+                if c not in ("bsp", "ltp_300s", "morningwap", "_entry", "_close", "mkt", "offset")
+                and not c.startswith(tuple(drop_prefixes))]
     dev = development_mask(df["race_date"])
     blocks, tests, labels, per_fold, dumps = [], [], [], [], []
 
@@ -341,10 +342,12 @@ def main() -> int:
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--dump", default=None)
     ap.add_argument("--json", default=None, help="also write the report here")
+    ap.add_argument("--drop", action="append", default=[], metavar="PREFIX",
+                    help="exclude features starting with PREFIX (repeatable)")
     args = ap.parse_args()
     logging.disable(logging.INFO)
     report = run(args.protocol, holdout=args.holdout, max_folds=args.max_folds,
-                 n_boot=args.n_boot, dump=args.dump)
+                 n_boot=args.n_boot, dump=args.dump, drop_prefixes=tuple(args.drop))
     print(render(report))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:

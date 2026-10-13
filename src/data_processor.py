@@ -21,6 +21,14 @@ import config
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+#: Title-cased sex codes (results use letters; full words kept for safety) to
+#: the sex at birth. Anything else becomes missing rather than a new category.
+_BIRTH_SEX = {
+    "F": "Female", "M": "Female", "Filly": "Female", "Mare": "Female",
+    "C": "Male", "G": "Male", "H": "Male", "R": "Male",
+    "Colt": "Male", "Gelding": "Male", "Horse": "Male", "Rig": "Male",
+}
+
 
 def _off_time_to_seconds(off_time: pd.Series) -> pd.Series:
     """Parse off-time strings to seconds after midnight with safe fallbacks."""
@@ -190,6 +198,16 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     for col in string_cols:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.title()
+
+    # --- Sex: birth sex only (look-ahead leak, ledger 15) ---
+    # Results pages report a horse's sex as of the day they were SCRAPED, not
+    # race day (2,842 two-year-olds are coded as mares). The code therefore
+    # encodes the horse's future: kept entire (stud value), gelded later, a
+    # filly raced on past four. Runners with an impossible race-day code
+    # returned +21.5% at BSP. Only the sex at birth survives that, so the
+    # gelding/entire distinction is dropped for history and live alike.
+    if "sex" in df.columns:
+        df["sex"] = df["sex"].map(_BIRTH_SEX)
 
     # --- Normalise entity names (jockey / trainer) ---
     # Racing Post data contains multiple representations of the same person:

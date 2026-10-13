@@ -137,6 +137,24 @@ class TestBuildVsAppend:
         get_featured_dataset(processed=proc)
         assert fake.calls == ["append", "load"]
 
+    def test_sectional_backfill_beneath_the_store_builds(self, patch_store, monkeypatch):
+        """The ATR cache is read inside FE, outside fe/data_signature (ledger 13)."""
+        proc = _toy(["2023-01-01", "2023-01-02"])
+        last = proc["race_date"].max()
+        meta = {"fe_signature": fe_signature(), "data_signature": data_signature(proc, cutoff=last),
+                "atr_signature": {"cutoff": "2023-01-02", "sig": "before-backfill"}}
+        monkeypatch.setattr(fd, "_atr_signature",
+                            lambda cutoff: {"cutoff": str(cutoff), "sig": "after-backfill"})
+        fake = patch_store(exists=True, last_date=last, meta=meta)
+        get_featured_dataset(processed=proc)
+        assert fake.calls == ["build"]
+
+        monkeypatch.setattr(fd, "_atr_signature",
+                            lambda cutoff: {"cutoff": str(cutoff), "sig": "before-backfill"})
+        fake = patch_store(exists=True, last_date=last, meta=meta)
+        get_featured_dataset(processed=proc)
+        assert fake.calls == ["append", "load"]
+
 
 @pytest.mark.parametrize("column,value", [
     ("odds", 99.0), ("official_rating", 120.0), ("sire", "Different sire"),

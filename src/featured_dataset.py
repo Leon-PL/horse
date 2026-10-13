@@ -70,6 +70,8 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "data_collector": "raw-data access only; values covered by data_signature",
     "weather": "sync writes raw weather into the DB (covered by data_signature); "
                "no FE stage calls it since the weather stage was removed",
+    "feature_inputs": "fingerprints the ATR cache for staleness checks; reads, "
+                      "never changes, a feature value",
     "model": "downstream consumer (column selection only), not a value source",
     "probability_calibration": "downstream prediction calibration; cannot change feature values",
     "bet_analysis": "downstream of FE (bet settlement/reporting)",
@@ -175,10 +177,24 @@ def data_signature(processed: pd.DataFrame, *, cutoff=None) -> str:
     return h.hexdigest()[:16]
 
 
+def _atr_signature(cutoff) -> dict:
+    """Fingerprint of the ATR sectional cache up to *cutoff*.
+
+    The cache is read inside FE (``add_atr_features``), outside both other
+    signatures, so a sectional backfill used to leave stored rows stale with
+    nothing noticing (ledger 13).
+    """
+    from src.feature_inputs import atr_cache_signature
+
+    return {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": atr_cache_signature(cutoff)}
+
+
 def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
     m = store.meta()
     m["fe_signature"] = fe_sig
     m["data_signature"] = data_sig
+    if store.last_date() is not None:
+        m["atr_signature"] = _atr_signature(store.last_date())
     with open(store.meta_path, "w", encoding="utf-8") as fh:
         json.dump(m, fh, indent=2, sort_keys=True, default=str)
 
@@ -264,6 +280,12 @@ def get_featured_dataset(
             "— full rebuild"
         )
         return _rebuild(store, processed, fe_sig)
+
+    atr = meta.get("atr_signature")
+    if isinstance(atr, dict) and atr.get("cutoff"):
+        if _atr_signature(atr["cutoff"])["sig"] != atr.get("sig"):
+            logger.info("FeatureStore stale: ATR sectional cache changed beneath it — full rebuild")
+            return _rebuild(store, processed, fe_sig)
 
     store.append(processed)
     _stamp(store, fe_sig, data_signature(processed, cutoff=store.last_date()))

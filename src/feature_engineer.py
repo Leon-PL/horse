@@ -3173,24 +3173,16 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_medical_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Derive medical procedure flags: first run since gelding / wind surgery."""
-    logger.info("Engineering medical procedure features (gelding, wind ops)...")
+    """Derive medical procedure flags: first run since a wind operation.
+
+    A first-time-gelded flag lived here until 2026-10-13. It compared the sex
+    code against "gelding" while the data holds single letters, so it was
+    always 0 - and fixing the comparison would have created a leak: the stored
+    sex is the horse's sex on the day the page was scraped, not on race day
+    (ledger 15), so a gelding transition cannot be dated from history.
+    """
+    logger.info("Engineering medical procedure features (wind ops)...")
     hkey = _horse_key(df)
-
-    if "sex" in df.columns:
-        # Sex is usually "Colt", "Filly", "Mare", "Horse", "Gelding"
-        # First time gelding - looking for transition from Colt/Horse to Gelding
-        df["_is_gelding"] = (df["sex"].astype(str).str.lower() == "gelding").astype(int)
-
-        # Track the previous known sex (shifting by 1)
-        df["_prev_is_gelding"] = _lag(df, hkey, "_is_gelding").fillna(0)
-
-        # First time gelding is 1 if it is now a gelding but previously was not
-        df["first_time_gelded"] = (
-            (df["_is_gelding"] == 1) & (df["_prev_is_gelding"] == 0) & (df.get("horse_prev_races", 0) > 0)
-        ).astype(np.int8)
-
-        df = df.drop(columns=["_prev_is_gelding", "_is_gelding"], errors="ignore")
 
     # ── Wind surgery (declared operation since last run) ─────────────
     # ``wind_surgery`` = 1 when this run is the FIRST since a declared wind
