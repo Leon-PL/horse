@@ -207,6 +207,14 @@ move the BHA aliases into src/utils at the next rebuild needed anyway.
 39. Added `scripts/wf_feature_family_lift.py` (model-level A/B) and
     `wf_market_offset.py --extra/--only-prefix`.
 
-**Next:** pace slope + model-level A/B once the concurrent build commits;
-merge the branch once that session commits its files; one rebuild after the
-rail backfill completes (rebuilding before it would force a second one).
+40. **Pace slope and surface-material affinity: nothing** (-0.0013, 0.0009).
+41. **Model-level (ledger 17):** production GBM + `cp_*`: LL -0.0013
+    [-0.0025, -0.0000], top-1 -0.0030 [-0.0057, -0.0002] (worse); offset
+    model on `cp_*` alone: -0.00000 [-0.00020, +0.00010]. Not allowlisted.
+42. Rail backfill restarted at 8 s/request with a 60-min quota pause (no
+    date-range race endpoint exists: `races?fromdate=` 404).
+
+**Next:** merge `feature/course-profile` once the concurrent session commits
+its files (its uncommitted `featured_dataset.py` touches the same file); one
+store rebuild + retrain + promote after the rail backfill completes
+(rebuilding before it would force a second rebuild).

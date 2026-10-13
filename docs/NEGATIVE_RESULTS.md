@@ -1342,7 +1342,7 @@ circumference, uphill finish, undulation, draw-bias strength, all 86 tracks)
 and the course-dynamics stage (11); what it lacked was **stalls position,
 rail movements, and any runner-specific measure of course suitability**.
 Race-level course constants cancel in a per-race model (2g), so every new
-feature is runner-specific. Built as `add_course_profile_features` (`cp_*`, 32
+feature is runner-specific. Built as `add_course_profile_features` (`cp_*`, 36
 columns) plus `src/course_reports.py`:
 
 - **Stalls position** per race, parsed from the BHA going report's free text
@@ -1384,6 +1384,8 @@ market basis, BH; development period, 72,582 races with a complete T-5 market):
 | horse course-type affinity (5 dimensions) | best `cp_horse_shape_aff` | -0.0017 | -1.1 | nothing |
 | sire course-type affinity (4 dimensions) | best `cp_sire_hand_aff` | -0.0020 | -1.6 | nothing |
 | per-course weight / age / course-experience slopes | best `cp_weight_adv` | 0.0009 | 0.8 | nothing |
+| per-course pace slope (expected early pace; ATR-era rows) | `cp_pace_adv` | -0.0013 | -0.6 | nothing |
+| horse affinity for surface material (Fibresand / Tapeta / Polytrack / turf) | `cp_horse_material_aff` | 0.0009 | 0.5 | nothing |
 
 Draw by segment, declared before running (BH across all 16 cells):
 
@@ -1408,14 +1410,29 @@ Draw by segment, declared before running (BH across all 16 cells):
   significant), for horses or for sires' progeny. Nor do courses differ
   measurably, beyond what the price already says, in the stamina, weight, age
   or experience they reward.
-- **Kept in the store, not allowlisted** unless the model-level test below
-  shows lift. The data is sound and free to keep; the stalls parser and BHA
-  join are the reusable part.
+**Model-level tests** (all 36 columns at once; rail still empty):
 
-Still to measure (recorded here when run): rail movements once collected,
-the pace slope (needs `pace_style_index` from the rebuilt store), and the
-model-level test - walk-forward race log loss of the production GBM with and
-without the `cp_*` family.
+| test | result |
+|---|---|
+| production GBM + `cp_*` vs without (`scripts/wf_feature_family_lift.py`, 8 latest development quarters, 24,405 races) | race log loss **-0.0013 [-0.0025, -0.0000]**; top-1 **-0.0030 [-0.0057, -0.0002]** (worse); gap to the market +0.1146 vs +0.1159 |
+| market-offset model given only `cp_*` (`wf_market_offset.py --only-prefix cp_`, 16 quarters, 49,554 races) | race log loss vs market **-0.00000 [-0.00020, +0.00010]**, 8/16 folds better; every rule's median CLV < 1, every ROI interval spans zero or is negative |
+
+- **The family adds nothing the price lacks** (the offset model is exactly the
+  market) and **barely anything to the production model**: about 1% of its
+  log-loss gap to the market, bought with a significant loss of top-1. Not
+  allowlisted.
+- **Kept in the store as data.** The stalls parser, the BHA join and the
+  rail collection are the reusable part. Draw-with-stalls is the only signal
+  here the market prices measurably less than perfectly (t 3.3), and the
+  offset model, which is given the market, still could not turn it into a
+  better price.
+
+Still to measure (recorded here when run): rail movements once collected.
+The BHA API allows ~490 requests before a lockout of over 20 minutes and has
+no date-range race listing, so the 9,300-fixture backfill takes about 20
+hours at 8 s per request. Rail changes are race-level (they cancel within a
+race) and enter only through the stamina features, already priced at full
+strength, so expect nothing.
 
 ## Things that are true and worth not re-deriving
 
