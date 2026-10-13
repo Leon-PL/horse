@@ -4,7 +4,7 @@ At The Races Sectionals Scraper
 Fetches rich per-runner sectional / stride / pace data from At The Races
 (``attheraces.com``).  ATR sources its sectionals from Total Performance
 Data (TPD), which is considerably richer than the RacingTV RACEiQ feed
-(see :mod:`src.rtv_scraper`) — it provides per-furlong split times,
+(retired 2026-10) — it provides per-furlong split times,
 running totals, pace classifications, sectional speeds (mph), finishing
 speed %, an efficiency grade/score, energy distribution and stride
 metrics, plus the in-running comment and a sectional-adjusted placing.
@@ -805,7 +805,6 @@ def backfill_atr_sectionals_for_races(
     """Incrementally fetch ATR sectionals for a specific race subset.
 
     ``races_df`` must contain ``race_date``, ``track`` and ``off_time``.
-    Mirrors :func:`src.rtv_scraper.backfill_rtv_metrics_for_races`.
 
     ``exclude_tracks`` (normalised track keys) are skipped entirely; it
     defaults to :data:`_NO_SECTIONALS_TRACKS` (Irish meetings, which have no

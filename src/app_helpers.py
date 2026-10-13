@@ -74,15 +74,6 @@ from src.autotune import (
     load_optuna_study,
     run_autotune_session,
 )
-from src.rtv_scraper import (
-    RTV_METRIC_COLS,
-    RTV_RANK_COLS,
-    _normalise_horse_key,
-    _normalise_off_time_key,
-    _normalise_track_key,
-    backfill_rtv_metrics_for_races,
-    load_rtv_cache,
-)
 from src.backtester import walk_forward_validation
 from src.run_store import save_run, list_runs as _raw_list_runs, load_run as _raw_load_run, load_run_meta as _raw_load_run_meta, delete_run as _raw_delete_run, rename_run, get_latest_run_id, restore_run_model, run_has_model, get_run_processed_path, get_run_featured_path, prune_runs, run_disk_usage
 from src.utils import format_odds, kelly_criterion, compact_numeric_dtypes as _compact_numeric_dtypes

@@ -54,7 +54,6 @@ pattern the stage uses; the **first** is dominant.
 | `add_surface_features` | C, L | per-(horse×surface) counts; prev surface |
 | `add_trainer_specialisation_features` | C | per-(trainer×dist-cat, trainer×going) counts |
 | `add_speed_figure_features` | B, W | per-horse rolling speed; within-race + per-class(backward) medians |
-| `add_rtv_features` | B, W | per-horse rolling RTV; within-race field avg |
 | `add_market_features` | R, W | none (odds math + per-race normalisation) |
 | `add_trainer_runner_intent_features` | W | none (per-(race×trainer) stable pecking order) |
 | `add_jockey_intent_features` | L | per-horse: prev jockey/elo/favourite/result |

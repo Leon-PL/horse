@@ -86,7 +86,6 @@ def save_run(
     wf_report: dict | None = None,
     featured_df: pd.DataFrame | None = None,
     processed_df: pd.DataFrame | None = None,
-    place_market_model: tuple | None = None,
 ) -> str:
     """
     Persist a complete training run to disk.
@@ -163,14 +162,6 @@ def save_run(
     # ── Snapshot model artifact + exact datasets ────────────────
     _snapshot_model(run_dir)
     _snapshot_datasets(run_dir, featured_df=featured_df, processed_df=processed_df)
-
-    # ── Optional place-market strategy artifact (model + meta) ───
-    if place_market_model is not None:
-        import joblib
-        pm_model, pm_meta = place_market_model
-        joblib.dump(pm_model, os.path.join(run_dir, "place_market_model.joblib"))
-        joblib.dump(pm_meta, os.path.join(run_dir, "place_market_meta.joblib"))
-        logger.info("Saved place-market strategy artifact to %s", run_dir)
 
     logger.info(f"Run {run_id} ({name}) saved to {run_dir}")
     return run_id
@@ -597,23 +588,6 @@ def run_model_path(run_id: str) -> str | None:
     """Path to a specific run's model.joblib, or ``None`` if it has none."""
     path = os.path.join(RUNS_DIR, run_id, "model.joblib")
     return path if os.path.isfile(path) else None
-
-
-def run_place_market_paths(run_id: str) -> tuple[str, str] | None:
-    """(model, meta) paths for a run's place-market strategy artifact, or
-    ``None`` if it didn't train one."""
-    d = os.path.join(RUNS_DIR, run_id)
-    model = os.path.join(d, "place_market_model.joblib")
-    meta = os.path.join(d, "place_market_meta.joblib")
-    return (model, meta) if os.path.isfile(model) and os.path.isfile(meta) else None
-
-
-def production_place_market_paths() -> tuple[str, str] | None:
-    """(model, meta) paths for the PROMOTED run's place-market artifact, or
-    ``None`` (no promotion, or the promoted run had the strategy disabled). The
-    paper trader loads this in preference to the standalone script's output."""
-    rid = get_production_run_id()
-    return run_place_market_paths(rid) if rid else None
 
 
 def load_run_predictor(run_id: str):

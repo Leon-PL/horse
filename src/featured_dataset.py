@@ -55,18 +55,10 @@ _FE_SOURCE_FILES = (
     "src/pedigree_backfill.py", "src/track_config.py", "src/trainer_locations.py",
     "src/weather.py", "src/utils.py",
     # Merge/column contracts consumed by FE stages: the sectional joins feed
-    # add_atr_features / add_rtv_features, and the BHA trainer directory feeds
+    # add_atr_features, and the BHA trainer directory feeds
     # trainer_locations -> add_trainer_travel_features.
-    "src/attheraces_scraper.py", "src/rtv_scraper.py", "src/bha_stewards_scraper.py",
+    "src/attheraces_scraper.py", "src/bha_stewards_scraper.py",
 )
-
-#: Deliberately NOT hashed: built, tested, and never called by the pipeline.
-#: Both were triaged as redundant (docs/NEGATIVE_RESULTS.md 4 and 7) and left
-#: in place in case they are revisited. While they are unwired, hashing them
-#: only means that editing dead code forces a multi-GB store rebuild. If
-#: either is ever added to a FE stage, tests/test_fe_signature_coverage.py
-#: will fail until it is registered above - which is the point of that test.
-_FE_UNWIRED_SOURCES = ("src/par_time_features.py", "src/stewards_features.py")
 
 #: Modules reachable from the FE entry points that provably cannot change a
 #: feature value, with the reason. Raw-data access is covered separately by
@@ -76,6 +68,7 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "data_scraper": "raw-data access only; values covered by data_signature",
     "data_collector": "raw-data access only; values covered by data_signature",
     "model": "downstream consumer (column selection only), not a value source",
+    "probability_calibration": "downstream prediction calibration; cannot change feature values",
     "bet_analysis": "downstream of FE (bet settlement/reporting)",
     "bet_settlement": "downstream of FE (bet settlement/reporting)",
     "each_way": "downstream of FE (bet settlement/reporting)",

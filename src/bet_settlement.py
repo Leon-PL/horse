@@ -30,6 +30,12 @@ EW_MAX_ODDS = 51.0
 EW_STAKE_UNITS = 2.0
 
 
+def valid_decimal_odds(odds):
+    """A bet needs an observed finite decimal price strictly greater than one."""
+    values = np.asarray(odds, dtype=np.float64)
+    return np.isfinite(values) & (values > 1.0)
+
+
 def dynamic_value_threshold(base_threshold, odds):
     """Odds-scaled edge threshold: ``base * sqrt(odds / 3)``.
 
@@ -68,8 +74,7 @@ def value_bet_selection(
     clv = probs_arr * odds_arr
     expected_roi = clv - 1.0
     mask = (
-        (odds_arr > 0)
-        & np.isfinite(odds_arr)
+        valid_decimal_odds(odds_arr)
         & np.isfinite(probs_arr)
         & (edge > dyn_threshold)
     )
@@ -152,9 +157,9 @@ def settle_ew_bet(win_odds, place_odds, won, placed) -> float:
 # Exchange bets are settled on Betfair prices (BSP or LTP), NOT bookmaker
 # each-way terms. Winnings are netted by commission (Betfair charges commission
 # on net market winnings); losers simply lose the stake. These are the single
-# formulas shared by the place-market backtest, the walk-forwards, the research
-# harnesses in scripts/, and live paper-trade settlement (src/paper_trading.py)
-# — keep them here so all of them agree (hard rule #2). Four research scripts
+# formulas shared by the walk-forward backtests and the research harnesses in
+# scripts/ — keep them here so all of them agree (hard rule #2). Four research
+# scripts
 # previously carried their own `COMM = 0.02` and open-coded this expression,
 # which is exactly the drift that makes two ROI figures incomparable.
 EXCHANGE_COMMISSION = 0.02  # operator-confirmed Betfair commission

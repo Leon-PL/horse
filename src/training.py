@@ -2,7 +2,7 @@
 ============================================================================
 
 Historically "train a model" was implemented three times (``train.py``, the
-Streamlit Train & Tune page, and the ``scripts/train_600d*`` one-offs), which
+Streamlit Train & Tune page), which
 drifted apart. This module is the single entry point: a typed
 :class:`TrainingConfig` plus :func:`train_run`, which runs the real flow
 
@@ -65,13 +65,10 @@ class TrainingConfig:
     train_window_days: int | None = None  # None = full history; else last N days
     # ── model ──
     frameworks: dict = field(default_factory=lambda: dict(config.SUB_MODEL_FRAMEWORKS))
+    win_calibration_method: str = field(default_factory=lambda: config.WIN_CALIBRATION_METHOD)
     blend_market_odds: bool = False
     hyperparams: dict | None = None
     value_config: dict = field(default_factory=lambda: dict(DEFAULT_VALUE_CONFIG))
-    # ── place-market strategy (opt-in, alongside the win/EW pipeline) ──
-    train_place_market: bool = False        # also train the +EV exchange-place model
-    place_market_features: bool = True       # form + pre-off win-market (else form-only)
-    place_ev_threshold: float = 0.10
     # ── walk-forward (optional) ──
     run_walk_forward: bool = False
     wf_min_train_months: int = 3
@@ -166,7 +163,10 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
 
     # 3) Train.
     _tick("Training models", 0.30)
-    predictor = RacePredictor(frameworks=dict(cfg.frameworks), random_seed=cfg.seed)
+    predictor = RacePredictor(
+        frameworks=dict(cfg.frameworks), random_seed=cfg.seed,
+        win_calibration_method=cfg.win_calibration_method,
+    )
     metrics = predictor.train(
         featured, params=cfg.hyperparams, value_config=cfg.value_config,
         blend_market_odds=cfg.blend_market_odds, dataset_start=dataset_start,
@@ -176,22 +176,6 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     # 4) Evaluate (calibration + ROI + CLV).
     _tick("Evaluating (calibration / ROI / CLV)", 0.88)
     evals = evaluate(predictor, metrics, featured)
-
-    # 4b) Optional place-market strategy (the validated +EV exchange-place model),
-    #     trained ALONGSIDE the win/EW pipeline. Held-out eval block + artifact.
-    place_market = None
-    if cfg.train_place_market:
-        _tick("Training place-market strategy (+EV @ place BSP)", 0.90)
-        try:
-            from src.place_market_model import train_and_evaluate as _pm_train
-            pm_model, pm_meta, pm_eval = _pm_train(
-                featured, use_market_features=cfg.place_market_features,
-                ev_threshold=cfg.place_ev_threshold)
-            evals["place_market"] = pm_eval
-            place_market = (pm_model, pm_meta)
-        except Exception as exc:  # never fail the whole run over the opt-in strategy
-            logger.warning("Place-market strategy training failed: %s", exc)
-            evals["place_market"] = {"error": str(exc)}
 
     # 5) Optional walk-forward.
     wf_report = None
@@ -206,6 +190,7 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
             fast_fold=cfg.wf_fast_fold,
             blend_market_odds=cfg.blend_market_odds,
             random_seed=cfg.seed,
+            win_calibration_method=cfg.win_calibration_method,
             value_threshold=cfg.value_config.get("value_threshold", 0.05),
             value_min_odds=cfg.value_config.get("value_min_odds", 1.0),
             value_max_odds=cfg.value_config.get("value_max_odds", 101.0),
@@ -245,7 +230,6 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
         wf_report=wf_report,
         featured_df=None,      # lean: do NOT snapshot the featured parquet
         processed_df=None,     # lean: do NOT snapshot the processed parquet
-        place_market_model=place_market,  # (model, meta) or None
     )
     _tick(f"Done: run {run_id}", 1.0)
     return run_id

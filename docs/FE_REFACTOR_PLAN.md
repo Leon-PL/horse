@@ -1,5 +1,15 @@
 # Feature-Engineering: target architecture & migration plan
 
+> **Status (2026-10-13): phases 0–2 are built and shipped**, so the sections
+> below describing them are a record, not a to-do. The single seam
+> (`featured_dataset.get_featured_dataset`), both freshness guards
+> (`fe_signature` / `data_signature`), the new-rows-only append and the
+> counts accumulator are all in the tree and under test. **Phases 3–4
+> (bounded ring buffers for the rolling/lag stages, then retiring the
+> recompute fallback) are still open** — they are a build-time optimisation,
+> not a correctness fix, and a full rebuild currently takes ~56 minutes.
+> Prioritise against [ACTION_PLAN.md](ACTION_PLAN.md) before picking them up.
+
 Goal: **separate FE from the app**, build the dataset **once** then **append**,
 and make the burn-in / "grab future races" behaviour explicit and correct.
 Grounded in the stage classes in [FE_TAXONOMY.md](FE_TAXONOMY.md).

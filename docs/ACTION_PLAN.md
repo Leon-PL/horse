@@ -1,7 +1,8 @@
 # Action Plan
 
-**Written 2026-10-12.** Supersedes `plan.txt`, whose Stage 2–5 assumptions
-predate the refutations in [NEGATIVE_RESULTS.md](NEGATIVE_RESULTS.md).
+**Written 2026-10-12.** Supersedes the old `plan.txt` (deleted 2026-10-13;
+recoverable from git), whose Stage 2–5 assumptions predate the refutations in
+[NEGATIVE_RESULTS.md](NEGATIVE_RESULTS.md).
 
 Read in this order: [NEGATIVE_RESULTS.md](NEGATIVE_RESULTS.md) for what is
 already dead, then §1 here for why the model loses, then pick up at §2.
@@ -314,16 +315,22 @@ explanation for each category.
 
 </details>
 
-### 3e. Retire dead weight *(≈half a day)*
+### 3e. Retire dead weight — LARGELY DONE 2026-10-13 (ledger 12)
 
-- `par_time_features` and `stewards_features` are tested but **never called**;
-  they are hashed into `fe_signature`, so editing dead code forces a multi-GB
-  rebuild. Either wire them or unregister them.
-- `add_rtv_features` is retired and still defined.
+Done: `par_time_features`, `stewards_features`, `add_rtv_features` +
+`rtv_scraper`, the sale-price scraper, the refuted place-market strategy and
+its paper trader, `strategy_calibrator`, and 17 one-off scripts are deleted
+(≈5,200 lines). `_FE_UNWIRED_SOURCES` is gone with them — the mechanism only
+existed to stop dead code forcing rebuilds. See `PROJECT_OUTLINE.md` §2.0 for
+the map that replaced the guesswork.
+
+Still open:
+
+- **Prune the allowlist**: ablate under the locked walk-forward and drop what
+  does not pay. 151 features, three-quarters entity history, and the
+  saturation finding says the marginal ones add nothing. This is the one item
+  here that can change a number, so it needs CLV, not a code reading.
 - 2 of 8 runs carry no feature signature.
-- Prune the allowlist: ablate under the locked walk-forward and drop what does
-  not pay. 151 features, three-quarters entity history, and the saturation
-  finding says the marginal ones add nothing.
 
 ---
 

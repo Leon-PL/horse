@@ -18,11 +18,7 @@ import ast
 import os
 from pathlib import Path
 
-from src.featured_dataset import (
-    FE_SIGNATURE_EXEMPT,
-    _FE_SOURCE_FILES,
-    _FE_UNWIRED_SOURCES,
-)
+from src.featured_dataset import FE_SIGNATURE_EXEMPT, _FE_SOURCE_FILES
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 
@@ -91,30 +87,6 @@ def test_exemptions_are_justified_and_not_also_hashed():
         assert reason.strip(), f"exemption for {module!r} needs a reason"
     overlap = sorted(set(FE_SIGNATURE_EXEMPT) & _registered())
     assert not overlap, f"listed as both hashed and exempt: {overlap}"
-
-
-def test_unwired_sources_really_are_unwired():
-    """Modules excluded from the hash because nothing calls them.
-
-    ``par_time_features`` and ``stewards_features`` are built and tested but
-    never invoked, so hashing them would mean editing dead code forces a
-    multi-GB rebuild. That exclusion is only safe while they stay unreachable
-    — the moment one is wired into a FE stage it must be hashed, or the store
-    will not be invalidated when it changes. This test and
-    ``test_every_fe_dependency_is_hashed_or_explicitly_exempt`` together make
-    that a loud failure rather than a silent one.
-    """
-    root = SRC.parent
-    reachable = _reachable()
-    for rel in _FE_UNWIRED_SOURCES:
-        assert (root / rel).is_file(), f"stale unwired entry: {rel}"
-        module = os.path.basename(rel)[: -len(".py")]
-        assert module not in reachable, (
-            f"{module} is now reachable from the FE entry points, so it can "
-            "change feature values. Move it from _FE_UNWIRED_SOURCES into "
-            "_FE_SOURCE_FILES."
-        )
-        assert module not in _registered(), f"{module} is both hashed and unwired"
 
 
 def test_registered_sources_exist():

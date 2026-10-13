@@ -717,8 +717,9 @@ unlucky" features proved redundant with ordinary form.
 
 Better replacement, if revisited: derive trouble from **sectionals** instead —
 a horse closing fastest at the line but beaten is the complete, full-coverage
-version of the same signal, with no text parsing. `src/stewards_features.py`
-exists but is **not wired into the pipeline**.
+version of the same signal, with no text parsing. That is what
+`atr_closing_in_hand` measures (see 2b). `src/stewards_features.py` and the two
+report scrapers were deleted on 2026-10-13 — recover from git if revisited.
 
 ## 8. Why the model loses to the market — characterised (2026-06-27)
 
@@ -751,6 +752,73 @@ A new course-dynamics FE stage produced 18 candidate features; **4 made the
 allowlist** with marginal positive lift. Not a breakthrough, but not dead.
 
 ---
+
+## 12. Consolidation: what was deleted and why (2026-10-13)
+
+The repository had accumulated one live pipeline and a long tail of side
+experiments, with no way to tell them apart by reading the tree. 32 files and
+≈5,200 lines were deleted. **Nothing here was removed because it looked
+unused — every item was either refuted with a number in this ledger, or
+provably unreachable.** The code is in git history; the measurements are here.
+
+### Refuted strategies and feature families
+
+| Deleted | Evidence |
+|---|---|
+| `place_market_model`, `paper_trading`, 3 scripts, 2 tests | 1 — the +15% was a stale-store artifact; on correct features +1.5% with a CI spanning zero, going negative. Opt-in and unrun since June (one 290-byte paper-trade log). |
+| `stewards_features`, `bha_stewards_scraper`'s report half, `ihrb_daily_enquiries_scraper` | 7 and 2b — "unlucky" features are redundant with form, and the sectional version (`atr_closing_in_hand`) beat the text version while both were tiny. |
+| `par_time_features` | 4 — the most discriminative new family measured, and CLV-flat. |
+| `tattersalls_sales_scraper`, `build_sale_price_join`, `test_sale_price_signal` | 5 — residual correlation 0.0000; the debutant edge is private information, not public sale price. |
+| `backfill_wind_surgery`'s feature consumers, `test_intent_signal` | 6 — wind surgery fully priced, travel is noise, booking's CLV was an SP-vs-LTP artifact. (The backfill script is kept: the DB column stays.) |
+
+### Provably unreachable
+
+- **`rtv_scraper` + `add_rtv_features`** (≈890 lines). ATR replaced Racing TV as
+  the sectional source and `add_rtv_features` was no longer in the stage list,
+  so the function could not run. Removing it is a **provable no-op on feature
+  values**: the four `rtv_acceleration_*` names sat in a list filtered by
+  `if col in df.columns`, and the `has_rtv_history` block behind
+  `if "rtv_top_speed_avg_3" in df.columns` — and those columns cannot exist when
+  the stage that creates them never runs. `src/app_helpers.py` also imported
+  eight RTV names and used none of them, three being a **duplicate set of merge-key
+  normalisers** (`_normalise_horse_key` and friends) pulled from the retired
+  scraper instead of `src/utils.py` — a quiet hard-rule-3 violation that only
+  showed up when the scraper was removed.
+- **`strategy_calibrator`** (717 lines). Zero importers, and it grid-searched
+  betting parameters **on the test set** — the overfitting trap that produced
+  two of this project's false edges. Not worth repairing.
+- **`config.MODEL_FILE` / `SCALER_FILE` / `FEATURE_COLUMNS_FILE`** and seven
+  March-2026 `models/` artifacts (49 MB) from the removed LambdaRank path:
+  referenced nowhere, and actively misleading about which model serves.
+- **17 one-off scripts** whose questions are answered here: `train_600d*` (two
+  pointed at a run snapshot that no longer exists), `ab_market_add`,
+  `ab_race_model`, `probe_stablemate_leak` (leak found and fixed in 150506e),
+  `repair_feature_leakage_snapshot` (superseded by the rebuild), `audit_edge`,
+  `gpu_tabular_benchmark` (needs a bundle that was never kept),
+  `wf_each_way` (hardcoded snapshot **and** a hand-rolled fold loop, which hard
+  rule 6 exists to forbid), `cleanup_non_runners` and `retrain_clean_store`
+  (completed repairs).
+
+### `_FE_UNWIRED_SOURCES` is gone, and that is the point
+
+`featured_dataset` carried a documented exemption list so that editing
+`par_time_features` or `stewards_features` would not force a multi-GB rebuild.
+That mechanism existed **only** to work around dead code. Deleting the code
+removed the need for it, along with its test. The real guard —
+`test_every_fe_dependency_is_hashed_or_explicitly_exempt` — is untouched.
+
+The general lesson: a workaround that protects dead code is a signal to delete
+the code, not to keep the workaround.
+
+### Cost of doing this mid-build
+
+The deletions touched `feature_engineer.py` and `featured_dataset.py` while a
+full store rebuild was running, so the finished store (749,296 rows, 1,178
+features, through 2026-10-11) carries `fe_signature` `724ce1afe9ad7611` against
+a current `3e3b9bbb5d79bacc`. The guard will correctly force a rebuild. It was
+**not** hand-re-stamped, even though the reasoning above says the values are
+unaffected: re-stamping a store on an argument rather than a measurement is
+exactly the move that produced the phantom +15% place edge. Spend the rebuild.
 
 ## Things that are true and worth not re-deriving
 

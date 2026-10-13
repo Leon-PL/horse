@@ -99,30 +99,6 @@ def test_cold_start_speed_features_stay_unknown():
     assert featured.loc[first_runs, cols].isna().all().all()
 
 
-def test_partial_repair_aligns_runner_keys_without_mutating_inputs():
-    from scripts.repair_feature_leakage_snapshot import repair_known_leaky_columns
-
-    processed = _history()
-    expected = add_race_context_features(
-        add_pedigree_features(_add_result_history_flags(processed.copy()))
-    )
-    cols = ["track_draw_win_rate", "sire_win_rate_shrunk", "damsire_soft_edge"]
-    featured = expected[["race_id", "horse_name"] + cols].sample(frac=1, random_state=4)
-    featured[cols] = -123.0
-    featured["unrelated"] = np.arange(len(featured))
-    before = featured.copy(deep=True)
-    repaired, report = repair_known_leaky_columns(featured, processed)
-    pd.testing.assert_frame_equal(featured, before)
-    pd.testing.assert_series_equal(repaired["unrelated"], before["unrelated"])
-    key = ["race_id", "horse_name"]
-    pd.testing.assert_frame_equal(
-        repaired.set_index(key)[cols].sort_index(),
-        expected.set_index(key)[cols].sort_index(),
-    )
-    assert report["production_ready"] is False
-    assert all(n == len(featured) for n in report["changed_rows_by_column"].values())
-
-
 def test_non_finisher_does_not_count_as_winning_adjusted_speed():
     from src.feature_engineer import add_speed_figure_features
 

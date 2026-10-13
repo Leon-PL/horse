@@ -1,8 +1,12 @@
 # CLAUDE.md
 
-Read **[PROJECT_OUTLINE.md](PROJECT_OUTLINE.md)** first — it is the full
-architecture and handover document. For what to work on next, and why the
-model loses to the market, see **[docs/ACTION_PLAN.md](docs/ACTION_PLAN.md)**.
+Start with **[PROJECT_OUTLINE.md §2.0](PROJECT_OUTLINE.md)** — the map of what
+is actually live. The repo is **one pipeline plus a research toolkit**; if a
+module is not in that section's table A, it cannot affect a bet. The rest of
+PROJECT_OUTLINE is the architecture and handover detail. For what to work on
+next, and why the model loses to the market, see
+**[docs/ACTION_PLAN.md](docs/ACTION_PLAN.md)**.
+
 The rules below are the ones that cause real damage when violated.
 
 ## Hard rules

@@ -2352,149 +2352,15 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ── RacingTV RACEiQ-derived features (RETIRED) ──────────────────
-
-def add_rtv_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Derive historical features from RacingTV RACEiQ comparison metrics.
-
-    .. warning::
-       **Retired — not in the pipeline.** :func:`add_atr_features` replaced
-       this stage (broader coverage and a far richer per-run record), and no
-       ``rtv_*`` feature is on the allowlist. It is kept only so the RacingTV
-       cache in ``data/rtv_cache`` stays readable. Do not re-add it to the
-       stage list without re-running the sectional comparison first; see
-       ``docs/NEGATIVE_RESULTS.md``.
-
-    **Leakage prevention**: The raw metrics (``rtv_top_speed``, ``rtv_fsp``,
-    etc.) are *post-race outcomes* — they describe how a horse performed in
-    the race they just ran.  Using them directly would be cheating.
-
-    Instead we compute *rolling historical* aggregates for each horse
-    using only prior runs (via ``shift(1)``).  At prediction time a horse's
-    features summarise its RTV metric history, not the race being predicted.
-
-    The raw ``rtv_*`` columns are dropped after feature derivation so they
-    cannot leak into the model.
-    """
-    from src.rtv_scraper import merge_rtv_metrics, RTV_METRIC_COLS, RTV_RANK_COLS
-
-    logger.info("Engineering RTV RACEiQ features...")
-
-    # ── Merge cached metrics onto the DF ─────────────────────────
-    df = merge_rtv_metrics(df)
-
-    # ── Sanitise raw RTV metrics ─────────────────────────────────
-    # The RTV API occasionally returns garbage values (e.g. fsp up to
-    # ±15,000 for a metric that legitimately sits ~85–120). The raw parse
-    # accepts them blindly, and they poison the rolling avg/best/trend and
-    # pace_finish_bias. NaN out values outside a generous plausible band so
-    # they're treated as missing (consistent with sparse RTV coverage),
-    # never as data.
-    _RTV_PLAUSIBLE = {
-        "rtv_fsp": (0.0, 300.0),                  # % finishing speed (~85–120)
-        "rtv_top_speed": (0.0, 80.0),             # MPH
-        "rtv_entry_speed": (0.0, 80.0),           # MPH
-        "rtv_jump_index": (0.0, 20.0),            # /10
-        "rtv_lengths_gained_jumping": (-100.0, 100.0),
-        "rtv_speed_lost": (-100.0, 20.0),         # negative MPH
-        "rtv_acceleration": (0.0, 60.0),          # seconds 0–20 MPH
-        "rtv_stride_length": (0.0, 20.0),         # metres
-    }
-    _rtv_bad = 0
-    for _col, (_lo, _hi) in _RTV_PLAUSIBLE.items():
-        if _col in df.columns:
-            _vals = pd.to_numeric(df[_col], errors="coerce")
-            _oob = _vals.notna() & ((_vals < _lo) | (_vals > _hi))
-            _n = int(_oob.sum())
-            if _n:
-                df.loc[_oob, _col] = np.nan
-                _rtv_bad += _n
-    if _rtv_bad:
-        logger.info("RTV sanitise: NaN'd %d implausible raw metric values", _rtv_bad)
-
-    hkey = _horse_key(df)
-
-    # Metrics to build rolling features from  (name, higher_is_better)
-    _rolling_metrics = [
-        ("rtv_top_speed",               True),   # MPH — higher = faster
-        ("rtv_fsp",                     True),   # % — higher = stronger finish
-        ("rtv_jump_index",              True),   # /10 — higher = cleaner jumping
-        ("rtv_lengths_gained_jumping",  True),   # lengths gained — higher = better
-        ("rtv_speed_lost",              True),   # negative MPH — closer to 0 = better
-        ("rtv_entry_speed",             True),   # MPH — higher = braver approach
-        ("rtv_acceleration",            False),  # seconds 0-20 MPH — lower = faster
-        ("rtv_stride_length",           True),   # meters — longer stride generally better
-    ]
-
-    for metric, hib in _rolling_metrics:
-        if metric not in df.columns:
-            continue
-        col = metric  # e.g. "rtv_top_speed"
-        short = metric.replace("rtv_", "")  # e.g. "top_speed"
-
-        # Rolling averages and best/trend
-        ops = [
-            (f"rtv_{short}_avg_3",  "mean", 3),
-            (f"rtv_{short}_avg_5",  "mean", 5),
-            (f"rtv_{short}_best_3", "max" if hib else "min", 3),
-        ]
-        for name, arr in _rolling(df,hkey, col, ops).items():
-            df[name] = arr
-
-        # Trend: recent avg minus longer avg
-        avg3 = f"rtv_{short}_avg_3"
-        avg5 = f"rtv_{short}_avg_5"
-        if avg3 in df.columns and avg5 in df.columns:
-            df[f"rtv_{short}_trend"] = df[avg3] - df[avg5]
-
-    # ── Race-relative RTV features ───────────────────────────────
-    # How a horse's historical RTV metrics compare to the field average
-    # for this race.  These are safe because they compare *past* metrics
-    # (already shifted) against other runners' *past* metrics.
-    for metric, higher_is_better in _rolling_metrics:
-        avg_col = f"rtv_{metric.replace('rtv_', '')}_avg_3"
-        if avg_col not in df.columns:
-            continue
-        field_avg = df.groupby("race_id")[avg_col].transform("mean")
-        df[f"{avg_col}_vs_field"] = df[avg_col] - field_avg
-
-    # ── Composite RTV speed score ────────────────────────────────
-    # Combine top_speed and fsp into one normalised score
-    ts = "rtv_top_speed_avg_3"
-    fsp = "rtv_fsp_avg_3"
-    if ts in df.columns and fsp in df.columns:
-        # z-score each then average
-        for c in [ts, fsp]:
-            mu = df[c].mean()
-            sd = df[c].std()
-            if sd and sd > 0:
-                df[f"_{c}_z"] = (df[c] - mu) / sd
-            else:
-                df[f"_{c}_z"] = 0.0
-        df["rtv_speed_score"] = (
-            df.get(f"_{ts}_z", 0) + df.get(f"_{fsp}_z", 0)
-        ) / 2.0
-        df = df.drop(columns=[f"_{ts}_z", f"_{fsp}_z"], errors="ignore")
-
-    # ── Drop raw RTV metrics (leakage risk) ──────────────────────
-    drop = [c for c in RTV_METRIC_COLS + RTV_RANK_COLS if c in df.columns]
-    # Also drop finish_position from RTV if it was added
-    if "finish_position_rtv" in df.columns:
-        drop.append("finish_position_rtv")
-    df = df.drop(columns=drop, errors="ignore")
-
-    return df
-
-
 def add_atr_features(df: pd.DataFrame) -> pd.DataFrame:
     """Derive historical features from At The Races (TPD) sectionals.
 
-    ATR replaces RacingTV (:func:`add_rtv_features`) as the sectional source:
+    ATR replaced RacingTV as the sectional source (RTV retired 2026-10):
     broader coverage and a far richer per-run record (full velocity curve,
     energy distribution, stride, sectional-adjusted placing and the in-running
     comment).  See :mod:`src.atr_features` for the per-run derivations.
 
-    **Leakage prevention** is identical to RTV: the raw ``atr_*`` columns are
+    **Leakage prevention**: the raw ``atr_*`` columns are
     *post-race outcomes*.  We turn each run into per-run scalars/tags, roll
     them over the horse's PRIOR runs only (``_rolling`` → ``shift(1)``), then
     **drop every raw/per-run column** so nothing from the current race reaches
@@ -2612,7 +2478,7 @@ def add_pace_style_features(df: pd.DataFrame) -> pd.DataFrame:
 
     Early-pace history (first-section speed vs field) drives the front-runner
     ↔ closer axis; finishing-speed % history is the balance/closing component.
-    Replaces the old RacingTV inputs (see :func:`add_atr_features`).
+    Built on the ATR sectional history (see :func:`add_atr_features`).
     """
     logger.info("Engineering pace-style features...")
 
@@ -2652,7 +2518,7 @@ def add_pace_style_features(df: pd.DataFrame) -> pd.DataFrame:
     pace_finish_bias = _weighted_history_score(balance_components)
     pace_trend = _weighted_history_score(trend_components)
 
-    # Expose RTV pace history coverage explicitly (2d)
+    # Expose pace history coverage explicitly (2d)
     df["has_pace_style_history"] = pace_base.notna().astype(np.int8)
 
     df["pace_style_index"] = pace_base
@@ -4771,10 +4637,6 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
         "trainer_te_norm_pos",
         "trainer_te_ewma",
         "jt_te_norm_pos",
-        "rtv_acceleration_avg_3",
-        "rtv_acceleration_avg_5",
-        "rtv_acceleration_best_3",
-        "rtv_acceleration_trend",
     ]
     _te_w = int(getattr(config, "TE_WINDOW_DAYS", 365))
     if _te_w > 0:
@@ -5012,13 +4874,6 @@ def engineer_features(
     # results and make old rows change when history is appended; tree models
     # can use missingness directly. The legacy defer_global_imputation argument
     # remains accepted for callers, but no global imputation is performed.
-
-    # RTV RACEiQ rolling columns: keep NaN (LightGBM handles missing
-    # natively) and expose coverage explicitly. The previous global
-    # median fill made most of rtv_jump_index a constant 6.93, which
-    # the model could only treat as fake signal.
-    if "rtv_top_speed_avg_3" in df.columns:
-        df["has_rtv_history"] = df["rtv_top_speed_avg_3"].notna().astype(np.int8)
 
     # Odds-based columns: fill with field median or neutral values
     odds_fill = {"implied_prob": 0.05, "norm_implied_prob": 0.05,

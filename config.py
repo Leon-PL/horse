@@ -66,11 +66,6 @@ MATCHBOOK_DEFAULT_CURRENCY = os.getenv("MATCHBOOK_DEFAULT_CURRENCY", "GBP")
 MATCHBOOK_USERNAME = os.getenv("MATCHBOOK_USERNAME", "")
 MATCHBOOK_PASSWORD = os.getenv("MATCHBOOK_PASSWORD", "")
 
-# --- Model Settings ---
-MODEL_FILE = os.path.join(MODELS_DIR, "horse_race_model.joblib")
-SCALER_FILE = os.path.join(MODELS_DIR, "feature_scaler.joblib")
-FEATURE_COLUMNS_FILE = os.path.join(MODELS_DIR, "feature_columns.joblib")
-
 # Test set size
 TEST_SIZE = 0.2
 
@@ -141,6 +136,12 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
     "classifier": "lgbm",  # Win classifier
     "place": "lgbm",       # Place classifier
 }
+
+# Win-probability calibration for newly trained models. The temperature option
+# improved chronological audit scores, but remains opt-in until confirmed on a
+# fully rebuilt feature store. Saved models preserve their fitted method.
+# Values: "platt_isotonic", "race_temperature".
+WIN_CALIBRATION_METHOD = "platt_isotonic"
 
 # --- Market Anchor (Benter combination) ---
 # After Platt/isotonic calibration, combine the win classifier with the

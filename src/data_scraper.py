@@ -233,8 +233,6 @@ def _parse_winning_time_secs(raw) -> float:
     """Parse a Sporting Life winning time into seconds.
 
     ``'1m 13.24s'`` -> 73.24, ``'59.34s'`` -> 59.34. Empty/garbage -> NaN.
-    Mirrors ``par_time_features.parse_winning_time`` (kept local so the scraper
-    has no dependency on feature code).
     """
     if not raw:
         return float('nan')

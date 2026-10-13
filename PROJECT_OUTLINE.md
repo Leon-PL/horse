@@ -16,6 +16,69 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
 
 ## 2. Directory Structure & System Status
 
+### 2.0 The map — read this first
+
+The repository is **one pipeline plus a research toolkit**. Nothing else is
+live. If a module is not in table A, it cannot affect a bet.
+
+#### A. The pipeline — the only path that produces a selection
+
+| # | Stage | Modules | Produces |
+|---|---|---|---|
+| 1 | **Collect** | `data_scraper` (Sporting Life), `data_collector`, `database.sync_database`; side feeds `pedigree_backfill`, `attheraces_scraper` (TPD sectionals), `weather`, `betfair` (BSP/LTP), `trainer_locations` (+ `bha_stewards_scraper`, used *only* for the BHA trainer directory) | `data/races.db` |
+| 2 | **Process** | `data_processor.process_data` | canonical runner frame |
+| 3 | **Engineer** | `feature_engineer.engineer_features` + `ratings`, `atr_features`, `track_config`, `fe_incremental` | ~1,100 feature columns |
+| 4 | **Store** | `feature_store.FeatureStore` behind `featured_dataset.get_featured_dataset` | `data/processed/feature_store/` |
+| 5 | **Train** | `training.train_run` → `model.RacePredictor` (+ `autotune`, `probability_calibration`) | win + place classifiers |
+| 6 | **Evaluate** | `bet_analysis`, `backtester`, `clv`, `each_way`, `quality_control`; **rules in `bet_settlement`** | calibration / ROI / CLV |
+| 7 | **Register** | `run_store.save_run` → `run_store.promote` | `data/runs/`, `models/production.json` |
+| 8 | **Serve** | `picks_app.py` → `live_prediction` → `FeatureStore.featurize_live`; `matchbook_client` / `matchbook_signals` / `paper_trade_store` for live prices and paper bets | today's picks |
+
+**Entry points:** `train.py` (CLI train), `training_app.py` (train/tune/backtest/promote
+UI), `picks_app.py` (serving UI), `scripts/project_status.py` (**run this first** —
+it verifies stages 1→4→5→7 agree, per CLAUDE.md hard rule 5).
+
+Shared infrastructure that every stage depends on: `utils` (the merge keys —
+hard rule 3), `bet_settlement` (the bet rules — hard rule 2), `featured_dataset`
+(`fe_signature` — hard rule 4), `wf_eval` (walk-forward primitives — hard rule 6).
+
+#### B. The research toolkit — measures the pipeline, never feeds it
+
+| Tool | Answers |
+|---|---|
+| `scripts/project_status.py` | do database → store → runs → promoted model agree? |
+| `scripts/triage_features.py` | is this feature orthogonal to the market? (partial correlation + BH q) |
+| `scripts/audit_selection_rule.py` | does this filter beat *its own universe*, not just the whole band? |
+| `scripts/audit_labels.py` | do our `won`/placed labels agree with Betfair's settlement? |
+| `scripts/clv_report.py`, `scripts/wf_benter_combination.py`, `scripts/wf_fundmarket_clv.py` | CLV at BSP and market combination, on purged walk-forward folds |
+| `scripts/model_lab.py` | fast single-fit model comparison (~1 min per idea) |
+| `scripts/feature_audit.py`, `scripts/diagnose_disagreement.py` | burn-in curves; where the model disagrees with the market |
+| `scripts/benchmark_calibration.py`, `scripts/fe_sweep.py` | calibration methods; FE constants |
+| `scripts/backfill_*.py`, `scripts/extract_betfair_*.py`, `scripts/betfair_db_audit.py`, `scripts/build_*.py` | data repair, extraction and store builds |
+
+`scripts/fe_sweep.py` still points `BASE_RUN` at a run snapshot that no longer
+exists; change the id before using it.
+
+#### C. What was tried and refuted — do not rebuild these
+
+Every row was built, measured and deleted. The measurement lives in
+`docs/NEGATIVE_RESULTS.md`; the code is in git history. **Read the ledger before
+proposing a new feature or data source** — most plausible ideas are already in it.
+
+| Deleted 2026-10-13 | Was | Verdict |
+|---|---|---|
+| `rtv_scraper` + `add_rtv_features` | Racing TV RACEiQ sectionals | superseded by ATR (broader coverage, richer record); stage was already unwired |
+| `stewards_features`, `ihrb_daily_enquiries_scraper` | stewards-report trouble signals | derived trouble beat the report text, and both were tiny (ledger 7 + 2b) |
+| `par_time_features` | going-corrected par-time speed figures | most discriminative new family yet CLV-flat → redundant (ledger 4) |
+| `tattersalls_sales_scraper` | public sale price as a debutant proxy | market prices it fully (residual corr 0.0000) (ledger 5) |
+| `place_market_model`, `paper_trading` | +EV exchange-place strategy | the +15% was a stale-store artifact; on correct features +1.5% with a CI spanning zero, going negative (ledger 1) |
+| `strategy_calibrator` | grid search over betting parameters on the test set | unused, and the method is the overfitting trap this project keeps paying for |
+| 17 one-off scripts | sale-price / intent-signal / field-size triages, `train_600d*`, `ab_*`, leak probes, a GPU benchmark | each answered its question; results in the ledger |
+
+Still **unwired by design**: `sibling_features` (dam-produce form) — priced
+overall, with one unconfirmed debutant lead awaiting a CLV test (ledger 2h).
+Wiring it in requires registering it in `_FE_SOURCE_FILES`.
+
 ### 2.1 User Interface (`picks_app.py`, `training_app.py` & `config.py`)
 *   **Status:** Functional, actively maintained.
 *   **Description:** The UI is split into two Streamlit processes so the day-to-day serving app stays fast (the old monolithic `app.py` was retired). Pages are selected via a sidebar radio, so only the active page's section executes per rerun. The cached run-store wrappers, chart builders and diagnostic panels live in `src/app_helpers.py`.
@@ -23,10 +86,11 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
     *   **`training_app.py` (training/analysis)** — heavy, run on a separate port. A thin Streamlit shell over the callable `src/training` modules. Pages: `📦 Data` (feature-store inspect/refresh), `🤖 Train` (configure frameworks/hyperparameters, run `train_run`, review calibration/ROI/CLV evals), `🗂️ Registry` (browse saved runs, promote one to production).
 *   **Recent Changes:** Training pipeline rebuilt as a callable core (`src/training.train_run`) with a lean run registry (no per-run featured/processed parquet snapshots — reproduce from the store) and a production pointer for promotion. Serving and training were split into two apps. H2O AutoML and FLAML were previously removed from the UI and dependencies. Sub-model frameworks are selectable per role (`config.SUB_MODEL_FRAMEWORKS`); the current defaults are LightGBM for both win and place classifiers.
 
-### 2.2 Data Pipeline & Scraping (`src/data_*.py`, `src/database.py`, `src/rtv_scraper.py`, `src/pedigree_backfill.py`)
+### 2.2 Data Pipeline & Scraping (`src/data_*.py`, `src/database.py`, `src/pedigree_backfill.py`)
 *   **Status:** Stable / In Production.
 *   **Description:** Extracts race results and live racecards. Includes caching logic (`data/raw/`, `data/racecards_cache/`) to limit network usage and API bans.
-*   **Notable modules:** `database.py` manages historical data access; `attheraces_scraper.py` fetches At The Races / TPD sectionals (needs `curl_cffi` or the system `curl` for the Fastly challenge) and is the live sectional source; `rtv_scraper.py` (Racing TV) is retired. Also present: `bha_stewards_scraper.py` / `ihrb_daily_enquiries_scraper.py` (stewards reports), `tattersalls_sales_scraper.py` (sale prices), `betfair.py` (BSP/LTP joins), `weather.py`, `trainer_locations.py`.
+*   **Notable modules:** `database.py` manages historical data access; `attheraces_scraper.py` fetches At The Races / TPD sectionals (needs `curl_cffi` or the system `curl` for the Fastly challenge) and is the only sectional source. Also present: `betfair.py` (BSP/LTP joins), `weather.py`, `trainer_locations.py`, and `bha_stewards_scraper.py` — which despite its name is kept **only** for the BHA trainer directory that `trainer_locations` needs; the stewards-report side of it is unused.
+*   **Retired scrapers** (deleted 2026-10-13, recoverable from git): Racing TV sectionals (`rtv_scraper.py`, superseded by ATR), IHRB/BHA stewards reports and Tattersalls sale prices (both refuted — see `docs/NEGATIVE_RESULTS.md`). `data/rtv_cache/` is now orphaned and safe to delete.
 *   **Pedigree:** the results/racecard APIs never include breeding, so the `sire`/`dam`/`damsire` columns in `results` are always null at scrape time. `src/pedigree_backfill.py` fills a `horse_pedigree` table from Sporting Life horse *profile* pages (keyed by horse_id; pedigree stored by NAME because the profile JSON's nested ids are buggy). `data_processor.process_data` joins it in; `sync_database` fetches profiles for first-time runners automatically. Full historical backfill completed 2026-06-12 (70k+ horses).
 
 ### 2.3 Feature Engineering & Ratings (`src/feature_engineer.py`, `src/ratings.py`, `src/data_processor.py`)
@@ -39,19 +103,21 @@ The project is a comprehensive Python-based machine learning pipeline and bettin
     *   **Elo Nulls / Non-Finishers Handling**: Custom logic exists for how non-finishers (falls, unseated riders) are penalized in historical rating datasets.
     *   **Scrape-time columns are post-race:** `horse_runs`/`horse_wins`/`horse_places` from the API describe the horse AFTER the race; `*_freq` counts span the whole dataset (future included). Both are explicitly in `EXCLUDE_COLUMNS` — never feed them to a model.
     *   **Same-day visibility (date-strict rule):** jockeys/trainers run many races per day, but at prediction time the day's earlier results don't exist. Every jockey/trainer/combo-keyed history feature must therefore be **date-strict** — all of an entity's runs on one day share the value at its first run of the day. Implemented via `_entity_day_start_view` (feature_engineer) and `_day_start_gather` (ratings). Guarded by `tests/test_live_parity.py`, which runs the training path and the live path (`feature_engineer_with_history_core`) on the same data and requires identical features — run it after ANY new entity-history feature.
-    *   **Sectional metrics are sparse by design** (jump metrics don't exist for flat races); they are left as NaN with a `has_atr_history` flag — do not reintroduce global median fills. The source is now At The Races / TPD (`src/attheraces_scraper.py` → `add_atr_features`); the older RacingTV stage (`add_rtv_features`) is retired and no longer in the pipeline.
+    *   **Sectional metrics are sparse by design** (jump metrics don't exist for flat races); they are left as NaN with a `has_atr_history` flag — do not reintroduce global median fills. The source is At The Races / TPD (`src/attheraces_scraper.py` → `add_atr_features`); the older RacingTV stage was deleted on 2026-10-13.
 
 ### 2.4 Modeling & Tuning (`train.py`, `src/model.py`, `src/autotune.py`)
 *   **Status:** Central to project. Focus on tree-based ensembles.
 *   **Description:** `src/model.py` defines `RacePredictor` (formerly `TripleEnsemblePredictor` — an alias is kept so old pickles load): two independently trained, Platt+isotonic-calibrated classifiers (Win and Place) that drive all betting, plus logistic-regression + market (overround-normalised 1/odds) baselines reported in metrics as sanity references. (A LambdaRank ranker was removed in 2026-06 — it was diagnostics-only, never blended into win probabilities, and cost ~⅓ of training time; the win classifier is still evaluated *as a ranker* via `_evaluate_as_ranker` for NDCG/top-1.) Optuna is heavily utilized for tuning. The test-set betting simulation (`analyse_test_set`) lives in `src/bet_analysis.py`; `src/model.py` re-exports it for backwards compatibility.
 *   **Market anchor (Benter combination):** after calibration, win probabilities are combined with the market via `softmax(alpha*log(p_model) + beta*log(p_market))` per race, with (alpha, beta) MLE-fitted on OOF predictions (`config.MARKET_ANCHOR`). The fitted **alpha is the scoreboard for fundamental-model progress**: it first went positive (+0.079) in run `20260612_172827` after the 2026-06-11/12 feature work. Races with incomplete odds fall back to unanchored probabilities.
-*   **Negative results worth not repeating:** a conditional-logit / Plackett-Luce (grouped-softmax) LightGBM objective lost to the plain binary classifier on both no-market and with-market protocols (`scripts/_ab_pl_objective.py`, 2026-06-12); the dtype-filter fix that admitted ~160 uint8 one-hot/flag columns measured neutral.
+*   **Negative results worth not repeating:** a conditional-logit / Plackett-Luce (grouped-softmax) LightGBM objective lost to the plain binary classifier on both no-market and with-market protocols (2026-06-12, script since deleted); the dtype-filter fix that admitted ~160 uint8 one-hot/flag columns measured neutral.
 *   **Checkpoints:** Models are saved straight to `models/` (e.g., `horse_race_model.joblib`, `ensemble_models.joblib`). All runs stream metrics to `data/runs/`.
 
-### 2.5 Backtesting & Strategy execution (`src/backtester.py`, `src/strategy_calibrator.py`, `src/matchbook_client.py`)
+### 2.5 Backtesting & Strategy execution (`src/backtester.py`, `src/wf_eval.py`, `src/matchbook_client.py`)
 *   **Status:** Functional, but often requires iterative refinements based on exchange behavior.
 *   **Description:** Includes `backtester.py` for historical simulation, computing PnL, and ROI. `matchbook_signals.py` translates model probabilities into actual market actions against Matchbook APIs. Contains logic for Each-Way betting (`src/each_way.py`) and paper trading (`src/paper_trade_store.py`).
-*   **CRITICAL Context:** All bet-selection and settlement rules (dynamic value threshold, each-way odds band, EW PnL maths) live in **`src/bet_settlement.py`** — the single source of truth shared by `analyse_test_set`, the walk-forward backtester, and the live Today's Picks settlement. Never inline these rules at a call site; if the backtest and live settlement use different formulas, every reported ROI becomes untrustworthy. Known intentional difference: the backtester computes value edge against race-normalised (overround-corrected) implied probabilities, while `analyse_test_set` and the strategy calibrator use raw `1/odds` (passed explicitly via the `implied_prob` argument).
+*   **CRITICAL Context:** All bet-selection and settlement rules (dynamic value threshold, each-way odds band, EW PnL maths) live in **`src/bet_settlement.py`** — the single source of truth shared by `analyse_test_set`, the walk-forward backtester, and the live Today's Picks settlement. Never inline these rules at a call site; if the backtest and live settlement use different formulas, every reported ROI becomes untrustworthy. Known intentional difference: the backtester computes value edge against race-normalised (overround-corrected) implied probabilities, while `analyse_test_set` uses raw `1/odds` (passed explicitly via the `implied_prob` argument).
+
+    There are **two walk-forward implementations** and they are not interchangeable: `src/backtester.walk_forward_validation` is the app-facing simulation (per-fold model fits, bet settlement, the Backtest tab), while `src/wf_eval.py` holds the research primitives (purged expanding folds, out-of-fold second-stage fitting, race-clustered bootstrap) that CLAUDE.md hard rule 6 requires for any new measurement. Use `wf_eval` for research; a hand-rolled fold loop has already produced a biased result that closed a real lead for three months.
 
 ## 3. Important Context for Agents
 
@@ -125,14 +191,26 @@ instead of hand-rolling a fold loop. Settlement maths lives in
 
 ### 4.3 Known dead code / loose ends
 
-- `add_rtv_features` is retired (superseded by `add_atr_features`) but still
-  defined in `feature_engineer.py`; `src/rtv_scraper.py` remains for its cache.
-- `src/par_time_features.py` and `src/stewards_features.py` are tested but
-  **never called by the pipeline** — both were triaged as redundant. They are
-  still hashed into `fe_signature`, so editing them forces a store rebuild.
-- `models/` holds March-2026 artifacts (`ranker_model.joblib`,
-  `rank_ensemble_models.joblib`, `ensemble_models.joblib`) from the removed
-  LambdaRank path. Safe to delete.
+Cleared on 2026-10-13 — 32 files and ≈5,200 lines removed; see §2.0 table C and
+`docs/NEGATIVE_RESULTS.md` 12 for the item-by-item justification. What remains:
+
+- **`src/sibling_features.py` is unwired by design.** It is screened against the
+  database directly so it can be judged before costing a rebuild. Wiring it in
+  means registering it in `_FE_SOURCE_FILES` (hard rule 4).
+- **`src/bha_stewards_scraper.py` is misnamed for what it now does.** Only the
+  BHA *trainer directory* half is used (by `trainer_locations` →
+  `add_trainer_travel_features`); the stewards-report half is dead. Worth
+  splitting if anyone touches it — it sits in `_FE_SOURCE_FILES`, so editing
+  dead code in it forces a rebuild.
+- **`add_trainer_travel_features` is still a pipeline stage** although trainer
+  travel measured as noise (ledger 6). Its columns are not allowlisted, so it
+  costs build time rather than accuracy; removing a stage changes the frame, so
+  it needs a parity check rather than a confident deletion.
+- **`scripts/fe_sweep.py` points `BASE_RUN` at a run snapshot that no longer
+  exists.** Change the id before using it.
+- **2 of 8 saved runs carry no feature signature**, so
+  `run_store.feature_generation_status` reports `unknown` for them.
+- **`data/rtv_cache/` is orphaned** now that the Racing TV scraper is gone.
 
 ### 4.4 Guards you should not weaken
 
