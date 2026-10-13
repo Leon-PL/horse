@@ -25,7 +25,7 @@ live. If a module is not in table A, it cannot affect a bet.
 
 | # | Stage | Modules | Produces |
 |---|---|---|---|
-| 1 | **Collect** | `data_scraper` (Sporting Life), `data_collector`, `database.sync_database`; side feeds `pedigree_backfill`, `attheraces_scraper` (TPD sectionals), `weather`, `betfair` (BSP/LTP), `trainer_locations` (+ `bha_stewards_scraper`, used *only* for the BHA trainer directory) | `data/races.db` |
+| 1 | **Collect** | `data_scraper` (Sporting Life), `data_collector`, `database.sync_database`; side feeds `pedigree_backfill`, `attheraces_scraper` (TPD sectionals), `weather` (raw columns into the DB only), `betfair` (BSP/LTP) | `data/races.db` |
 | 2 | **Process** | `data_processor.process_data` | canonical runner frame |
 | 3 | **Engineer** | `feature_engineer.engineer_features` + `ratings`, `atr_features`, `track_config`, `fe_incremental` | ~1,100 feature columns |
 | 4 | **Store** | `feature_store.FeatureStore` behind `featured_dataset.get_featured_dataset` | `data/processed/feature_store/` |
@@ -89,7 +89,7 @@ Wiring it in requires registering it in `_FE_SOURCE_FILES`.
 ### 2.2 Data Pipeline & Scraping (`src/data_*.py`, `src/database.py`, `src/pedigree_backfill.py`)
 *   **Status:** Stable / In Production.
 *   **Description:** Extracts race results and live racecards. Includes caching logic (`data/raw/`, `data/racecards_cache/`) to limit network usage and API bans.
-*   **Notable modules:** `database.py` manages historical data access; `attheraces_scraper.py` fetches At The Races / TPD sectionals (needs `curl_cffi` or the system `curl` for the Fastly challenge) and is the only sectional source. Also present: `betfair.py` (BSP/LTP joins), `weather.py`, `trainer_locations.py`, and `bha_stewards_scraper.py` — which despite its name is kept **only** for the BHA trainer directory that `trainer_locations` needs; the stewards-report side of it is unused.
+*   **Notable modules:** `database.py` manages historical data access; `attheraces_scraper.py` fetches At The Races / TPD sectionals (needs `curl_cffi` or the system `curl` for the Fastly challenge) and is the only sectional source. Also present: `betfair.py` (BSP/LTP joins) and `weather.py` (the sync writes raw weather into the DB; since 2026-10-13 no feature stage reads it). `trainer_locations.py` and `bha_stewards_scraper.py` are unwired data tools: the trainer-travel stage that used them was removed on 2026-10-13 (ledger 13).
 *   **Retired scrapers** (deleted 2026-10-13, recoverable from git): Racing TV sectionals (`rtv_scraper.py`, superseded by ATR), IHRB/BHA stewards reports and Tattersalls sale prices (both refuted — see `docs/NEGATIVE_RESULTS.md`). `data/rtv_cache/` is now orphaned and safe to delete.
 *   **Pedigree:** the results/racecard APIs never include breeding, so the `sire`/`dam`/`damsire` columns in `results` are always null at scrape time. `src/pedigree_backfill.py` fills a `horse_pedigree` table from Sporting Life horse *profile* pages (keyed by horse_id; pedigree stored by NAME because the profile JSON's nested ids are buggy). `data_processor.process_data` joins it in; `sync_database` fetches profiles for first-time runners automatically. Full historical backfill completed 2026-06-12 (70k+ horses).
 
@@ -197,15 +197,10 @@ Cleared on 2026-10-13 — 32 files and ≈5,200 lines removed; see §2.0 table C
 - **`src/sibling_features.py` is unwired by design.** It is screened against the
   database directly so it can be judged before costing a rebuild. Wiring it in
   means registering it in `_FE_SOURCE_FILES` (hard rule 4).
-- **`src/bha_stewards_scraper.py` is misnamed for what it now does.** Only the
-  BHA *trainer directory* half is used (by `trainer_locations` →
-  `add_trainer_travel_features`); the stewards-report half is dead. Worth
-  splitting if anyone touches it — it sits in `_FE_SOURCE_FILES`, so editing
-  dead code in it forces a rebuild.
-- **`add_trainer_travel_features` is still a pipeline stage** although trainer
-  travel measured as noise (ledger 6). Its columns are not allowlisted, so it
-  costs build time rather than accuracy; removing a stage changes the frame, so
-  it needs a parity check rather than a confident deletion.
+- **The weather and trainer-travel FE stages were removed on 2026-10-13**
+  after a parity check (ledger 13): the store no longer calls Open-Meteo at
+  build time, and `weather.py`, `trainer_locations.py` and
+  `bha_stewards_scraper.py` no longer sit in `_FE_SOURCE_FILES`.
 - **`scripts/fe_sweep.py` points `BASE_RUN` at a run snapshot that no longer
   exists.** Change the id before using it.
 - **2 of 8 saved runs carry no feature signature**, so

@@ -2801,109 +2801,14 @@ def add_course_dynamics_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def add_weather_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Fetch & attach weather features for every race-day / track pair.
-
-    Raw columns from weather module:
-        weather_temp_max, weather_temp_min, weather_precip_mm,
-        weather_wind_kmh, weather_precip_prev3
-
-    Derived columns:
-        weather_temp_range      – diurnal swing (stress indicator)
-        weather_is_wet          – race-day precipitation >2 mm
-        weather_heavy_rain_prev – 3-day prior precip >10 mm (soft/heavy going)
-        weather_wind_x_dist     – wind × distance (stamina drain)
-        weather_cold            – temperature below 5 °C
-    """
-    from src.weather import get_weather_for_races
-
-    df = get_weather_for_races(df)
-
-    # ── Derived weather features ─────────────────────────────────
-    tmax = df["weather_temp_max"].fillna(14.0)
-    tmin = df["weather_temp_min"].fillna(7.0)
-    precip = df["weather_precip_mm"].fillna(1.5)
-    wind = df["weather_wind_kmh"].fillna(18.0)
-    prev3 = df["weather_precip_prev3"].fillna(4.5)
-
-    df["weather_temp_range"] = tmax - tmin
-    df["weather_is_wet"] = (precip > 2.0).astype(int)
-    df["weather_heavy_rain_prev"] = (prev3 > 10.0).astype(int)
-    df["weather_cold"] = (tmax < 5.0).astype(int)
-
-    # Wind × distance interaction: wind matters more over longer trips
-    dist = df["distance_f"].fillna(8.0) if "distance_f" in df.columns else 8.0
-    df["weather_wind_x_dist"] = wind * dist / 100.0  # scaled
-
-    return df
-
-
-def add_trainer_travel_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Yard-to-track travel distance and lone-runner intent.
-
-    Yard locations come from the BHA licensed-trainer directory (county
-    centroid — see ``src.trainer_locations``); track coordinates from
-    ``track_config``. Vanning one horse a long way on an ordinary card is a
-    classic trainer-intent signal: the trip only pays if connections expect
-    the horse to be competitive.
-
-    Columns:
-        trainer_travel_km          – haversine yard → track (120 when unknown)
-        trainer_travel_known       – 1 if both endpoints resolved
-        trainer_travel_far         – known trip over 250 km
-        trainer_runners_at_meeting – yard's runners on this (date, track)
-        trainer_lone_long_trip     – far trip AND sole runner at the meeting
-    """
-    from src.track_config import TRACK_CONFIG, get_track_config
-    from src.trainer_locations import haversine_km, resolve_trainer_latlon
-
-    if "trainer" not in df.columns or "track" not in df.columns:
-        return df
-    logger.info("Engineering trainer travel features...")
-
-    trainer_loc = resolve_trainer_latlon(df["trainer"].dropna().unique())
-
-    # Track coords: only trust explicit entries (the get_track_config default
-    # is a UK-centroid placeholder that would fabricate distances).
-    known_tracks = {k.lower() for k in TRACK_CONFIG}
-
-    def _track_latlon(t: str) -> tuple[float, float]:
-        if str(t).strip().lower() in known_tracks:
-            cfg = get_track_config(str(t))
-            return (cfg.get("lat", np.nan), cfg.get("lon", np.nan))
-        return (np.nan, np.nan)
-
-    track_loc = {t: _track_latlon(t) for t in df["track"].dropna().unique()}
-
-    t_lat = df["trainer"].map(lambda n: trainer_loc.get(n, (np.nan, np.nan))[0])
-    t_lon = df["trainer"].map(lambda n: trainer_loc.get(n, (np.nan, np.nan))[1])
-    c_lat = df["track"].map(lambda t: track_loc.get(t, (np.nan, np.nan))[0])
-    c_lon = df["track"].map(lambda t: track_loc.get(t, (np.nan, np.nan))[1])
-
-    dist_km = pd.Series(
-        haversine_km(t_lat, t_lon, c_lat, c_lon), index=df.index
-    )
-    df["trainer_travel_known"] = dist_km.notna().astype(np.int8)
-    # Fixed fallback (typical GB trip), NOT a frame statistic — a frame-level
-    # median would make the feature depend on the batch it was computed in.
-    df["trainer_travel_km"] = dist_km.fillna(120.0)
-    df["trainer_travel_far"] = (
-        (df["trainer_travel_known"] == 1) & (dist_km > 250.0)
-    ).astype(np.int8)
-
-    # Lone-runner intent: yard sent exactly one horse to this meeting.
-    if "race_date" in df.columns:
-        meeting_runners = df.groupby(
-            [df["race_date"], df["track"], df["trainer"]]
-        )["trainer"].transform("count")
-        df["trainer_runners_at_meeting"] = meeting_runners.astype(np.int16)
-        df["trainer_lone_long_trip"] = (
-            (meeting_runners == 1) & (df["trainer_travel_far"] == 1)
-        ).astype(np.int8)
-
-    return df
+# add_weather_features and add_trainer_travel_features were removed on
+# 2026-10-13. Both families measured dead (ledger 2g: every weather signal
+# scores 0.0000 because weather is race-level; ledger 6: travel is noise), and
+# both made the store depend on more than the database: the weather stage
+# called the Open-Meteo API at build time for rows with no stored weather and
+# silently filled failures with constants, and the travel stage read an
+# unsigned CSV. A parity check on 106,467 rows showed the removal drops
+# exactly their 10 columns and leaves the other 1,058 bit-identical.
 
 
 def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -4834,8 +4739,6 @@ def engineer_features(
         add_field_quality_features,
         add_track_config_features,         # static venue data
         add_course_dynamics_features,      # course experience/handedness/pace-bias/travel
-        add_trainer_travel_features,       # yard→track distance + lone-runner intent
-        add_weather_features,              # Open-Meteo historical weather
         add_supplementary_features,        # consistency, class, campaign, seasonal
         add_race_relative_signal_features,
         add_interaction_features,

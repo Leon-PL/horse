@@ -9,7 +9,6 @@ from src.data_scraper import SportingLifeScraper
 from src.feature_engineer import (
     add_medical_features,
     add_trainer_runner_intent_features,
-    add_trainer_travel_features,
 )
 from src.trainer_locations import (
     _surname_initial_key,
@@ -159,61 +158,6 @@ class TestTrainerNameMatching:
         # London -> Edinburgh is ~535 km
         d = haversine_km(51.5074, -0.1278, 55.9533, -3.1883)
         assert 500 < float(d) < 570
-
-
-class TestTrainerTravelFeatures:
-    def _card(self):
-        return pd.DataFrame([
-            # Fife yard vanning one horse to Bath (~600 km): lone long trip
-            dict(race_id="X1", race_date=pd.Timestamp("2026-07-02"),
-                 track="Bath", trainer="N W Alexander", horse_name="A"),
-            # Local yard with two runners at the meeting
-            dict(race_id="X1", race_date=pd.Timestamp("2026-07-02"),
-                 track="Bath", trainer="Local Yard", horse_name="B"),
-            dict(race_id="X2", race_date=pd.Timestamp("2026-07-02"),
-                 track="Bath", trainer="Local Yard", horse_name="C"),
-            # Unresolvable trainer
-            dict(race_id="X2", race_date=pd.Timestamp("2026-07-02"),
-                 track="Bath", trainer="Mystery Man", horse_name="D"),
-        ])
-
-    def test_travel_distance_and_lone_long_trip(self, monkeypatch):
-        def fake_resolve(names, path=None):
-            return {
-                "N W Alexander": (56.25, -3.15),   # Fife
-                "Local Yard": (51.40, -2.36),      # next to Bath
-            }
-
-        monkeypatch.setattr(
-            "src.trainer_locations.resolve_trainer_latlon", fake_resolve
-        )
-        out = add_trainer_travel_features(self._card())
-        by_horse = out.set_index("horse_name")
-
-        assert by_horse.loc["A", "trainer_travel_known"] == 1
-        assert by_horse.loc["A", "trainer_travel_km"] > 400
-        assert by_horse.loc["A", "trainer_travel_far"] == 1
-        assert by_horse.loc["A", "trainer_runners_at_meeting"] == 1
-        assert by_horse.loc["A", "trainer_lone_long_trip"] == 1
-
-        assert by_horse.loc["B", "trainer_travel_km"] < 30
-        assert by_horse.loc["B", "trainer_runners_at_meeting"] == 2
-        assert by_horse.loc["B", "trainer_lone_long_trip"] == 0
-
-        # unknown trainer: flagged unknown, fixed fallback, never "far"
-        assert by_horse.loc["D", "trainer_travel_known"] == 0
-        assert by_horse.loc["D", "trainer_travel_km"] == pytest.approx(120.0)
-        assert by_horse.loc["D", "trainer_travel_far"] == 0
-
-    def test_unknown_track_is_not_fabricated(self, monkeypatch):
-        monkeypatch.setattr(
-            "src.trainer_locations.resolve_trainer_latlon",
-            lambda names, path=None: {"N W Alexander": (56.25, -3.15)},
-        )
-        df = self._card()
-        df["track"] = "Nowhere Park"
-        out = add_trainer_travel_features(df)
-        assert (out["trainer_travel_known"] == 0).all()
 
 
 # ---------------------------------------------------------------------------

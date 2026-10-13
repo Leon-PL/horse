@@ -61,7 +61,6 @@ pattern the stage uses; the **first** is dominant.
 | `add_pace_style_features` | W, B | within-race pace aggregates; per-horse weighted history |
 | `add_field_quality_features` | W | none (field OR/Elo aggregates) |
 | `add_track_config_features` | R | none (static venue reference + draw interactions) |
-| `add_weather_features` | R | none (external weather join by race-date) |
 | `add_supplementary_features` | B, C, L | per-horse rolling consistency/class; best-class cummin; prev trainer |
 | `add_race_relative_signal_features` | W | none (within-race relative families of base signals) |
 | `add_interaction_features` | R, W | none (products of existing cols + a race avg) |

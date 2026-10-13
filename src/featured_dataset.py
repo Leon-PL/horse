@@ -52,12 +52,13 @@ _FE_SOURCE_FILES = (
     "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
     "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
     "src/atr_features.py",
-    "src/pedigree_backfill.py", "src/track_config.py", "src/trainer_locations.py",
-    "src/weather.py", "src/utils.py",
-    # Merge/column contracts consumed by FE stages: the sectional joins feed
-    # add_atr_features, and the BHA trainer directory feeds
-    # trainer_locations -> add_trainer_travel_features.
-    "src/attheraces_scraper.py", "src/bha_stewards_scraper.py",
+    "src/pedigree_backfill.py", "src/track_config.py", "src/utils.py",
+    # Merge/column contract consumed by an FE stage: the sectional joins feed
+    # add_atr_features.
+    "src/attheraces_scraper.py",
+    # weather.py, trainer_locations.py and bha_stewards_scraper.py left this
+    # list on 2026-10-13 with the weather and trainer-travel stages: nothing
+    # reachable from the FE entry points imports them any more.
 )
 
 #: Modules reachable from the FE entry points that provably cannot change a
@@ -67,6 +68,8 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "database": "raw-data access only; values covered by data_signature",
     "data_scraper": "raw-data access only; values covered by data_signature",
     "data_collector": "raw-data access only; values covered by data_signature",
+    "weather": "sync writes raw weather into the DB (covered by data_signature); "
+               "no FE stage calls it since the weather stage was removed",
     "model": "downstream consumer (column selection only), not a value source",
     "probability_calibration": "downstream prediction calibration; cannot change feature values",
     "bet_analysis": "downstream of FE (bet settlement/reporting)",
