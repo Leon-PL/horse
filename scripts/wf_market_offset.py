@@ -23,8 +23,12 @@ Protocols (decision price -> settlement):
 
 * ``t5``      - Betfair LTP 5 minutes before the off (BASIC data), settled at
                 BSP. CLV = ltp_300s / bsp. Ends 2026-06-10.
-* ``morning`` - Betfair morning VWAP (public BSP files), settled at BSP.
-                CLV = morningwap / bsp. Covers the golden hold-out.
+* ``morning`` - Betfair morning VWAP (public BSP files) as the market the
+                model corrects, known when the morning closes (~11:00 UK);
+                execution at BSP. **ROI at BSP is the valid metric; the CLV
+                printed (morningwap / bsp) is not** - the VWAP averages
+                prices from across the morning, so no bet placed on morning
+                information could take it (ledger 14). Covers the hold-out.
 
 Usage::
 
@@ -312,6 +316,8 @@ def render(r: dict) -> str:
     lines = [f"\n=== market-offset model, protocol {r['protocol']}"
              f"{' - GOLDEN HOLD-OUT' if r['holdout'] else ''} ===",
              f"races {r['races']:,}  runners {r['runners']:,}",
+             *(["NOTE: morning protocol - read ROI@BSP; the CLV column is not a valid measure here"]
+               if r["protocol"] == "morning" else []),
              f"delta race log loss (model - market): {d['mean']:+.5f} "
              f"CI[{d['ci_low']:+.5f}, {d['ci_high']:+.5f}]  folds better {d['folds_better']}/{d['n_folds']}",
              ""]
