@@ -1065,6 +1065,38 @@ an earlier price on the horses the money is backing, before the close catches
 up. T5 says that effect exists after T-5 but is small. Its economic size is
 measured below.
 
+### The timing edge, priced (`scripts/microstructure_clv.py`)
+
+One rule per protocol, fixed before the run: in each race, back the runner
+with the highest excess morning volume if its decision price is 1.5-50;
+matched baseline = every runner in that band. Development period, 2%
+commission, race-clustered CIs.
+
+| protocol | rule | n | median CLV [95% CI] | ROI at taken price | quarters + |
+|---|---|---|---|---|---|
+| T-5 LTP -> BSP | bet all in band | 411,632 | 0.9809 [0.9801, 0.9816] | -2.29% | 2/21 |
+| T-5 LTP -> BSP | **top excess volume** | 55,412 | **0.9953 [0.9932, 0.9978]** | -2.15% [-4.24, -0.12] | 6/21 |
+| same, races off >= 14:00 UTC | top excess volume | 41,458 | 0.9954 [0.9929, 0.9985] | -2.13% | 6/21 |
+| morning VWAP -> BSP | bet all in band | 498,798 | 0.9210 | -6.11% | 0/24 |
+| morning VWAP -> BSP | top excess volume | 64,209 | *1.0187 [1.0157, 1.0217]* | *+1.59% [-0.30, +3.44]* | *15/24* |
+
+**At T-5 the timing edge is real and too small to bank**: +1.4 CLV points over
+the matched baseline, CIs well separated, robust to dropping every race near
+the morning cutoff - and still below 1.0, with ROI no better than backing the
+band. Fails ACTION_PLAN 7.
+
+**The morning row is an artifact, and was labelled one in the script before it
+ran.** The signal uses the whole morning's volume, which is only known when
+the morning ends, while `morningwap` averages the whole morning's prices -
+including the longer ones a steamer traded at before the money arrived. It
+credits the bettor with prices that had already gone: the jockey-booking trap
+(6) in a new form. **Do not read 1.0187 as a result.** The honest version
+strikes the bet at the price available when the morning closes; Betfair does
+not publish the cutoff, but the morning share of pre-play volume collapses for
+races off after ~11:00 UK (median share 1.24 before 11:00, 0.20 at
+11:00-11:30, 0.10 at 11:30-12:00), so `ltp_1100` is being extracted from the
+BASIC stream for that test.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
