@@ -5,7 +5,10 @@ is actually live. The repo is **one pipeline plus a research toolkit**; if a
 module is not in that section's table A, it cannot affect a bet. The rest of
 PROJECT_OUTLINE is the architecture and handover detail. For what to work on
 next, and why the model loses to the market, see
-**[docs/ACTION_PLAN.md](docs/ACTION_PLAN.md)**.
+**[docs/ACTION_PLAN.md](docs/ACTION_PLAN.md)**. Starting a long autonomous
+session? **[docs/NEXT_AGENT_BRIEF.md](docs/NEXT_AGENT_BRIEF.md)** is the
+standing brief: current tree state, a stage-by-stage audit checklist, the live
+work queue, and the specific self-deceptions to avoid.
 
 The rules below are the ones that cause real damage when violated.
 
