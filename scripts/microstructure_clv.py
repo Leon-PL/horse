@@ -71,22 +71,22 @@ def evaluate(df: pd.DataFrame, entry_col: str, n_boot: int) -> dict:
     return out
 
 
-def _with_1100_price(df: pd.DataFrame, path: str) -> pd.DataFrame:
-    """The honest morning protocol: strike at the 11:00 UK last traded price.
+def _with_early_price(df: pd.DataFrame, path: str, col: str, min_off_minutes: int) -> pd.DataFrame:
+    """Honest early protocols: strike at a price available after the morning.
 
     Full-morning volume is known when the morning closes (~11:00 UK), so the
-    bet takes the price available then - never the morning VWAP. Races off
-    before 11:30 UK are dropped so the morning is complete before the
-    decision; races with any runner untraded by 11:00 have no coherent market.
+    bet takes a price available then or later - never the morning VWAP.
+    ``ltp_1100`` (m11): races off >= 11:30 UK. ``ltp_3600s`` (t60, one hour
+    before the off): races off >= 12:05 UK, so T-60 falls after the morning.
+    Races with any runner untraded by the cut have no coherent market.
     """
     from src.betfair import attach_bsp
-    out = attach_bsp(df.drop(columns=["ltp_1100"], errors="ignore"),
-                     pd.read_parquet(path), cols=("ltp_1100",))
-    out["ltp_1100"] = pd.to_numeric(out["ltp_1100"], errors="coerce")
+    out = attach_bsp(df.drop(columns=[col], errors="ignore"), pd.read_parquet(path), cols=(col,))
+    out[col] = pd.to_numeric(out[col], errors="coerce")
     off = pd.to_datetime(out["race_date"].astype(str) + " " + out["off_time"].astype(str), errors="coerce")
     local = off.dt.tz_localize("UTC").dt.tz_convert("Europe/London")
-    late_enough = (local.dt.hour * 60 + local.dt.minute) >= 11 * 60 + 30
-    priced = (out["ltp_1100"] > 1).groupby(out["race_id"]).transform("all")
+    late_enough = (local.dt.hour * 60 + local.dt.minute) >= min_off_minutes
+    priced = (out[col] > 1).groupby(out["race_id"]).transform("all")
     return out[late_enough & priced].copy()
 
 
@@ -107,7 +107,10 @@ def main() -> int:
               "morning": evaluate(df, "morningwap", args.n_boot)}
     early = os.path.join("data", "processed", "betfair_bsp_early.parquet")
     if os.path.exists(early):
-        report["m11"] = evaluate(_with_1100_price(df, early), "ltp_1100", args.n_boot)
+        report["m11"] = evaluate(_with_early_price(df, early, "ltp_1100", 11 * 60 + 30),
+                                 "ltp_1100", args.n_boot)
+        report["t60"] = evaluate(_with_early_price(df, early, "ltp_3600s", 12 * 60 + 5),
+                                 "ltp_3600s", args.n_boot)
     for proto, res in report.items():
         print(f"\n=== protocol {proto} (decision price -> BSP) ===")
         for name, r in res.items():
