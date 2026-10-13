@@ -117,10 +117,12 @@ def _per_race(test: pd.DataFrame, probs: np.ndarray) -> pd.DataFrame:
                          "ll": -np.log(np.clip(w["p"].to_numpy(), 1e-12, None))})
 
 
-def run(max_folds: int | None = None, n_boot: int = 2000) -> dict:
+def run(max_folds: int | None = None, n_boot: int = 2000, last_folds: int | None = None) -> dict:
     df = load_frame()
     features = [c for c in get_feature_columns(df) if c not in ("ltp_300s", "mkt", "scorable")]
     folds = expanding_period_folds(df["race_date"], freq="Q", min_train_periods=8)[: max_folds or None]
+    if last_folds:
+        folds = folds[-last_folds:]
     burn_in = df["race_date"].min() + pd.DateOffset(months=int(getattr(config, "BURN_IN_MONTHS", 8)))
     print(f"rows {len(df):,} features {len(features)} folds {len(folds)} burn-in to {burn_in.date()}",
           flush=True)
@@ -177,11 +179,13 @@ def render(r: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--max-folds", type=int, default=None)
+    ap.add_argument("--last-folds", type=int, default=None,
+                    help="score only the most recent N development quarters")
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
     logging.disable(logging.INFO)
-    report = run(args.max_folds, args.n_boot)
+    report = run(args.max_folds, args.n_boot, last_folds=args.last_folds)
     print(render(report))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
