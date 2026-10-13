@@ -267,6 +267,14 @@ differs from the current FE code. The result is uniform enough (20 of 21 under
 0.0075) that code drift is very unlikely to reverse it, but re-confirm after
 the store rebuild before treating it as final.
 
+**Re-confirmed 2026-10-13 on the rebuilt store** (fe `63d88ff721a02632`,
+development period only, 2023-08-11..2026-06-03): **20 of 21 signals priced**
+(largest |0.0073|, `atr_stride_x_gallop`); `atr_closing_in_hand_avg_3` the only
+shortlisted signal at **+0.0115** (t +4.2), against +0.0105 before. The
+verdict is final. Its golden-hold-out test is not possible (sectionals end
+2026-06-20; see `docs/SESSION_LOG.md`); the walk-forward economic test is in
+section 15.
+
 **This fires decision gate 3 in [ACTION_PLAN.md](ACTION_PLAN.md):** the
 sectionals were the last unexploited asset already in hand. With them priced,
 market microstructure (traded volume, ladder depth) is the only live

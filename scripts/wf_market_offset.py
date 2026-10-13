@@ -110,12 +110,12 @@ def _prices(df: pd.DataFrame, protocol: str) -> pd.DataFrame:
     return out
 
 
-def load_frame(protocol: str) -> pd.DataFrame:
+def load_frame(protocol: str, extra: tuple = ()) -> pd.DataFrame:
     store = FeatureStore()
     available = set(pq.read_schema(store.featured_path).names)
     allow = [line.strip() for line in open(config.FEATURE_ALLOWLIST, encoding="utf-8")
              if line.strip() and not line.lstrip().startswith("#")]
-    cols = [c for c in sorted(set(allow) | set(DIAG)) if c in available]
+    cols = [c for c in sorted(set(allow) | set(DIAG) | set(extra)) if c in available]
     df = pd.read_parquet(store.featured_path, columns=cols)
     df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
     df["won"] = pd.to_numeric(df["won"], errors="coerce").fillna(0).astype(int)
@@ -267,11 +267,18 @@ def summarise(blocks: list[dict], tests: list[pd.DataFrame], labels: list[str], 
 
 
 def run(protocol: str, *, holdout: bool = False, max_folds: int | None = None,
-        n_boot: int = 2000, dump: str | None = None, drop_prefixes: tuple = ()) -> dict:
-    df = load_frame(protocol)
-    features = [c for c in get_feature_columns(df)
-                if c not in ("bsp", "ltp_300s", "morningwap", "_entry", "_close", "mkt", "offset")
-                and not c.startswith(tuple(drop_prefixes))]
+        n_boot: int = 2000, dump: str | None = None, drop_prefixes: tuple = (),
+        only_features: tuple = ()) -> dict:
+    df = load_frame(protocol, extra=tuple(only_features))
+    if only_features:
+        # Test one candidate signal on its own: can the residual model use it?
+        features = [c for c in only_features if c in df.columns]
+        if not features:
+            raise SystemExit(f"none of {only_features} are in the store")
+    else:
+        features = [c for c in get_feature_columns(df)
+                    if c not in ("bsp", "ltp_300s", "morningwap", "_entry", "_close", "mkt", "offset")
+                    and not c.startswith(tuple(drop_prefixes))]
     dev = development_mask(df["race_date"])
     blocks, tests, labels, per_fold, dumps = [], [], [], [], []
 
@@ -344,10 +351,14 @@ def main() -> int:
     ap.add_argument("--json", default=None, help="also write the report here")
     ap.add_argument("--drop", action="append", default=[], metavar="PREFIX",
                     help="exclude features starting with PREFIX (repeatable)")
+    ap.add_argument("--only", action="append", default=[], metavar="COLUMN",
+                    help="use only these store columns as features (repeatable), e.g. a "
+                         "shortlisted triage signal")
     args = ap.parse_args()
     logging.disable(logging.INFO)
     report = run(args.protocol, holdout=args.holdout, max_folds=args.max_folds,
-                 n_boot=args.n_boot, dump=args.dump, drop_prefixes=tuple(args.drop))
+                 n_boot=args.n_boot, dump=args.dump, drop_prefixes=tuple(args.drop),
+                 only_features=tuple(args.only))
     print(render(report))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
