@@ -1022,6 +1022,27 @@ those races. They have closing and morning prices now, but **no T-5 price**
 confirmed on the hold-out once the operator downloads BASIC data for June to
 October 2026; a morning-protocol result can be confirmed now.
 
+### Stalls position and rail movements: collected, not yet tested (plan 5a-bis)
+
+The BHA API behind britishhorseracing.com publishes each GB fixture's going
+report: stalls position by distance, rail movements, watering, and (per
+fixture, on a second endpoint) GoingStick with occasional inside / centre /
+outside splits. `scripts/fetch_bha_going.py` collected all **9,311 fixtures
+2020-09..2026-10**; stalls text is present on 96.8% of flat fixtures and the
+fixtures join to **100% of the 8,682 GB meetings** in the DB. The API
+enforces a long-window quota (HTTP 429 for every request for over an hour once
+tripped); at 5 s per request it completed.
+
+Not done, deliberately: turning the text into a draw signal. The stalls field
+is free text in 1,253 forms ("7f 36y outside; remainder inside", "straight
+course - stands side, round - inside"), and which stall numbers sit nearest
+the rail depends on each course's handedness and straight-course layout - days
+of careful work for a family whose prior is low (every racecard prints the
+stalls position; draw features scored at most 0.0023 in 2g). GoingStick was
+not fetched (~9,300 requests, ~13 hours at the tolerated rate) because a
+single reading is race-level and cancels (2g). The data is in place for
+whoever takes this on; see docs/ROADMAP.md.
+
 ### Checked and clean
 
 - Arabian purge held: 0 `(A)` runners, 0 Arab race names, 0 "Extras" tracks.

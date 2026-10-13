@@ -39,6 +39,17 @@ from src import bha_stewards_scraper as bha  # noqa: E402
 from src.utils import canonical_track_key  # noqa: E402
 
 BASE = "https://api09.horseracing.software/bha/v1/"
+#: BHA course names canonical_track_key does not map to our results' names.
+#: Kept here, not in src/utils._TRACK_ALIAS, because utils.py is hashed into
+#: fe_signature: an alias no feature uses would force a full store rebuild.
+#: Move them into utils at the next rebuild that is needed anyway.
+_BHA_ALIAS = {"great yarmouth": "yarmouth", "royal ascot": "ascot"}
+
+
+def bha_track_key(name) -> str:
+    """Join key for BHA fixtures: apply to BOTH sides (BHA courses and DB tracks)."""
+    key = canonical_track_key(name)
+    return _BHA_ALIAS.get(key, key)
 ROOT = os.path.join("data", "bha_going")
 OUT = os.path.join("data", "processed", "bha_going.parquet")
 
@@ -108,7 +119,7 @@ def build() -> pd.DataFrame:
             rows.append({
                 "race_date": f.get("fixtureDate"),
                 "course": f.get("courseName"),
-                "track_key": canonical_track_key(f.get("courseName")),
+                "track_key": bha_track_key(f.get("courseName")),
                 "fixture_type": f.get("fixtureType"),
                 "track_type": f.get("racingTrackType"),
                 "session": f.get("fixtureSession"),
