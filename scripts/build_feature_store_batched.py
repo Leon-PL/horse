@@ -104,6 +104,11 @@ def main() -> None:
 def _build(store: FeatureStore, chunk_rows: int) -> dict:
     """Build into the supplied staging store without touching the live files."""
     t0 = time.perf_counter()
+    # Fix the signature BEFORE any work. Reading it at the end described
+    # whatever the source files said after an hour of building, not the code
+    # that computed the values: the store in use on 2026-10-12 was stamped
+    # mid-edit that way and matched neither generation (ledger 12).
+    fe_sig_at_start = fe_signature()
     parts_dir = os.path.join(store.root, "_build_parts")
     os.makedirs(parts_dir, exist_ok=True)
     for old in glob.glob(os.path.join(parts_dir, "*.parquet")):
@@ -161,6 +166,12 @@ def _build(store: FeatureStore, chunk_rows: int) -> dict:
     # Write only to staging. Consolidation must finish before any of these
     # states, rows or metadata can replace the previous store generation.
     last_date = rd.max()
+    if fe_signature() != fe_sig_at_start:
+        # Raising here aborts the staged update, so the previous store stays.
+        raise RuntimeError(
+            "FE code changed while the store was building; its values describe "
+            "neither generation. Rebuild without editing FE sources meanwhile."
+        )
     _stringify_objects(processed).to_parquet(
         store.processed_path, index=False, engine="pyarrow"
     )
@@ -172,7 +183,7 @@ def _build(store: FeatureStore, chunk_rows: int) -> dict:
         "featured_rows": int(total_rows),
         "processed_rows": int(len(processed)),
         "built_at": datetime.now().isoformat(timespec="seconds"),
-        "fe_signature": fe_signature(),
+        "fe_signature": fe_sig_at_start,
         "data_signature": data_signature(processed, cutoff=last_date),
     }
 

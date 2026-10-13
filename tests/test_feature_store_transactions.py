@@ -215,3 +215,22 @@ def test_batched_rebuild_failure_preserves_store(store, rows, monkeypatch):
     _assert_complete(store, rows)
     assert store.meta()["fe_signature"] == "current-fe"
     assert store.meta()["data_signature"] == "current-data"
+
+
+def test_batched_rebuild_refuses_to_stamp_code_that_changed_mid_build(store, rows, monkeypatch):
+    """The store in use on 2026-10-12 was stamped after FE files were edited
+    mid-build, so its signature matched neither generation (ledger 12)."""
+    from scripts import build_feature_store_batched as batched
+
+    original = _snapshot(store)
+    signatures = iter(["code-at-start", "code-after-an-edit"])
+    monkeypatch.setattr(batched, "FeatureStore", lambda: store)
+    monkeypatch.setattr(batched, "process_data", lambda **kwargs: rows.copy())
+    monkeypatch.setattr(batched, "engineer_features", feature_store.engineer_features)
+    monkeypatch.setattr(batched, "fe_signature", lambda: next(signatures))
+    monkeypatch.setattr(batched, "data_signature", lambda *args, **kwargs: "current-data")
+    monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2"])
+
+    with pytest.raises(RuntimeError, match="changed while the store was building"):
+        batched.main()
+    assert _snapshot(store) == original
