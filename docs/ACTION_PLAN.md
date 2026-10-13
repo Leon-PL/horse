@@ -252,7 +252,7 @@ it imperfectly, and this is a derived feature — no new data.
 
 **Success criterion:** CLV improvement under the walk-forward, or a ledger entry.
 
-### 3c-bis. Triage the families the model has never seen *(≈1 hour)*
+### 3c-bis. Triage the never-seen families - DONE 2026-10-13, all 43 priced (ledger 2g)
 
 Before building anything new, point the triage tool at each family that is in
 the store and absent from the allowlist (ledger §2e): weather (10 columns, 0
@@ -269,7 +269,7 @@ is one command:
 **Success criterion:** every family either enters the shortlist or gets a
 ledger line. Expect mostly "priced" after §2b, but the cost is minutes.
 
-### 3c-ter. Sibling / dam-produce form for debutants *(≈1–2 days)*
+### 3c-ter. Sibling / dam-produce form - BUILT 2026-10-13; priced overall, one debutant lead (ledger 2h)
 
 The model ranks debutants over a 13.9x probability range where the market uses
 53.6x (ledger §2d) — it cannot separate the 1.4 shot from the 200/1 shot.
@@ -448,7 +448,15 @@ priced. See ledger §2e.
 (ideally stronger) partial correlation once conditioned on stalls position, or
 the conditioning is shown to add nothing.
 
-### 5b. GoingStick numeric readings — cheap, low ceiling
+### 5b. GoingStick numeric readings - DOWNGRADED, see ledger 2g
+
+A GoingStick reading is another **race-level constant**, and race-level
+features cancel exactly in any per-race-normalised model - which is why all
+seven weather signals score 0.0000 rather than merely small. It could only
+pay through an interaction with each horse's own going record, and that
+family already scores 0.0019. Low priority.
+
+<details><summary>Original item</summary>
 
 The official penetrometer value (e.g. 7.2) rather than the verbal "good to
 soft", published per GB meeting and rarely used quantitatively. The going
@@ -456,7 +464,9 @@ soft", published per GB meeting and rarely used quantitatively. The going
 from the early races on a card. Pairs naturally with the par-time work, which
 was CLV-flat on its own but whose underlying data is sound and kept.
 
-### 5c. GPS / stride biomechanics beyond sectionals — highest ceiling, commercial
+</details>
+
+### 5c. GPS / stride biomechanics beyond sectionals - highest ceiling, commercial
 
 Total Performance Data (`totalperformancedata.com`) is the official tracking
 provider for a large set of GB tracks: stride length and frequency,

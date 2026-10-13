@@ -561,6 +561,113 @@ forever. This was nearly shipped; `tests/test_audit_labels.py` now constructs a
 deliberate one-race disagreement so the test fails if the label is ever
 clobbered again.
 
+## 2g. The never-allowlisted families: all priced (2026-10-13)
+
+Acting on 2e. Every family that sits in the store and not in the allowlist,
+triaged with `scripts/triage_features.py`. **43 signals across 12 families, and
+not one clears the bar** (|partial| >= 0.01 with q <= 0.05):
+
+| family | signals | strongest abs(partial) |
+|---|---|---|
+| `weather_*` | 7 | **0.0000** |
+| `going_*` | 5 | 0.0019 |
+| `draw*` | 7 | 0.0023 |
+| `course_*` | 7 | 0.0028 |
+| `trainer_first_string_*` | 7 | 0.0034 |
+| `first_time_*` | 4 | 0.0035 |
+| `dam_*` | 2 | 0.0011 |
+| headgear / first-time equipment | 4 | 0.0049 |
+
+So "in the store but not allowlisted" turned out, in every case, to mean the
+same thing as "tested and dead". The allowlist was not leaving signal behind.
+
+### Why the weather features are *exactly* 0.0000 - a structural lesson
+
+All seven weather signals score 0.0000, not merely small. So do
+`course_favours_leaders` and `course_quirk_score`. The reason is not that
+weather is uninformative: **those features are race-level constants.** Every
+runner in a race shares the same temperature, wind and course quirk, so they
+have no within-race variance, and both this triage and any
+per-race-normalised model cancel them exactly.
+
+A race-level feature cannot differentiate runners by construction. It can only
+pay through a **runner-specific interaction** - this horse's record in *these*
+conditions. The two going features built that way, `going_wr_x_runs` (+0.0019)
+and `going_specialist_edge` (+0.0011), are the only non-zero members of their
+family, which confirms the mechanism while being far too small to matter.
+`weather_wind_x_dist` scores 0.0000 because wind and distance are *both*
+race-level, so the interaction is too.
+
+**Consequence:** collecting the GoingStick number would add another race-level
+column and cannot help on its own. Only worth it as an input to interactions
+with each horse's own going record - and that family scores 0.0019, so expect
+nothing.
+
+## 2h. Sibling (dam-produce) form: priced overall, one live lead (2026-10-13)
+
+Built because 2d found the model spreads debutant probabilities over a 13.9x
+range against the market's 53.6x, and sibling form - "full brother to a Group
+winner" - is the most-used public read on an unraced horse and **did not exist
+in the store at all**.
+
+`src/sibling_features.py` computes it from the `horse_pedigree` dam, strictly
+self-excluding (a horse is not its own sibling) and date-strict (siblings
+running the same day are invisible to each other, since their results are not
+known pre-off). 64.7% of runners carry sibling history, averaging 17.5 prior
+sibling runs.
+
+**Overall: priced.** On 396,898 rows with sibling history, every signal is
+under abs(0.005):
+
+| signal | partial | t |
+|---|---|---|
+| `sibling_any_winner` | +0.0049 | +3.1 |
+| `sibling_win_rate_shrunk` | +0.0035 | +2.2 |
+| `sibling_best_or_vs_field` | +0.0031 | +2.0 |
+| `sibling_runs` | +0.0013 | +0.8 |
+
+### The one result that clears the bar - treat it with suspicion
+
+Restricted to debutants and one-start horses (n=3,746):
+
+| signal | partial | t |
+|---|---|---|
+| `sibling_best_or_vs_field` | **-0.0641** | -3.9 |
+| `sibling_any_winner` | -0.0346 | -2.1 |
+| `sibling_win_rate_shrunk` | -0.0160 | -1.0 |
+
+Note the **sign**. Negative means that among unraced horses a *better* sibling
+record goes with a *worse* result than the price implies - i.e. **the market
+over-rates the well-bred newcomer**, and the implied trade is to fade them
+rather than back them. That is the opposite of what the feature was built for.
+
+**Why to be sceptical anyway:**
+
+- It is a **subgroup examined after the headline test came back null**, which
+  is the exact pattern that generates false discoveries and has already misled
+  this project twice in one session (the cherry-picked examples in 2c, and the
+  two-fold re-run in 2). With roughly 6 exposure bands x 7 signals available to
+  look at, the multiple-testing bar is about abs(t) > 3.2, which -3.9 clears
+  only narrowly.
+- n = 3,746, so the standard error on the correlation is about 0.016.
+- Correlation with the residual is **necessary, not sufficient** (see 0). Every
+  refuted entry in this ledger cleared some correlation test first.
+
+**The only thing that would settle it:** CLV at BSP under the locked
+walk-forward, restricted to unraced runners, with the ROI-vs-CLV tripwire, on
+the rebuilt store - this screen ran against the DB directly. Until then it is
+a lead, not a finding.
+
+### A bug the tests caught, worth recording
+
+The first implementation shrank the sibling win rate toward **the mean of
+whatever frame was passed in**. That breaks store-append parity: the same
+settled row gets one value in a full build and a different one after an
+append, because the population mean moves. The "settled rows do not change
+when later races are appended" invariant in
+`tests/test_sibling_features.py` caught it. The shrinkage target is now a fixed
+constant, and any future `*_shrunk` feature must do the same.
+
 ## 3. `trainer_freq` stablemate leak — RESOLVED (2026-06-26)
 
 A **+56.8% ROI@BSP** was traced to `trainer_freq`, built with a `cumcount`
