@@ -842,6 +842,109 @@ a current `3e3b9bbb5d79bacc`. The guard will correctly force a rebuild. It was
 unaffected: re-stamping a store on an argument rather than a measurement is
 exactly the move that produced the phantom +15% place edge. Spend the rebuild.
 
+## 13. Phase A audit: what the pipeline was silently getting wrong (2026-10-13)
+
+A stage-by-stage audit (NEXT_AGENT_BRIEF §3). Nothing below changed a
+refutation in this ledger; several items change what the data and the
+instrument can be trusted for.
+
+### The results database was missing races, systematically
+
+The old date-level sync kept **only the first 50 listed races per day**
+(`race_links[:50]`) and skipped any race page whose fetch raised, after which
+the date counted as present and was never revisited. Neither path logged
+anything louder than a warning.
+
+| | days with exactly 50 races | days with more than 50 |
+|---|---|---|
+| 2020-21 (capped sync) | 50 | **0** |
+| 2022-25 (an uncapped collection path) | 6-10 a year | 30-38 a year |
+| 2026 (capped sync, incl. the June-October refresh) | 25 | 5 |
+
+Histogram of races per day: 53 days at 49, **105 at 50**, 24 at 51. A dry-run
+relist of 30 sample dates found 32 missing races; the listing puts UK meetings
+first, so the cap cut **Irish** cards (Navan, Cork, Limerick, Sligo, Kilbeggan,
+Tramore). The skip path is separate and hits any day: 2021-08-08 was missing a
+whole 7-race Haydock card on a 28-race day, and **2022-12-17 (42 races) was
+missing entirely**. Sampled 2022-25 dates came back complete.
+
+Why it matters despite being under 1% of races: every horse that ran in a
+missing race has a hole in its history (wrong days-since-run, a skipped rating
+update, a missing form line), the market saw that run and the model did not,
+and the 2026 holes fall on exactly the horses live serving prices. Repaired by
+a full relist through the new resumable ledger
+(`python -m src.database --audit-history --sync 2219`); totals below.
+
+### The flat draw backfill was finished, not pending
+
+`draw_backfill_done` covers 46,791 flat races through 2026-06-13, and the
+3,645 later flat races were scraped by the fixed scraper. Verified on the data
+rather than the checkpoint: the per-race Spearman correlation between `draw`
+and weight carried in flat handicaps is **~0 (|mean| < 0.06) in every month
+from 2020-09 to 2026-10**. Saddle-cloth numbers, which the old bug stored,
+are assigned by weight in handicaps and would give ~-1. `draw` is a real stall
+draw everywhere.
+
+### The feature build was not a pure function of the database
+
+`add_weather_features` called the Open-Meteo API at build time for rows with
+no stored weather, and filled whatever failed with constants (14.0 C, 1.5 mm,
+...); `add_trainer_travel_features` read an unsigned CSV. Neither input is in
+`data_signature`, so two builds of the same database could differ. Both
+families were already measured dead (2g: every weather signal 0.0000; 6:
+travel is noise). Both stages were removed after a parity check: engineering
+106,467 rows / 10,460 races with and without them drops **exactly their 10
+columns and leaves the other 1,058 bit-identical**. `weather.py`,
+`trainer_locations.py` and `bha_stewards_scraper.py` left `_FE_SOURCE_FILES`.
+
+### `fe_signature` changed with line endings
+
+It hashed raw bytes; the tree holds a mix of LF and CRLF sources and git
+autocrlf rewrites them on checkout, stash or worktree add. Converting one file
+(`feature_store.py`) moved the signature `3e3b9bbb...` to `e7f6193d...`. That
+fails safe but forced ~56-minute rebuilds for no change, and made signatures
+incomparable between checkouts. Now normalised; identical in the main tree and
+a fresh worktree.
+
+### `promote` let unverifiable runs through
+
+It refused a feature-generation **mismatch** but promoted a run with **no
+recorded signature** after a log warning. All 8 saved runs predate the
+`trainer_freq` leak fix (2026-06-26) and 6 carry no signature, so one click
+would have served a leaky model. Unverifiable runs now need the same explicit
+override as a mismatch.
+
+### Plan 4b's class-weighting hypothesis describes code that does not run
+
+ACTION_PLAN 1b led with "the win classifier trains with scale_pos_weight ~
+(N-1)". It does not: every call site uses `_train_win_classifier`, which
+passes no class weight to LightGBM, and the LightGBM place model is unweighted
+too (only the XGBoost paths take `scale_pos_weight`; the focal-loss trainer is
+never called). "Drop class weighting" is already the configuration. What is
+left of 4b is regularisation and learning rate.
+
+### Seven allowlisted features are race-level
+
+`base_win_rate`, `base_place_rate`, `num_runners`, `race_type_Chase`,
+`handicap`, `field_std_or` and `field_avg_elo` never vary within a race;
+`weight_per_furlong` (0.7% of its variance within-race) and `or_x_handicap`
+(1.6%) nearly never do. In the current binary GBM they are not dead by
+construction: `num_runners` sets each runner's base rate before per-race
+normalisation, and the rest can act through interactions. Under a per-race
+softmax or a market offset (plan 4c) their main effects cancel exactly. The
+allowlist holds 150 features, not the 151 documented.
+
+### Checked and clean
+
+- Arabian purge held: 0 `(A)` runners, 0 Arab race names, 0 "Extras" tracks.
+  Sporting Life files Arabian races under a "TRP Extras" pseudo-course that
+  passes the UK/IRE filter; they are now dropped at listing time as well.
+- Pedigree: 100% sire/dam coverage for debutants in every quarter 2024Q3-2026Q4.
+- `data_signature` excludes exactly 31 derived one-hot columns, each
+  reproducible from a categorical that is hashed; no other column matches.
+- `attach_bsp` now refuses to replace a column the caller owns (2f's trap)
+  unless `overwrite=True`; no current caller overlaps.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
@@ -865,6 +968,5 @@ exactly the move that produced the phantom +15% place edge. Spend the rebuild.
   normalisation. Note a Plackett-Luce LightGBM objective already lost to the
   plain binary classifier once (2026-06-12, `scripts/_ab_pl_objective.py`).
 - **Each-way 1/5-odds re-run** and a locked CLV harness — parked.
-- **Flat draw backfill** following the draw-bug fix — pending.
 - **Retrain on the leak-fixed store** — pending; see
   `scripts/project_status.py`, which currently reports no promoted model.

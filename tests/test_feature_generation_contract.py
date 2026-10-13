@@ -80,14 +80,18 @@ def test_mismatch_can_be_overridden_deliberately(registry_dirs, store_signature)
     assert registry.feature_generation_status()["state"] == registry.GENERATION_MISMATCH
 
 
-def test_legacy_run_without_signature_is_unverified_not_blocked(registry_dirs, store_signature):
-    """Runs predating signature recording stay promotable, but never claim safety."""
+def test_legacy_run_without_signature_needs_a_deliberate_override(registry_dirs, store_signature):
+    """An unverifiable run is refused by default: on 2026-10-13 every unsigned
+    run in the registry predated the trainer_freq leak fix."""
     store_signature("abc123")
     rid = _make_run(registry_dirs, "20260101_120000", None)
 
-    assert registry.promote(rid) is True
+    assert registry.promote(rid) is False
+    assert registry.get_production_run_id() is None
+
+    assert registry.promote(rid, allow_feature_mismatch=True) is True
     status = registry.feature_generation_status()
-    assert status["state"] == registry.GENERATION_UNKNOWN
+    assert status["state"] == registry.GENERATION_UNKNOWN, "an override must not claim safety"
     assert status["run_fe_signature"] is None
 
 
@@ -95,7 +99,8 @@ def test_unbuilt_store_is_unverified(registry_dirs, store_signature):
     store_signature(None)
     rid = _make_run(registry_dirs, "20260101_120000", "abc123")
 
-    assert registry.promote(rid) is True
+    assert registry.promote(rid) is False
+    assert registry.promote(rid, allow_feature_mismatch=True) is True
     assert registry.feature_generation_status()["state"] == registry.GENERATION_UNKNOWN
 
 

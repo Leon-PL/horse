@@ -22,6 +22,8 @@ def registry_dirs(tmp_path, monkeypatch):
     monkeypatch.setattr(registry, "RUNS_DIR", str(runs))
     monkeypatch.setattr(registry, "PRODUCTION_POINTER", str(models / "production.json"))
     monkeypatch.setattr(config, "MODELS_DIR", str(models))
+    # Fake runs carry no feature signature, so promoting one is an explicit,
+    # unverified override (run_store.promote refuses them by default).
     for rid in ("20260101_120000", "20260201_120000", "20260301_120000"):
         (runs / rid).mkdir()
         (runs / rid / "model.joblib").write_bytes(rid.encode())
@@ -30,7 +32,7 @@ def registry_dirs(tmp_path, monkeypatch):
 
 def test_production_survives_direct_delete_and_pruning(registry_dirs):
     rid = "20260101_120000"
-    assert registry.promote(rid)
+    assert registry.promote(rid, allow_feature_mismatch=True)
     assert registry.delete_run(rid) is False
     assert registry.prune_runs(keep_latest=1) == ["20260201_120000"]
     assert registry.get_production_run_id() == rid
@@ -43,9 +45,9 @@ def test_delete_cannot_escape_registry(registry_dirs):
 
 
 def test_model_revision_changes_on_promotion_and_replacement(registry_dirs):
-    registry.promote("20260101_120000")
+    registry.promote("20260101_120000", allow_feature_mismatch=True)
     first = registry.production_model_revision()
-    registry.promote("20260201_120000")
+    registry.promote("20260201_120000", allow_feature_mismatch=True)
     second = registry.production_model_revision()
     assert first != second
     (registry_dirs / second[0] / "model.joblib").write_bytes(b"replacement model")
@@ -64,10 +66,10 @@ def test_serving_cache_loads_exact_promoted_revision(registry_dirs, monkeypatch)
     exec(compile(ast.Module(body=[loader], type_ignores=[]), str(source), "exec"), namespace)
     load = namespace["_cached_load_model"]
     assert load(None) is None
-    registry.promote("20260101_120000")
+    registry.promote("20260101_120000", allow_feature_mismatch=True)
     first = load(registry.production_model_revision())
     assert load(registry.production_model_revision()) is first
-    registry.promote("20260201_120000")
+    registry.promote("20260201_120000", allow_feature_mismatch=True)
     assert load(registry.production_model_revision()) is not first
     assert calls == ["20260101_120000", "20260201_120000"]
 

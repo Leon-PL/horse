@@ -70,7 +70,8 @@ def test_promote_and_load_production(tmp_path, monkeypatch):
     _dummy_model_file(runs / rid / "model.joblib")
 
     assert rs.get_production_run_id() is None
-    assert rs.promote(rid) is True
+    assert rs.promote(rid) is False, "an unsigned run must not promote by default"
+    assert rs.promote(rid, allow_feature_mismatch=True) is True
     assert rs.get_production_run_id() == rid
     assert os.path.isfile(rs.PRODUCTION_POINTER)
 

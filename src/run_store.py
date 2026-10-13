@@ -522,16 +522,21 @@ def feature_generation_status(run_id: str | None = None) -> dict:
 def promote(run_id: str, *, allow_feature_mismatch: bool = False) -> bool:
     """Mark *run_id* as the production model. Returns ``True`` on success.
 
-    Refuses a run whose recorded feature generation disagrees with the store,
-    because serving it would score live features the model never saw. Pass
-    ``allow_feature_mismatch=True`` to override deliberately (for example to
-    promote a model while a rebuild is still in flight).
+    Refuses a run whose feature generation disagrees with the store, or cannot
+    be verified against it, because serving it would score live features the
+    model may never have seen. Pass ``allow_feature_mismatch=True`` to override
+    deliberately (for example to promote a model while a rebuild is in flight).
+
+    Unverified runs used to promote with only a log warning. On 2026-10-13
+    every saved run predated the ``trainer_freq`` leak fix and six of eight
+    carried no signature, so one click would have served a leaky model.
     """
     if not run_has_model(run_id):
         logger.warning("Cannot promote %s: no model snapshot.", run_id)
         return False
     status = feature_generation_status(run_id)
-    if status["state"] == GENERATION_MISMATCH and not allow_feature_mismatch:
+    if (status["state"] in (GENERATION_MISMATCH, GENERATION_UNKNOWN)
+            and not allow_feature_mismatch):
         logger.warning("Refusing to promote %s: %s", run_id, status["message"])
         return False
     if status["state"] in (GENERATION_UNKNOWN, GENERATION_MISMATCH):

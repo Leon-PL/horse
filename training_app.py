@@ -117,6 +117,10 @@ def _promote_with_feedback(run_id: str, *, key: str) -> None:
         )
     elif status["state"] == GENERATION_UNKNOWN:
         st.warning(status["message"])
+        override = st.checkbox(
+            "Promote anyway (I accept these features cannot be verified)",
+            key=f"{key}_override",
+        )
 
     if st.button("🚀 Promote to production", type="primary", key=key,
                  disabled=not run_has_model(run_id)):

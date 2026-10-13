@@ -184,7 +184,7 @@ project's largest "edges" were artifacts of exactly this.
 | 2a | Refresh results: ~4 months of races (last stored date 2026-06-20). Hours of scraping at a 2s delay — run it overnight. | database check green |
 | 2b | Rebuild the feature store. The current store was built by older FE code (`fe_signature` mismatch), so a rebuild is required regardless. | store check green, signatures match |
 | 2c | Retrain and promote. The newest saved run predates the `trainer_freq` leak fix, so **no existing run should be promoted.** | `project_status.py` exits 0 |
-| 2d | Flat **draw backfill**, still pending from the draw-bug fix. | draw non-null rate at flat tracks matches expectation |
+| 2d | Flat **draw backfill** — **DONE** (verified 2026-10-13, ledger 13: draw-vs-weight correlation ~0 in every month, where saddle cloths would give ~-1). | met |
 
 ---
 
