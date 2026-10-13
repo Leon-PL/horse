@@ -1097,6 +1097,47 @@ races off after ~11:00 UK (median share 1.24 before 11:00, 0.20 at
 11:00-11:30, 0.10 at 11:30-12:00), so `ltp_1100` is being extracted from the
 BASIC stream for that test.
 
+### The honest early-price tests: break-even at best
+
+`scripts/extract_betfair_bsp.py` now also records the last trade at or before
+11:00 UK (`ltp_1100`, present for 96.4% of runners) and at T-60. Same rule,
+same matched baseline, development period, races off at least 30 minutes
+after the decision:
+
+| decision price | rule | median CLV [95% CI] | geo CLV | beat close | ROI at taken price | quarters + |
+|---|---|---|---|---|---|---|
+| 11:00 UK | bet all in band | 0.9524 | 0.9143 | 43.4% | -2.04% | 2/24 |
+| 11:00 UK | **top excess volume** | **1.0000 [1.0000, 1.0011]** | 0.9711 | 49.7% | **+0.85% [-1.12, +2.85]** | 13/24 |
+| T-60 | top excess volume | 0.9927 [0.9902, 0.9949] | 0.9708 | 47.6% | -1.89% | 8/24 |
+| T-5 | top excess volume | 0.9958 [0.9939, 0.9980] | 0.9801 | 47.6% | -2.12% | 8/24 |
+
+**The closest thing to a positive result this project has produced, and it is
+not an edge.** Struck at 11:00, following the morning money lifts CLV ~5 points
+over the matched band and reaches break-even - and the value is gone by T-60,
+the shape information absorption predicts. But it fails ACTION_PLAN 7: the
+median's interval *touches* 1.0 rather than excluding it, the geometric mean
+is below 1, it beats the close less than half the time, and ROI's interval
+spans zero. The median sits on 1.0000 partly because of ties: BASIC rounds BSP
+to the two-decimal grid LTPs trade on, and ties concentrate in the short-priced,
+heavily traded runners this rule selects - read the geometric mean and the
+beat-close rate alongside it. Capacity would be thin anyway: the median
+runner trades about GBP 345 in the whole morning.
+
+Confirming even break-even on the golden hold-out needs BASIC data for June to
+October 2026 (the hold-out has volume but no 11:00 price) and, at ~4,000
+selections, could not resolve an effect of +0.85% (ROI CI roughly +-6 points).
+
+### A data gap found on the way: the canonical BSP parquet was incomplete
+
+`data/processed/betfair_bsp.parquet` was written at 17:09 on 2026-06-21; the
+last two BASIC tars arrived at 17:38 the same day and were never extracted.
+The re-extraction found **99,917 runners** missing - exactly 2020Q3-Q4 and
+2021Q3-Q4, the "gaps" every T-5 analysis in this ledger worked around. It cost
+those analyses power, not correctness (a missing early quarter thins the
+training data; it cannot bias a later test quarter). The full extraction is
+now canonical (the old file is in `data/backups/`); BSP and `ltp_300s` agree on
+99.998% of the 646,895 runners the two share.
+
 ## 15. The `sex` look-ahead leak, and plan 4c without it (2026-10-13)
 
 ### The third phantom edge, caught by the tripwire
