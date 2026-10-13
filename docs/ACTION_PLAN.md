@@ -195,7 +195,11 @@ project's largest "edges" were artifacts of exactly this.
 Highest information per unit of effort. Do all of this before touching
 modelling architecture or buying data.
 
-### 3a. Re-measure the model-vs-logistic gap properly *(≈1 day)*
+### 3a. Re-measure the model-vs-logistic gap properly — **DONE 2026-10-13: the GBM does not rank worse (ledger 16)**
+
+On 24,405 races: top-1 0.2930 vs 0.2893 (+0.36 pt, CI spans 0); race log loss
+GBM better by 0.021. The 646-race result was noise. Market: 0.3396.
+
 
 Re-run the §1 comparison on the rebuilt store with the full test set, not 646
 races. **Success criterion:** a definitive answer to "does a 2,000-tree GBM
@@ -362,7 +366,11 @@ one metric where the current model is already competitive.
 **Success criterion:** top-1 and NDCG@1 beat the current model *and* the
 logistic baseline on the locked walk-forward.
 
-### 4b. Fix the objective before changing the architecture *(≈1 day)* — cheapest
+### 4b. Fix the objective before changing the architecture — **DONE 2026-10-13: ruled out (ledgers 13, 16)**
+
+Class weighting was never on for LightGBM; loosening regularisation worsens
+race log loss by 0.013 (significant). The configuration is not the problem.
+
 
 Two configuration experiments that follow directly from §1b:
 
@@ -545,20 +553,24 @@ Checkpoints where the honest move may be to stop:
    and verified on code *and* data; run `20261013_162640` promoted and
    matching), after repairing 543 missing races and closing the gaps that
    let a stale store pass (ledger 13).
-2. **After 3a + 4b.** If the model still ranks no better than logistic
-   regression once weighting and regularisation are addressed, the feature set
-   — not the model — is the binding constraint, and §1d/§5a are the only
-   remaining levers.
+2. **After 3a + 4b — FIRED 2026-10-13.** With weighting and regularisation
+   addressed the GBM ties logistic regression on top-1 (better only on log
+   loss) and both trail the market by ~5 points (ledger 16): the feature set
+   is the binding constraint. §1d (sectionals) was already priced; §5a fails
+   in its free form (gate 4).
 3. **After 3b — FIRED 2026-10-12.** The sectionals were the last unexploited
    asset in hand, and 20 of 21 signals are priced (ledger §2b). That is strong
    evidence the market prices everything reachable from public form, and it
    promotes §5a (market microstructure) to the only live hypothesis. Treat
    further *public-form* feature engineering as closed.
-4. **After 4c + 5a.** Residual-targeted training and market microstructure are
-   the two approaches that attack the informational gap rather than
-   re-processing public form. If both fail, there is no public-data edge to
-   find and continuing is a hobby rather than an investment — which is a
-   perfectly good reason to continue, but should be a conscious one.
+4. **After 4c + 5a — FIRED 2026-10-13.** Residual-targeted training finds
+   nothing beyond the market (race log loss -0.00010 [-0.00040, +0.00020],
+   ledger 15) and the free microstructure data is fully absorbed by BSP, with
+   a timing edge that reaches break-even at 11:00 at best (ledger 14). Only
+   paid order-book data (Betfair ADVANCED/PRO) remains untested. There is no
+   public-data edge to find; continuing is a hobby rather than an investment -
+   a perfectly good reason to continue, but a conscious one. See
+   docs/ROADMAP.md.
 
 **What success looks like:** median CLV > 1.0 with a race-clustered confidence
 interval excluding 1.0, on a locked walk-forward, holding on a golden hold-out

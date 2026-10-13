@@ -1275,6 +1275,41 @@ brief's two unsettled leads (the other, sibling form, failed on the hold-out).
 - **The tripwire is now three for three.** High ROI with CLV at or below 1.0
   has meant a leak every time it has fired here.
 
+## 16. GBM vs logistic regression vs the market (plans 3a, 4b) (2026-10-13)
+
+ACTION_PLAN 1b's diagnosis rested on 646 races where the production GBM ranked
+*worse* than logistic regression (top-1 0.268 vs 0.292, ~1.3 sigma).
+`scripts/wf_ranking_compare.py`, clean store, the eight most recent
+development quarters (2024Q3-2026Q2), 24,405 races with a complete T-5
+market; same training rows, recency weights and early stopping for every
+model; per-race paired differences with race-bootstrap CIs:
+
+| model | top-1 | top-3 | race log loss |
+|---|---|---|---|
+| production GBM (`CLASSIFIER_PARAMS`) | 0.2930 | 0.6327 | 1.8768 |
+| loosened GBM (lr 0.05, 63 leaves, light regularisation) | 0.2898 | 0.6245 | 1.8894 |
+| logistic regression (production baseline pipeline) | 0.2893 | 0.6225 | 1.8979 |
+| **market (T-5, overround-free)** | **0.3396** | **0.6830** | **1.7609** |
+
+| pair | top-1 [95% CI] | race log loss [95% CI] |
+|---|---|---|
+| GBM - logistic | +0.0036 [-0.0007, +0.0077] | **-0.0211 [-0.0241, -0.0182]** |
+| loosened - production GBM | -0.0032 [-0.0066, +0.0002] | **+0.0126 [+0.0107, +0.0144]** |
+| GBM - market | **-0.0466 [-0.0522, -0.0413]** | **+0.1159 [+0.1103, +0.1217]** |
+
+- **3a: the GBM does not rank worse than logistic regression.** It ties on
+  top-1 and is clearly better on race log loss. The 646-race result was
+  noise; the prior written before the run expected exactly this.
+- **4b: the configuration is not costing discrimination.** Class weighting was
+  never on (13); loosening the regularisation makes log loss significantly
+  worse.
+- **Gate 2 fires.** With weighting and regularisation addressed the model ranks
+  no better than a linear model on the same 149 features, and both trail the
+  market by about five points of top-1. The feature set, not the model, is the
+  binding constraint - and gate 3 (public form priced) and gate 4 (residual
+  training and free microstructure fail) say the reachable features are
+  exhausted.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
