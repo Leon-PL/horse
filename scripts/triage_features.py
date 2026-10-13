@@ -58,6 +58,7 @@ import pyarrow.parquet as pq
 
 import config
 from src.betfair import attach_bsp
+from src.wf_eval import development_mask
 from src.feature_store import FeatureStore
 
 logger = logging.getLogger("triage")
@@ -198,6 +199,9 @@ def load_candidates(prefix: str) -> tuple[pd.DataFrame, list[str]]:
     df = pd.read_parquet(store.featured_path, columns=cols)
     df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
     df["won"] = pd.to_numeric(df["won"], errors="coerce").fillna(0).astype(np.int8)
+    # Never screen on the golden hold-out. Today it has no T-5 price anyway,
+    # but that protection would vanish the day its BASIC data is downloaded.
+    df = df[development_mask(df["race_date"])].copy()
 
     df = attach_bsp(df, cols=("bsp", "ltp_300s"))
     entry = pd.to_numeric(df["ltp_300s"], errors="coerce")

@@ -1033,6 +1033,38 @@ October 2026; a morning-protocol result can be confirmed now.
 - `attach_bsp` now refuses to replace a column the caller owns (2f's trap)
   unless `overwrite=True`; no current caller overlaps.
 
+## 14. Market microstructure, free version: the close absorbs it all (2026-10-13)
+
+ACTION_PLAN 5a's hypothesis is that *where and when money enters* carries the
+private information that beats the model. Betfair's public files add matched
+volume (morning, pre-play, in-play), so a first version is testable without
+the paid ADVANCED/PRO tiers. `scripts/microstructure_screen.py`, development
+period only (574k runners / 64k races, 2020-09-15..2026-06-03), six tests
+written down before the run, each either **continuation** (does a signal known
+at the decision point predict the move after it?) or **orthogonality to the
+close**. Within-race demeaned, price basis partialled, race-clustered
+bootstrap SEs (calibrated on null data: t mean 0.01, sd 1.10).
+
+"Excess volume" = log(runner's share of the race's morning matched volume) -
+log(its morning market share): money beyond what its price would attract.
+
+| test | partial corr | t | reading |
+|---|---|---|---|
+| T1 excess volume -> move morning VWAP -> BSP | +0.169 (liquid runners +0.103) | +69 | morning money predicts where the price goes |
+| **T2 excess volume -> won - p_BSP** | **+0.0004** | +0.4 | **nothing beyond the close** |
+| T3 excess volume -> won - p_morning | +0.015 (liquid +0.021) | +13.5 | real information, ahead of the morning price |
+| T4 move morning -> T-5 -> move T-5 -> BSP | -0.033 | -9.2 | reversal: bid-ask bounce (the same noisy LTP enters both moves with opposite signs) |
+| T5 excess volume -> move T-5 -> BSP | +0.014 | +8.1 | small continuation after T-5 |
+| **T6 move morning -> T-5 -> won - p_BSP** | **+0.0007** | +0.5 | **nothing beyond the close** |
+
+**The closing price contains all of it.** Morning money is informative - it
+predicts the result better than the morning price (T3) and predicts the later
+move (T1, T5) - but BSP has fully absorbed it by the off (T2, T6 ~ 0). For a
+bettor settling at BSP there is nothing here. What remains is *timing*: taking
+an earlier price on the horses the money is backing, before the close catches
+up. T5 says that effect exists after T-5 but is small. Its economic size is
+measured below.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
