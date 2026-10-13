@@ -78,7 +78,9 @@ The model loses to **plain logistic regression** on every ranking metric
 engineered features should not rank worse than a linear model on the same
 data. Candidate causes, in order of likelihood:
 
-- **Class weighting distorts ranking.** The win classifier trains with
+- ~~**Class weighting distorts ranking.**~~ **Premise wrong (ledger 13):** the
+  LightGBM win and place models are already unweighted; only the XGBoost paths
+  take `scale_pos_weight`. Original text kept for the record: the win classifier trains with
   `scale_pos_weight ≈ (N−1)` / `auto_class_weights="Balanced"`. For a
   one-winner-per-race problem that massively upweights winners and reshapes
   where the model spends capacity. It is the right choice for balanced
@@ -270,7 +272,7 @@ is one command:
 **Success criterion:** every family either enters the shortlist or gets a
 ledger line. Expect mostly "priced" after §2b, but the cost is minutes.
 
-### 3c-ter. Sibling / dam-produce form - BUILT 2026-10-13; priced overall, one debutant lead (ledger 2h)
+### 3c-ter. Sibling / dam-produce form - BUILT 2026-10-13; priced overall; debutant lead FAILED on the golden hold-out (ledger 2h)
 
 The model ranks debutants over a 13.9x probability range where the market uses
 53.6x (ledger §2d) — it cannot separate the 1.4 shot from the 200/1 shot.
@@ -373,7 +375,17 @@ Two configuration experiments that follow directly from §1b:
 **Success criterion:** ranking metrics improve, or both are ruled out with
 numbers.
 
-### 4c. Train on the market's residual, not on the outcome *(≈2 days)*
+### 4c. Train on the market's residual, not on the outcome — **TESTED 2026-10-13: FAILS (ledger 15)**
+
+**Result:** a per-race conditional logit with the market as a fixed offset
+learns nothing the market lacks: race log loss vs market **-0.00000
+[-0.00030, +0.00020]** over 13 purged quarters, early stopping at 10-100
+trees, every selection rule's CI spanning zero. Its first run showed +11.62%
+at BSP with CLV < 1; the tripwire fired, and it was a look-ahead leak in the
+`sex` column (scrape-time, encoding each horse's future career), now fixed.
+
+<details><summary>Original item</summary>
+
 
 This is the genuinely different idea, and it has not been tried. Three things
 have: market probabilities as *features* (fund+market), as *soft labels*
@@ -390,6 +402,8 @@ that is not structurally blocked.
 
 **Success criterion:** positive CLV at BSP under the locked walk-forward. Watch
 the ROI-vs-CLV tripwire — an odds-derived target makes leakage easy.
+
+</details>
 
 ### 4d. Conditional edge: find *where* you beat the market *(≈1 day)*
 
@@ -422,7 +436,19 @@ Most public form is priced; the ledger records seven refutations. Only three
 categories are plausibly orthogonal, and they are ranked by
 (orthogonality × availability) ÷ effort.
 
-### 5a. Betfair market microstructure — **the top remaining candidate**
+### 5a. Betfair market microstructure — **free version TESTED 2026-10-13 (ledger 14)**
+
+**Result (free public data: morning / pre-play matched volume):** morning
+money predicts the later price move and the result *beyond the morning price*,
+but **nothing beyond BSP** (partial 0.0004, t 0.4): the close absorbs it. The
+timing edge it leaves at T-5 is real and too small (median CLV 0.9953 vs 0.9809
+for the matched band; < 1.0). A morning-VWAP version that looked like a pass
+(1.0187) is look-ahead by construction; the honest 11:00-price test is in
+ledger 14. What remains untested is the **paid** version (ADVANCED/PRO ladder
+depth and volume through time), an operator spending decision - see
+docs/ROADMAP.md.
+
+Original item:
 
 The project holds the *price trajectory* (`ltp_300s`, `ltp_60s`,
 `ltp_preoff`, `bsp`) but **no traded volume and no ladder depth**. Volume-
