@@ -603,7 +603,7 @@ column and cannot help on its own. Only worth it as an input to interactions
 with each horse's own going record - and that family scores 0.0019, so expect
 nothing.
 
-## 2h. Sibling (dam-produce) form: priced overall, one live lead (2026-10-13)
+## 2h. Sibling (dam-produce) form: priced overall; the debutant lead failed on the hold-out (2026-10-13)
 
 Built because 2d found the model spreads debutant probabilities over a 13.9x
 range against the market's 53.6x, and sibling form - "full brother to a Group
@@ -657,6 +657,30 @@ rather than back them. That is the opposite of what the feature was built for.
 walk-forward, restricted to unraced runners, with the ROI-vs-CLV tripwire, on
 the rebuilt store - this screen ran against the DB directly. Until then it is
 a lead, not a finding.
+
+### Hold-out verdict (2026-10-13): does not confirm
+
+Tested once on the golden hold-out (races from 2026-06-11, never seen by any
+residual analysis), with the population, statistic and bar written into
+`docs/SESSION_LOG.md` before the script existed
+(`scripts/holdout_sibling_test.py`): runners with at most one prior UK/IRE
+start and sibling history, in races with a complete BSP market; partial
+correlation of `sibling_best_or_vs_field` with won - p_BSP, within-race
+demeaned, price basis partialled out, race-clustered bootstrap SE.
+
+| | n runners (races) | partial corr | SE | t | one-sided p |
+|---|---|---|---|---|---|
+| discovery (vs T-5 price) | 3,746 | -0.0641 | ~0.016 | -3.9 | - |
+| **golden hold-out (vs BSP)** | **3,711 (848)** | **-0.0160** | 0.0179 | -0.89 | **0.19** |
+
+**Fails** (bar: p < 0.01). The sign agrees, but the effect is a quarter of
+the discovery's and its 95% interval, [-0.051, +0.019], excludes the
+discovered -0.064: the winner's curse of a subgroup found after a null
+headline, as this entry predicted. **The sibling lead is closed.** One
+discrepancy recorded rather than explained: the same population definition
+yields 61,558 runners in the development period, against the 3,746 the
+discovery reported, so the discovery applied restrictions it did not
+document.
 
 ### A bug the tests caught, worth recording
 
