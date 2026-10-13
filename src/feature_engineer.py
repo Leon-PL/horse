@@ -2858,7 +2858,7 @@ def add_course_profile_features(df: pd.DataFrame) -> pd.DataFrame:
 
     * **Course-type affinity.** How the horse has run, against its market
       expectation, at courses sharing today's shape, uphill finish,
-      undulation, circuit size and direction, compared with its runs
+      undulation, circuit size, direction and surface material, compared with its runs
       elsewhere. "Goes well at stiff tracks" transfers across venues where
       plain course form (``horse_track_*``) cannot. The sire's progeny give the
       same signal for horses with little or no form.
@@ -2919,6 +2919,10 @@ def add_course_profile_features(df: pd.DataFrame) -> pd.DataFrame:
         "undulating": _num("track_downhill"),
         "size": size_band,
         "hand": _num("track_direction"),
+        # Surface material, not just turf/AW: Fibresand, Tapeta and Polytrack
+        # ride differently and have their specialists.
+        "material": (df["surface"].astype(str).str.upper().to_numpy()
+                     if "surface" in df.columns else np.full(n, "")),
     }
     track = df["track"].astype(str).to_numpy()
     surface = np.where(df.get("surface", pd.Series("", index=df.index)).astype(str).str.lower()

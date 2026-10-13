@@ -110,13 +110,27 @@ def _prices(df: pd.DataFrame, protocol: str) -> pd.DataFrame:
     return out
 
 
-def load_frame(protocol: str, extra: tuple = ()) -> pd.DataFrame:
+def load_frame(protocol: str, extra: tuple = (), extra_path: str | None = None) -> pd.DataFrame:
+    """Store rows (allowlist + *extra* columns). With *extra_path*, the *extra*
+    columns come from that parquet instead, joined on race_id + horse_name -
+    for candidates not yet in the store."""
     store = FeatureStore()
     available = set(pq.read_schema(store.featured_path).names)
     allow = [line.strip() for line in open(config.FEATURE_ALLOWLIST, encoding="utf-8")
              if line.strip() and not line.lstrip().startswith("#")]
-    cols = [c for c in sorted(set(allow) | set(DIAG) | set(extra)) if c in available]
+    from_store = () if extra_path else extra
+    cols = [c for c in sorted(set(allow) | set(DIAG) | set(from_store)) if c in available]
     df = pd.read_parquet(store.featured_path, columns=cols)
+    if extra_path:
+        names = set(pq.read_schema(extra_path).names)
+        add = [c for c in extra if c in names and c not in df.columns]
+        side = pd.read_parquet(extra_path, columns=["race_id", "horse_name", *add])
+        side["race_id"] = side["race_id"].astype(str)
+        df["race_id"] = df["race_id"].astype(str)
+        n = len(df)
+        df = df.merge(side.drop_duplicates(["race_id", "horse_name"]),
+                      on=["race_id", "horse_name"], how="left")
+        assert len(df) == n, "extra join duplicated rows"
     df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
     df["won"] = pd.to_numeric(df["won"], errors="coerce").fillna(0).astype(int)
     df = _prices(df, protocol)
@@ -268,8 +282,12 @@ def summarise(blocks: list[dict], tests: list[pd.DataFrame], labels: list[str], 
 
 def run(protocol: str, *, holdout: bool = False, max_folds: int | None = None,
         n_boot: int = 2000, dump: str | None = None, drop_prefixes: tuple = (),
-        only_features: tuple = ()) -> dict:
-    df = load_frame(protocol, extra=tuple(only_features))
+        only_features: tuple = (), extra_path: str | None = None,
+        only_prefix: str | None = None) -> dict:
+    if only_prefix:
+        source = extra_path or FeatureStore().featured_path
+        only_features = tuple(c for c in pq.read_schema(source).names if c.startswith(only_prefix))
+    df = load_frame(protocol, extra=tuple(only_features), extra_path=extra_path)
     if only_features:
         # Test one candidate signal on its own: can the residual model use it?
         features = [c for c in only_features if c in df.columns]
@@ -359,11 +377,17 @@ def main() -> int:
     ap.add_argument("--only", action="append", default=[], metavar="COLUMN",
                     help="use only these store columns as features (repeatable), e.g. a "
                          "shortlisted triage signal")
+    ap.add_argument("--only-prefix", default=None, metavar="PREFIX",
+                    help="use only the columns starting with PREFIX (a whole family)")
+    ap.add_argument("--extra", default=None, metavar="PARQUET",
+                    help="take the --only/--only-prefix columns from this parquet (keyed on "
+                         "race_id + horse_name) instead of the store")
     args = ap.parse_args()
     logging.disable(logging.INFO)
     report = run(args.protocol, holdout=args.holdout, max_folds=args.max_folds,
                  n_boot=args.n_boot, dump=args.dump, drop_prefixes=tuple(args.drop),
-                 only_features=tuple(args.only))
+                 only_features=tuple(args.only), extra_path=args.extra,
+                 only_prefix=args.only_prefix)
     print(render(report))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as fh:
