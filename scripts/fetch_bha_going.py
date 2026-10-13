@@ -8,13 +8,15 @@ Usage::
 
     python scripts/fetch_bha_going.py --download --start 2020-09-01 --end 2026-10-12
     python scripts/fetch_bha_going.py --download --going      # also per-fixture reports
-    python scripts/fetch_bha_going.py --download --races --delay 3   # rail-adjusted distances
+    python scripts/fetch_bha_going.py --download --races --delay 8   # rail-adjusted distances
     python scripts/fetch_bha_going.py --refresh 2026-10-13 2026-10-14
     python scripts/fetch_bha_going.py --build
 
-The API enforces a long-window quota (HTTP 429 for every request for over an
-hour once tripped); a 3 s delay completes a full backfill, ~9,300 fixtures in
-about six hours.
+The API enforces a long-window quota: at a 3 s delay it trips after ~490
+requests and then refuses every request for over 20 minutes. There is no
+date-range race listing (``races?fromdate=`` is 404, ``fixtures?include=races``
+ignores the include), so rail changes cost one request per fixture: use
+``--delay 8`` (~450 an hour) for a backfill, about 20 hours for 9,300 fixtures.
 """
 
 from __future__ import annotations

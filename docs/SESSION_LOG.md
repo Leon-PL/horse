@@ -189,3 +189,24 @@ the new model -> final status check -> report.
 Open, for whoever continues: BASIC data June-Oct 2026 (operator) for any T-5
 hold-out test; stalls/rail feature work (data collected); GoingStick fetch;
 move the BHA aliases into src/utils at the next rebuild needed anyway.
+
+### 2026-10-14 - course profile (operator request: stalls, rail, course types)
+
+36. **Branch `feature/course-profile`** (worktree; the main tree had a
+    concurrent session mid-rebuild, and editing an FE file there would have
+    aborted its build). `src/course_reports.py` (stalls parser 95.2% of GB
+    flat races; BHA rail `distanceChange` join), `src/bha_reports.py`
+    (collection; sync + live refresh), `add_course_profile_features`
+    (`cp_*`). Tests: parser, join, no own-race leak, same-day exclusion,
+    append parity with varying stalls/rail.
+37. **Triage (ledger 17): all priced.** Draw with stalls 0.0051 (vs 0.0044
+    without, 0.0023 best before); stamina gap 0.0045; course-type affinity
+    for horse and sire ~0; per-course weight/age/experience slopes ~0.
+38. **Rail backfill running**: per-fixture `races` calls trip the BHA quota
+    after ~490 requests; ~15-20 h for 9,300 fixtures at the pause/resume rate.
+39. Added `scripts/wf_feature_family_lift.py` (model-level A/B) and
+    `wf_market_offset.py --extra/--only-prefix`.
+
+**Next:** pace slope + model-level A/B once the concurrent build commits;
+merge the branch once that session commits its files; one rebuild after the
+rail backfill completes (rebuilding before it would force a second one).

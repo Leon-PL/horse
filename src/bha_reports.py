@@ -47,7 +47,7 @@ ROOT = os.path.join(config.DATA_DIR, "bha_going")
 #: every request keeps failing until it resets, so pause instead of burning
 #: through the fixture list.
 _QUOTA_STRIKES = 3
-_QUOTA_PAUSE_S = 20 * 60
+_QUOTA_PAUSE_S = 60 * 60
 
 
 def _session() -> requests.Session:
