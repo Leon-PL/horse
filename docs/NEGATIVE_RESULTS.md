@@ -1217,8 +1217,27 @@ Same harness, every `sex_*` feature excluded:
 Early stopping keeps 10-100 trees per fold - the residual signal is so weak
 the model stops almost at once. Plan 4c, the best-motivated untried idea in
 the project, fails cleanly: not a configuration problem but an informational
-one. (Re-confirmed on the rebuilt store with the legitimate `sex_Female`
-below, once it exists.)
+one.
+
+**Re-confirmed on the rebuilt store** (fe `63d88ff721a02632`, birth-sex
+`sex_Female`, and the now-complete Betfair coverage, which adds three early
+quarters: 16 folds 2022Q3-2026Q2, 49,554 races):
+
+| rule | n | ROI @ BSP [95% CI] | median CLV | folds + |
+|---|---|---|---|---|
+| race log loss vs market | - | **-0.00010 [-0.00040, +0.00020]** | - | 9/16 |
+| bet all (band) | 378,152 | -2.17% [-3.00, -1.36] | 0.9783 | 3/16 |
+| edge > 0 | 194,962 | +0.12% [-1.44, +1.68] | 0.9852 | 7/16 |
+| edge > 0.05 | 41,590 | +1.82% [-2.49, +6.13] | 0.9926 | 6/16 |
+| edge > 0.10 | 9,121 | +6.50% [-3.85, +16.92] | 0.9976 | 9/15 |
+| top-edge | 40,151 | +1.53% [-2.38, +5.59] | 0.9933 | 7/16 |
+
+Every interval spans zero and every median CLV is below 1. The residual
+model now leans on `or_vs_field_x_hcap`, so the official rating was checked
+for the same kind of leak: it is race-day. 86.7% of handicap runners sit
+exactly on their race's rating-to-weight line, winners and losers alike
+(86.9% vs 86.7%), and the handicapper's reassessment appears in the *next*
+race's rating (winners +4.62 lb, losers -0.84).
 
 ### Consequences
 
