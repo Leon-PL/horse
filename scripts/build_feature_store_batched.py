@@ -52,6 +52,7 @@ from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore, _stringify_objects
 from src.featured_dataset import data_signature, fe_signature
+from src.feature_inputs import atr_cache_signature
 
 logging.basicConfig(
     level=logging.INFO,
@@ -185,6 +186,9 @@ def _build(store: FeatureStore, chunk_rows: int) -> dict:
         "built_at": datetime.now().isoformat(timespec="seconds"),
         "fe_signature": fe_sig_at_start,
         "data_signature": data_signature(processed, cutoff=last_date),
+        # The sectional cache is read inside FE, outside both signatures.
+        "atr_signature": {"cutoff": str(last_date.date()),
+                          "sig": atr_cache_signature(last_date)},
     }
 
     # ── consolidate parts → single featured.parquet (streaming, pyarrow) ──

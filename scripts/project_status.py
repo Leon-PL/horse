@@ -11,7 +11,10 @@ silently disagree the system still produces confident numbers — the 2026-06
 ROI@BSP by 56 points. Both were found late and by accident.
 
 This prints the state of every link and a plain verdict. Read-only: it opens
-metadata and parquet footers, never the 2 GB of feature rows.
+metadata and parquet footers, never the 2 GB of feature rows. By default it
+also recomputes the data signature from the database (about a minute), which
+is the only way to see results backfilled beneath the store; ``--quick``
+skips that.
 
     .venv/Scripts/python.exe scripts/project_status.py
     .venv/Scripts/python.exe scripts/project_status.py --json
@@ -78,23 +81,75 @@ def _database() -> dict:
     }
 
 
-def _feature_store() -> dict:
+def store_findings(meta: dict, *, live_fe_sig: str, db_latest=None,
+                   live_data_sig: str | None = None, atr_now: str | None = None) -> tuple[str, list[str]]:
+    """Judge the store against everything that can make it stale.
+
+    The FE signature alone missed three ways a store goes stale while its code
+    is unchanged: results backfilled beneath it (``data_signature``), results
+    added after it (the store lags the database), and the ATR sectional cache
+    changing beneath it (read inside FE, so no other signature covers it).
+    """
+    state, notes = OK, []
+    stored_sig = meta.get("fe_signature")
+    if stored_sig != live_fe_sig:
+        state = BAD
+        notes.append(f"built by FE {stored_sig} but code is now {live_fe_sig} -> REBUILD")
+    else:
+        notes.append(f"FE code matches ({live_fe_sig})")
+    if live_data_sig is not None:
+        if live_data_sig != meta.get("data_signature"):
+            state = BAD
+            notes.append("results changed beneath the store (data_signature) -> REBUILD")
+        else:
+            notes.append("data matches")
+    last = meta.get("last_date")
+    if db_latest is not None and last and str(db_latest)[:10] > str(last)[:10]:
+        state = BAD
+        notes.append(f"database has results to {str(db_latest)[:10]} not yet in the store -> refresh")
+    atr = meta.get("atr_signature")
+    if isinstance(atr, dict) and atr.get("sig"):
+        if atr_now is not None and atr_now != atr["sig"]:
+            state = BAD
+            notes.append("ATR sectional cache changed beneath the store -> REBUILD")
+    elif state == OK:
+        state = WARN
+        notes.append("sectional cache unverified (store predates the ATR stamp)")
+    return state, notes
+
+
+def _feature_store(deep: bool = True) -> dict:
     from src.feature_store import FeatureStore
-    from src.featured_dataset import fe_signature
+    from src.featured_dataset import data_signature, fe_signature
 
     store = FeatureStore()
     if not store.exists():
         return {"state": BAD, "detail": "not built - build it on the training app's Data page"}
     meta = store.meta()
     live_sig = fe_signature()
-    stored_sig = meta.get("fe_signature")
-    fresh = stored_sig == live_sig
+    db_latest = live_data_sig = atr_now = None
+    try:
+        from src.database import get_latest_date
+        db_latest = get_latest_date()
+    except Exception:  # pragma: no cover - reported by the database probe
+        pass
+    if deep and meta.get("last_date"):
+        # Recompute from the database: catches a backfill beneath the store.
+        from src.data_processor import process_data
+        live_data_sig = data_signature(process_data(save=False), cutoff=meta["last_date"])
+    atr = meta.get("atr_signature")
+    if isinstance(atr, dict) and atr.get("cutoff"):
+        from src.feature_inputs import atr_cache_signature
+        atr_now = atr_cache_signature(atr["cutoff"])
+    state, notes = store_findings(meta, live_fe_sig=live_sig, db_latest=db_latest,
+                                  live_data_sig=live_data_sig, atr_now=atr_now)
     behind = _days_behind(meta.get("last_date"))
     return {
-        "state": OK if fresh else BAD,
-        "fe_signature": stored_sig,
+        "state": state,
+        "fe_signature": meta.get("fe_signature"),
         "live_fe_signature": live_sig,
-        "code_matches": fresh,
+        "code_matches": meta.get("fe_signature") == live_sig,
+        "data_checked": live_data_sig is not None,
         "last_date": meta.get("last_date"),
         "days_behind": behind,
         "rows": meta.get("featured_rows"),
@@ -102,11 +157,7 @@ def _feature_store() -> dict:
         "detail": (
             f"{meta.get('featured_rows', 0):,} rows to {meta.get('last_date')}"
             + (f" ({behind} days behind)" if behind is not None else "")
-            + (
-                f"; FE code matches ({live_sig})"
-                if fresh
-                else f"; built by FE {stored_sig} but code is now {live_sig} -> REBUILD"
-            )
+            + "; " + "; ".join(notes)
         ),
     }
 
@@ -156,12 +207,13 @@ def _production() -> dict:
     }
 
 
-def collect() -> dict:
+def collect(deep: bool = True) -> dict:
     """Every link's state, worst-first in the printed order."""
     sections: dict[str, dict] = {}
     for name, probe in (
         ("database", _database),
-        ("feature_store", _feature_store),
+        ("feature_store", (lambda: _feature_store(deep=False)) if not deep
+                          else (lambda: _feature_store())),
         ("training_runs", _runs),
         ("production_model", _production),
     ):
@@ -213,11 +265,13 @@ def render(report: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--quick", action="store_true",
+                        help="skip recomputing data_signature from the database (~1 min)")
     args = parser.parse_args()
     # A status report is the output; module start-up chatter is not.
     logging.disable(logging.INFO)
 
-    report = collect()
+    report = collect(deep=not args.quick)
     print(json.dumps(report, indent=2, default=str) if args.json else render(report))
     return 0 if report["servable"] else 1
 

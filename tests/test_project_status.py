@@ -105,3 +105,34 @@ def test_render_is_console_safe(status, monkeypatch):
         _sections(status, feature_store={"state": status.BAD, "detail": "rebuild"}),
     )
     status.render(broken).encode("cp1252")
+
+
+class TestStoreFindings:
+    """The FE signature alone missed three ways a store goes stale."""
+
+    META = {"fe_signature": "fe1", "data_signature": "d1", "last_date": "2026-10-12",
+            "atr_signature": {"cutoff": "2026-10-12", "sig": "a1"}}
+
+    def test_everything_current_is_ok(self, status):
+        state, notes = status.store_findings(self.META, live_fe_sig="fe1", db_latest="2026-10-12",
+                                             live_data_sig="d1", atr_now="a1")
+        assert state == status.OK, notes
+
+    def test_backfill_beneath_the_store_is_stale(self, status):
+        state, notes = status.store_findings(self.META, live_fe_sig="fe1", live_data_sig="d2")
+        assert state == status.BAD and any("data_signature" in n for n in notes)
+
+    def test_results_newer_than_the_store_are_stale(self, status):
+        state, notes = status.store_findings(self.META, live_fe_sig="fe1", db_latest="2026-10-13",
+                                             live_data_sig="d1", atr_now="a1")
+        assert state == status.BAD and any("not yet in the store" in n for n in notes)
+
+    def test_sectional_backfill_is_stale(self, status):
+        state, notes = status.store_findings(self.META, live_fe_sig="fe1", live_data_sig="d1",
+                                             atr_now="a2")
+        assert state == status.BAD and any("ATR" in n for n in notes)
+
+    def test_unstamped_store_is_a_warning_not_a_pass(self, status):
+        meta = {k: v for k, v in self.META.items() if k != "atr_signature"}
+        state, _ = status.store_findings(meta, live_fe_sig="fe1", live_data_sig="d1")
+        assert state == status.WARN

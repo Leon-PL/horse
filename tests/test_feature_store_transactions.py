@@ -202,6 +202,7 @@ def test_batched_rebuild_failure_preserves_store(store, rows, monkeypatch):
     monkeypatch.setattr(batched, "engineer_features", feature_store.engineer_features)
     monkeypatch.setattr(batched, "fe_signature", lambda: "current-fe")
     monkeypatch.setattr(batched, "data_signature", lambda *args, **kwargs: "current-data")
+    monkeypatch.setattr(batched, "atr_cache_signature", lambda cutoff: "current-atr")
     monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2"])
 
     with monkeypatch.context() as patch:
@@ -229,6 +230,7 @@ def test_batched_rebuild_refuses_to_stamp_code_that_changed_mid_build(store, row
     monkeypatch.setattr(batched, "engineer_features", feature_store.engineer_features)
     monkeypatch.setattr(batched, "fe_signature", lambda: next(signatures))
     monkeypatch.setattr(batched, "data_signature", lambda *args, **kwargs: "current-data")
+    monkeypatch.setattr(batched, "atr_cache_signature", lambda cutoff: "current-atr")
     monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2"])
 
     with pytest.raises(RuntimeError, match="changed while the store was building"):
