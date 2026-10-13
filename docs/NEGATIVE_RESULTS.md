@@ -871,9 +871,23 @@ missing entirely**. Sampled 2022-25 dates came back complete.
 Why it matters despite being under 1% of races: every horse that ran in a
 missing race has a hole in its history (wrong days-since-run, a skipped rating
 update, a missing form line), the market saw that run and the model did not,
-and the 2026 holes fall on exactly the horses live serving prices. Repaired by
-a full relist through the new resumable ledger
-(`python -m src.database --audit-history --sync 2219`); totals below.
+and the 2026 holes fall on exactly the horses live serving prices.
+
+Repaired by a full relist through the new resumable ledger
+(`python -m src.database --audit-history --sync 2219`): **543 races / 6,410
+runner rows added** (2020: 44, 2021: 229, 2022: 27, 2023: 27, 2026: 216, of
+which 47 are the newly synced 2026-10-12), all at the truncated meetings
+(Navan 53, Limerick 43, Killarney 40, Tramore 35, Punchestown 32, ...). Races
+per day around 50 is now smooth (49: 41, 50: 36, 51: 42) and 2021 has 46 days
+above 50 instead of none. Correction to the dry run: 2022-12-17 was *not*
+missing - all six cards were abandoned in the freeze.
+
+3,472 listed races still yield no result: 3,084 in meetings with nothing
+stored, 388 isolated inside stored meetings. A random sample of 80 found
+**none that ran and was missed**: ABANDONED 54, DORMANT 19, RACEVOID 3,
+Arabian 2, HTTP 404 2 (95% upper bound on genuine misses ~3.7% of the set).
+The sync now closes such races with their reason (`RaceNotRun`), so its
+"pending" count means "failed, unexplained".
 
 ### The flat draw backfill was finished, not pending
 
@@ -933,6 +947,45 @@ construction: `num_runners` sets each runner's base rate before per-race
 normalisation, and the rest can act through interactions. Under a per-race
 softmax or a market offset (plan 4c) their main effects cancel exactly. The
 allowlist holds 150 features, not the 151 documented.
+
+### A free closing-price source, and the first golden hold-out
+
+Betfair publishes daily BSP files for anyone
+(`promo.betfair.com/betfairsp/prices`, `scripts/fetch_betfair_sp_public.py`):
+per runner, BSP, morning and pre-play volume-weighted prices, price ranges,
+and **matched volume** (morning, pre-play, in-play) - volume the BASIC tars do
+not carry at all. All 4,440 files for 2020-09-14..2026-10-12 (GB and IE)
+downloaded; validated:
+
+| check | result |
+|---|---|
+| BSP vs the BASIC parquet, 589,123 shared runners | 99.99% within 1% (BASIC rounds to 2 dp) |
+| winner flag vs BASIC / vs our DB | 99.99% / 99.94% |
+| DB runners matched, by quarter | 95-100% in every quarter, incl. the BASIC gaps 2020Q4 (94.9%), 2021Q3 (97.9%), 2021Q4 (96.9%) |
+| golden hold-out (races from 2026-06-11) | 4,812 races, 96.2% with a complete closing and morning market |
+
+Three traps, each silent if missed and each tested: the file is dated the day
+after its races; off times are UK local while the DB is UTC (every BST race
+would fail to join); two header styles.
+
+Two measured facts any morning-price protocol must respect:
+
+- A runner with no morning trade carries `morningwap = 1.0`, a placeholder
+  (2.5% of runners). Requiring a valid price drops any race containing one.
+- **Pre-off prices sit well short of BSP on the typical runner**: median
+  morning VWAP / BSP = 0.8925 (geometric mean 0.8236); pre-play VWAP / BSP =
+  0.88. Most runners are outsiders, whose BSP routinely exceeds the traded
+  price. This is why bet-all CLV at T-5 is already 0.9786 (2), and it makes
+  ACTION_PLAN 7's "median CLV > 1.0" a much higher bar at morning prices.
+
+**The golden hold-out** (`config.GOLDEN_HOLDOUT_START = 2026-06-11`,
+committed in `3800c33` before any Phase B experiment) qualifies because every
+CLV and market-residual harness drops rows without a Betfair price, and the
+hand-downloaded data stopped on 2026-06-10: no such analysis has ever seen
+those races. They have closing and morning prices now, but **no T-5 price**
+(`ltp_300s` exists only in the BASIC tars). A T-5 result can therefore only be
+confirmed on the hold-out once the operator downloads BASIC data for June to
+October 2026; a morning-protocol result can be confirmed now.
 
 ### Checked and clean
 

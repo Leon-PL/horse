@@ -37,3 +37,32 @@ work is, so it survives a context compaction.
 
 **Next:** 14-day sync (smoke test, running) → full history audit → store
 rebuild (~56 min) → Phase A stages 1-8.
+
+### 2026-10-13 afternoon
+
+5. **History audit done**: +543 races / 6,410 rows (Irish cards cut by the
+   50-race cap, and skipped pages). 3,472 listed races yield nothing: sample of
+   80 = all abandoned / dormant / void / Arabian / 404. Sync now closes those
+   (`RaceNotRun`). DB: 755,706 rows to 2026-10-12.
+6. **Weather + trainer-travel FE stages removed** after a parity check (10
+   columns dropped, other 1,058 bit-identical on 106k rows). Store no longer
+   calls Open-Meteo at build time. New fe_signature `e522ca1b86174217`.
+7. **promote() now refuses unverifiable runs** (all 8 saved runs predate the
+   trainer_freq leak fix; 6 unsigned).
+8. **Batched build stamps the signature it started with**, aborting if FE code
+   changes mid-build (how the old store got "stamped mid-edit").
+9. **Public Betfair BSP files** downloaded and validated (4,440 files; BSP
+   99.99% within 1% of BASIC; 95-100% DB coverage every quarter incl. the
+   2020Q4/2021 gaps). `data/processed/betfair_sp_public.parquet`. Carries
+   morning/pre-play VWAP and traded volume. Pre-off prices sit short of BSP
+   (median morning VWAP/BSP 0.8925).
+10. **Golden hold-out pre-registered**: races from 2026-06-11 (`3800c33`),
+    because no Betfair-priced analysis has ever seen them. No T-5 price there
+    (BASIC needed from the operator); morning protocol can be confirmed now.
+11. Harnesses written + tested, not yet run: `wf_market_offset.py` (plan 4c,
+    protocols t5/morning) and `wf_ranking_compare.py` (plans 3a/4b).
+12. Store rebuild running (started ~13:20, 7 chunks).
+
+**Next:** rebuild done -> project_status -> train + promote (gate 1) ->
+wf_ranking_compare (gate 2) -> wf_market_offset t5 + morning (gate 4 half) ->
+5a-lite volume/continuation test -> golden hold-out once -> Phase C.
