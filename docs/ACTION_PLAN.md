@@ -181,9 +181,9 @@ project's largest "edges" were artifacts of exactly this.
 
 | # | task | success criterion |
 |---|---|---|
-| 2a | Refresh results: ~4 months of races (last stored date 2026-06-20). Hours of scraping at a 2s delay — run it overnight. | database check green |
-| 2b | Rebuild the feature store. The current store was built by older FE code (`fe_signature` mismatch), so a rebuild is required regardless. | store check green, signatures match |
-| 2c | Retrain and promote. The newest saved run predates the `trainer_freq` leak fix, so **no existing run should be promoted.** | `project_status.py` exits 0 |
+| 2a | Refresh results — **DONE 2026-10-13**, plus a full-history relist that restored 543 races the old sync had dropped (ledger 13). | met: database to 2026-10-12 |
+| 2b | Rebuild the feature store — **DONE 2026-10-13** (52 min; signature now line-ending invariant and stamped from build start). | met: code and data signatures match |
+| 2c | Retrain and promote — **DONE 2026-10-13**: run `20261013_162640` promoted; `promote` now refuses unverifiable runs. | met: `project_status.py` exits 0 |
 | 2d | Flat **draw backfill** — **DONE** (verified 2026-10-13, ledger 13: draw-vs-weight correlation ~0 in every month, where saddle cloths would give ~-1). | met |
 
 ---
@@ -514,8 +514,11 @@ positive closing-line edge, and all of it is cheap once there is one.
 
 Checkpoints where the honest move may be to stop:
 
-1. **After Phase 0.** If `project_status.py` cannot be made green without
-   disproportionate effort, the system is not maintainable as configured.
+1. **After Phase 0 — PASSED 2026-10-13.** `project_status.py` is green on all
+   four links (database to 2026-10-12; store rebuilt at `e522ca1b86174217`
+   and verified on code *and* data; run `20261013_162640` promoted and
+   matching), after repairing 543 missing races and closing the gaps that
+   let a stale store pass (ledger 13).
 2. **After 3a + 4b.** If the model still ranks no better than logistic
    regression once weighting and regularisation are addressed, the feature set
    — not the model — is the binding constraint, and §1d/§5a are the only
