@@ -50,6 +50,10 @@ hard rule 3), `bet_settlement` (the bet rules — hard rule 2), `featured_datase
 | `scripts/triage_features.py` | is this feature orthogonal to the market? (partial correlation + BH q) |
 | `scripts/audit_selection_rule.py` | does this filter beat *its own universe*, not just the whole band? |
 | `scripts/audit_labels.py` | do our `won`/placed labels agree with Betfair's settlement? |
+| `scripts/audit_field_timing.py` | is every scraped per-race field as-of-race, not as-of-scrape? (the `sex` leak, ledger 15) |
+| `scripts/betfair_db_audit.py` with `--bsp data/processed/betfair_sp_public.parquet` | is the DB missing races? (checked against Betfair's public census of every GB/IE race) |
+| `scripts/wf_market_offset.py`, `scripts/wf_ranking_compare.py` | plan 4c (market as offset) and plans 3a/4b (GBM vs logistic vs market), purged walk-forward |
+| `scripts/microstructure_screen.py`, `scripts/microstructure_clv.py` | does morning money carry information beyond the close; is the timing edge bankable? (ledger 14) |
 | `scripts/clv_report.py`, `scripts/wf_benter_combination.py`, `scripts/wf_fundmarket_clv.py` | CLV at BSP and market combination, on purged walk-forward folds |
 | `scripts/model_lab.py` | fast single-fit model comparison (~1 min per idea) |
 | `scripts/feature_audit.py`, `scripts/diagnose_disagreement.py` | burn-in curves; where the model disagrees with the market |
@@ -229,3 +233,5 @@ These exist because each one corresponds to a bug that actually shipped:
 | `tests/test_project_status.py` | the status report claiming "ready" when it is not |
 | `tests/test_wf_eval.py` | folds without an embargo, second stages fitted in-sample, CIs that ignore race clustering |
 | `tests/test_benter_harness.py` | a research harness biased against the hypothesis it is testing |
+| `tests/test_birth_sex.py`, `scripts/audit_field_timing.py` | a raw field recorded at scrape time leaking each horse's future (no feature-level guard can see it) |
+| `wf_eval.development_mask` (used by every research harness, triage and the app backtester) | spending the golden hold-out before a final, single test |
