@@ -58,6 +58,30 @@ def purge_days() -> int:
     return max(0, int(getattr(config, "PURGE_DAYS", 7)))
 
 
+def golden_holdout_start() -> pd.Timestamp:
+    """First race date of the pre-registered golden hold-out (config)."""
+    return pd.Timestamp(getattr(config, "GOLDEN_HOLDOUT_START", "2026-06-11"))
+
+
+def development_mask(race_dates) -> np.ndarray:
+    """Rows research may use: strictly before the golden hold-out, minus the
+    purge gap, so rolling features cannot straddle into it.
+
+    ACTION_PLAN 7 only counts an edge that also holds on data never used for
+    tuning. Every harness filters with this before building folds, and scores
+    the hold-out separately and once (:func:`holdout_mask`).
+    """
+    dates = pd.to_datetime(pd.Series(race_dates).reset_index(drop=True), errors="coerce")
+    cutoff = golden_holdout_start() - pd.Timedelta(days=purge_days())
+    return (dates < cutoff).to_numpy()
+
+
+def holdout_mask(race_dates) -> np.ndarray:
+    """Rows in the golden hold-out."""
+    dates = pd.to_datetime(pd.Series(race_dates).reset_index(drop=True), errors="coerce")
+    return (dates >= golden_holdout_start()).to_numpy()
+
+
 @dataclass(frozen=True)
 class Fold:
     """One walk-forward fold: train strictly before test, with a purge gap."""

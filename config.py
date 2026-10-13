@@ -263,6 +263,16 @@ EARLY_STOPPING_ROUNDS = 80
 # PURGE_DAYS: number of days to remove between train/test boundaries
 # to prevent feature leakage from overlapping horse form.
 PURGE_DAYS = 7
+
+# --- Golden hold-out (pre-registered 2026-10-13) ---
+# Races on or after this date are the hold-out ACTION_PLAN 7 requires: no
+# research may tune, select or threshold on them, and a candidate is scored on
+# them once. Chosen because no CLV or market-residual analysis in this project
+# has ever seen them: every such harness drops rows without a Betfair price,
+# and the hand-downloaded Betfair data stopped at 2026-06-10. Development folds
+# must end PURGE_DAYS before it (src.wf_eval.development_mask). Do not move it
+# later to reuse data after looking at a result.
+GOLDEN_HOLDOUT_START = "2026-06-11"
 # BURN_IN_MONTHS: strip the first N months of the training window from the
 # training split.  Feature engineering has already run on the full history
 # so cumulative stats are correct, but these earliest rows have cold-start

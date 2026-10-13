@@ -269,3 +269,19 @@ class TestRaceLogLoss:
 
     def test_no_usable_race_is_nan_not_zero(self):
         assert np.isnan(race_logloss([0.5, 0.5], [0, 0], ["r1", "r1"]))
+
+
+def test_development_and_holdout_masks_partition_with_a_purge_gap(monkeypatch):
+    """Research rows end PURGE_DAYS before the golden hold-out; none overlap."""
+    import config
+    from src.wf_eval import development_mask, holdout_mask
+
+    monkeypatch.setattr(config, "GOLDEN_HOLDOUT_START", "2026-06-11")
+    monkeypatch.setattr(config, "PURGE_DAYS", 7)
+    dates = pd.Series(pd.date_range("2026-05-30", "2026-06-20", freq="D"))
+    dev, hold = development_mask(dates), holdout_mask(dates)
+    assert not (dev & hold).any()
+    assert dates[dev].max() == pd.Timestamp("2026-06-03")
+    assert dates[hold].min() == pd.Timestamp("2026-06-11")
+    gap = dates[~dev & ~hold]
+    assert len(gap) == 7  # the purge: 2026-06-04 .. 2026-06-10
