@@ -756,8 +756,8 @@ allowlist** with marginal positive lift. Not a breakthrough, but not dead.
 ## 12. Consolidation: what was deleted and why (2026-10-13)
 
 The repository had accumulated one live pipeline and a long tail of side
-experiments, with no way to tell them apart by reading the tree. 32 files and
-≈5,200 lines were deleted. **Nothing here was removed because it looked
+experiments, with no way to tell them apart by reading the tree. 32 files were
+deleted and two live modules pruned — **≈6,100 lines in all**. **Nothing here was removed because it looked
 unused — every item was either refuted with a number in this ledger, or
 provably unreachable.** The code is in git history; the measurements are here.
 
@@ -798,6 +798,28 @@ provably unreachable.** The code is in git history; the measurements are here.
   `wf_each_way` (hardcoded snapshot **and** a hand-rolled fold loop, which hard
   rule 6 exists to forbid), `cleanup_non_runners` and `retrain_clean_store`
   (completed repairs).
+
+### Dead code *inside* live modules
+
+Module-level deletion missed the larger share. A reference scan over every
+top-level function in `src/`, re-run after each pass so a helper used only by
+something already deleted is caught on the next one, found:
+
+- **`src/app_helpers.py` was 63% dead** — 882 of 1,404 lines. 17 orphaned
+  chart/frame builders, then 14 more that only those called: the Insights and
+  Diagnostics panels of the retired monolithic `app.py`. The current panels
+  never referenced them, which is why nothing failed and nothing noticed.
+- **`src/live_prediction.py` carried two caches, one superseded.** The
+  `live_feature_cache_*` family (5 functions, 48 lines, plus two directories it
+  created on import) was replaced by the `lookahead_cache_*` family that
+  `app_helpers` actually imports. Two cache systems in the serving module, one
+  dead — the single most confusing thing in the live path.
+
+Six single orphaned functions were **kept** on purpose; they are listed in
+`PROJECT_OUTLINE.md` §4.3. A reference count of zero is a prompt to look, not
+a licence to delete: a settlement formula, an append-machinery helper and a
+market-anchor teacher all have obvious future callers, and stripping a
+module's API surface on a grep is how a codebase loses optionality.
 
 ### `_FE_UNWIRED_SOURCES` is gone, and that is the point
 

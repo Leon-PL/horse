@@ -211,6 +211,15 @@ Cleared on 2026-10-13 — 32 files and ≈5,200 lines removed; see §2.0 table C
 - **2 of 8 saved runs carry no feature signature**, so
   `run_store.feature_generation_status` reports `unknown` for them.
 - **`data/rtv_cache/` is orphaned** now that the Racing TV scraper is gone.
+- **Six single functions are unreferenced and were deliberately kept**, because
+  a reference count is not a reason to strip a module's API:
+  `bet_settlement.settle_place_exchange_bets` (the vectorised twin of a formula
+  hard rule 2 wants centralised), `feature_engineer._cumulative_plain` (part of
+  the incremental-append machinery a later FE phase needs),
+  `betfair.market_prob_bsp_preferred` (the market-anchor teacher),
+  `utils.print_race_prediction`, `database.get_latest_date`,
+  `sibling_features.add_sibling_features` (the FE-stage shape, waiting on a
+  CLV verdict).
 
 ### 4.4 Guards you should not weaken
 

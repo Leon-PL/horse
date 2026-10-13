@@ -73,64 +73,6 @@ def cards_signature(cards_df: pd.DataFrame) -> str:
     return hashlib.sha1(hashed).hexdigest()[:20]
 
 
-def build_live_feature_cache_key(
-    *,
-    target_date_str: str,
-    cards_sig: str,
-    history_sig: str,
-    gap_sig: str,
-) -> str:
-    payload = {
-        "version": int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)),
-        "target_date": target_date_str,
-        "cards_sig": cards_sig,
-        "history_sig": history_sig,
-        "gap_sig": gap_sig,
-    }
-    raw = json.dumps(payload, sort_keys=True).encode("utf-8")
-    return hashlib.sha1(raw).hexdigest()[:20]
-
-
-def get_live_feature_cache_paths(target_date_str: str, cache_key: str) -> dict[str, str]:
-    date_dir = os.path.join(LIVE_FEATURE_CACHE_DIR, target_date_str)
-    os.makedirs(date_dir, exist_ok=True)
-    file_stem = f"features_{cache_key}"
-    return {
-        "parquet": os.path.join(date_dir, f"{file_stem}.parquet"),
-        "meta": os.path.join(date_dir, f"{file_stem}.json"),
-        "baseline": os.path.join(LIVE_FEATURE_BASELINE_DIR, f"{target_date_str}_{file_stem}.parquet"),
-    }
-
-
-def live_feature_cache_exists(target_date_str: str, cache_key: str) -> bool:
-    return os.path.exists(get_live_feature_cache_paths(target_date_str, cache_key)["parquet"])
-
-
-def load_live_feature_cache(target_date_str: str, cache_key: str) -> pd.DataFrame | None:
-    path = get_live_feature_cache_paths(target_date_str, cache_key)["parquet"]
-    if not os.path.exists(path):
-        return None
-    return pd.read_parquet(path, engine="pyarrow")
-
-
-def save_live_feature_cache(
-    target_date_str: str,
-    cache_key: str,
-    featured_df: pd.DataFrame,
-    *,
-    metadata: dict[str, object] | None = None,
-    preserve_baseline: bool = False,
-) -> dict[str, str]:
-    paths = get_live_feature_cache_paths(target_date_str, cache_key)
-    featured_df.to_parquet(paths["parquet"], index=False, engine="pyarrow")
-    meta = {"cache_key": cache_key, **(metadata or {})}
-    with open(paths["meta"], "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, indent=2, sort_keys=True, default=str)
-    if preserve_baseline and not os.path.exists(paths["baseline"]):
-        shutil.copyfile(paths["parquet"], paths["baseline"])
-    return paths
-
-
 def feature_engineer_with_history_core(
     history_df: pd.DataFrame | None,
     live_processed: pd.DataFrame,
