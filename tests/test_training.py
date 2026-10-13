@@ -154,7 +154,7 @@ def test_train_run_orchestration(monkeypatch, walk_forward):
         frameworks={"classifier": "xgb", "place": "lgbm"},
         hyperparams={"classifier": {"n_estimators": 75}},
         run_walk_forward=walk_forward, wf_min_train_months=6,
-        wf_fast_fold=False, blend_market_odds=True,
+        wf_fast_fold=False, blend_market_odds=True, win_calibration_method="race_temperature",
         value_config={"value_threshold": 0.08, "ew_enabled": False},
     )
     rid = tr.train_run(cfg)
@@ -166,12 +166,16 @@ def test_train_run_orchestration(monkeypatch, walk_forward):
     assert set(tc["evals"]) == {"calibration", "roi", "clv"}
     assert tc["signatures"] == {"fe_signature": "FE", "data_signature": "DS"}
     assert tc["config"]["name"] == "t"
-    assert captured["predictor_options"] == {"frameworks": cfg.frameworks, "random_seed": 123}
+    assert captured["predictor_options"] == {
+        "frameworks": cfg.frameworks, "random_seed": 123,
+        "win_calibration_method": "race_temperature",
+    }
     if walk_forward:
         wf = captured["walk_forward_options"]
         assert wf["frameworks"] == cfg.frameworks
         assert wf["params"] == captured["train_options"]["params"] == cfg.hyperparams
         assert wf["random_seed"] == 123
+        assert wf["win_calibration_method"] == "race_temperature"
         assert wf["min_train_months"] == 6
         assert wf["fast_fold"] is False
         assert wf["blend_market_odds"] is True
