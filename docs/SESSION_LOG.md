@@ -66,3 +66,25 @@ rebuild (~56 min) → Phase A stages 1-8.
 **Next:** rebuild done -> project_status -> train + promote (gate 1) ->
 wf_ranking_compare (gate 2) -> wf_market_offset t5 + morning (gate 4 half) ->
 5a-lite volume/continuation test -> golden hold-out once -> Phase C.
+
+### Priors, written before any Phase B result (2026-10-13 ~14:00)
+
+So a surprise can be recognised as one rather than rationalised afterwards:
+
+- **3a (GBM vs logistic):** on ~40k races I expect the GBM to rank about the
+  same as logistic regression (|top-1 gap| < 1pt), both ~5pt below the
+  market. The 646-race "GBM worse" result was probably noise.
+- **4b (loosened GBM):** a small change either way (< 0.5pt top-1).
+- **4c (market offset):** a small log-loss gain over the market (delta race
+  LL between -0.001 and -0.004 nats), consistent with Benter alpha ~+0.046;
+  selections negative at BSP after 2% commission; median CLV < 1.
+  P(passing ACTION_PLAN 7) < 5%.
+- **5a-lite (volume / move continuation):** partial correlations ~0; the move
+  continuation near the ledger-8 figure of 0.01. P(any test passing) ~15%,
+  most of it mechanical (VWAP noise), which is what the liquid-only
+  robustness rows are for.
+
+New source found while waiting: the BHA API publishes per-fixture going
+reports (`/bha/v1/fixtures/{year}/{id}/going`): stalls by distance, rail
+movements, GoingStick with inside/centre/outside splits, back to 2020, GB
+only. This is the plan-5a-bis collection path. Queued after the core results.
