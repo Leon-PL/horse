@@ -83,12 +83,14 @@ would have to come from somewhere this project has no access to:
    from form modelling. *If you try it:* buy one or two months first, and fix
    the success test before looking - median CLV > 1.0 with a race-clustered
    interval excluding 1.0, on a walk-forward plus the hold-out.
-2. **Stalls position and rail movements (plan 5a-bis).** The data is now
-   collected for every GB fixture since 2020 (`data/processed/bha_going.parquet`).
-   Turning it into a draw signal is a few days' work: parse the free text
-   by distance and map stall numbers to the rail per course. *Expected value:
-   low* - every racecard prints the stalls position, and draw features score
-   at most 0.0023 against the market.
+2. **Stalls position and rail movements (plan 5a-bis) - built and measured
+   2026-10-14 (ledger 17): priced.** Stalls position is parsed for 95% of GB
+   flat races and sharpens the draw signal (0.0044 -> 0.0051 against the
+   market), still half the 0.01 bar. Rail changes per race now come from the
+   BHA races endpoint. The same pass added runner-specific course
+   suitability - course-type affinity for horse and sire, stamina against the
+   actual trip, per-course draw/pace/weight/age/experience slopes - and none
+   of it scores. Kept in the store (`cp_*`), not allowlisted.
 3. **Commercial GPS tracking (Total Performance Data, plan 5c).** Terms are
    negotiated, not published. *Expected value: very low* - the public sectional
    version of the same data is 20/21 priced.

@@ -25,8 +25,8 @@ live. If a module is not in table A, it cannot affect a bet.
 
 | # | Stage | Modules | Produces |
 |---|---|---|---|
-| 1 | **Collect** | `data_scraper` (Sporting Life), `data_collector`, `database.sync_database`; side feeds `pedigree_backfill`, `attheraces_scraper` (TPD sectionals), `weather` (raw columns into the DB only), `betfair` (BSP/LTP) | `data/races.db` |
-| 2 | **Process** | `data_processor.process_data` | canonical runner frame |
+| 1 | **Collect** | `data_scraper` (Sporting Life), `data_collector`, `database.sync_database`; side feeds `pedigree_backfill`, `attheraces_scraper` (TPD sectionals), `bha_reports` (BHA going reports: stalls, rail; `data/processed/bha_*.parquet`), `weather` (raw columns into the DB only), `betfair` (BSP/LTP) | `data/races.db` |
+| 2 | **Process** | `data_processor.process_data` (+ `course_reports`: stalls position, rail-adjusted distance) | canonical runner frame |
 | 3 | **Engineer** | `feature_engineer.engineer_features` + `ratings`, `atr_features`, `track_config`, `fe_incremental` | ~1,100 feature columns |
 | 4 | **Store** | `feature_store.FeatureStore` behind `featured_dataset.get_featured_dataset` | `data/processed/feature_store/` |
 | 5 | **Train** | `training.train_run` → `model.RacePredictor` (+ `autotune`, `probability_calibration`) | win + place classifiers |
@@ -227,6 +227,11 @@ Cleared on 2026-10-13 — 32 files and ≈5,200 lines removed; see §2.0 table C
   after a parity check (ledger 13): the store no longer calls Open-Meteo at
   build time, and `weather.py`, `trainer_locations.py` and
   `bha_stewards_scraper.py` no longer sit in `_FE_SOURCE_FILES`.
+- **Stalls position and rail changes enter in `process_data`, not FE**
+  (`src/course_reports.py`, ledger 17), so `data_signature` covers them. The
+  daily sync refreshes `data/processed/bha_*.parquet` for the dates it adds;
+  if that refresh fails, run `scripts/fetch_bha_going.py --refresh DATE...`
+  before the next store append, or the late values will force a full rebuild.
 - **`scripts/fe_sweep.py` points `BASE_RUN` at a run snapshot that no longer
   exists.** Change the id before using it.
 - **2 of 8 saved runs carry no feature signature**, so
