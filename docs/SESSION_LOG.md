@@ -61,7 +61,7 @@ rebuild (~56 min) → Phase A stages 1-8.
     (BASIC needed from the operator); morning protocol can be confirmed now.
 11. Harnesses written + tested, not yet run: `wf_market_offset.py` (plan 4c,
     protocols t5/morning) and `wf_ranking_compare.py` (plans 3a/4b).
-12. Store rebuild running (started ~13:20, 7 chunks).
+12. Store rebuild running (started 14:52:57, 7 chunks).
 
 **Next:** rebuild done -> project_status -> train + promote (gate 1) ->
 wf_ranking_compare (gate 2) -> wf_market_offset t5 + morning (gate 4 half) ->
@@ -88,3 +88,24 @@ New source found while waiting: the BHA API publishes per-fixture going
 reports (`/bha/v1/fixtures/{year}/{id}/going`): stalls by distance, rail
 movements, GoingStick with inside/centre/outside splits, back to 2020, GB
 only. This is the plan-5a-bis collection path. Queued after the core results.
+
+### Hold-out confirmatory tests, pre-registered (2026-10-13 ~16:00)
+
+Written before any hold-out number exists. Each hypothesis gets ONE test on
+the golden hold-out (races from 2026-06-11); with ~4 such tests planned this
+session, the pass bar is one-sided p < 0.01.
+
+- **H1, sibling lead (ledger 2h).** Population: hold-out runners with <= 1
+  prior UK/IRE start and sibling history, in races with a complete BSP market.
+  x = `sibling_best_or_vs_field`; y = won - p_BSP; both within-race demeaned,
+  price basis (p, logit p, p^2) on p_BSP partialled out, race-clustered
+  bootstrap SE. Prediction from discovery: partial corr < 0 (discovery
+  -0.0641, t = -3.9, n = 3,746, vs the T-5 price). Pass: one-sided p < 0.01.
+  Expected n ~3,000, SE ~0.018.
+- **H2, atr_closing_in_hand (ledger 2b): not tested.** The ATR cache ends
+  2026-06-20, so the hold-out holds 10 days of sectionals. Even after a
+  2.5-hour backfill (~35k runners, SE ~0.0053) power at the discovered
+  +0.0105 is about 50%, and the ledger already rates that size economically
+  negligible. Recorded as untestable rather than spending the hold-out on it.
+- **H3/H4:** the plan-4c candidate(s), fixed from development folds only, on
+  the morning protocol (the only one with hold-out entry prices).
