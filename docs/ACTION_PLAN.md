@@ -252,6 +252,42 @@ it imperfectly, and this is a derived feature — no new data.
 
 **Success criterion:** CLV improvement under the walk-forward, or a ledger entry.
 
+### 3c-bis. Triage the families the model has never seen *(≈1 hour)*
+
+Before building anything new, point the triage tool at each family that is in
+the store and absent from the allowlist (ledger §2e): weather (10 columns, 0
+allowlisted), going detail (11/0), headgear and first-time equipment (4/0),
+debut features (11/0), `trainer_first_string_*` (7/0), draw (11/2), course and
+track detail (22/3).
+
+The allowlist was selected for **raw win prediction**, not for orthogonality to
+the market, so "not allowlisted" does not mean "tested and dead". Each family
+is one command:
+
+    python scripts/triage_features.py --prefix weather_
+
+**Success criterion:** every family either enters the shortlist or gets a
+ledger line. Expect mostly "priced" after §2b, but the cost is minutes.
+
+### 3c-ter. Sibling / dam-produce form for debutants *(≈1–2 days)*
+
+The model ranks debutants over a 13.9x probability range where the market uses
+53.6x (ledger §2d) — it cannot separate the 1.4 shot from the 200/1 shot.
+Sibling form is the most-used public debutant signal in racing and **does not
+exist in the store at all**. `dam` is in the results table, so it is
+computable: for each runner, the career record of other horses sharing its dam
+(wins, best official rating, best class) from races strictly before today.
+
+Mind hard rule 1 — it is a history feature, and siblings running on the same
+day must be date-strict (`tests/test_live_parity.py` will catch a slip).
+
+**Expectation-setting:** sale price, the canonical public proxy for a fancied
+debutant, tested dead on debutants (residual 0.005). Sibling form is evidence
+rather than a price, but do not expect much.
+
+**Success criterion:** improves debutant AUC toward the market's 0.825, or a
+ledger entry.
+
 ### 3d. Label correctness audit *(≈1 day)* — never done
 
 `plan.txt` Stage 1 called for this and it was never carried out. Cross-check
@@ -382,6 +418,20 @@ Stream API ladder.
 CLV purely by proxying the price move itself, which is not tradeable (the
 jockey-booking result, ledger §6). Validate on **continuation**, not
 correlation: does the signal predict the move *after* the observation point?
+
+### 5a-bis. Stalls position and rail movement — a collection gap, not a redundancy
+
+**The store has 11 draw columns and no stalls side.** Draw bias is close to
+meaningless without knowing whether the stalls are high, low or centre, and
+rail movements change the effective trip. Both are published in every GB going
+report. Unlike most candidates this does not add a new signal so much as make
+an **existing allowlisted feature (`draw`) mean what it is supposed to mean** —
+which is why it is worth doing even though the ledger says most public data is
+priced. See ledger §2e.
+
+**Success criterion:** `draw`-derived features show a materially different
+(ideally stronger) partial correlation once conditioned on stalls position, or
+the conditioning is shown to add nothing.
 
 ### 5b. GoingStick numeric readings — cheap, low ceiling
 

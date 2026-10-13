@@ -391,6 +391,113 @@ strongest argument yet for trying it.
 
 Beyond that the ceiling is informational, not architectural (§1c).
 
+## 2d. Debutants: the model can rank them, but only over a 14x range (2026-10-12)
+
+Follow-up to §2c, asking whether the "well-fancied debutant" the market sees
+is measurable from public data.
+
+**The model is not blind to debutants.** On 18,130 debutant runners it reaches
+**AUC 0.773** against the winner, and in races with two or more debutants it
+picks the winning one 48.3% of the time against 19.6% for random.
+
+**But debutants are its worst band relative to the market**, and the mechanism
+is compression, not bias:
+
+| debutant probabilities | sd | p10 | p90 | p90/p10 |
+|---|---|---|---|---|
+| model | 0.082 | 0.0132 | 0.1834 | **13.9x** |
+| market | 0.108 | 0.0039 | 0.2102 | **53.6x** |
+
+AUC by prior starts, model minus market: **0 starts −0.052** (the largest gap),
+1 start −0.030, 2-3 −0.029, 4-7 −0.033, 8-19 −0.035, 20+ −0.043.
+
+The market spreads debutants across a ~54x range of probability; the model
+compresses them toward the 8% base rate. It is perfectly calibrated *on
+average* over debutants (1.01x) while being unable to separate the 1.4 shot
+from the 200/1 shot.
+
+**Note it under-spreads at both ends.** Its p10 is 0.0132 against the market's
+0.0039, so it also cannot identify the no-hopers — and that half of the problem
+is a *public* one (weak yard, weak pedigree, weak jockey booking). It also
+matters more than it looks: in a per-race softmax, pushing genuine 200/1 shots
+down redistributes probability to the real contenders, so improving the bottom
+end sharpens the top end for free.
+
+### What public proxies exist, and what is missing
+
+| signal | in store | allowlisted |
+|---|---|---|
+| `sire_*` | 14 | 5 |
+| `damsire_*` | 14 | 4 |
+| `dam_*` (the dam's own produce record) | 2 | **0** |
+| sibling / progeny / produce form | **0** | **0** |
+| first-time-out / debut features | 11 | **0** |
+| `trainer_first_string_*` | 7 | **0** |
+| `first_time_headgear` | 1 | **0** |
+
+Two gaps worth acting on:
+
+1. **Sibling form does not exist at all.** "Full brother to a Group winner" is
+   the most-used public debutant signal in racing and the market leans on it
+   heavily. `dam` is already in the results table, so it is computable: for a
+   debutant, the career record of other horses sharing its dam — wins, best
+   official rating, best class — strictly from races before today. Mind hard
+   rule 1: this is a history feature and must exclude the current race, and
+   siblings running on the same day must be date-strict.
+2. **Everything debut-specific that already exists is invisible to the model** —
+   the dam's produce record, all 11 debut features, all 7
+   `trainer_first_string_*` columns. Free to test with
+   `scripts/triage_features.py`.
+
+**Expectation-setting:** sale price is the canonical public proxy for a fancied
+debutant and it tested **dead on debutants specifically** (residual correlation
+0.005, §5). That is real evidence against this whole family. Sibling form is
+different in kind — racecourse evidence from relatives rather than a price —
+but do not expect much.
+
+## 2e. Public data audit: what is collected and never used (2026-10-12)
+
+The store holds **1,178 columns**; the allowlist is **151**. Whole families sit
+at zero, and the allowlist is three-quarters trainer/horse/jockey history.
+
+**Collected and never shown to the model:**
+
+| family | in store | allowlisted |
+|---|---|---|
+| sectionals (`atr_*`) | 216 | 0 |
+| weather | 10 | 0 |
+| going detail | 11 | 0 |
+| headgear / first-time equipment | 4 | 0 |
+| debut features | 11 | 0 |
+| trainer-first-string | 7 | 0 |
+| course / track detail | 22 | 3 |
+| draw | 11 | 2 |
+
+The important nuance: **the allowlist was selected for raw win prediction, not
+for orthogonality to the market.** A family can be legitimately unimportant for
+predicting winners and still carry residual signal, so "not allowlisted" is not
+the same as "tested and dead". `scripts/triage_features.py --prefix <family>_`
+settles each one in minutes.
+
+**Not collected, though published:**
+
+- **Stalls position — entirely absent.** There are 11 draw columns but no
+  stalls side (high / low / centre) and no rail movement. **Draw bias is close
+  to meaningless without it:** a low draw is decisive at one configuration and
+  irrelevant at another, and rail movements change the effective trip. This is
+  in every published going report and is the largest course-data omission.
+- **GoingStick numeric reading — absent.** All 11 `going_*` columns are
+  one-hots of the going *word*. The penetrometer value is published per GB
+  meeting and is a finer-grained measure than the category.
+- **Exact distance in yards** — only `distance_furlongs` is stored. Races are
+  run over e.g. 1m 2f 7y, which matters for stamina at the margin.
+- **Course configuration** — inner/outer, round/straight not captured.
+
+Given §2b (sectionals priced) and the saturation finding, most of the
+already-collected families will probably also be priced. The stalls-position
+gap is different: it is a genuine collection omission that makes an existing
+allowlisted feature (`draw`) weaker than it needs to be.
+
 ## 3. `trainer_freq` stablemate leak — RESOLVED (2026-06-26)
 
 A **+56.8% ROI@BSP** was traced to `trainer_freq`, built with a `cumcount`
