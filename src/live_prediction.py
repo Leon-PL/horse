@@ -269,6 +269,51 @@ def load_lookahead_cache(
         return None
 
 
+#: Longest routine gap between UK/IRE race days (22 Dec -> 26 Dec). History
+#: ending further before a card than this means results are missing.
+MAX_HISTORY_GAP_DAYS = 4
+
+
+def _results_db_latest() -> pd.Timestamp | None:
+    """Latest settled race date in the results database, or None if absent."""
+    from src import database
+
+    if not os.path.exists(database.DB_PATH):
+        return None
+    try:
+        latest = database.get_latest_date()
+    except Exception:  # pragma: no cover - unreadable DB is reported elsewhere
+        logger.warning("Could not read the results database's latest date", exc_info=True)
+        return None
+    return pd.Timestamp(latest) if latest else None
+
+
+def _require_current_history(store_last, date_str: str) -> None:
+    """Refuse to price a card against history that is missing recent races.
+
+    The serving app never refreshes the store itself. A store a week behind
+    priced every horse that ran that week on stale form - days since its last
+    run, its latest result, its rating - and nothing said so.
+    """
+    if store_last is None:
+        return
+    store_last = pd.Timestamp(store_last).normalize()
+    db_last = _results_db_latest()
+    if db_last is not None and db_last.normalize() > store_last:
+        raise RuntimeError(
+            f"The feature store ends {store_last:%Y-%m-%d} but the results database holds races "
+            f"to {db_last.normalize():%Y-%m-%d}. Refresh the store on the training app's Data page "
+            "first, or every horse that ran since is priced on stale form."
+        )
+    newest = max(store_last, db_last.normalize()) if db_last is not None else store_last
+    gap = (pd.Timestamp(date_str).normalize() - newest).days
+    if gap > MAX_HISTORY_GAP_DAYS:
+        raise RuntimeError(
+            f"Results end {newest:%Y-%m-%d}, {gap} days before {date_str}. Sync the database "
+            "(python -m src.database --sync 14) and refresh the store before pricing live cards."
+        )
+
+
 def features_for_live_cards(
     cards: pd.DataFrame, date_str: str, *, store=None, use_cache: bool = True,
 ) -> pd.DataFrame:
@@ -285,11 +330,15 @@ def features_for_live_cards(
     if not store.exists():
         raise RuntimeError("Build the feature store on the training app's Data page first.")
     stored_fe_sig = store.meta().get("fe_signature")
-    if stored_fe_sig is not None and stored_fe_sig != fe_signature():
+    if stored_fe_sig is None:
+        # Used to skip the check entirely: an unsigned store was served unverified.
+        raise RuntimeError("The feature store carries no feature signature; rebuild it on the training app's Data page.")
+    if stored_fe_sig != fe_signature():
         raise RuntimeError("Feature code has changed; rebuild the feature store on the training app's Data page.")
     last = store.last_date()
     if last is not None and pd.Timestamp(date_str).normalize() <= pd.Timestamp(last).normalize():
         raise ValueError("Live prediction requires a race date after the stored results; use saved evaluations for historical races.")
+    _require_current_history(last, date_str)
     sig = cards_signature(cards)
     history_sig = feature_store_signature(store)
     if use_cache:

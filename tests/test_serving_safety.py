@@ -118,6 +118,7 @@ def test_live_card_changes_recompute_all_race_features(cache_dir, monkeypatch):
     monkeypatch.setattr(feature_store, "FeatureStore", Store)
     monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "current")
     monkeypatch.setattr(data_processor, "process_data", lambda df, save=False: df)
+    monkeypatch.setattr(live, "_results_db_latest", lambda: pd.Timestamp("2026-10-10"))
     cards = pd.DataFrame({"race_id": ["r1", "r1"], "horse_name": ["A", "B"], "odds": [2.0, 4.0]})
     first = live.features_for_live_cards(cards, "2026-10-11")
     assert first["odds_rank"].tolist() == [1.0, 2.0]
@@ -187,3 +188,46 @@ def test_cache_rejects_parquet_from_another_writer(cache_dir):
     # A competing cache writer published a different field before its metadata.
     pd.DataFrame({"horse_name": ["B", "C"]}).to_parquet(cache_dir / f"{date}.parquet", index=False)
     assert live.load_lookahead_cache(date, "cards-A") is None
+
+
+class _CurrentStore:
+    def __init__(self, last="2026-10-10", signature="current"):
+        self._last, self._sig = pd.Timestamp(last), signature
+    def exists(self): return True
+    def meta(self): return {"fe_signature": self._sig} if self._sig else {}
+    def last_date(self): return self._last
+    def featurize_live(self, card): return card.copy()
+
+
+@pytest.fixture
+def live_env(cache_dir, monkeypatch):
+    from src import featured_dataset, data_processor
+    monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "current")
+    monkeypatch.setattr(data_processor, "process_data", lambda df, save=False: df)
+    return pd.DataFrame({"race_id": ["r1"], "horse_name": ["A"], "odds": [2.0]})
+
+
+def test_store_behind_the_results_database_is_refused(live_env, monkeypatch):
+    """The serving app never refreshes the store: a stale one priced horses
+    that ran since on old form, silently."""
+    monkeypatch.setattr(live, "_results_db_latest", lambda: pd.Timestamp("2026-10-12"))
+    with pytest.raises(RuntimeError, match="Refresh the store"):
+        live.features_for_live_cards(live_env, "2026-10-13", store=_CurrentStore("2026-10-10"),
+                                     use_cache=False)
+
+
+def test_history_ending_days_before_the_card_is_refused(live_env, monkeypatch):
+    monkeypatch.setattr(live, "_results_db_latest", lambda: pd.Timestamp("2026-10-01"))
+    with pytest.raises(RuntimeError, match="Sync the database"):
+        live.features_for_live_cards(live_env, "2026-10-13", store=_CurrentStore("2026-10-01"),
+                                     use_cache=False)
+
+
+def test_christmas_gap_is_tolerated_and_unsigned_store_is_not(live_env, monkeypatch):
+    monkeypatch.setattr(live, "_results_db_latest", lambda: pd.Timestamp("2025-12-22"))
+    out = live.features_for_live_cards(live_env, "2025-12-26", store=_CurrentStore("2025-12-22"),
+                                       use_cache=False)
+    assert len(out) == 1
+    with pytest.raises(RuntimeError, match="no feature signature"):
+        live.features_for_live_cards(live_env, "2025-12-26",
+                                     store=_CurrentStore("2025-12-22", signature=None), use_cache=False)
