@@ -20,9 +20,11 @@ investment, unless you choose to buy the one dataset that remains untested
 What changed this session is that the answer can be trusted. Before measuring
 anything, the instrument was repaired: 543 races the scraper had silently
 dropped were restored; a look-ahead leak in the `sex` column, which had
-flattered every model trained here, was found and fixed; and the status check
+flattered every model trained here, was found and fixed; the status check
 now verifies the data underneath the feature store, not just the code that
-built it. A pre-registered golden hold-out (races from 2026-06-11) now exists
+built it; and live picks, which had been pricing horses with their history
+silently erased whenever racecards were freshly scraped, now see the features
+the model was trained on. A pre-registered golden hold-out (races from 2026-06-11) now exists
 for any future claim.
 
 ## 1. What was measured

@@ -173,3 +173,19 @@ microstructure screen -> wf_ranking_compare -> wf_market_offset t5/morning.
 
 **Next:** ranking result -> roadmap's last line -> live end-to-end check on
 the new model -> final status check -> report.
+
+### 2026-10-13 late night - session close
+
+32. **3a/4b (ledger 16)**: GBM ties logistic on top-1 (+0.36 pt, CI spans 0),
+    better on log loss; loosening hurts; market +5 pt. **Gate 2 fired.**
+33. **Clean production run `20261013_220519` promoted; project_status green
+    on all four links** (deep check, exit 0).
+34. **Serving bug fixed** (ledger 13): fresh racecard scrapes carried text
+    horse_ids, missing the store's integer-keyed history - 25/149 model
+    features wrong on 68-98% of runners on every first load and odds refresh.
+    Verified end to end through a forced fresh scrape.
+35. **Roadmap committed** (`docs/ROADMAP.md`). Gates 1 passed, 2 and 4 fired.
+
+Open, for whoever continues: BASIC data June-Oct 2026 (operator) for any T-5
+hold-out test; stalls/rail feature work (data collected); GoingStick fetch;
+move the BHA aliases into src/utils at the next rebuild needed anyway.
