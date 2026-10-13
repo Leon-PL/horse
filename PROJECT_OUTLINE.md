@@ -140,11 +140,28 @@ Wiring it in requires registering it in `_FE_SOURCE_FILES`.
 
 It reports all four links that must agree — results database → feature store →
 trained model → promoted model — and says plainly whether the system can serve
-a pick. Exit code 0 means yes. As of 2026-10-12 it reports **not ready**: the
-results database and feature store are ~114 days behind, the store was built by
-older FE code than is now on disk, and **no model is promoted to production**.
-The newest saved run (`20260623_223148`) predates both the `trainer_freq` leak
-fix and the store rebuild, so it should not be promoted.
+a pick. Exit code 0 means yes. By default it also recomputes the data
+signature from the database (about a minute; `--quick` skips it), checks the
+store against the database's latest date, and verifies the ATR-cache
+fingerprint - the three ways a store went stale with its code unchanged.
+
+**State on 2026-10-13** (see `docs/SESSION_LOG.md` for the detail): database
+to 2026-10-12 after a full-history relist restored 543 dropped races; store
+rebuilt at `63d88ff721a02632` after fixing the `sex` look-ahead leak (ledger
+15); a model retrained on that store is the promoted one (check the status
+report - a store rebuild always invalidates the promoted model until it is
+retrained).
+
+**Operational rule learned the hard way:** after a sync that adds rows dated
+*before* the store's last date (the sync re-lists the last seven days, so a
+late-resolving race can do this), rebuild with
+`scripts/build_feature_store_batched.py` before training.
+`get_featured_dataset` would otherwise detect the data change and attempt its
+in-memory full rebuild, which peaks past 16 GB on this machine.
+
+**Where the edge question stands:** decision gate 4 has fired. The
+market-offset model (plan 4c) and the free microstructure data (plan 5a) both
+fail; see `docs/ROADMAP.md` for the options.
 
 ### 4.1 The honest position on edge
 
@@ -166,6 +183,11 @@ and the market's advantage is *private* information (stable confidence on
 favourites and debutants) that no public source proxies.
 
 ### 4.2 Ranked next steps
+
+**Superseded on 2026-10-13 by [docs/ROADMAP.md](docs/ROADMAP.md):** items 1-3
+below are done or measured (the instrument is restored; microstructure in its
+free form and the market-offset model both fail, gate 4). The list is kept as
+it stood, for the record.
 
 The full version, with success criteria, costs and decision gates, is
 **[docs/ACTION_PLAN.md](docs/ACTION_PLAN.md)** — start there. Summary:
