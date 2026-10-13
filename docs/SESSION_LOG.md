@@ -109,3 +109,22 @@ session, the pass bar is one-sided p < 0.01.
   negligible. Recorded as untestable rather than spending the hold-out on it.
 - **H3/H4:** the plan-4c candidate(s), fixed from development folds only, on
   the morning protocol (the only one with hold-out entry prices).
+
+### 2026-10-13 late afternoon
+
+13. **H1 (sibling lead) FAILED on the hold-out**: partial -0.016, t -0.89,
+    p 0.19, n 3,711. Closed; ledger 2h.
+14. **Census check**: DB holds every non-Arabian Betfair race bar 3 Sporting
+    Life omissions. Fixed Aint/List/Nott abbreviations in betfair.py.
+15. **Serving guards**: features_for_live_cards refuses unsigned stores, stores
+    behind the DB, and history ending >4 days before the card.
+16. **project_status** now recomputes data_signature (deep), checks store vs
+    DB date, and verifies a new ATR-cache fingerprint (`src/feature_inputs.py`;
+    the sectional cache was read inside FE outside both signatures).
+17. **BHA going reports**: 37 months (2020-09..2023-09) downloaded; the API
+    then returned 429 for every request even at 5 s spacing - a long-window
+    quota. Resume later: `python scripts/fetch_bha_going.py --download --delay 5`.
+18. Store rebuild consolidating (staging `.commit-qvb8rtac`).
+
+**Next:** stamp_atr (scratchpad) -> project_status deep -> train+promote ->
+microstructure screen -> wf_ranking_compare -> wf_market_offset t5/morning.
