@@ -128,3 +128,21 @@ session, the pass bar is one-sided p < 0.01.
 
 **Next:** stamp_atr (scratchpad) -> project_status deep -> train+promote ->
 microstructure screen -> wf_ranking_compare -> wf_market_offset t5/morning.
+
+### 2026-10-13 evening
+
+19. **Store rebuilt and verified**: 755,706 rows to 2026-10-12, fe
+    `e522ca1b86174217`, data `b8676e9b1dcd6adf`, ATR stamp `ac2f21f41f9535c8`
+    (cache untouched since 2026-07-04, before the build). project_status: DB,
+    store (code AND data) and runs OK; only "no promoted model" blocks.
+20. **Microstructure (free 5a)**: morning money predicts later moves and the
+    result beyond the morning price, but NOTHING beyond BSP (T2 +0.0004, T6
+    +0.0007). T-5 timing edge: top-excess-volume CLV 0.9953 vs band 0.9809 -
+    real, < 1.0, fails. Morning-VWAP "1.0187" is look-ahead (flagged before
+    the run). Honest 11:00-price test pending: `extract_betfair_bsp.py` now
+    emits `ltp_1100`/`ltp_3600s`; re-extraction running to
+    `data/processed/betfair_bsp_early.parquet`, then
+    `python scripts/microstructure_clv.py` (protocol m11).
+21. **Matchbook harness works** (read-only check: login, 71 events/12h,
+    markets with prices). No balance/account calls made.
+22. Production training running (`train.py --no-refresh --promote`).
