@@ -51,7 +51,7 @@ FE_CONFIG_KEYS = [
 _FE_SOURCE_FILES = (
     "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
     "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
-    "src/atr_features.py",
+    "src/atr_features.py", "src/course_reports.py",
     "src/pedigree_backfill.py", "src/track_config.py", "src/utils.py",
     # Merge/column contract consumed by an FE stage: the sectional joins feed
     # add_atr_features.
@@ -78,6 +78,11 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "bet_settlement": "downstream of FE (bet settlement/reporting)",
     "each_way": "downstream of FE (bet settlement/reporting)",
     "betfair": "post-race prices joined at eval time, not an FE input",
+    "bha_reports": "network collection of BHA going reports into data/processed/bha_*.parquet; "
+                   "values reach features only via course_reports in process_data, "
+                   "covered by data_signature",
+    "bha_stewards_scraper": "BHA API session and token helpers used by bha_reports; "
+                            "no feature value passes through it",
 }
 
 

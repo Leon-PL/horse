@@ -511,6 +511,16 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
             backfill_pedigree()
         except Exception as exc:
             logger.warning("Pedigree backfill for new horses failed: %s", exc)
+        # Stalls position and rail changes for the new dates, before anything
+        # appends them to the feature store: fetched afterwards, they would
+        # change data_signature under stored rows and force a full rebuild.
+        try:
+            from src.bha_reports import refresh as refresh_bha
+            refresh_bha(sorted(inserted_dates))
+        except Exception as exc:
+            logger.warning("BHA going reports for new dates failed (stalls/rail stay "
+                           "missing for them; rerun scripts/fetch_bha_going.py --refresh "
+                           "before the next store append): %s", exc)
 
     # Save a CSV copy for the pipeline. This MUST be the full history, not the
     # scrape window: feature engineering computes cumulative/rolling features

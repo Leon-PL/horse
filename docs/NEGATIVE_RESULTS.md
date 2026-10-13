@@ -1332,6 +1332,91 @@ model; per-race paired differences with race-bootstrap CIs:
   training and free microstructure fail) say the reachable features are
   exhausted.
 
+## 17. Course profile: stalls, rail and course types - priced (2026-10-14)
+
+The operator's hypothesis: the store knows a course only by name, and courses
+suit types of horse - stiff tracks reward stamina, tight tracks reward handy
+types - so richer course information should help. In fact the store already
+held a static venue table (`src/track_config.py`: direction, shape,
+circumference, uphill finish, undulation, draw-bias strength, all 86 tracks)
+and the course-dynamics stage (11); what it lacked was **stalls position,
+rail movements, and any runner-specific measure of course suitability**.
+Race-level course constants cancel in a per-race model (2g), so every new
+feature is runner-specific. Built as `add_course_profile_features` (`cp_*`, 32
+columns) plus `src/course_reports.py`:
+
+- **Stalls position** per race, parsed from the BHA going report's free text
+  (1,500 formats; distances-first or position-first, "except", course-name
+  prefixes, straight/round groups). Parsed for **95.2% of 41,081 GB flat
+  races** 2020-09..2026-10; every miss checked is a bumper (no stalls) or a
+  report that does not name the race's distance. Never guessed.
+- **Rail movements**: the BHA races endpoint publishes `distanceChange`, the
+  yards rail movements add to each race. The results store only the
+  advertised trip, which never changes between meetings (Chester 1m2f70y was
+  run over 1m2f96y on 2025-05-07). Collection takes ~6 h; see below.
+- **Course-type affinity**: how a horse has run against its starting-price
+  expectation at courses sharing today's shape / uphill finish / undulation /
+  circuit size / direction, versus elsewhere; the same for its sire's progeny.
+- **Stamina**: where the horse's best runs came in trip versus today's actual
+  trip, and a prior-only per-course-and-trip slope of market-relative
+  performance on it ("some courses ride further than their trip").
+- **Draw**: a prior-only draw-bias slope per course and start, refined by
+  stalls position, shrunk hierarchically (course -> start -> stalls side).
+- **Which runner a course suits**: per-course-and-trip slopes on weight
+  carried, age and course experience.
+
+Course and sire statistics exclude the whole race day, not just the race:
+live picks are made before any of the day's results exist, and training must
+not see what serving cannot. Tested (`tests/test_course_profile_features.py`),
+with append parity under varying stalls and rail data.
+
+**Triage** (`won - p(T-5)` partial correlation, within-race centred, log-odds
+market basis, BH; development period, 72,582 races with a complete T-5 market):
+
+| family | best column | partial | t | verdict |
+|---|---|---|---|---|
+| draw slope with stalls position | `cp_draw_adv` | 0.0051 | 3.3 | priced (q 0.01, below the 0.01 bar) |
+| same, without stalls | `cp_draw_adv_nostalls` | 0.0044 | 2.8 | priced |
+| raw draw position | `cp_draw_vs_field` | 0.0030 | 1.9 | priced |
+| stamina: best-run trip vs today | `cp_stamina_gap` | 0.0045 | 3.5 | priced |
+| stamina x static uphill finish | `cp_stamina_x_stiff` | 0.0024 | 1.9 | priced |
+| course-specific stamina demand | `cp_stamina_x_course` | 0.0002 | 0.2 | nothing |
+| horse course-type affinity (5 dimensions) | best `cp_horse_shape_aff` | -0.0017 | -1.1 | nothing |
+| sire course-type affinity (4 dimensions) | best `cp_sire_hand_aff` | -0.0020 | -1.6 | nothing |
+| per-course weight / age / course-experience slopes | best `cp_weight_adv` | 0.0009 | 0.8 | nothing |
+
+Draw by segment, declared before running (BH across all 16 cells):
+
+| segment | races | `cp_draw_adv` partial | t |
+|---|---|---|---|
+| GB flat, stalls known | 34,651 | 0.0058 | 3.3 |
+| no stalls data (Ireland) | 7,724 | 0.0019 | 0.6 |
+| sprint <= 7.5f, 10+ runners | 10,223 | 0.0046 | 1.6 |
+| same, stalls known | 7,859 | 0.0055 | 1.7 |
+
+- **Stalls position is real information about the draw, and the market has
+  it.** Conditioning on it lifts the draw signal from 0.0044 to 0.0051 (0.0058
+  where stalls are known) - more than twice the best draw feature measured
+  before (0.0023, 2g) - and it is still half the 0.01 below which nothing has
+  ever survived. It does not concentrate in sprints or big fields, where draw
+  matters most, and the version built on the market's past *misses*
+  (`cp_draw_adv_resid`, 0.0012 where stalls are known) is weaker than the raw
+  one: the draw bias the market underprices in one period does not persist.
+- **Course suitability is not a persistent, unpriced trait.** Beating the
+  market at stiff, tight, undulating, big or left-handed courses does not
+  predict beating it at the next one (every affinity |partial| <= 0.0017, none
+  significant), for horses or for sires' progeny. Nor do courses differ
+  measurably, beyond what the price already says, in the stamina, weight, age
+  or experience they reward.
+- **Kept in the store, not allowlisted** unless the model-level test below
+  shows lift. The data is sound and free to keep; the stalls parser and BHA
+  join are the reusable part.
+
+Still to measure (recorded here when run): rail movements once collected,
+the pace slope (needs `pace_style_index` from the rebuilt store), and the
+model-level test - walk-forward race log loss of the production GBM with and
+without the `cp_*` family.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is

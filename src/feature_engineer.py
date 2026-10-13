@@ -2801,6 +2801,244 @@ def add_course_dynamics_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ── Course profile (cp_*) ──────────────────────────────────────────────────
+#: Shrinkage, in prior runs, of a horse's course-type affinity toward "no
+#: difference", and, in progeny runs, of its sire's.
+_CP_HORSE_K = 3.0
+_CP_SIRE_K = 30.0
+#: Ridge for course-level slopes, in units of within-race variance (about one
+#: per race): each level of the hierarchy shrinks toward the level above.
+_CP_SLOPE_LAMBDA = 10.0
+_CP_STALLS_CODE = {"inside": 0, "outside": 1, "centre": 2, "stands": 3, "far": 4}
+
+
+def _cp_prior_sums(keys, group_ids, metrics: dict) -> dict:
+    """Seed-aware prior-only sums, NaN contributions counted as zero.
+
+    *group_ids* is the exclusion unit: ``race_id`` for horse keys, the race
+    date for course and sire keys, so a course statistic never uses results
+    from earlier the same day, which live picks made that morning cannot see.
+    """
+    clean = {name: np.nan_to_num(np.asarray(v, dtype=np.float64), nan=0.0)
+             for name, v in metrics.items()}
+    return _cumulative(keys, group_ids, clean)
+
+
+def _cp_join(*parts) -> np.ndarray:
+    out = pd.Series(parts[0], copy=False).astype(str)
+    for p in parts[1:]:
+        out = out + "\x1f" + pd.Series(p, index=out.index, copy=False).astype(str)
+    return out.to_numpy()
+
+
+def _cp_slopes(keys_by_level, group_ids, x, y, prefix: str) -> np.ndarray:
+    """Hierarchically shrunk prior-only slope of *y* on *x*, finest level last.
+
+    Accumulates Sxy and Sxx per key over earlier race days; each level's slope
+    is ``(Sxy + lambda * parent) / (Sxx + lambda)``, the top level's parent 0.
+    """
+    ok = np.isfinite(x) & np.isfinite(y)
+    sxy = np.where(ok, x * y, 0.0)
+    sxx = np.where(ok, x * x, 0.0)
+    slope = np.zeros(len(x))
+    for level, keys in enumerate(keys_by_level):
+        sums = _cp_prior_sums(keys, group_ids, {
+            f"_cp_{prefix}_l{level}_sxy": sxy, f"_cp_{prefix}_l{level}_sxx": sxx})
+        slope = ((sums[f"_cp_{prefix}_l{level}_sxy"] + _CP_SLOPE_LAMBDA * slope)
+                 / (sums[f"_cp_{prefix}_l{level}_sxx"] + _CP_SLOPE_LAMBDA))
+    return slope
+
+
+def add_course_profile_features(df: pd.DataFrame) -> pd.DataFrame:
+    """What kind of course this is, and whether it suits this horse (``cp_*``).
+
+    The static venue table (``add_track_config_features``) describes a course
+    but cannot say whether it suits *this* runner, and race-level constants
+    cancel inside a per-race model. Every feature here is runner-specific:
+
+    * **Course-type affinity.** How the horse has run, against its market
+      expectation, at courses sharing today's shape, uphill finish,
+      undulation, circuit size and direction, compared with its runs
+      elsewhere. "Goes well at stiff tracks" transfers across venues where
+      plain course form (``horse_track_*``) cannot. The sire's progeny give the
+      same signal for horses with little or no form.
+    * **Stamina demand.** Where the horse's best runs have come in trip,
+      relative to today's *actual* distance (rail movements included), and a
+      prior-only per-course-and-trip slope of market-relative performance on
+      that stamina margin: some courses ride further than their trip.
+    * **Draw with stalls position.** A prior-only draw-bias slope per course
+      and start, refined by which rail the stalls are against that day; the
+      static ``track_draw_bias`` has strength but no direction.
+    * **Pace bias.** The same slope on expected early pace, per course and
+      trip.
+
+    Performance is the finishing percentile minus the percentile the starting
+    price implied, so it reads "ran better than expected" rather than "was a
+    good horse". Must run after ``add_track_config_features`` and
+    ``add_pace_style_features``; reads ``stalls_position`` and
+    ``rail_distance_change_yards`` from ``course_reports``.
+    """
+    if not {"track", "race_id", "_result_start"}.issubset(df.columns):
+        return df
+    logger.info("Engineering course-profile features...")
+    n = len(df)
+    hkey = _horse_key(df)
+    race = df["race_id"].to_numpy()
+    day = pd.to_datetime(df["race_date"], errors="coerce").dt.strftime("%Y-%m-%d").to_numpy()
+    race_s = pd.Series(race, index=df.index)
+
+    # ── Per-run outcome: percentile minus market-implied percentile ──────
+    started = df["_result_start"].fillna(0).to_numpy() > 0
+    pos = pd.to_numeric(df.get("_finish_pos_for_history"), errors="coerce").to_numpy(dtype=np.float64)
+    order_in = np.where(started, np.where(np.isfinite(pos), pos, 1e6), np.nan)
+    order_s = pd.Series(order_in, index=df.index)
+    n_started = order_s.groupby(race).transform("count").to_numpy(dtype=np.float64)
+    fin_rank = order_s.groupby(race).rank(method="average").to_numpy(dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fp = np.where(n_started >= 3, 1.0 - (fin_rank - 1.0) / (n_started - 1.0), np.nan)
+    odds = pd.to_numeric(df.get("odds"), errors="coerce").to_numpy(dtype=np.float64)
+    imp = pd.Series(np.where(started & (odds > 1.0), 1.0 / odds, np.nan), index=df.index)
+    n_priced = imp.groupby(race).transform("count").to_numpy(dtype=np.float64)
+    mkt_rank = imp.groupby(race).rank(method="average", ascending=False).to_numpy(dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        expected = 1.0 - (mkt_rank - 1.0) / (n_priced - 1.0)
+    resid = np.where((n_priced == n_started) & np.isfinite(fp), fp - expected, np.nan)
+
+    # ── Course descriptors for today's race ──────────────────────────────
+    def _num(col, default=np.nan):
+        if col not in df.columns:
+            return np.full(n, default)
+        return pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=np.float64)
+
+    circ = _num("track_circumference")
+    size_band = np.select([circ == 0, circ < 9.0, circ < 12.0], [0, 1, 2], default=3).astype(float)
+    size_band[~np.isfinite(circ)] = np.nan
+    dims = {
+        "shape": _num("track_shape"),
+        "stiff": _num("track_uphill_finish"),
+        "undulating": _num("track_downhill"),
+        "size": size_band,
+        "hand": _num("track_direction"),
+    }
+    track = df["track"].astype(str).to_numpy()
+    surface = np.where(df.get("surface", pd.Series("", index=df.index)).astype(str).str.lower()
+                       .eq("turf"), "T", "A")
+    code = (df.get("race_type", pd.Series("", index=df.index)).astype(str)
+            .map({"Flat": "F", "Hurdle": "H", "Chase": "C"}).fillna("O").to_numpy())
+    course = _cp_join(track, surface, code)
+
+    # ── Course-type affinity: horse, then sire ───────────────────────────
+    horse = df[hkey].astype(str).to_numpy()
+    base = _cp_prior_sums(horse, race, {"_cp_h_n": np.isfinite(resid), "_cp_h_s": resid})
+    for name, values in dims.items():
+        cat = _cp_prior_sums(_cp_join(horse, values), race, {
+            f"_cp_h_{name}_n": np.isfinite(resid), f"_cp_h_{name}_s": resid})
+        n_in, s_in = cat[f"_cp_h_{name}_n"], cat[f"_cp_h_{name}_s"]
+        n_out, s_out = base["_cp_h_n"] - n_in, base["_cp_h_s"] - s_in
+        aff = s_in / (n_in + _CP_HORSE_K) - s_out / (n_out + _CP_HORSE_K)
+        df[f"cp_horse_{name}_aff"] = np.where((n_in > 0) & (n_out > 0), aff, np.nan)
+        df[f"cp_horse_{name}_runs"] = n_in
+
+    if "sire" in df.columns:
+        sire_raw = df["sire"]
+        has_sire = sire_raw.notna().to_numpy() & sire_raw.astype(str).str.strip().ne("").to_numpy()
+        sire = sire_raw.astype(str).to_numpy()
+        sbase = _cp_prior_sums(sire, day, {"_cp_s_n": np.isfinite(resid), "_cp_s_s": resid})
+        for name in ("shape", "stiff", "size", "hand"):
+            cat = _cp_prior_sums(_cp_join(sire, dims[name]), day, {
+                f"_cp_s_{name}_n": np.isfinite(resid), f"_cp_s_{name}_s": resid})
+            n_in, s_in = cat[f"_cp_s_{name}_n"], cat[f"_cp_s_{name}_s"]
+            n_out, s_out = sbase["_cp_s_n"] - n_in, sbase["_cp_s_s"] - s_in
+            aff = s_in / (n_in + _CP_SIRE_K) - s_out / (n_out + _CP_SIRE_K)
+            df[f"cp_sire_{name}_aff"] = np.where(has_sire & (n_in > 0) & (n_out > 0), aff, np.nan)
+
+    # ── Stamina: best-run trip vs today's actual trip, and course demand ─
+    dist = _num("distance_furlongs")
+    rail = _num("rail_distance_change_yards")
+    actual = dist + np.nan_to_num(rail, nan=0.0) / 220.0
+    with np.errstate(invalid="ignore", divide="ignore"):
+        logd = np.log(np.where(actual > 0, actual, np.nan))
+    weight = np.where(np.isfinite(fp) & np.isfinite(logd), fp * fp, np.nan)
+    trip = _cp_prior_sums(horse, race, {"_cp_trip_w": weight, "_cp_trip_wd": weight * logd})
+    with np.errstate(invalid="ignore", divide="ignore"):
+        best_trip = np.where(trip["_cp_trip_w"] > 0, trip["_cp_trip_wd"] / trip["_cp_trip_w"], np.nan)
+    stamina_gap = best_trip - logd
+    df["cp_stamina_gap"] = stamina_gap
+
+    df["_cp_placed_logd"] = np.where(started & (fp >= 2.0 / 3.0), logd, np.nan)
+    df["_cp_placed_max"] = _running_extreme(df, hkey, "_cp_placed_logd", kind="max", prev=False)
+    df["cp_stamina_margin"] = _ffill_prev(df, hkey, "_cp_placed_max").to_numpy(dtype=np.float64) - logd
+    df = df.drop(columns=["_cp_placed_logd", "_cp_placed_max"])
+
+    gap_s = pd.Series(stamina_gap, index=df.index)
+    x_stamina = (gap_s - gap_s.groupby(race).transform("mean")).to_numpy(dtype=np.float64)
+    df["cp_stamina_gap_vs_field"] = x_stamina
+    band = np.where(actual <= 12.0, np.round(actual), 2.0 * np.round(actual / 2.0))
+    course_trip = _cp_join(course, band)
+    stamina_slope = _cp_slopes([course, course_trip], day, x_stamina, resid, "stamina")
+    df["cp_course_stamina_slope"] = stamina_slope
+    df["cp_stamina_x_course"] = x_stamina * stamina_slope
+    df["cp_stamina_x_stiff"] = x_stamina * np.nan_to_num(dims["stiff"], nan=0.0)
+
+    # ── Rail movements ───────────────────────────────────────────────────
+    df["cp_rail_yards"] = rail
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rail_pct = rail / (dist * 220.0)
+    df["cp_rail_pct"] = rail_pct
+    df["cp_stamina_x_rail"] = x_stamina * np.nan_to_num(rail_pct, nan=0.0)
+
+    # ── Draw bias by course, start and stalls position (flat only) ───────
+    stalls = (df["stalls_position"].astype("string").fillna("na").to_numpy()
+              if "stalls_position" in df.columns else np.full(n, "na"))
+    df["cp_stalls_code"] = pd.Series(stalls).map(_CP_STALLS_CODE).to_numpy(dtype=np.float64)
+    draw = _num("draw")
+    drawn = (code == "F") & (draw > 0)
+    draw_s = pd.Series(np.where(drawn, draw, np.nan), index=df.index)
+    max_draw = draw_s.groupby(race).transform("max").to_numpy(dtype=np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        dpos = pd.Series(np.where(drawn & (max_draw >= 4), (draw - 1.0) / (max_draw - 1.0), np.nan),
+                         index=df.index)
+    x_draw = (dpos - dpos.groupby(race).transform("mean")).to_numpy(dtype=np.float64)
+    fp_c = fp - pd.Series(fp, index=df.index).groupby(race).transform("mean").to_numpy(dtype=np.float64)
+    start = _cp_join(course, np.round(dist, 1))
+    draw_levels = [course, start, _cp_join(start, stalls)]
+    slope_raw = _cp_slopes(draw_levels, day, x_draw, fp_c, "draw_raw")
+    slope_res = _cp_slopes(draw_levels, day, x_draw, resid, "draw_res")
+    slope_nostalls = _cp_slopes(draw_levels[:2], day, x_draw, fp_c, "draw_ns")
+    df["cp_draw_vs_field"] = x_draw
+    df["cp_draw_adv"] = x_draw * slope_raw
+    df["cp_draw_adv_resid"] = x_draw * slope_res
+    df["cp_draw_adv_nostalls"] = x_draw * slope_nostalls
+    df["cp_draw_stalls_runs"] = _cp_prior_sums(draw_levels[2], day, {
+        "_cp_draw_k2_n": np.isfinite(x_draw) & np.isfinite(fp_c)})["_cp_draw_k2_n"]
+
+    # ── Pace bias by course and trip ─────────────────────────────────────
+    if "pace_style_index" in df.columns:
+        pace = pd.to_numeric(df["pace_style_index"], errors="coerce")
+        x_pace = (pace - pace.groupby(race_s.to_numpy()).transform("mean")).to_numpy(dtype=np.float64)
+        pace_levels = [course, course_trip]
+        df["cp_pace_adv"] = x_pace * _cp_slopes(pace_levels, day, x_pace, fp_c, "pace_raw")
+        df["cp_pace_adv_resid"] = x_pace * _cp_slopes(pace_levels, day, x_pace, resid, "pace_res")
+
+    # ── Which kind of runner this course and trip suit ───────────────────
+    # Per-course-and-trip slopes on runner attributes: weight carried (stiff
+    # finishes), age, and course craft. Fixed scales keep the ridge
+    # comparable across attributes without a frame-dependent standardisation,
+    # which would break append parity.
+    course_runs = _cp_prior_sums(_cp_join(horse, track), race, {"_cp_ct_n": started})["_cp_ct_n"]
+    attrs = {
+        "weight": _num("weight_lbs") / 10.0,
+        "age": _num("age") / 2.0,
+        "course_exp": np.log1p(course_runs),
+    }
+    for name, values in attrs.items():
+        vs = pd.Series(values, index=df.index)
+        x = (vs - vs.groupby(race).transform("mean")).to_numpy(dtype=np.float64)
+        df[f"cp_{name}_adv"] = x * _cp_slopes([course, course_trip], day, x, fp_c, name)
+
+    return df
+
+
 # add_weather_features and add_trainer_travel_features were removed on
 # 2026-10-13. Both families measured dead (ledger 2g: every weather signal
 # scores 0.0000 because weather is race-level; ledger 6: travel is noise), and
@@ -4731,7 +4969,8 @@ def engineer_features(
         add_field_quality_features,
         add_track_config_features,         # static venue data
         add_course_dynamics_features,      # course experience/handedness/pace-bias/travel
-        add_supplementary_features,        # consistency, class, campaign, seasonal
+        add_course_profile_features,       # course-type affinity, stamina, stalls draw, rail
+        add_supplementary_features,       # consistency, class, campaign, seasonal
         add_race_relative_signal_features,
         add_interaction_features,
         apply_conditional_feature_masks,   # zero irrelevant features

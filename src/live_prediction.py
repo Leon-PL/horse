@@ -131,9 +131,12 @@ def feature_engineer_with_history_core(
                 grp = "race_id" if col in race_level_vars else ["race_id", col]
                 combined[freq_col] = combined.groupby(grp)[freq_col].transform("min")
 
+    # Missing means unknown for these, not zero; training leaves them missing.
+    # A rail change of 0 is a real value ("no movement") that Irish races and
+    # unreported fixtures do not have.
     weather_cols = {
         "weather_temp_max", "weather_temp_min", "weather_precip_mm",
-        "weather_wind_kmh", "weather_precip_prev3",
+        "weather_wind_kmh", "weather_precip_prev3", "rail_distance_change_yards",
     }
     numeric_cols = combined.select_dtypes(include=["number"]).columns.difference(weather_cols)
     if len(numeric_cols) > 0:
@@ -333,6 +336,28 @@ def _require_current_history(store_last, date_str: str) -> None:
         )
 
 
+def _refresh_course_reports(date_str: str) -> None:
+    """Fetch the day's BHA going reports so the card gets its stalls and rail.
+
+    Best effort: picks still run without them, with those features missing,
+    which is logged because a model using them would then see values it was
+    never trained on.
+    """
+    from src import course_reports
+    try:
+        going = pd.read_parquet(course_reports.GOING_PATH, columns=["race_date"])
+        if (going["race_date"].astype(str) == str(date_str)).any():
+            return
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        from src.bha_reports import refresh
+        refresh([date_str])
+    except Exception as exc:
+        logger.warning("BHA going reports for %s unavailable; stalls position and rail "
+                       "changes are missing from today's card features: %s", date_str, exc)
+
+
 def features_for_live_cards(
     cards: pd.DataFrame, date_str: str, *, store=None, use_cache: bool = True,
 ) -> pd.DataFrame:
@@ -364,6 +389,7 @@ def features_for_live_cards(
         cached = load_lookahead_cache(date_str, sig, history_sig=history_sig)
         if cached is not None and not cached.empty:
             return cached
+    _refresh_course_reports(date_str)
     card = cards.copy()
     card = _match_store_id_types(card)
     card["won"] = 0

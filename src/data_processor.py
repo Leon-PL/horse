@@ -433,6 +433,12 @@ def process_data(
 
     df = clean_data(df)
 
+    # Stalls position and rail-adjusted distance (GB, BHA going reports).
+    # Joined here, not in FE, so data_signature covers the values: a later
+    # backfill of the BHA files invalidates the store like any history edit.
+    from src.course_reports import attach_course_reports
+    df = attach_course_reports(df)
+
     # Chronological ordering is required before any cumulative encodings.
     if "race_date" in df.columns:
         race_dt = pd.to_datetime(df["race_date"], errors="coerce")
