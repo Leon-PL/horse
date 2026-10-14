@@ -236,3 +236,108 @@ def test_batched_rebuild_refuses_to_stamp_code_that_changed_mid_build(store, row
     with pytest.raises(RuntimeError, match="changed while the store was building"):
         batched.main()
     assert _snapshot(store) == original
+
+
+@pytest.fixture
+def dataset(store, rows, monkeypatch):
+    from src import featured_dataset
+
+    monkeypatch.setattr(featured_dataset, "FeatureStore", lambda: store)
+    monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "test-fe")
+    monkeypatch.setattr(featured_dataset, "_atr_signature", lambda cutoff: {
+        "cutoff": str(pd.Timestamp(cutoff).date()), "sig": "test-atr",
+    })
+    featured_dataset._stamp(store, "test-fe", featured_dataset.data_signature(rows.iloc[:2]))
+    return featured_dataset
+
+
+@pytest.mark.parametrize("rebuild", [False, True])
+def test_dataset_lock_spans_decision_commit_stamp_and_load(
+    dataset, store, rows, monkeypatch, rebuild,
+):
+    """A second writer cannot replace the generation between public methods."""
+    competing = FeatureStore(store.root)
+    checkpoints = []
+
+    def check_competing_writer(phase):
+        checkpoints.append(phase)
+        with pytest.raises(RuntimeError, match="in use by another operation"):
+            competing.append(rows)
+
+    def signature():
+        check_competing_writer("decision")
+        return "test-fe"
+
+    original_data_signature = dataset.data_signature
+    original_stamp = dataset._stamp
+
+    def data_signature(*args, **kwargs):
+        check_competing_writer("source-signature")
+        return original_data_signature(*args, **kwargs)
+
+    def stamp(*args, **kwargs):
+        check_competing_writer("after-row-commit")
+        return original_stamp(*args, **kwargs)
+
+    def columns(*args, **kwargs):
+        check_competing_writer("before-final-load")
+        return None
+
+    monkeypatch.setattr(dataset, "fe_signature", signature)
+    monkeypatch.setattr(dataset, "data_signature", data_signature)
+    monkeypatch.setattr(dataset, "_stamp", stamp)
+    monkeypatch.setattr(dataset, "_model_load_columns", columns)
+    featured = dataset.get_featured_dataset(processed=rows, rebuild=rebuild)
+
+    assert featured["history_count"].tolist() == list(range(len(rows)))
+    assert {"decision", "source-signature", "after-row-commit"} <= set(checkpoints)
+    if not rebuild:
+        assert "before-final-load" in checkpoints
+    _assert_complete(store, rows)
+    assert store.meta()["data_signature"] == original_data_signature(rows)
+    assert competing.append(rows).empty  # lock is released after the whole operation
+
+
+@pytest.mark.parametrize("failure", ["serialization", "flush", "replace"])
+def test_failed_signature_stamp_keeps_complete_metadata(
+    dataset, store, rows, monkeypatch, failure,
+):
+    original = _snapshot(store)
+
+    def broken_dump(obj, fh, **kwargs):
+        fh.write('{"incomplete":')
+        raise OSError("injected stamp failure")
+
+    def broken_operation(*args, **kwargs):
+        raise OSError("injected stamp failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "serialization":
+            patch.setattr(dataset.json, "dump", broken_dump)
+        else:
+            patch.setattr(dataset.os, "fsync" if failure == "flush" else "replace", broken_operation)
+        with pytest.raises(OSError, match="injected stamp failure"):
+            dataset._stamp(store, "new-fe", "new-data")
+    assert _snapshot(store) == original
+    assert not list(Path(store.root).glob(".meta-*.json"))
+    _assert_complete(store, rows.iloc[:2])
+    dataset._stamp(store, "new-fe", "new-data")
+    assert store.meta()["fe_signature"] == "new-fe"
+    assert store.meta()["data_signature"] == "new-data"
+    assert store.meta()["last_date"] == "2026-01-01"
+
+
+def test_signature_stamp_holds_lock_while_replacing_metadata(dataset, store, monkeypatch):
+    competing = FeatureStore(store.root)
+    original_replace = os.replace
+    checked = []
+
+    def replace(source, target):
+        with pytest.raises(RuntimeError, match="in use by another operation"):
+            competing.load_counts_state()
+        checked.append(target)
+        return original_replace(source, target)
+
+    monkeypatch.setattr(dataset.os, "replace", replace)
+    dataset._stamp(store, "next-fe", "next-data")
+    assert checked == [store.meta_path]

@@ -36,7 +36,7 @@ def max_drawdown(pnl_series: np.ndarray) -> float:
     if len(pnl_series) == 0:
         return 0.0
     cum = np.cumsum(pnl_series)
-    peak = np.maximum.accumulate(cum)
+    peak = np.maximum.accumulate(np.maximum(cum, 0.0))
     dd = peak - cum
     return float(dd.max())
 
@@ -151,17 +151,17 @@ def analyse_test_set(
         if valid_decimal_odds(odds_val):
             pnl = settle_win_bet(odds_val, best["won"] == 1)
             all_bets.append({
-            "race_date": rd_str,
-            "race_id": race_id,
-            "track": best.get("track", ""),
-            "strategy": "top_pick",
-            "horse_name": best["horse_name"],
-            "model_prob": round(float(best["model_prob"]), 4),
-            "odds": round(odds_val, 2),
-            "won": int(best["won"]),
-            "stake": 1.0,
-            "pnl": round(pnl, 2),
-            "clv": round(float(best["model_prob"]) * odds_val, 4) if has_odds else None,
+                "race_date": rd_str,
+                "race_id": race_id,
+                "track": best.get("track", ""),
+                "strategy": "top_pick",
+                "horse_name": best["horse_name"],
+                "model_prob": round(float(best["model_prob"]), 4),
+                "odds": round(odds_val, 2),
+                "won": int(best["won"]),
+                "stake": 1.0,
+                "pnl": round(pnl, 2),
+                "clv": round(float(best["model_prob"]) * odds_val, 4),
             })
 
         # Strategy 2 — Value Bets (odds-dependent threshold)

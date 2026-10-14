@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 
 import numpy as np
 
@@ -190,13 +191,24 @@ def _atr_signature(cutoff) -> dict:
 
 
 def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
-    m = store.meta()
-    m["fe_signature"] = fe_sig
-    m["data_signature"] = data_sig
-    if store.last_date() is not None:
-        m["atr_signature"] = _atr_signature(store.last_date())
-    with open(store.meta_path, "w", encoding="utf-8") as fh:
-        json.dump(m, fh, indent=2, sort_keys=True, default=str)
+    """Atomically stamp metadata while retaining the dataset operation's lock."""
+    with store._access():
+        m = store.meta()
+        m["fe_signature"] = fe_sig
+        m["data_signature"] = data_sig
+        last = store.last_date()
+        if last is not None:
+            m["atr_signature"] = _atr_signature(last)
+        fd, temporary = tempfile.mkstemp(prefix=".meta-", suffix=".json", dir=store.root)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(m, fh, indent=2, sort_keys=True, default=str)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(temporary, store.meta_path)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
 
 
 def _rebuild(store: FeatureStore, processed: pd.DataFrame, fe_sig: str) -> pd.DataFrame:
@@ -260,37 +272,41 @@ def get_featured_dataset(
         rebuild: force a full rebuild even if the store looks current.
     """
     store = FeatureStore()
-    fe_sig = fe_signature()
-    meta = store.meta()
-
     if processed is None:
         processed = process_data(save=False)
 
-    if rebuild or not store.exists():
-        return _rebuild(store, processed, fe_sig)
+    # The decision, row/state commit, signature stamp and final load must all
+    # refer to one generation. Locking individual store methods leaves gaps
+    # where another writer could advance the store and receive our signature.
+    with store._access():
+        fe_sig = fe_signature()
+        meta = store.meta()
 
-    if meta.get("fe_signature") != fe_sig:
-        logger.info("FeatureStore stale: FE code/config changed — full rebuild")
-        return _rebuild(store, processed, fe_sig)
-
-    last = store.last_date()
-    if meta.get("data_signature") != data_signature(processed, cutoff=last):
-        logger.info(
-            "FeatureStore stale: history changed beneath it (backfill/cleanup) "
-            "— full rebuild"
-        )
-        return _rebuild(store, processed, fe_sig)
-
-    atr = meta.get("atr_signature")
-    if isinstance(atr, dict) and atr.get("cutoff"):
-        if _atr_signature(atr["cutoff"])["sig"] != atr.get("sig"):
-            logger.info("FeatureStore stale: ATR sectional cache changed beneath it — full rebuild")
+        if rebuild or not store.exists():
             return _rebuild(store, processed, fe_sig)
 
-    store.append(processed)
-    _stamp(store, fe_sig, data_signature(processed, cutoff=store.last_date()))
-    cols = _model_load_columns(store)
-    if cols is not None:
-        logger.info("FeatureStore: loading %d of %d columns (allow-list active)",
-                    len(cols), len(store.featured_schema_names()))
-    return store.load_featured(columns=cols)
+        if meta.get("fe_signature") != fe_sig:
+            logger.info("FeatureStore stale: FE code/config changed — full rebuild")
+            return _rebuild(store, processed, fe_sig)
+
+        last = store.last_date()
+        if meta.get("data_signature") != data_signature(processed, cutoff=last):
+            logger.info(
+                "FeatureStore stale: history changed beneath it (backfill/cleanup) "
+                "— full rebuild"
+            )
+            return _rebuild(store, processed, fe_sig)
+
+        atr = meta.get("atr_signature")
+        if isinstance(atr, dict) and atr.get("cutoff"):
+            if _atr_signature(atr["cutoff"])["sig"] != atr.get("sig"):
+                logger.info("FeatureStore stale: ATR sectional cache changed beneath it — full rebuild")
+                return _rebuild(store, processed, fe_sig)
+
+        store.append(processed)
+        _stamp(store, fe_sig, data_signature(processed, cutoff=store.last_date()))
+        cols = _model_load_columns(store)
+        if cols is not None:
+            logger.info("FeatureStore: loading %d of %d columns (allow-list active)",
+                        len(cols), len(store.featured_schema_names()))
+        return store.load_featured(columns=cols)

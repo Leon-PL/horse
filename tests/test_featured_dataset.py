@@ -4,6 +4,8 @@ Covers the data fingerprint and the build-vs-append decision. FeatureStore is
 faked so we exercise the routing logic without a real (slow) FE build.
 """
 
+from contextlib import nullcontext
+
 import pandas as pd
 import pytest
 
@@ -55,6 +57,9 @@ class _FakeStore:
         self._exists, self._meta, self._last = exists, meta, last_date
         self.meta_path = "(fake)"
         self.calls: list[str] = []
+
+    def _access(self):
+        return nullcontext()
 
     def exists(self):
         return self._exists
