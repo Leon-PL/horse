@@ -1430,6 +1430,37 @@ favourite, with the highest excess volume in its race).
 **A pass is a candidate, not a result**: confirming it needs Betfair BASIC
 files from 2026-06-11 (the hold-out has volume but no 11:00 price), scored once.
 
+### Result (`scripts/morning_money_segments.py`): both fail
+
+60,733 races, 537,646 runners (2020-09..2026-06), 2% commission:
+
+| cell | bets | win rate | median CLV [CI] | geo CLV | beat close | ROI at 11:00 [CI] | ROI at BSP | quarters + |
+|---|---|---|---|---|---|---|---|---|
+| **H1** pick & debutant | 2,535 | 0.238 | 1.0008 [0.9895, 1.0205] (97.5%) | 0.9780 | 50.0% | +4.79% [-7.08, +17.81] | +2.03% | 11/24 |
+| baseline: debutants in band | 25,020 | 0.107 | 0.9429 [0.9366, 0.9506] | 0.9034 | 44.1% | +2.71% [-2.75, +8.33] | -0.33% | 13/24 |
+| **H2** pick & favourite | 25,491 | 0.363 | **1.0122 [1.0086, 1.0151]** (97.5%) | 0.9931 | 52.1% | +0.99% [-0.97, +3.05] | -1.11% | 16/24 |
+| baseline: favourites in band | 60,416 | 0.321 | 0.9958 [0.9932, 0.9992] | 0.9755 | 48.6% | -0.57% [-2.02, +0.84] | -0.87% | 10/24 |
+| all picks (ledger 14 m11, reproduced) | 60,733 | 0.236 | 1.0000 [1.0000, 1.0011] | 0.9711 | 49.7% | +0.85% [-1.12, +2.83] | -2.72% | 13/24 |
+| pick & not debutant | 58,198 | 0.235 | 1.0000 [1.0000, 1.0008] | 0.9708 | 49.7% | +0.67% [-1.41, +2.66] | -2.92% | 13/24 |
+| pick & not favourite | 35,242 | 0.143 | 0.9887 [0.9828, 0.9948] | 0.9555 | 47.9% | +0.75% [-2.25, +3.87] | -3.88% | 12/24 |
+| within-debutant top excess | 9,505 | 0.141 | 0.9577 [0.9494, 0.9682] | 0.9217 | 45.8% | +1.05% [-6.51, +8.85] | -0.44% | 10/24 |
+
+- **H1 fails.** The money is no more informative on debutants: the median CLV
+  interval spans 1.0, the geometric mean is below 1, and 2,535 bets cannot
+  resolve the ROI (interval 25 points wide).
+- **H2 fails, as a near miss in the predicted direction.** Where the money
+  backs the 11:00 favourite, the median bet beats the close (1.0122, interval
+  clear of 1.0) and it carries most of the rule's timing value (non-favourite
+  picks: 0.9887). But the geometric mean is 0.9931 - favourites that drift
+  lose more than shorteners gain - and the ROI, +0.99%, has an interval
+  spanning zero. Same shape as the T-5 timing effect in ledger 14: real, and
+  too small to bank after commission.
+- **No hold-out test is warranted**; neither passed on development data.
+- The debutant *baseline* returns +2.71% at 11:00 against -0.33% at BSP with a
+  median CLV of 0.943 - debutants drift after 11:00 on average, yet the
+  winners among them do not. Descriptive, untested, and the interval spans
+  zero; noted only as a question.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
