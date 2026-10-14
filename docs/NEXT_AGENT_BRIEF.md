@@ -3,6 +3,12 @@
 **Written 2026-10-13 for the next agent. Re-read this file after any context
 compaction — it is the one thing that survives.**
 
+> **2026-10-14:** the operator has chosen the next work. Read
+> [EXPLORATION_PLAN.md](EXPLORATION_PLAN.md) — five unconventional ideas
+> (execution timing, Tote exotics priced from Betfair, forecast ground
+> changes, breeze-up times, morning market-making feasibility), in order,
+> with data notes, pass bars and stopping rules. The rules below still apply.
+
 Your mandate is broad: audit every stage of this project, fix what is broken,
 improve what is weak, and push the work as far as it will go. You have full
 discretion over what to pursue, including online research and collecting new
