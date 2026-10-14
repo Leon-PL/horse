@@ -1393,6 +1393,43 @@ new run is promoted because it is trained on what it is served.
 - **The production model was trained on finishers only.**
 - **The tripwire is now four for four.**
 
+## 19. Morning money on debutants and favourites (pre-registered 2026-10-14)
+
+*Written and committed before the test was run.*
+
+**Hypothesis.** Following the money at 11:00 reached break-even overall
+(ledger 14: median CLV 1.0000, ROI +0.85% [-1.12, +2.85]). If that value comes
+from private information the morning market has not absorbed, it should
+concentrate where the market's informational lead over form is largest
+(ledgers 8 and 2d): **debutants** and **favourites**.
+
+**Data.** Development period only; the m11 protocol of ledger 14: races off at
+or after 11:30 UK, every runner priced at 11:00 (`ltp_1100`, BASIC) and at
+BSP, morning volume from the public BSP files. *Debutant* = empty pre-race
+form string. The results start on 2020-09-15, so a count of earlier runs in
+the database would mislabel older horses as debutants, while the racecard
+form string grows run by run and includes runs before the database started.
+*Favourite* = the shortest 11:00 price in the race (ties included).
+
+**Rule** (unchanged from ledger 14): in each race, back the runner with the
+highest excess morning volume if its 11:00 price is between 1.5 and 50.
+
+**Primary tests (two):**
+- **H1:** the rule's selections that are debutants; matched baseline: every
+  debutant in the band.
+- **H2:** the rule's selections that are the 11:00 favourite; matched
+  baseline: every 11:00 favourite in the band.
+
+**Pass, for each:** median CLV (11:00 price / BSP) above 1.0 with a
+race-clustered **97.5%** interval excluding 1.0 (Bonferroni over the two),
+geometric-mean CLV above 1.0, and ROI at the taken price after 2% commission
+above zero. Reported but not tested: the complements (selections that are not
+debutants, not favourites) and a within-segment rule (the debutant, or the
+favourite, with the highest excess volume in its race).
+
+**A pass is a candidate, not a result**: confirming it needs Betfair BASIC
+files from 2026-06-11 (the hold-out has volume but no 11:00 price), scored once.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
