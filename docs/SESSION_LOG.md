@@ -232,3 +232,10 @@ store rebuild + retrain + promote after the rail backfill completes
     `faabec2` (578 passed, same fe signature) and committed as one unit on
     `checkpoint/eval-harness-and-guards` (`5c7780e`). Retrain + promote with
     the promoted run's settings (`train.py --no-refresh --promote`).
+45. Retrain `20261014_100406` promoted (fe `221fcd4d`); status green; live
+    end-to-end OK (337 runners, 149/149 features).
+46. **Fourth tripwire catch (ledger 18)**: its report showed each-way +79% at
+    CLV 0.78. Training, the training app's evaluation and the backtester had
+    dropped every non-finisher (finish_position 0) since the first commit.
+    Fixed `c40f85c` (placed labels via `bet_settlement.placed_mask`); honest
+    run `20261014_105017` promoted; status green.
