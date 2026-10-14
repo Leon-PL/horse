@@ -182,3 +182,17 @@ class TestWinExchangeSettlement:
         odds = np.full(10_000, 2.0)
         won = np.arange(10_000) % 2 == 0  # exactly 50% strike rate
         assert settle_win_exchange_bets(odds, won).mean() == pytest.approx(-0.01)
+
+
+def test_betfair_tick_down_uses_the_increment_below_the_price():
+    from src.bet_settlement import betfair_tick_down
+    got = betfair_tick_down([1.5, 2.0, 2.02, 3.0, 4.0, 5.0, 10.0, 15.0, 20.0, 50.0, 1.01])
+    assert got.tolist() == [1.49, 1.99, 2.0, 2.98, 3.95, 4.9, 9.8, 14.5, 19.5, 48.0, 1.01]
+    assert betfair_tick_down([10.0], ticks=2).tolist() == [9.6]
+    # An off-ladder BSP steps down within its band.
+    assert betfair_tick_down([7.33]).tolist() == [7.13]
+
+
+def test_apply_reduction_factor_cuts_decimal_odds_with_a_floor():
+    from src.bet_settlement import apply_reduction_factor
+    assert apply_reduction_factor([10.0, 1.05], [0.75, 0.5]).tolist() == [7.5, 1.01]

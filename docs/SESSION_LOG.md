@@ -189,3 +189,18 @@ the new model -> final status check -> report.
 Open, for whoever continues: BASIC data June-Oct 2026 (operator) for any T-5
 hold-out test; stalls/rail feature work (data collected); GoingStick fetch;
 move the BHA aliases into src/utils at the next rebuild needed anyway.
+
+## 2026-10-14 evening - EXPLORATION_PLAN session
+
+**Start state:** `project_status.py` ready (fe `221fcd4db0fc5631`, run
+`20261014_105017` promoted); tree clean; BHA rail backfill running (not a store
+build).
+
+36. **Idea B set up.** Found a bias the earlier timing tests (ledgers 14, 19)
+    missed: a back bet matched before a non-runner is withdrawn has its odds cut
+    by the reduction factor; BSP is not. `extract_betfair_bsp.py` now records,
+    per cut (18:00 eve, 08:00, 11:00, T-60, T-5), LTP age, LTP change count,
+    later reduction factors, and withdrawn runners' book share; `--jobs` runs
+    tars in parallel. Writing to `data/processed/betfair_timing.parquet` (the
+    canonical BSP parquet is untouched). Tick ladder + reduction helper in
+    `bet_settlement`. Ledger 20 pre-registered.

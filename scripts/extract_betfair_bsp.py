@@ -87,17 +87,61 @@ def _iso_to_epoch_ms(iso: str) -> int | None:
     return int(dt.timestamp() * 1000)
 
 
-def _uk_clock_ms(market_time: str, hour: int, minute: int) -> int | None:
-    """Epoch ms of HH:MM UK local time on the race's date (marketTime is UTC)."""
+def _uk_clock_ms(market_time: str, hour: int, minute: int, day_offset: int = 0) -> int | None:
+    """Epoch ms of HH:MM UK local time on the race's date (marketTime is UTC),
+    shifted by *day_offset* days (-1 = the evening before)."""
     if not market_time or len(market_time) < 10:
         return None
+    from datetime import timedelta
     from zoneinfo import ZoneInfo
     try:
-        local = datetime.strptime(market_time[:10], "%Y-%m-%d").replace(
-            hour=hour, minute=minute, tzinfo=ZoneInfo("Europe/London"))
+        day = datetime.strptime(market_time[:10], "%Y-%m-%d") + timedelta(days=day_offset)
+        local = day.replace(hour=hour, minute=minute, tzinfo=ZoneInfo("Europe/London"))
     except ValueError:
         return None
     return int(local.timestamp() * 1000)
+
+
+def _timing_fields(events: list[tuple[int, float]], cuts: dict[str, int | None],
+                   removals: list[tuple[int, float]]) -> dict:
+    """How tradeable each early LTP was, for the execution-timing test.
+
+    Per cut: ``age_<cut>`` (seconds since the runner's LTP last changed; BASIC
+    publishes changes only, so this bounds staleness from above),
+    ``nchg_<cut>`` (LTP changes so far, an activity proxy known at the cut),
+    and the non-runner reduction that a back bet matched at the cut would
+    suffer: ``rf_after_<cut>`` multiplies the price for every runner removed
+    after the cut (Betfair reduces matched odds by the removed runner's
+    reduction factor; BSP is unaffected), ``rf_stale_<cut>`` for removals
+    between the last trade and the cut (the LTP predates the reformed market).
+    Every factor is applied, including those under the 2.5% Betfair may waive:
+    the conservative reading.
+    """
+    out: dict = {}
+    for name, cut in cuts.items():
+        last_pt = None
+        n = 0
+        if cut is not None:
+            for pt, _ in events:
+                if pt > cut:
+                    break
+                last_pt = pt
+                n += 1
+        out[f"age_{name}"] = (cut - last_pt) / 1000.0 if last_pt is not None else None
+        out[f"nchg_{name}"] = n
+        after = stale = 1.0
+        n_after = 0
+        if cut is not None:
+            for rm_ms, rf in removals:
+                if rm_ms > cut:
+                    after *= 1.0 - rf / 100.0
+                    n_after += 1
+                elif last_pt is not None and rm_ms > last_pt:
+                    stale *= 1.0 - rf / 100.0
+        out[f"rf_after_{name}"] = after
+        out[f"rf_stale_{name}"] = stale
+        out[f"n_removed_after_{name}"] = n_after
+    return out
 
 
 def parse_market(stream: bytes) -> list[dict] | None:
@@ -156,6 +200,15 @@ def parse_market(stream: bytes) -> list[dict] | None:
     # 11:00 price, never the morning VWAP (which includes earlier prices).
     cut_3600 = (off_ms - 3_600_000) if off_ms else None
     cut_1100 = _uk_clock_ms(final_def.get("marketTime", ""), 11, 0)
+    # Execution-timing and ground-forecast tests (EXPLORATION_PLAN B, C): the
+    # evening before (18:00 UK) and race-day 08:00 UK, after the morning
+    # going reports.
+    cut_eve = _uk_clock_ms(final_def.get("marketTime", ""), 18, 0, day_offset=-1)
+    cut_0800 = _uk_clock_ms(final_def.get("marketTime", ""), 8, 0)
+    ltp_eve: dict[int, float] = {}
+    ltp_0800: dict[int, float] = {}
+    events: dict[int, list[tuple[int, float]]] = {}
+    first_pt = next((d.get("pt") for d in parsed if d.get("pt") is not None), None)
 
     for d in parsed:
         pt = d.get("pt")
@@ -166,6 +219,12 @@ def parse_market(stream: bytes) -> list[dict] | None:
                 rid = rc["id"]
                 ltp = rc["ltp"]
                 last_ltp[rid] = ltp
+                if pt is not None:
+                    events.setdefault(rid, []).append((pt, ltp))
+                if cut_eve is not None and pt is not None and pt <= cut_eve:
+                    ltp_eve[rid] = ltp
+                if cut_0800 is not None and pt is not None and pt <= cut_0800:
+                    ltp_0800[rid] = ltp
                 if off_ms is not None and pt is not None and pt <= off_ms:
                     ltp_pre[rid] = ltp
                 if cut_60 is not None and pt is not None and pt <= cut_60:
@@ -185,6 +244,33 @@ def parse_market(stream: bytes) -> list[dict] | None:
     n_active = sum(
         1 for r in final_def.get("runners", []) if r.get("status") in ("WINNER", "LOSER")
     )
+    removals = sorted(
+        (ms, float(r.get("adjustmentFactor") or 0.0))
+        for r in final_def.get("runners", [])
+        if r.get("status") == "REMOVED"
+        for ms in [_iso_to_epoch_ms(r.get("removalDate", ""))]
+        if ms is not None
+    )
+    cuts = {"eve1800": cut_eve, "0800": cut_0800, "1100": cut_1100,
+            "3600s": cut_3600, "300s": cut_300}
+    market_ids = {mc.get("id") for d in parsed for mc in d.get("mc", []) if mc.get("id")}
+    # The book as it stood at each cut includes runners withdrawn later, which
+    # never appear as rows. Without them an early overround (or "favourite")
+    # computed over the final field would encode the future withdrawal.
+    removed_book: dict = {}
+    for name, cut in cuts.items():
+        prices = []
+        for r in final_def.get("runners", []):
+            if r.get("status") != "REMOVED":
+                continue
+            rm = _iso_to_epoch_ms(r.get("removalDate", ""))
+            if cut is None or rm is None or rm <= cut:
+                continue
+            at_cut = [ltp for pt, ltp in events.get(r["id"], []) if pt <= cut]
+            if at_cut and at_cut[-1]:
+                prices.append(float(at_cut[-1]))
+        removed_book[f"book_removed_after_{name}"] = sum(1.0 / x for x in prices if x > 1)
+        removed_book[f"min_removed_ltp_{name}"] = min(prices) if prices else None
 
     rows = []
     for r in final_def.get("runners", []):
@@ -194,6 +280,7 @@ def parse_market(stream: bytes) -> list[dict] | None:
         rid = r["id"]
         raw_name = names.get(rid, r.get("name", ""))
         horse = _clean_horse(raw_name)
+        timing = _timing_fields(events.get(rid, []), cuts, removals)
         rows.append(
             {
                 "race_date": race_date,
@@ -214,6 +301,13 @@ def parse_market(stream: bytes) -> list[dict] | None:
                 "track_key": normalise_track_key(track),
                 "off_key": normalise_off_time_key(off_hhmm),
                 "horse_key": bf_horse_key(horse),
+                **timing,
+                **removed_book,
+                "ltp_eve1800": ltp_eve.get(rid),
+                "ltp_0800": ltp_0800.get(rid),
+                "off_ms": off_ms,
+                "mkt_first_pt": first_pt,
+                "bf_market_id": next(iter(market_ids)) if len(market_ids) == 1 else None,
             }
         )
     return rows
@@ -341,6 +435,12 @@ def validate(df: pd.DataFrame) -> None:
             print(f"median BSP={bsp[ok].median():.2f}  median SP={sp[ok].median():.2f}", flush=True)
 
 
+def _process_tar_frame(path: str, limit: int | None = None) -> pd.DataFrame:
+    """One tar -> DataFrame (a frame pickles far smaller than a list of dicts)."""
+    print(f"processing {path} ...", flush=True)
+    return pd.DataFrame(process_tar(path, limit=limit))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tar", action="append", required=True, help="tar path (repeatable)")
@@ -350,24 +450,34 @@ def main() -> None:
     ap.add_argument("--append", action="store_true",
                     help="merge the given tar(s) into the existing --out parquet "
                          "instead of rebuilding from scratch (process only new files)")
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="process this many tars in parallel (one process each)")
     args = ap.parse_args()
 
-    all_rows: list[dict] = []
-    for tar in args.tar:
-        if not os.path.exists(tar):
-            print(f"missing: {tar}", flush=True)
-            continue
-        print(f"processing {tar} ...", flush=True)
-        all_rows.extend(process_tar(tar, limit=args.limit))
+    tars = [t for t in args.tar if os.path.exists(t)]
+    for t in set(args.tar) - set(tars):
+        print(f"missing: {t}", flush=True)
+    frames: list[pd.DataFrame] = []
+    if args.jobs > 1 and len(tars) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        from functools import partial
+        with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+            for rows in pool.map(partial(_process_tar_frame, limit=args.limit), tars):
+                frames.append(rows)
+    else:
+        for tar in tars:
+            frames.append(_process_tar_frame(tar, limit=args.limit))
+    frames = [f for f in frames if not f.empty]
 
-    if not all_rows:
+    if not frames:
         print("no rows extracted", flush=True)
         return
 
-    df = pd.DataFrame(all_rows)
+    df = pd.concat(frames, ignore_index=True)
     # Older (2022) streams occasionally encode prices as strings; coerce so the
     # sort/dedup and downstream maths stay numeric.
-    for _c in ("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_3600s", "ltp_1100", "ltp_last"):
+    for _c in ("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_3600s", "ltp_1100", "ltp_last",
+               "ltp_eve1800", "ltp_0800"):
         if _c in df.columns:
             df[_c] = pd.to_numeric(df[_c], errors="coerce")
     # Incremental update: merge into the existing parquet instead of rebuilding

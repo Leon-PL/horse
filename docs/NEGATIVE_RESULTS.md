@@ -1461,6 +1461,92 @@ files from 2026-06-11 (the hold-out has volume but no 11:00 price), scored once.
   winners among them do not. Descriptive, untested, and the interval spans
   zero; noted only as a question.
 
+## 20. Execution timing: when to strike, not what to back (EXPLORATION_PLAN B; pre-registered 2026-10-14)
+
+*Written and committed before the test was run.*
+
+**Hypothesis.** Morning money predicts the later price move (ledger 14, T1/T5)
+although it predicts nothing beyond BSP. So for a bet already worth making,
+striking early when the price is predicted to shorten, and waiting for BSP
+otherwise, should cost less than always taking BSP. This needs no selection
+edge.
+
+**Two corrections that ledgers 14 and 19 did not make.** Both apply to every
+early strike scored here.
+- **Non-runner reductions.** Betfair cuts the odds of a back bet by the
+  reduction factor of every runner withdrawn after it was matched; BSP, struck
+  after all withdrawals, is not cut. An early LTP compared with BSP without
+  this is flattered whenever a horse comes out later. Every factor is applied,
+  including any below the 2.5% Betfair may waive (unverified): the
+  conservative reading. An LTP that predates a withdrawal before the cut is
+  scaled by that factor too.
+- **The spread.** An LTP is a traded price, not a back price. The primary
+  scoring takes one tick down Betfair's ladder.
+
+Strike price at decision time *t*:
+`P_t = max(1.01, tick_down(LTP_t, 1) x rf_stale_t x rf_after_t)`
+(`bet_settlement.betfair_tick_down`, `apply_reduction_factor`). Target:
+`y_t = log(P_t / BSP)`.
+
+**Data.** Development period only. Ledger 14's frame
+(`microstructure_screen.load()`: complete markets, public BSP as the close,
+morning volume) joined to `data/processed/betfair_timing.parquet`, a
+re-extraction of the BASIC tars that adds, per cut, the LTP's age, the count
+of LTP changes so far, the reduction factors of runners withdrawn later, and
+the withdrawn runners' share of the book at the cut. Races off at or after
+12:05 UK; every runner traded at 11:00, T-60 and T-5.
+
+**Decision points.** 11:00 UK, T-60, T-5.
+
+**Features, all known at *t*.** log LTP_t and its square; 1/LTP_t; the
+overround at *t* including runners withdrawn later (without them, a low early
+overround would announce a withdrawal); favourite at *t* and price rank;
+field size at *t*; jumps, handicap and all-weather flags; local off hour;
+log minutes to the off; log age and log count of LTP changes at *t*;
+log `rf_stale_t`; excess morning volume, log runner and race morning volume,
+`log(morningwap / LTP_t)`; the move from 18:00 the evening before and from
+08:00 to *t* (zero plus a missing flag where untraded); at T-60 and T-5 the
+move since 11:00, at T-5 the move since T-60. Never the result, BSP,
+`rf_after` or anything after *t*.
+
+**Model.** Least squares on standardised features, one per decision point,
+on purged quarterly expanding folds (`wf_eval.expanding_period_folds`, at
+least four training quarters). LightGBM is fitted alongside and replaces the
+linear model at a decision point only if its pooled out-of-fold R-squared of
+`y_t` is at least 20% higher (relative), judged before any policy is scored.
+
+**Policy, fixed:** at 11:00, strike if the predicted `y` exceeds
+**tau = 0.01**; otherwise at T-60 on the same test; otherwise at T-5;
+otherwise take BSP.
+
+**Universes, fixed at 11:00:** U1 every runner whose 11:00 LTP is 1.5-50; U2
+the 11:00 favourite (shortest in the whole 11:00 book, ties kept) in the band;
+U3 ledger 14's pick (highest excess morning volume among the band).
+
+**Primary metric, per universe:** `G` = mean over the universe of `y` at the
+strike time if struck, 0 if BSP was taken: the cost saved per bet, in CLV
+points. Race-clustered bootstrap; Bonferroni over the three universes, so
+98.33% intervals.
+
+**Pass, per universe:** `G >= 0.5` CLV points and the 98.33% interval's lower
+bound above 0, with the one-tick haircut and reductions applied. If no
+universe passes, Idea B stops (the plan's rule).
+
+**Reported, not tested:** `G` with no haircut, a 1% haircut and two ticks
+under the same policy; tau of 0 and 0.02; `G` without the reductions (how
+much they flattered ledgers 14 and 19), and ledger 14's m11 rule and ledger
+19's H2 re-scored with them; always striking at each *t*; the share struck at
+each point; the realised PnL gain, mean of `won x (P_taken - BSP) x 0.98`
+with its interval, which must not be significantly negative where `G` is
+positive (the tripwire); the struck bets as a standalone strategy against
+ACTION_PLAN 7 (median CLV and interval, geometric mean, beat-close, ROI at
+the taken price); quarters positive; morning matched volume on struck
+runners (capacity).
+
+**A pass is a candidate, not a result.** The hold-out needs Betfair BASIC
+files from 2026-06-11, which only the operator can download, and BASIC cannot
+show the real spread (no ladder), which only a recorded order book can.
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is

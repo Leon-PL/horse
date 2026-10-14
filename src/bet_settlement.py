@@ -213,3 +213,51 @@ def settle_place_exchange_bets(place_odds, placed, stake: float = 1.0,
     placed_arr = np.asarray(placed).astype(bool)
     stake_arr = np.asarray(stake, dtype=np.float64)
     return np.where(placed_arr, stake_arr * (odds_arr - 1.0) * (1.0 - commission), -stake_arr)
+
+
+# ---------------------------------------------------------------------------
+# Striking before the off: the exchange price grid and non-runner reductions
+# ---------------------------------------------------------------------------
+# An early last-traded price (LTP) is not a guaranteed back price: the last
+# trade may have been a layer taking the back side, a tick above what a backer
+# can get. And a back bet matched before a runner is withdrawn has its odds
+# cut by that runner's reduction factor, while BSP (struck after every
+# withdrawal) is not - so comparing an early price with BSP without the
+# reduction flatters the early price. Both matter to any "take the early
+# price" rule (EXPLORATION_PLAN B; ledgers 14 and 19 applied neither).
+
+#: Betfair's odds ladder: (upper bound of band, increment within the band).
+BETFAIR_TICK_BANDS = (
+    (2.0, 0.01), (3.0, 0.02), (4.0, 0.05), (6.0, 0.1), (10.0, 0.2),
+    (20.0, 0.5), (30.0, 1.0), (50.0, 2.0), (100.0, 5.0), (1000.0, 10.0),
+)
+BETFAIR_MIN_ODDS = 1.01
+
+
+def betfair_tick_down(odds, ticks: int = 1) -> np.ndarray:
+    """*odds* moved *ticks* steps down Betfair's ladder (floored at 1.01).
+
+    The increment is the one just below the price, so 2.0 -> 1.99 and
+    10.0 -> 9.8. Off-ladder prices (a BSP) step down by the increment of the
+    band they fall in.
+    """
+    out = np.asarray(odds, dtype=np.float64).copy()
+    uppers = np.array([b for b, _ in BETFAIR_TICK_BANDS])
+    incs = np.array([i for _, i in BETFAIR_TICK_BANDS])
+    for _ in range(int(ticks)):
+        band = np.searchsorted(uppers, out - 1e-9, side="left")
+        inc = incs[np.clip(band, 0, len(incs) - 1)]
+        out = np.where(np.isfinite(out), np.round(out - inc, 2), out)
+        out = np.maximum(out, BETFAIR_MIN_ODDS)
+    return out
+
+
+def apply_reduction_factor(odds, factor) -> np.ndarray:
+    """Matched back odds after non-runner reductions.
+
+    *factor* is the product of ``(1 - reduction_factor/100)`` over runners
+    withdrawn after the bet was matched (1.0 = no withdrawal). Betfair cuts
+    the decimal odds by the factor, floored at 1.01.
+    """
+    reduced = np.asarray(odds, dtype=np.float64) * np.asarray(factor, dtype=np.float64)
+    return np.maximum(reduced, BETFAIR_MIN_ODDS)
