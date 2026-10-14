@@ -218,3 +218,17 @@ move the BHA aliases into src/utils at the next rebuild needed anyway.
 its files (its uncommitted `featured_dataset.py` touches the same file); one
 store rebuild + retrain + promote after the rail backfill completes
 (rebuilding before it would force a second rebuild).
+
+### 2026-10-14 morning - after an interruption
+
+43. The session ended overnight and took the rail backfill with it (1,265
+    fixtures, to 2021-06). Relaunched as a detached process (survives the
+    session; logs to the scratchpad's `bha_races3.err`), 8 s/request, no
+    lockouts at that pace (~410 fixtures/hour).
+44. **Instrument was red on arrival**: the concurrent session's uncommitted
+    `featured_dataset.py` (it is hashed) moved fe to `221fcd4db0fc5631`, it
+    rebuilt the store, and the promoted run (fe `63d88ff7`) went STALE -
+    live picks blocked. Its 5 files verified in a fresh worktree at
+    `faabec2` (578 passed, same fe signature) and committed as one unit on
+    `checkpoint/eval-harness-and-guards` (`5c7780e`). Retrain + promote with
+    the promoted run's settings (`train.py --no-refresh --promote`).
