@@ -61,7 +61,15 @@ def test_timing_fields_staleness_activity_and_reduction_factors():
     # ... and its LTP (09:00 UTC) predates Gamma's removal (09:30 UTC).
     assert abs(row["rf_stale_1100"] - 0.9) < 1e-12
     assert row["rf_after_300s"] == 1.0 and row["rf_stale_300s"] == 1.0
+    assert row["rf25_after_1100"] == 0.8 and abs(row["rf25_stale_1100"] - 0.9) < 1e-12
     assert row["bf_market_id"] == "1.5"
+
+
+def test_waived_reduction_variant_skips_small_factors():
+    from scripts.extract_betfair_bsp import _timing_fields
+    out = _timing_fields([(100, 5.0)], {"c": 200}, [(300, 2.0), (400, 10.0)])
+    assert abs(out["rf_after_c"] - 0.98 * 0.9) < 1e-12
+    assert abs(out["rf25_after_c"] - 0.9) < 1e-12
 
 
 def test_removed_runners_count_in_the_early_book():

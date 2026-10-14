@@ -102,6 +102,11 @@ def _uk_clock_ms(market_time: str, hour: int, minute: int, day_offset: int = 0) 
     return int(local.timestamp() * 1000)
 
 
+#: Reduction factors below this (%) may be waived by Betfair; unverified, so
+#: the waived version is recorded alongside, never instead of, the full one.
+RF_WAIVER_PCT = 2.5
+
+
 def _timing_fields(events: list[tuple[int, float]], cuts: dict[str, int | None],
                    removals: list[tuple[int, float]]) -> dict:
     """How tradeable each early LTP was, for the execution-timing test.
@@ -129,17 +134,23 @@ def _timing_fields(events: list[tuple[int, float]], cuts: dict[str, int | None],
                 n += 1
         out[f"age_{name}"] = (cut - last_pt) / 1000.0 if last_pt is not None else None
         out[f"nchg_{name}"] = n
-        after = stale = 1.0
+        after = stale = after25 = stale25 = 1.0
         n_after = 0
         if cut is not None:
             for rm_ms, rf in removals:
+                keep25 = rf >= RF_WAIVER_PCT
                 if rm_ms > cut:
                     after *= 1.0 - rf / 100.0
+                    after25 *= (1.0 - rf / 100.0) if keep25 else 1.0
                     n_after += 1
                 elif last_pt is not None and rm_ms > last_pt:
                     stale *= 1.0 - rf / 100.0
+                    stale25 *= (1.0 - rf / 100.0) if keep25 else 1.0
         out[f"rf_after_{name}"] = after
         out[f"rf_stale_{name}"] = stale
+        # The same, if Betfair waives factors below 2.5% (unverified).
+        out[f"rf25_after_{name}"] = after25
+        out[f"rf25_stale_{name}"] = stale25
         out[f"n_removed_after_{name}"] = n_after
     return out
 

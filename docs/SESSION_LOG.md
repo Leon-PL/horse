@@ -204,3 +204,39 @@ build).
     tars in parallel. Writing to `data/processed/betfair_timing.parquet` (the
     canonical BSP parquet is untouched). Tick ladder + reduction helper in
     `bet_settlement`. Ledger 20 pre-registered.
+37. **Idea A step 0 - blocked on the operator (terms of service).** Sporting
+    Life result pages carry every Tote dividend since 2020 (`tote_win`,
+    `place_win`, `exacta_win`, `trifecta`, `swingers`, `straight_forecast`
+    (CSF), `tricast`, `place_pot`/`quad_pot` with pool and winning stakes;
+    `deductions`; checked 2020-09-19, 2022-03-05, 2025-10-04) but no
+    exacta/trifecta pool sizes. **Its terms say "screen scraping is expressly
+    prohibited"** - the plan's Racing Post rule applies, so no 80k-page
+    backfill without the operator's say-so (the main pipeline already scrapes
+    it; that inconsistency is the operator's to resolve). At The Races has one
+    results page per day with dividends (~2,200 requests), robots.txt allows
+    `/results/` (but disallows `/ajax/`); its terms page and a results page
+    both returned HTTP 429, terms unread. Placepot takeout measured from one
+    page: pot x winning stakes / pool = 72.9% returned (~27% deduction).
+38. **Idea C data check:** Open-Meteo Previous Runs API has 24-48 h-ahead
+    precipitation forecasts from January 2024 for most models (GFS 2 m
+    temperature from 2021-03); the Historical Forecast API stitches the first
+    hours of each run (too short a lead). So C has ~2.4 development years.
+39. **Timing parquet built** (`data/processed/betfair_timing.parquet`, 746,812
+    runners, prices identical to the canonical file). 21.7% of runners have a
+    later withdrawal that would cut an 11:00 strike; 11:00 prices are inflated
+    almost exactly by that factor (mean log(11:00/BSP) +0.41 where later
+    reductions exceed 30%, -0.13 after applying them, vs -0.12 with none).
+40. **Idea B dry run (n_boot 50, final run pending):** fails the pre-registered
+    bar in every universe (G +0.10 / +0.15 / +0.16 CLV points vs 0.5).
+    **Ledgers 14 and 19 overturned by the reductions**: m11 median CLV 1.0000
+    -> 0.9849, ROI +0.85% -> -1.84% [-3.66, -0.58]; H2 1.0122 -> 0.9963.
+    Descriptive lead: the policy's early strikes alone have median CLV 1.016
+    [1.008, 1.024], but two ticks of spread erase the U1 gain. Re-extracting
+    with a waived-under-2.5% reduction variant before the official run.
+41. **Idea D stopped at step 0** (ledger 21): no official European breeze-up
+    times 2020-2026.
+42. **Idea E phase 1** (ledger 22): break-even ~0.7 ticks (balanced flow),
+    1.2-1.7 ticks against informed flow; GBP 303k/day morning volume. Phase 1
+    does not stop it; phase 2 needs the operator.
+43. **Idea C pre-registered** (ledger 23); forecasts for 80/86 courses fetched
+    (Open-Meteo hourly cap; resumable).

@@ -1547,6 +1547,123 @@ runners (capacity).
 files from 2026-06-11, which only the operator can download, and BASIC cannot
 show the real spread (no ladder), which only a recorded order book can.
 
+## 21. Breeze-up times for debutants (EXPLORATION_PLAN D): stopped at step 0 (2026-10-14)
+
+The test needs measured breeze times for the two-year-olds sold at European
+breeze-up sales, matched to their debuts. **No European breeze-up published
+official times in 2020-2026.** Trade coverage is consistent: British sales
+have no official timing (Tattersalls hands buyers stopwatches; private timing
+gates and lasers run by buyers' agents), vendors oppose official times
+because a slow breeze can mean no sale, and the time sheets that "circulate"
+after the major sales are private. Goffs said it was open to publishing times
+at its new Naas sale (June 2025) and Aktem at its second edition; neither is
+confirmed, and either would give one sale a year, a few dozen debut runs
+against the ~1,500 needed to see a partial of 0.03. The only systematic
+clocker times are commercial (Racing Post), which this project does not
+scrape.
+
+**Not pursued.** The prior was already low (sale price is fully priced, even
+on debutants, ledger 5). Revisit only if a sales company starts publishing
+official times, and then only after several sales' worth have accumulated.
+
+## 22. Morning market-making, phase 1: feasible on paper, unknowable on free data (EXPLORATION_PLAN E) (2026-10-14)
+
+`scripts/morning_mm_feasibility.py`, development period, races off at or
+after 11:30 UK (so "morning" volume is all before 11:00): 64,168 races,
+573,583 runners, GBP 953m of morning matched volume. Descriptive, no test.
+
+**The arithmetic.** Matched volume is zero-sum at the traded price. Per GBP
+of backer stake matched at price `P` on a runner whose fair probability is
+`p` (BSP, overround removed), the layer's expected value is `1 - P*p` and the
+backer's `P*p - 1`, before commission. So the *markout* of a fill follows
+from the price, the close and the side. The public files do not say who
+crossed the spread, so two cases bound it: against the **informed side**
+(the runner with the most excess morning volume, ledger 14) a market-maker
+is assumed to have laid; elsewhere it fills both sides equally. Later
+non-runner reductions are applied to the morning price (ledger 20).
+
+Volume-weighted markout per GBP matched, %, 2% commission per winning bet:
+
+| fills at | group | lay | back | both sides | break-even half-spread |
+|---|---|---|---|---|---|
+| morning VWAP | all runners | -0.15 | -2.81 | -1.48 | 0.7 ticks |
+| morning VWAP | informed (top excess volume) | **-2.45** | -0.10 | -1.28 | **1.7 ticks** (as layer) |
+| morning VWAP | the rest | +1.24 | -4.43 | -1.60 | 0.6 ticks |
+| 11:00 LTP | informed | **-1.69** | -0.85 | -1.27 | **1.2 ticks** (as layer) |
+| 11:00 LTP | the rest | -0.66 | -2.57 | -1.62 | 0.65 ticks |
+
+By price band the informed-side lay loss is worst at 5.0-13.0 (-6.4% at
+VWAP, about 2-2.7 ticks) and smallest on short favourites (under 2.0: +0.7%).
+The "both sides" column charges commission on every winning bet; a two-sided
+maker pays it on net market winnings, so the true cost is lower.
+
+**Capacity.** Median morning volume per runner GBP 454 (mean 1,661); per
+racing day GBP 303k median across all GB/IRE runners, of which GBP 113k is
+on the informed runner. A new maker would win some fraction of that.
+
+**Verdict: phase 1 does not stop E.** The break-even half-spread, about 0.7
+ticks against balanced flow and 1.2-1.7 ticks against informed flow, sits
+inside the plausible 1-2 ticks, and capacity is not trivial. But phase 1
+cannot answer the questions that decide it: how often a passive offer is
+filled at all, queue position behind the incumbent makers, and the real
+aggressor mix. The observed morning prices are already the outcome of
+professional market-making, and the uninformed runners' lay markout at VWAP
+(+1.24%) is the margin those incumbents earn. Phase 2 (live app key, Stream
+API order-book recording for 4-8 weeks, a paper simulation with queue
+position) is an operator decision; no order is ever placed.
+
+## 23. Forecast ground changes, bet early (EXPLORATION_PLAN C; pre-registered 2026-10-14)
+
+*Written and committed before the test was run.*
+
+**Hypothesis.** When rain is forecast between an early decision time and the
+off, early prices under-react for horses that like soft ground; the market
+catches up when the official going changes. The test is **continuation**:
+does the forecast-times-preference signal, known at the decision time,
+predict the price move *after* it?
+
+**Data.** Development period from 2024-03-01 (Open-Meteo's day-ahead forecasts
+start in early 2024) to the hold-out's purge cutoff; turf races only; ledger
+14's frame (complete markets, public BSP as the close).
+- *Forecast rain*: the sum of `precipitation_previous_day1` at the course over
+  each hour from the decision to the off (each hour's value as forecast 24 h
+  before it, so every forecast used was issued before the decision;
+  `scripts/fetch_forecast_previous_runs.py`). Never the `weather_*` columns,
+  which record what happened.
+- *Ground preference*, per runner, from its previous runs only: finish
+  percentile minus SP-rank percentile, averaged on soft ground (Good to Soft
+  or softer) minus the same on firm (Good to Firm or firmer), each shrunk
+  toward zero (k = 2). Not the store's `horse_going_*` columns, which are
+  keyed on the race's final going and so are look-ahead here.
+  (`scripts/ground_forecast.ground_preference`, `tests/test_ground_forecast.py`.)
+- *Decision price*: the last trade at or before 08:00 UK on race day, every
+  runner traded; later non-runner reductions applied (ledger 20).
+
+Feature distributions were looked at before writing this (never outcomes):
+forecast rain from 08:00 to the off has median 0 mm, 90th percentile 2.0 mm;
+preference has SD 0.114, 90th percentile 0.139.
+
+**Primary test (one).** `x = preference x forecast rain`; `y = log(P_08:00 /
+BSP)` with reductions, no haircut. Within-race partial correlation of `x` and
+`y`, controlling for the 08:00 price basis (as `triage_features`) **and the
+preference itself** (so a general drift of soft-ground horses is not read as
+a forecast effect); race-clustered bootstrap SE, 2,000 draws. **Pass: partial
+at least +0.01 and two-sided p below 0.05.**
+
+**Economic rule (scored whatever the primary shows; counts only if the
+primary passes).** In races with at least 2 mm forecast from 08:00 to the
+off, back the runner with the highest preference if it is at least 0.15 and
+its 08:00 price is 1.5-50; strike one tick down with reductions. Matched
+baseline: every runner in the band in those races. Pass (ACTION_PLAN 7):
+median CLV above 1 with the 95% interval excluding 1, geometric mean above 1,
+ROI at the taken price above 0. Reported in ledger 19's format.
+
+**Reported, not tested:** the 18:00-evening-before decision (fewer complete
+markets); the sire's soft-ground edge in place of the horse's preference;
+runners with both soft and firm history only.
+
+**Hold-out:** needs Betfair BASIC files from 2026-06-11 (operator).
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
