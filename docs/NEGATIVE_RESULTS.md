@@ -1332,6 +1332,67 @@ model; per-race paired differences with race-bootstrap CIs:
   training and free microstructure fail) say the reachable features are
   exhausted.
 
+## 18. Non-finishers were dropped from training and evaluation - the fourth tripwire catch (2026-10-14)
+
+**Found** in the retrain after the concurrent session's commit: the training
+report showed each-way bets at **+79.3% ROI (483 bets) with a closing-line
+value of 0.78** - high ROI with CLV below 1, the pattern that has meant a
+leak every time it has fired here. It had been in every training report
+(the previous promoted run: +82.8%).
+
+**The leak.** Since the first commit, `prepare_multi_target_data` (training,
+the training app's evaluation, autotune, `model_lab`) and the backtester's
+`walk_forward_validation` kept only rows with `finish_position > 0`.
+Non-finishers - fell, pulled up, unseated, refused, stored as position 0 - are
+**23.6% of chase runners, 15.2% of hurdle runners and 0.5% of flat**
+(2020-09..). So the test set held only horses already known to have
+completed, and a bet on a faller could never lose. The clearest case: Hexham,
+2025-10-03, a nine-runner chase in which six failed to finish; the test set
+held the three finishers, the place model rated each of them ~35%, and the
+each-way strategy backed all three - first, second and third. Training was
+biased the same way (P(win | completes), served on every declared runner).
+
+**Fixed in `c40f85c`.** Non-finishers stay in, as losers that never place:
+place labels through `bet_settlement.placed_mask` (`fp <= places` alone
+counts position 0 as placed - the trap a naive fix walks into), the
+normalised-position target puts them last, `rps_per_race` ranks them after
+every finisher. `tests/test_non_finishers.py`; three of its four tests fail
+on the old code.
+
+Training-app evaluation, same settings and store (fe `221fcd4d`):
+
+| strategy | run `20261014_100406` (fallers dropped) | run `20261014_105017` (fallers kept) |
+|---|---|---|
+| top pick | -8.0% (14,329 bets) | -13.3% (14,348) |
+| value | **+2.1%** (5,360) | **-15.2%** (4,088) |
+| each-way | **+79.3%** (483) | **-8.8%** (123) |
+
+Both models on one complete test set (14,331 races, 133,241 runners, 8,129
+of them non-finishers), and the old model again on finishers only:
+
+| model, test set | race log loss | top-1 | top pick | value | each-way |
+|---|---|---|---|---|---|
+| old, all runners | 1.8920 | 0.2940 | -13.3% | -17.8% (4,025) | -5.0% (87) |
+| new, all runners | 1.8896 | 0.2941 | -13.4% | -15.3% (4,085) | -18.7% (65) |
+| **old, finishers only (the leak)** | **1.8333** | **0.3048** | **-8.1%** | **+2.1%** (5,356) | **+96.1%** (416) |
+
+The inflation was almost entirely in the *evaluation*: dropping the fallers
+from the scored set alone turns -17.8% into +2.1% and -5% into +96%. Training
+on finishers only cost little (new vs old: log loss -0.0024, top-1 equal). The
+new run is promoted because it is trained on what it is served.
+
+**What it does and does not change.**
+- **Every research conclusion in this ledger stands.** The walk-forward
+  research scripts (`wf_market_offset`, `wf_ranking_compare`,
+  `wf_benter_combination` behind ledger 2, triage, microstructure, family
+  lift) read the feature store directly and always included every runner.
+- **Every ROI the training app or its backtest tab has ever shown was
+  inflated**, most for jumps and each-way. The "place-market edge" (ledger 1)
+  was overturned for a different reason, but measured through the same
+  filter.
+- **The production model was trained on finishers only.**
+- **The tripwire is now four for four.**
+
 ## Things that are true and worth not re-deriving
 
 - **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
