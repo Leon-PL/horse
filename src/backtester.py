@@ -202,8 +202,10 @@ def walk_forward_validation(
         _sort_cols.append("horse_name")
     df = df.sort_values(_sort_cols).reset_index(drop=True)
 
-    # Only use actual results (finish_position > 0)
-    df = df[df["finish_position"] > 0].copy()
+    # Every runner with a result, non-finishers (position 0) included: a bet on
+    # a faller is a loss, and dropping them scored strategies on horses already
+    # known to have completed (ledger 18).
+    df = df[df["finish_position"].notna() & (df["finish_position"] >= 0)].copy()
 
     feature_cols = get_feature_columns(df)
     if not feature_cols:

@@ -74,7 +74,7 @@ def __getattr__(name: str):
 Pool = None
 
 import config
-from src.bet_settlement import value_bet_selection as _value_bet_selection
+from src.bet_settlement import placed_mask, value_bet_selection as _value_bet_selection
 # Re-exported for backwards compatibility — the betting simulation now
 # lives in src.bet_analysis.
 from src.bet_analysis import analyse_test_set, max_drawdown as _max_drawdown  # noqa: F401
@@ -1096,8 +1096,13 @@ def prepare_multi_target_data(
         _sort_cols.append("horse_name")
     df = df.sort_values(_sort_cols).reset_index(drop=True)
 
-    # Only keep rows with valid finish positions
-    df = df[df["finish_position"].notna() & (df["finish_position"] > 0)].copy()
+    # Keep every runner with a result, non-finishers (position 0: fell, pulled
+    # up, unseated) included. Dropping them trained on finishers only and,
+    # worse, scored the test set on horses already known to have completed:
+    # 24% of chase and 15% of hurdle runners vanished as certain losers, and
+    # the each-way strategy showed +79% at a closing-line value of 0.78
+    # (ledger 18). Every label below treats position 0 as unplaced.
+    df = df[df["finish_position"].notna() & (df["finish_position"] >= 0)].copy()
 
     # ── Degenerate race filter (training quality) ─────────────────────────
     _degenerate_removed_rows = 0
@@ -1299,20 +1304,17 @@ def prepare_multi_target_data(
 
     _pp_train = _places_paid_vec(train_df)
     _pp_test = _places_paid_vec(test_df)
-    y_train_placed = (train_df["finish_position"].values <= _pp_train).astype(int)
-    y_test_placed = (test_df["finish_position"].values <= _pp_test).astype(int)
+    y_train_placed = placed_mask(train_df["finish_position"].values, _pp_train)
+    y_test_placed = placed_mask(test_df["finish_position"].values, _pp_test)
 
-    # Normalised position target (0 = winner, 1 = last)
-    nr_train = train_df["num_runners"].replace(0, 1).values.astype(np.float32)
-    y_train_norm_pos = (
-        (train_df["finish_position"].values.astype(np.float32) - 1)
-        / np.maximum(nr_train - 1, 1)
-    )
-    nr_test = test_df["num_runners"].replace(0, 1).values.astype(np.float32)
-    y_test_norm_pos = (
-        (test_df["finish_position"].values.astype(np.float32) - 1)
-        / np.maximum(nr_test - 1, 1)
-    )
+    # Normalised position target (0 = winner, 1 = last; a non-finisher is last)
+    def _norm_pos(part):
+        fp_ = part["finish_position"].values.astype(np.float32)
+        nr_ = part["num_runners"].replace(0, 1).values.astype(np.float32)
+        return np.where(fp_ >= 1, (fp_ - 1) / np.maximum(nr_ - 1, 1), 1.0).astype(np.float32)
+
+    y_train_norm_pos = _norm_pos(train_df)
+    y_test_norm_pos = _norm_pos(test_df)
 
     fp_train = train_df["finish_position"].values.astype(np.float32)
     fp_test = test_df["finish_position"].values.astype(np.float32)
@@ -1443,8 +1445,9 @@ def rps_per_race(
     offsets = _group_offsets(groups)
     gids = np.repeat(np.arange(n_groups), groups)
 
-    # Sort within each group by finish_position (lexsort keeps groups contiguous)
-    order = np.lexsort((finish_positions, gids))
+    # Sort within each group by finish_position (lexsort keeps groups
+    # contiguous); non-finishers (position 0) come after every finisher.
+    order = np.lexsort((np.where(finish_positions >= 1, finish_positions, np.inf), gids))
     sorted_probs = probs[order]
 
     # Grouped cumulative sum
@@ -1901,7 +1904,7 @@ class RacePredictor:
             _nr_vl = data["train_df"]["num_runners"].values[vl_beg:vl_end]
             _hc_vl = data["train_df"].get("handicap", pd.Series(0, index=data["train_df"].index)).values[vl_beg:vl_end].astype(bool)
             _pp_vl = np.where(_nr_vl <= 4, 3, np.where(_nr_vl <= 7, 2, np.where(_nr_vl <= 15, 3, np.where(_hc_vl, 4, 3))))
-            oof_placed_parts.append((fp_f_vl <= _pp_vl).astype(int))
+            oof_placed_parts.append(placed_mask(fp_f_vl, _pp_vl))
 
         # ── Fit calibration on concatenated OOF data ─────────────
         _cb("Phase 1 — Fitting calibration …", 0.28)
@@ -3786,7 +3789,7 @@ class RacePredictor:
         nr = test_df["num_runners"].values
         hcap = test_df.get("handicap", pd.Series(0, index=test_df.index)).values.astype(bool)
         pp = np.where(nr <= 4, 3, np.where(nr <= 7, 2, np.where(nr <= 15, 3, np.where(hcap, 4, 3))))
-        placed = (test_df["finish_position"].values <= pp).astype(int)
+        placed = placed_mask(test_df["finish_position"].values, pp)
 
         # Brier score (calibration quality)
         brier_cal = float(np.mean((place_probs - placed) ** 2))
@@ -3802,7 +3805,7 @@ class RacePredictor:
             pp_race = place_probs[off:off + g]
             _k = int(pp_vec[0]) if len(pp_vec) > 0 else 3
             top3_idx = np.argsort(-pp_race)[:min(_k, g)]
-            actual_placed = set(np.where(fp_race <= _k)[0])
+            actual_placed = set(np.where(placed_mask(fp_race, _k))[0])
             place_hits += len(set(top3_idx) & actual_placed)
             total_placed += len(actual_placed)
             off += g
@@ -4054,7 +4057,7 @@ class RacePredictor:
         _nr_fold = train_df["num_runners"].values
         _hc_fold = train_df.get("handicap", pd.Series(0, index=train_df.index)).values.astype(bool)
         _pp_fold = np.where(_nr_fold <= 4, 3, np.where(_nr_fold <= 7, 2, np.where(_nr_fold <= 15, 3, np.where(_hc_fold, 4, 3))))
-        y_placed = (fp <= _pp_fold).astype(int)
+        y_placed = placed_mask(fp, _pp_fold)
 
         # Recency sample weights
         dates = pd.to_datetime(train_df["race_date"])

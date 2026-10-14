@@ -139,6 +139,18 @@ def ew_placed_flag(finish_position, places_paid) -> int:
     return int(0 < fp <= int(places_paid))
 
 
+def placed_mask(finish_positions, places_paid) -> np.ndarray:
+    """Vectorised :func:`ew_placed_flag`: 1 where a runner earns the place leg.
+
+    Non-finishers are stored as position 0 and never place. ``fp <= places``
+    alone counts them as placed, which is how leaving them out of training and
+    evaluation once looked harmless.
+    """
+    fp = np.asarray(finish_positions, dtype=np.float64)
+    pp = np.broadcast_to(np.asarray(places_paid, dtype=np.float64), fp.shape)
+    return ((fp >= 1) & (fp <= pp)).astype(int)  # NaN compares False: never placed
+
+
 def settle_ew_bet(win_odds, place_odds, won, placed) -> float:
     """PnL of a 2-unit each-way bet (1 win + 1 place).
 
