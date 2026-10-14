@@ -34,7 +34,7 @@ for any future claim.
 | Market as a fixed offset (plan 4c), the best-motivated untried idea | race log loss vs the market **-0.00010 [-0.00040, +0.00020]** over 16 purged quarters; every selection rule's ROI interval spans zero, every median CLV < 1 | **fails** |
 | Morning money vs the close (plan 5a, free data) | excess morning volume vs the result beyond BSP: partial corr **+0.0004** (t 0.4, 574k runners) | **the close absorbs it** |
 | Following the money, struck at T-5 | median CLV 0.9958 [0.9939, 0.9980] vs 0.9811 for the matched band; ROI unchanged | real, too small |
-| Following the money, struck at 11:00 (honest morning) | median CLV 1.0000 [1.0000, 1.0011], geometric 0.9711, ROI +0.85% [-1.12, +2.85] | break-even, fails the bar |
+| Following the money, struck at 11:00 (honest morning) | recorded as median CLV 1.0000, ROI +0.85%; **with later non-runner reductions (ledger 20): 0.9849 [0.9822, 0.9877], ROI -1.84% [-3.75, +0.12]** | **loses to the close**, fails the bar |
 | Sibling-form debutant lead, on the hold-out | partial corr -0.016, p 0.19 (discovery had -0.064) | **fails** |
 | `atr_closing_in_hand`, the one sectional signal that survived triage | alone in the offset model: race log loss vs market -0.00000 [-0.00040, +0.00030] | **fails** |
 | GBM vs logistic vs market (plans 3a/4b) | 24,405 races: top-1 GBM 0.293, logistic 0.289, market **0.340**; loosening the GBM makes it worse | the model is not the problem; the features are (gate 2) |
@@ -60,8 +60,10 @@ therefore about **minus the commission, roughly -2%**. An edge, if one exists,
 would have to come from somewhere this project has no access to:
 
 - **Timing**: taking a price before information is absorbed. Measured: worth
-  about 5 CLV points at 11:00, which only reaches break-even, and it is gone by
-  an hour before the off. Morning liquidity is thin (median runner: about
+  about 5 CLV points over the matched band at 11:00, which still loses to the
+  close by 1.5 points once later non-runner reductions are counted (ledger
+  20), and it is gone by an hour before the off. A learned timing policy
+  saves 0.1-0.16 CLV points per bet (ledger 20). Morning liquidity is thin (median runner: about
   GBP 345 matched all morning).
 - **Private information** (gallops, stable intent): not obtainable, and the
   part of the market the model loses to (favourites, debutants).
@@ -139,3 +141,21 @@ what the project is, not a backlog item.
 3. **Know where things live:** `docs/SESSION_LOG.md` for this session's state;
    `scripts/project_status.py` before trusting any number (it now checks the
    data, the sectional cache and the store's freshness, not just code).
+
+## 7. Addendum 2026-10-14: the five unconventional ideas (EXPLORATION_PLAN)
+
+| idea | outcome | ledger |
+|---|---|---|
+| B. Execution timing | **fails** the pre-registered bar (saves 0.10-0.16 CLV points per bet vs 0.5). Found that ledgers 14 and 19 ignored non-runner reductions: the 11:00 "break-even" is median CLV **0.985**. A descriptive 11:00 lead (median CLV ~1.03-1.05 after a tick, survives staleness, morning-cut-off and bounce checks) is frozen for a future test | 20 |
+| A. Tote exotics from BSP | **blocked at step 0**: Sporting Life has every dividend since 2020 but its terms prohibit scraping; ATR rate-limited | 24 |
+| C. Forecast ground changes | **fails**: continuation partial +0.006 (p 0.04) vs the 0.01 bar; the economic rule loses | 23 |
+| D. Breeze-up times | **stopped at step 0**: no official European breeze-up times exist | 21 |
+| E. Morning market-making | **phase 1 does not stop it**: break-even half-spread 0.7 ticks (balanced flow) to 1.2-1.7 (informed flow); GBP 303k a day of morning volume; whether a newcomer gets filled is unknowable without an order book | 22 |
+
+Decisions only the operator can make, added by this round:
+4. **Sporting Life dividends** for idea A: permission to collect them (about
+   80k pages, a day at one request a second), or a licensed source.
+5. **A live Betfair app key and a few weeks of Stream API order-book
+   recording** (no orders). One recording serves both E phase 2 and the 11:00
+   timing lead (it shows how much was available at the price, which BASIC
+   cannot).

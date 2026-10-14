@@ -243,3 +243,115 @@ def partial_corr(df: pd.DataFrame, x: str, y: str, price: str, extra: tuple[str,
     return {"partial_corr": round(r, 5), "se": round(se, 5), "t": round(t, 2),
             "p": erfc(abs(t) / sqrt(2)) if np.isfinite(t) else float("nan"),
             "n": int(len(sub)), "races": int(n_c)}
+
+
+# ---------------------------------------------------------------------------
+# Ledger 23
+# ---------------------------------------------------------------------------
+
+RAIN_MIN_MM = 2.0
+PREF_MIN = 0.15
+BAND = (1.5, 50.0)
+
+
+def economic(df: pd.DataFrame, cut: str, n_boot: int) -> dict:
+    from src.bet_settlement import betfair_tick_down, settle_win_exchange_bets
+    from src.wf_eval import bootstrap_median_ci, bootstrap_roi_ci, clv_summary, fold_summary
+    d = df[df["rain_fc"] >= RAIN_MIN_MM].copy()
+    p = d[f"ltp_{cut}"].to_numpy(float)
+    rf = (d[f"rf_after_{cut}"].fillna(1.0) * d[f"rf_stale_{cut}"].fillna(1.0)).to_numpy(float)
+    d["taken"] = apply_reduction_factor(betfair_tick_down(p, 1), rf)
+    d["band"] = d[f"ltp_{cut}"].between(*BAND)
+    top = d["pref"].where(d["band"]).groupby(d["race_id"]).transform("max")
+    d["pick"] = d["band"] & (d["pref"] == top) & (d["pref"] >= PREF_MIN)
+    won = d["won"].to_numpy().astype(bool)
+    d["pnl_taken"] = settle_win_exchange_bets(d["taken"].to_numpy(), won)
+    d["pnl_bsp"] = settle_win_exchange_bets(d["bsp"].to_numpy(float), won)
+    out = {}
+    for name, mask in (("baseline: band in rain races", d["band"]), ("rule: top preference", d["pick"])):
+        s = d[mask]
+        if s.empty:
+            out[name] = {"n": 0}
+            continue
+        cl = s["race_id"].to_numpy()
+        clv = clv_summary(s["taken"], s["bsp"])
+        out[name] = {
+            "n": int(len(s)), "win_rate": round(float(s["won"].mean()), 4),
+            "median_clv_ci": bootstrap_median_ci((s["taken"] / s["bsp"]).to_numpy(), clusters=cl, n_boot=n_boot),
+            "geo_clv": clv.get("geometric_mean_clv"), "beat_close": clv.get("pct_beat_close"),
+            "roi_taken": bootstrap_roi_ci(s["pnl_taken"], clusters=cl, n_boot=n_boot),
+            "roi_bsp": bootstrap_roi_ci(s["pnl_bsp"], clusters=cl, n_boot=n_boot),
+            "quarters": fold_summary(s.groupby("q")["pnl_taken"].mean().mul(100).tolist()),
+        }
+    r = out["rule: top preference"]
+    out["pass"] = bool(r.get("n") and r["median_clv_ci"]["ci_low"] > 1.0 and (r["geo_clv"] or 0) > 1.0
+                       and r["roi_taken"]["mean"] > 0)
+    return out
+
+
+def _sire_soft(df: pd.DataFrame) -> pd.Series:
+    import pyarrow.parquet as pq
+    store = pq.read_table("data/processed/feature_store/featured.parquet",
+                          columns=["race_id", "horse_name", "sire_soft_edge"]).to_pandas()
+    store["race_id"] = store["race_id"].astype(str)
+    m = df[["race_id", "horse_name"]].merge(store.drop_duplicates(["race_id", "horse_name"]),
+                                            on=["race_id", "horse_name"], how="left")
+    return pd.Series(m["sire_soft_edge"].to_numpy(), index=df.index)
+
+
+def run(n_boot: int) -> dict:
+    report: dict = {}
+    d = frame("0800")
+    print(f"08:00 frame: {d['race_id'].nunique():,} races, {len(d):,} runners "
+          f"({d['race_date'].min()}..{d['race_date'].max()})", flush=True)
+    prim = partial_corr(d, "x", "y", "p_dec", ("pref",), n_boot)
+    prim["pass"] = bool(prim["partial_corr"] >= 0.01 and prim["p"] < 0.05)
+    report["primary 08:00"] = prim
+    report["economic 08:00"] = economic(d, "0800", n_boot)
+    both = d[(d["soft_n"] > 0) & (d["firm_n"] > 0)]
+    report["08:00, soft and firm history"] = partial_corr(both, "x", "y", "p_dec", ("pref",), n_boot)
+    d["sire_soft"] = _sire_soft(d)
+    d["x_sire"] = d["sire_soft"] * d["rain_fc"]
+    report["08:00, sire soft edge"] = partial_corr(d, "x_sire", "y", "p_dec", ("sire_soft",), n_boot)
+    e = frame("eve1800")
+    print(f"evening frame: {e['race_id'].nunique():,} races, {len(e):,} runners", flush=True)
+    report["evening 18:00"] = partial_corr(e, "x", "y", "p_dec", ("pref",), n_boot)
+    report["economic evening"] = economic(e, "eve1800", n_boot)
+    return report
+
+
+def render(report: dict) -> str:
+    L = ["", "=== ledger 23: forecast ground changes (development, turf, 2024-03..) ==="]
+    for k, v in report.items():
+        if k.startswith("economic"):
+            L.append(f"  {k}: PASS={v.get('pass')}")
+            for name, c in v.items():
+                if name == "pass" or not isinstance(c, dict) or not c.get("n"):
+                    continue
+                m, r = c["median_clv_ci"], c["roi_taken"]
+                L.append(f"    {name:30s} n={c['n']:6,} win {c['win_rate']:.3f} medCLV {m['estimate']:.4f} "
+                         f"[{m['ci_low']:.4f},{m['ci_high']:.4f}] geo {c['geo_clv']:.4f} beat {c['beat_close']:.3f} "
+                         f"ROI@taken {r['mean']:+.2f}% [{r['ci_low']:+.2f},{r['ci_high']:+.2f}] "
+                         f"ROI@BSP {c['roi_bsp']['mean']:+.2f}% q+ {c['quarters']['folds_positive']}/{c['quarters']['n_folds']}")
+        else:
+            L.append(f"  {k:32s} partial {v['partial_corr']:+.4f} (se {v['se']:.4f}, t {v['t']:+.2f}, "
+                     f"p {v['p']:.3g}) n={v['n']:,} races={v['races']:,}"
+                     + (f"  PASS={v['pass']}" if "pass" in v else ""))
+    return "\n".join(L) + "\n"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--n-boot", type=int, default=2000)
+    ap.add_argument("--json", default=None)
+    args = ap.parse_args()
+    report = run(args.n_boot)
+    print(render(report))
+    if args.json:
+        with open(args.json, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2, default=str)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

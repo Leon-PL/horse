@@ -8,6 +8,14 @@ compaction — it is the one thing that survives.**
 > (execution timing, Tote exotics priced from Betfair, forecast ground
 > changes, breeze-up times, morning market-making feasibility), in order,
 > with data notes, pass bars and stopping rules. The rules below still apply.
+>
+> **Worked the same evening** (ledgers 20-24, ROADMAP section 7): B and C
+> fail their bars, D and A stop at step 0 (A on Sporting Life's terms, an
+> operator decision), E phase 1 does not stop. **Every early-price
+> comparison must apply non-runner reduction factors** (`bet_settlement.
+> apply_reduction_factor`, `rf_after_*` in `data/processed/betfair_timing.
+> parquet`): without them ledger 14's 11:00 "break-even" was really median
+> CLV 0.985. One descriptive 11:00 timing lead is frozen in ledger 20.
 
 Your mandate is broad: audit every stage of this project, fix what is broken,
 improve what is weak, and push the work as far as it will go. You have full

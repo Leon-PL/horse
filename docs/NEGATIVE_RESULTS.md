@@ -1150,6 +1150,12 @@ BASIC stream for that test.
 
 ### The honest early-price tests: break-even at best
 
+> **Corrected 2026-10-14 (ledger 20): not break-even.** These tests compared
+> the 11:00 price with BSP without the reduction Betfair applies to matched
+> odds when a runner is withdrawn later (17% of these runners). With it, the
+> m11 rule's median CLV is **0.9849 [0.9822, 0.9877]** and its ROI **-1.84%
+> [-3.75, +0.12]**. The table below is kept as recorded.
+
 `scripts/extract_betfair_bsp.py` now also records the last trade at or before
 11:00 UK (`ltp_1100`, present for 96.4% of runners) and at T-60. Same rule,
 same matched baseline, development period, races off at least 30 minutes
@@ -1432,6 +1438,10 @@ files from 2026-06-11 (the hold-out has volume but no 11:00 price), scored once.
 
 ### Result (`scripts/morning_money_segments.py`): both fail
 
+> **Corrected 2026-10-14 (ledger 20):** with later non-runner reductions
+> applied to the 11:00 price, H2's median CLV is **0.9963 [0.9934, 0.9997]**
+> (ROI -1.70%), so the "near miss" is below the close. Table kept as recorded.
+
 60,733 races, 537,646 runners (2020-09..2026-06), 2% commission:
 
 | cell | bets | win rate | median CLV [CI] | geo CLV | beat close | ROI at 11:00 [CI] | ROI at BSP | quarters + |
@@ -1547,7 +1557,122 @@ runners (capacity).
 files from 2026-06-11, which only the operator can download, and BASIC cannot
 show the real spread (no ladder), which only a recorded order book can.
 
-## 21. Breeze-up times for debutants (EXPLORATION_PLAN D): stopped at step 0 (2026-10-14)
+### Result (`scripts/execution_timing.py`): fails in every universe; and the reductions overturn ledgers 14 and 19
+
+60,337 races, 533,587 runners (2020-09-15..2026-06-03); 20 purged quarterly
+folds (2021Q3-2026Q2), 463,717 runners scored. LightGBM cleared the 20% R²
+rule at every decision point (out-of-fold R² of `y`: 11:00 0.105 vs linear
+0.082; T-60 0.039 vs 0.027; T-5 0.046 vs 0.019), so it drives the policy.
+`G` in CLV points (1 = 1% better price than BSP), 98.33% intervals for the
+primary, 95% otherwise:
+
+| universe | n | struck early | **G, one tick + reductions** | no haircut | two ticks | no reductions | quarters + | PASS |
+|---|---|---|---|---|---|---|---|---|
+| U1 all in band | 401,782 | 2.9% | **+0.096 [+0.036, +0.162]** | +0.207 | -0.014 | +0.165 | 15/20 | **no** |
+| U2 11:00 favourite | 51,538 | 2.1% | **+0.145 [+0.059, +0.242]** | +0.174 | +0.117 | +0.176 | 14/20 | **no** |
+| U3 morning-money pick | 52,683 | 5.5% | **+0.158 [+0.046, +0.268]** | +0.286 | +0.031 | +0.321 | 11/20 | **no** |
+
+- **Idea B fails.** The policy saves a real but tiny amount: a tenth to a
+  sixth of a CLV point per bet, against a bar of 0.5. It strikes early on
+  only 2-6% of runners; always striking early costs 3-14 points
+  (always at 11:00: -13.8 in U1). tau of 0 or 0.02 changes nothing. The
+  realised PnL gain agrees in sign (U1 +0.15 [-0.47, +0.47] per 100 staked;
+  U3 +0.68 [+0.44, +0.94]). By the plan's rule, B stops.
+- Waiving reductions under 2.5% barely moves anything (U1 +0.097).
+
+**The correction that matters: ledgers 14 and 19 were flattered by
+non-runners.** 17.4% of the m11 runners had a horse withdrawn after 11:00
+(12.7% with a factor of 2.5% or more). A bet matched at 11:00 would have had
+its odds cut; BSP is not. The 11:00 prices are inflated by almost exactly
+that factor (`log(11:00 / BSP)` averages +0.41 where later reductions exceed
+30%, -0.13 after applying them, against -0.12 in races with none), so the
+correction is the market's own arithmetic, not a modelling choice. Re-scored:
+
+| rule | as recorded | with reductions | reductions >= 2.5% only | reductions + one tick |
+|---|---|---|---|---|
+| ledger 14 m11 (all picks), median CLV | 1.0000 [1.0000, 1.0011] | **0.9849 [0.9822, 0.9877]** | 0.9856 [0.9830, 0.9886] | 0.9675 |
+| ledger 14 m11, geometric CLV | 0.9711 | 0.9505 | 0.9510 | 0.9306 |
+| ledger 14 m11, ROI at 11:00 | +0.85% [-1.12, +2.83] | **-1.84% [-3.75, +0.12]** | -1.79% | -3.89% [-5.75, -1.98] |
+| ledger 19 H2 (pick & favourite), median CLV | 1.0122 [1.0088, 1.0148] | **0.9963 [0.9934, 0.9997]** | 0.9968 [0.9940, 1.0000] | 0.9848 |
+| ledger 19 H2, ROI at 11:00 | +0.99% [-0.74, +2.80] | **-1.70% [-3.38, +0.07]** | -1.65% | -2.89% [-4.54, -1.14] |
+
+"The closest thing to a positive result this project has produced"
+(ledger 14) was not break-even: the median 11:00 strike on the morning money
+**loses** to the close by 1.5 CLV points once the withdrawals are counted,
+and ledger 19's favourite near-miss is below 1.0. **Any early-price test in
+this ledger before this entry ignored reductions and is optimistic by about
+1-1.5 CLV points at 11:00** (less at T-60 and T-5: 7.6% and 3.6% of runners
+have a later withdrawal against 21.7% at 11:00). That includes ledger 14's
+T-5 and T-60 rows; their verdicts (fail) only get stronger.
+
+**A descriptive lead, not a result.** Read as bets of their own, the policy's
+early strikes beat the close: U1 11,537 bets, median CLV 1.0163 [1.0061,
+1.0253], geometric 1.0341, beat-close 51.4%, ROI at the taken price +6.30%
+[-3.01, +16.54]; U3 2,885 bets, median 1.0372 [1.0256, 1.0488]. This was
+not the pre-registered test. It is development data, the ROI interval spans
+zero, two ticks of spread erase the U1 gain, and the strikes sit in thin
+markets (median morning volume GBP 487 in U1). The exploratory checks below
+ask whether the LTP was ever a price you could back.
+
+### Exploratory checks on the lead (`scripts/execution_timing_diagnostics.py`; not tests)
+
+**It is all 11:00.** U1 strikes by decision point, one tick + reductions:
+
+| strike at | n | median CLV | geometric | ROI at taken price | two ticks: median, ROI |
+|---|---|---|---|---|---|
+| 11:00 | 5,895 | **1.0488 [1.0385, 1.0575]** | 1.0290 | **+14.7% [+3.9, +25.8]** | 1.0204, +11.1% [+0.7, +21.8] |
+| T-60 | 2,429 | 0.9936 [0.9743, 1.0029] | 1.0450 | +25.5% [-5.6, +59.9] | 0.9545 |
+| T-5 | 3,213 | 0.9909 [0.9788, 1.0000] | 1.0353 | -23.7% [-40.6, -6.0] | 0.9500 |
+
+T-60 and T-5 strikes have no edge after a tick (their geometric means are
+long-price tails). The 11:00 numbers are the kind of result this ledger has
+learned to distrust, so three artefacts were checked:
+
+- **Stale prices: no.** The struck 11:00 LTPs are *fresher* than average
+  (median age 156 s vs 285 s for all U1 runners; 42 changes so far vs 34),
+  and the freshest (under 60 s old, 1,575 bets) still show median CLV 1.033
+  [1.020, 1.050].
+- **The undocumented morning period, and the final-field normalisation: no.**
+  Betfair does not say when its "morning" ends (morning VWAP sits nearer the
+  11:00 price than the T-60 price in 81% of big moves, consistent with an
+  11:00 cut but not proof), and the race-level morning aggregates are
+  normalised over the runners that eventually ran, which could betray a
+  later withdrawal. Refitting the 11:00 model **without any morning field**:
+  linear has no edge (12,082 strikes, median CLV 0.980, ROI -5.4%); LightGBM
+  (R² 0.082 vs 0.105 with them) strikes 2,292 times with median CLV **1.0435
+  [1.0200, 1.0679]**, ROI +16.8% [-3.9, +37.3], two ticks 1.0049 [0.9899,
+  1.0297]. The edge holds in races with no later withdrawal (median 1.041),
+  and the strike rate is barely lower where one comes (0.49% vs 0.59%).
+- **Bid-ask bounce: partly, not wholly.** An LTP after a *rise* may be a
+  layer matching at the top of the spread, a tick or more above the best
+  back price; after a *fall*, a backer has just taken the price, so it was
+  there to back. The model does lean on rises (64% of its 11:00 strikes
+  follow one, against 48% of all runners), but the strikes that follow a
+  fall still beat the close: 2,103 bets, one tick + reductions, median CLV
+  **1.0336 [1.0190, 1.0478]**, geometric 1.0227, beat-close 53.4%, ROI +9.1%
+  [-6.8, +27.4] (after a rise: 3,781 bets, 1.0563, ROI +18.2%).
+
+**Reading.** After four checks, the 11:00 lead is the most robust timing
+signal this project has measured: a model of the 11:00 book's shape picks
+runners whose price is long relative to where the market closes, about 3-5%
+at the median, with no morning-volume input needed. It looks like thin
+morning prices reverting. It is still only descriptive: found after the
+pre-registered test failed, on development data, with ROI intervals that
+span zero, and BASIC cannot show **how much** could be backed at those
+prices (the median struck runner traded GBP 487 all morning).
+
+**If it is pursued, test exactly this frozen rule, once, on data never
+seen:** the 11:00 LightGBM of `execution_timing.py` with the four morning
+fields removed (`execution_timing_diagnostics.no_morning`: immune to the
+undocumented morning cut-off), refit deterministically on all development
+U1 rows; strike if the prediction exceeds 0.01, U1 band, races off at or
+after 12:05 UK, one tick down plus reductions; pass = median CLV above 1
+with the 95% interval excluding 1, geometric mean above 1, ROI at the taken
+price above 0. **Power:** about 115 strikes a quarter, so the June-October
+2026 hold-out (~150) cannot resolve a 4% median effect (its interval would
+be roughly +-0.09); it needs about 600 strikes, roughly five quarters of
+BASIC data, or an order-book recording that also measures the depth at the
+price (the same Stream API recording Idea E phase 2 needs). for debutants (EXPLORATION_PLAN D): stopped at step 0 (2026-10-14)
 
 The test needs measured breeze times for the two-year-olds sold at European
 breeze-up sales, matched to their debuts. **No European breeze-up published
@@ -1663,6 +1788,68 @@ markets); the sire's soft-ground edge in place of the horse's preference;
 runners with both soft and firm history only.
 
 **Hold-out:** needs Betfair BASIC files from 2026-06-11 (operator).
+
+### Result (`scripts/ground_forecast.py`): fails
+
+14,869 turf races, 124,892 runners (2024-03-01..2026-06-03), every runner
+traded at 08:00, forecasts for all 86 courses.
+
+| test | partial | SE | t | p | n (races) | |
+|---|---|---|---|---|---|---|
+| **primary: preference x rain, 08:00** | **+0.0060** | 0.0029 | +2.04 | 0.041 | 124,892 (14,869) | **fails (below 0.01)** |
+| runners with soft and firm history | +0.0048 | 0.0054 | +0.88 | 0.38 | 42,602 (10,070) | |
+| sire's soft-ground edge instead | +0.0065 | 0.0034 | +1.92 | 0.054 | 119,499 (14,869) | |
+| evening before (18:00) | +0.0014 | 0.0089 | +0.15 | 0.88 | 16,027 (1,820) | |
+
+| economic rule (08:00, >= 2 mm forecast) | n | median CLV [95% CI] | geo | beat close | ROI at taken price | ROI at BSP | quarters + |
+|---|---|---|---|---|---|---|---|
+| baseline: band in those races | 10,188 | 0.8785 [0.8706, 0.8856] | 0.8293 | 36.8% | -9.19% | +3.12% | 1/10 |
+| rule: top preference >= 0.15 | 661 | 0.9028 [0.8568, 0.9444] | 0.8526 | 39.5% | -0.85% [-25.5, +27.1] | +10.20% | 6/10 |
+
+- **C fails.** The signal points the predicted way (soft-ground horses
+  shorten after 08:00 when rain is forecast) and is nominally significant,
+  but at 0.006 it is below the pre-registered 0.01, and the pedigree version
+  is no stronger. The economic rule beats its baseline on CLV only because
+  08:00 prices are far shorter than BSP across the board (the 08:00 book is
+  thin and over-round: the median runner drifts 12%); it is nowhere near 1.
+- The evening-before decision cannot be tested properly: only 1,820 races
+  had every runner traded by 18:00 the day before.
+- By the plan's stop rule (no continuation signal of 0.01), C stops. The
+  forecast cache (`data/weather_forecast/`, 86 courses, 2024-01..2026-10) is
+  kept.
+
+## 24. Tote exotics priced from BSP (EXPLORATION_PLAN A): step 0 blocked on the operator (2026-10-14)
+
+Not run. The data exists but the only complete source forbids collecting it.
+
+- **Sporting Life result pages carry every Tote dividend** in their
+  `__NEXT_DATA__` JSON, back to at least 2020-09: `tote_win`, `place_win`
+  (per place), `exacta_win`, `trifecta`, `swingers` (three pairs),
+  `straight_forecast` (the CSF), `tricast`, `place_pot` and `quad_pot`
+  (dividend, pool size and winning stakes), plus `deductions` and
+  `on_course_book_percentage`. Checked on 2020-09-19, 2022-03-05 and
+  2025-10-04. Dividends are quoted per GBP 1. **No exacta or trifecta pool
+  sizes**, which the plan's stake-cap trap needs.
+- **Sporting Life's terms: "Data capture including, but not limited to,
+  screen scraping is expressly prohibited"**, content is "for personal use",
+  and no commercial use. By the plan's rule (as for Racing Post), no
+  80,000-page backfill was started. The main pipeline already scrapes these
+  pages daily; reconciling that with the terms is the operator's call.
+- **At The Races** publishes one results page per day with dividends
+  (~2,200 pages for the whole period; robots.txt allows `/results/`,
+  disallows `/ajax/`). Its terms page and a results page both returned HTTP
+  429 to the project's fetcher on two tries 25 minutes apart, so its terms are
+  unread. Note for the sectional scraper: it may be rate-limited too.
+- **Takeouts are steep.** Placepot measured from one page: pot x winning
+  stakes / pool = 72.9% returned (~27% deduction). Published figures (old,
+  unofficial): win 13.5-19.25%, exacta ~24%, trifecta and jackpot 29%,
+  placepot 27%; Irish pools a further 5%. An exotics rule must beat a
+  quarter of every stake.
+
+**Unblocking needs one operator decision:** permission to collect Sporting
+Life's dividend fields (the scrape is ~80k pages, ~1 request/s, about a day,
+resumable), or a licensed source (the Tote's own data, or a paid racing data
+API that carries dividends and pool sizes).
 
 ## Things that are true and worth not re-deriving
 

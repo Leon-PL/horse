@@ -126,14 +126,21 @@ def _timing_fields(events: list[tuple[int, float]], cuts: dict[str, int | None],
     for name, cut in cuts.items():
         last_pt = None
         n = 0
+        prev = last = None
         if cut is not None:
-            for pt, _ in events:
+            for pt, ltp in events:
                 if pt > cut:
                     break
                 last_pt = pt
                 n += 1
+                if ltp != last:
+                    prev, last = last, ltp
         out[f"age_{name}"] = (cut - last_pt) / 1000.0 if last_pt is not None else None
         out[f"nchg_{name}"] = n
+        # The LTP before the last change: a fall means a backer just took the
+        # price (so it was there to back); a rise means a layer may have
+        # matched at the top of the spread (bid-ask bounce).
+        out[f"prev_ltp_{name}"] = prev
         after = stale = after25 = stale25 = 1.0
         n_after = 0
         if cut is not None:

@@ -566,7 +566,8 @@ Checkpoints where the honest move may be to stop:
 4. **After 4c + 5a — FIRED 2026-10-13.** Residual-targeted training finds
    nothing beyond the market (race log loss -0.00010 [-0.00040, +0.00020],
    ledger 15) and the free microstructure data is fully absorbed by BSP, with
-   a timing edge that reaches break-even at 11:00 at best (ledger 14). Only
+   a timing edge that does not reach break-even at 11:00 once non-runner
+   reductions are counted (ledgers 14, 20). Only
    paid order-book data (Betfair ADVANCED/PRO) remains untested. There is no
    public-data edge to find; continuing is a hobby rather than an investment -
    a perfectly good reason to continue, but a conscious one. See

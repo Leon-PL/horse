@@ -55,6 +55,7 @@ def test_timing_fields_staleness_activity_and_reduction_factors():
     assert row["ltp_0800"] == 7.0             # 08:00 BST: the evening trade still stands
     assert row["age_1100"] == 3600.0          # last change 09:00 UTC, cut 10:00 UTC
     assert row["nchg_1100"] == 2
+    assert row["prev_ltp_1100"] == 7.0 and row["prev_ltp_300s"] == 5.0
     # A bet matched at 11:00 BST is cut by Beta (removed 12:00 UTC) but not
     # Gamma (removed before the cut) ...
     assert row["rf_after_1100"] == 0.8 and row["n_removed_after_1100"] == 1

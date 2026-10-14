@@ -229,7 +229,7 @@ build).
 40. **Idea B dry run (n_boot 50, final run pending):** fails the pre-registered
     bar in every universe (G +0.10 / +0.15 / +0.16 CLV points vs 0.5).
     **Ledgers 14 and 19 overturned by the reductions**: m11 median CLV 1.0000
-    -> 0.9849, ROI +0.85% -> -1.84% [-3.66, -0.58]; H2 1.0122 -> 0.9963.
+    -> 0.9849, ROI +0.85% -> -1.84% (dry-run CI; official [-3.75, +0.12]); H2 1.0122 -> 0.9963.
     Descriptive lead: the policy's early strikes alone have median CLV 1.016
     [1.008, 1.024], but two ticks of spread erase the U1 gain. Re-extracting
     with a waived-under-2.5% reduction variant before the official run.
@@ -240,3 +240,15 @@ build).
     does not stop it; phase 2 needs the operator.
 43. **Idea C pre-registered** (ledger 23); forecasts for 80/86 courses fetched
     (Open-Meteo hourly cap; resumable).
+44. **Idea B final (ledger 20): fails** - G +0.096/+0.145/+0.158 vs 0.5.
+    Ledger 14/19 correction holds with reductions >= 2.5% only (0.9856,
+    0.9968); corrections noted in ledgers 14, 19, ROADMAP, ACTION_PLAN.
+    Exploratory: the lead is all 11:00 strikes (median 1.049 after a tick);
+    not stale, survives removing every morning field (LightGBM 1.0435), and
+    survives on strikes whose last LTP change was a fall (1.0336). Frozen
+    rule written into ledger 20; needs ~600 unseen strikes or an order-book
+    recording.
+45. **Idea C (ledger 23): fails** - partial +0.0060 (p 0.041) < 0.01; economic
+    rule median CLV 0.90. All 86 course forecasts cached.
+46. **Idea A (ledger 24)** recorded as blocked on the operator.
+47. ROADMAP addendum section 7 written.
