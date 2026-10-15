@@ -134,9 +134,11 @@ what the project is, not a backlog item.
 
 ## 6. Actions only you can take
 
-1. **Download Betfair BASIC files for 2026-06-11 to today.** BASIC is free;
-   the hold-out has closing prices but no T-5 or 11:00 price, so no T-5 claim
-   can be confirmed on it without them.
+1. ~~Download Betfair BASIC files for 2026-06-11 to today.~~ **Done
+   2026-10-15** to 2026-10-10 (`data/betfair/2026-06.tar`, `2026-07to10.tar`;
+   in `data/processed/betfair_timing.parquet`). Keep adding months: the
+   frozen 11:00 rule (ledger 20) needs ~600 unseen strikes, about five
+   quarters, before its one hold-out test is worth spending.
 2. **Decide on paid ADVANCED/PRO data**, if you choose option B.
 3. **Know where things live:** `docs/SESSION_LOG.md` for this session's state;
    `scripts/project_status.py` before trusting any number (it now checks the

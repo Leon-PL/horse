@@ -264,3 +264,8 @@ build).
     `betfair_timing.parquet` (783,476 runners; ~98% of DB races Jul-Oct).
     **Hold-out gap: 2026-06-11..06-30 (775 races) still has no BASIC data.**
     The canonical `betfair_bsp.parquet` is unchanged (still to 2026-06-10).
+50. Operator added BASIC for June 2026 (`2026-06.tar`): appended to
+    `betfair_timing.parquet` (791,026 runners). **Hold-out BASIC now complete
+    2026-06-11..2026-10-10**: 11-30 June 100% of DB races, Jul-Oct ~98%;
+    43,795 hold-out runners, 99.6% with an 11:00 price. Not yet used for any
+    test (the frozen 11:00 rule needs ~600 strikes; ~4 months gives ~150).
