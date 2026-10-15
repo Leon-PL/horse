@@ -252,3 +252,15 @@ build).
     rule median CLV 0.90. All 86 course forecasts cached.
 46. **Idea A (ledger 24)** recorded as blocked on the operator.
 47. ROADMAP addendum section 7 written.
+
+## 2026-10-15
+
+48. BHA race backfill restarted (detached, from the `feature/course-profile`
+    worktree; log `data/bha_going/races_backfill.err.log`).
+49. `data/betfair/data (x).tar` renamed by content (2020.tar, 2021.tar,
+    2020-08to2021-04.tar, 2021-08to2022-01.tar, 2026-05to06.tar); they are the
+    only source of 2020-2021, not duplicates. Operator added BASIC for
+    2026-07-01..2026-10-10 (`2026-07to10.tar`), appended to
+    `betfair_timing.parquet` (783,476 runners; ~98% of DB races Jul-Oct).
+    **Hold-out gap: 2026-06-11..06-30 (775 races) still has no BASIC data.**
+    The canonical `betfair_bsp.parquet` is unchanged (still to 2026-06-10).
