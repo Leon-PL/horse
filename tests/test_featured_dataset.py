@@ -85,9 +85,17 @@ class _FakeStore:
         return ["featured"]
 
 
+def _no_rtv_cache(cutoff):
+    return {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": {"runs": None, "pre": None}}
+
+
 @pytest.fixture
 def patch_store(monkeypatch):
-    """Install a fake store and a no-op _stamp; return a setter for the fake."""
+    """Install a fake store, a no-op _stamp and an absent RTV cache.
+
+    Without the RTV stub the decision reads the real cache under data/, so
+    these tests passed on a fresh checkout and failed wherever RTV data exists.
+    """
     holder = {}
 
     def _install(*, exists, meta, last_date):
@@ -95,6 +103,7 @@ def patch_store(monkeypatch):
         holder["fake"] = fake
         monkeypatch.setattr(fd, "FeatureStore", lambda: fake)
         monkeypatch.setattr(fd, "_stamp", lambda *a, **k: None)
+        monkeypatch.setattr(fd, "_rtv_signature", _no_rtv_cache)
         return fake
 
     return _install
@@ -159,6 +168,32 @@ class TestBuildVsAppend:
         fake = patch_store(exists=True, last_date=last, meta=meta)
         get_featured_dataset(processed=proc)
         assert fake.calls == ["append", "load"]
+
+    def test_rtv_cache_change_beneath_the_store_builds(self, patch_store, monkeypatch):
+        """The RTV observation cache is read inside FE, outside fe/data_signature."""
+        proc = _toy(["2023-01-01", "2023-01-02"])
+        last = proc["race_date"].max()
+        stamped = {"cutoff": "2023-01-02", "sig": {"runs": "before", "pre": None}}
+        meta = {"fe_signature": fe_signature(), "data_signature": data_signature(proc, cutoff=last),
+                "rtv_signature": stamped}
+
+        fake = patch_store(exists=True, last_date=last, meta=meta)
+        monkeypatch.setattr(fd, "_rtv_signature",
+                            lambda cutoff: {"cutoff": "2023-01-02", "sig": {"runs": "after", "pre": None}})
+        get_featured_dataset(processed=proc)
+        assert fake.calls == ["build"]
+
+        fake = patch_store(exists=True, last_date=last, meta=meta)
+        monkeypatch.setattr(fd, "_rtv_signature", lambda cutoff: stamped)
+        get_featured_dataset(processed=proc)
+        assert fake.calls == ["append", "load"]
+
+        # A store stamped before the RTV cache existed must rebuild once it appears.
+        unstamped = {k: v for k, v in meta.items() if k != "rtv_signature"}
+        fake = patch_store(exists=True, last_date=last, meta=unstamped)
+        monkeypatch.setattr(fd, "_rtv_signature", lambda cutoff: stamped)
+        get_featured_dataset(processed=proc)
+        assert fake.calls == ["build"]
 
 
 @pytest.mark.parametrize("column,value", [
