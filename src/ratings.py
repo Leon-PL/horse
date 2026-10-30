@@ -449,7 +449,8 @@ def compute_elo_features(
     horse_margin_elo_col = np.full(len(df), np.nan)
     horse_margin_delta_col = np.zeros(len(df))
     horse_margin_momentum_col = np.full(len(df), np.nan)
-    _lengths_behind = df["lengths_behind"].values if "lengths_behind" in df.columns else None
+    from src.result_margins import margin_values
+    _lengths_behind = margin_values(df).values if "lengths_behind" in df.columns else None
     _dist_furlongs = df["distance_furlongs"].values if "distance_furlongs" in df.columns else None
 
     for race_id in race_ids_ordered:
@@ -545,7 +546,9 @@ def compute_elo_features(
             )
 
         # ── Margin Elo: includes non-finishers with penalty ──
-        if _lengths_behind is not None:
+        if (_lengths_behind is not None
+                and ("beaten_lengths" not in df
+                     or np.isfinite(_lengths_behind[idx][valid_mask]).all())):
             # Collect all horses that competed (finishers + non-finishers)
             # Finishers: fp > 0 → use their lengths_behind
             # Non-finishers: fp == 0 (PU/F/UR/BD) → penalised virtual lb
@@ -955,7 +958,11 @@ def _glicko_pass(
         idx = race_group_indices[race_id]
         race_dt = dates[idx[0]]
 
-        # Pre-race: inflate RD for inactivity, record values
+        # Pre-race: compute uncertainty from the last rated result. Do not
+        # change carried RD until there is an actual rating update: otherwise
+        # an unrated/non-finish appearance counts the same idle days again
+        # next time. Multiple runners for an entity share one pre-race RD.
+        race_rds = {}
         for i in idx:
             k = keys[i]
             if k is None:
@@ -967,7 +974,7 @@ def _glicko_pass(
                     float(np.sqrt(rds[k] ** 2 + (GLICKO_C ** 2) * months)),
                     GLICKO_RD_INIT,
                 )
-                rds[k] = rd_now
+                race_rds[k] = rd_now
                 r_col[i] = ratings[k]
                 rd_col[i] = rd_now
                 has_col[i] = 1
@@ -990,7 +997,7 @@ def _glicko_pass(
             continue
         m = len(upd)
         r_arr = np.array([ratings.get(k, GLICKO_RATING_INIT) for k in ukeys])
-        rd_arr = np.array([rds.get(k, GLICKO_RD_INIT) for k in ukeys])
+        rd_arr = np.array([race_rds.get(k, GLICKO_RD_INIT) for k in ukeys])
         fp_arr = np.array([float(fp_race[j]) for j, _ in upd])
         exclude = None
         if len(set(ukeys)) < m:
@@ -1103,6 +1110,9 @@ def _glicko2_pass(
         idx = race_group_indices[race_id]
         race_dt = dates[idx[0]]
 
+        # Keep the persisted deviation tied to last_dt until an observed
+        # result updates both. Pending and non-finish rows are read-only.
+        race_phis = {}
         for i in idx:
             k = keys[i]
             if k is None:
@@ -1113,7 +1123,7 @@ def _glicko2_pass(
                 phi_now = min(
                     float(np.sqrt(phis[k] ** 2 + (sigmas[k] ** 2) * t)), phi_init
                 )
-                phis[k] = phi_now
+                race_phis[k] = phi_now
                 r_col[i] = GLICKO_RATING_INIT + _G2_SCALE * mus[k]
                 rd_col[i] = _G2_SCALE * phi_now
                 vol_col[i] = sigmas[k]
@@ -1135,7 +1145,7 @@ def _glicko2_pass(
             continue
         m = len(upd)
         mu = np.array([mus.get(k, 0.0) for _, k in upd])
-        phi = np.array([phis.get(k, phi_init) for _, k in upd])
+        phi = np.array([race_phis.get(k, phi_init) for _, k in upd])
         sigma = np.array([sigmas.get(k, GLICKO2_SIGMA_INIT) for _, k in upd])
         fp_arr = np.array([float(fp_race[j]) for j, _ in upd])
 
@@ -1354,7 +1364,8 @@ def compute_glicko_features(
             ).to_numpy()
 
     if getattr(config, "GLICKO_MARGIN", False) and "lengths_behind" in df.columns:
-        lb = pd.to_numeric(df["lengths_behind"], errors="coerce").to_numpy(dtype=float)
+        from src.result_margins import margin_values
+        lb = pd.to_numeric(margin_values(df), errors="coerce").to_numpy(dtype=float)
         r, rd, has, _ = _run(
             _glicko_pass, "margin",
             horse_keys, _finish_pos, _dates, race_ids_ordered,

@@ -1,0 +1,586 @@
+{
+  "source_audit": "data/audit/cached_race_code_review_025/completion.json",
+  "races": {
+    "588529": {
+      "date": "2020-09-16",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Fortune Stakes (Listed)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/839908",
+      "source_horse_id": "839908",
+      "source_sha256": "9e7ba793e3561fa94dac5587a5ddd109bee40a844caf5ecda3f27f7b5d1089fe"
+    },
+    "607638": {
+      "date": "2021-02-07",
+      "track": "Leopardstown",
+      "race_type": "Chase",
+      "race_name": "Paddy Power Irish Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/411034",
+      "source_horse_id": "411034",
+      "source_sha256": "a18a80a0965297436d64fe552ae9d4868c4011752bd784e1fc19625173c4e864"
+    },
+    "613115": {
+      "date": "2021-02-22",
+      "track": "Fairyhouse",
+      "race_type": "Hurdle",
+      "race_name": "Fairyhouse Bobbyjo Chase Day 27th February Mares Maiden Hurdle (Div 2)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1001906",
+      "source_horse_id": "1001906",
+      "source_sha256": "8ff46f90da0320a563bb5cc8d1d9d8166a2376cd001c32a3fbd130ed0ca0dca7"
+    },
+    "613622": {
+      "date": "2021-02-22",
+      "track": "Fairyhouse",
+      "race_type": "Hurdle",
+      "race_name": "Fairyhouse Bobbyjo Chase Day 27th February Mares Maiden Hurdle (Div 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1001614",
+      "source_horse_id": "1001614",
+      "source_sha256": "c08921b2c167de17ff898429a1c8ebeea852aafede5e2208e8d6af0053d4af8d"
+    },
+    "622145": {
+      "date": "2021-04-28",
+      "track": "Punchestown",
+      "race_type": "Chase",
+      "race_name": "Ladbrokes Punchestown Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/3171"
+    },
+    "630916": {
+      "date": "2021-06-11",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm EBF Maiden Stakes (GBB Race) (Div 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1021104",
+      "source_horse_id": "1021104",
+      "source_sha256": "8128a5d570b2e5c129bfbcc02516505abce85f0c89d5b316f32f68c1c5c92666"
+    },
+    "630917": {
+      "date": "2021-06-11",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm EBF Maiden Stakes (GBB Race) (Div 2)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1020789",
+      "source_horse_id": "1020789",
+      "source_sha256": "731efc12a92b2bdf5620928f5476a3be21f9a97dd8f14b71f28655265f66876a"
+    },
+    "631586": {
+      "date": "2021-06-26",
+      "track": "Newcastle",
+      "race_type": "Flat",
+      "race_name": "William Hill Chipchase Stakes (Group 3)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/862008"
+    },
+    "647207": {
+      "date": "2021-09-15",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Fortune Stakes (Listed)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1012515",
+      "source_horse_id": "1012515",
+      "source_sha256": "31e48d5633232d610ce6e439bd81ef8fc63f26a556b9e1455ba98e9a114b2c50"
+    },
+    "650404": {
+      "date": "2021-10-05",
+      "track": "Huntingdon",
+      "race_type": "Hurdle",
+      "race_name": "'Peterborough Chase Day' Sunday 5th December Novices' Hurdle (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/927854"
+    },
+    "666515": {
+      "date": "2022-02-05",
+      "track": "Leopardstown",
+      "race_type": "Chase",
+      "race_name": "Paddy Power Irish Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/3062",
+      "source_horse_id": "3062",
+      "source_sha256": "3138d109475d94ef20038b7a5effc53f41f3ae48aad4eb5a4ed65169aaebaaa8"
+    },
+    "668885": {
+      "date": "2022-02-09",
+      "track": "Fairyhouse",
+      "race_type": "Hurdle",
+      "race_name": "Book For Bobbyjo Chase Day 26th February Mares Maiden Hurdle (Div 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1005145",
+      "source_horse_id": "1005145",
+      "source_sha256": "90151374934c34cc73bc6e2d1fc42b287301f862a77b0f4a8501ea2fd217a834"
+    },
+    "668886": {
+      "date": "2022-02-09",
+      "track": "Fairyhouse",
+      "race_type": "Hurdle",
+      "race_name": "Book For Bobbyjo Chase Day 26th February Mares Maiden Hurdle (Div 2)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1013277"
+    },
+    "673761": {
+      "date": "2022-03-14",
+      "track": "Taunton",
+      "race_type": "Hurdle",
+      "race_name": "William Hill Champion Chase Top Price Guarantee Maiden Hurdle (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1012558",
+      "source_horse_id": "1012558",
+      "source_sha256": "257c65c2477184c19bfc4a5e2c91f9d38e773ee89709797f8ce3e06805581fff"
+    },
+    "678742": {
+      "date": "2022-04-27",
+      "track": "Punchestown",
+      "race_type": "Chase",
+      "race_name": "Ladbrokes Punchestown Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/3171"
+    },
+    "687635": {
+      "date": "2022-06-10",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm British EBF Maiden Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1061107",
+      "source_horse_id": "1061107",
+      "source_sha256": "f42ba4067adf1f45e6d2eed6b5fe5a6543206263a7bada77ce0587969beaeb59"
+    },
+    "690171": {
+      "date": "2022-06-25",
+      "track": "Newcastle",
+      "race_type": "Flat",
+      "race_name": "Pertemps Network Chipchase Stakes (Group 3)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1016446",
+      "source_horse_id": "1016446",
+      "source_sha256": "dc18860da2b816273074d6dc53794b740e8c503e04bf865836ae10679ede486e"
+    },
+    "691038": {
+      "date": "2022-07-01",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Vintage Acquisitions Whisky Chaser Handicap (Female Amateur Jockeys)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/959424"
+    },
+    "694366": {
+      "date": "2022-07-21",
+      "track": "Newbury",
+      "race_type": "Flat",
+      "race_name": "Chuckit! Chaser Nursery",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1053238",
+      "source_horse_id": "1053238",
+      "source_sha256": "42b05337aaefdf2ca9d5d72a0d94ed3011cfba04d6ea21683bc0773f36fb8b71"
+    },
+    "703158": {
+      "date": "2022-09-14",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Fortune Stakes (Listed)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1008484",
+      "source_horse_id": "1008484",
+      "source_sha256": "be86170ccb19f5d239f37dbfbdf9463873396021531fabdaa17a4e7cf127fa8f"
+    },
+    "706458": {
+      "date": "2022-10-05",
+      "track": "Navan",
+      "race_type": "Flat",
+      "race_name": "Troytown Chase Day Early Bird Tickets On Sale Now Handicap",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/405963"
+    },
+    "724016": {
+      "date": "2023-02-04",
+      "track": "Leopardstown",
+      "race_type": "Chase",
+      "race_name": "Paddy Power Irish Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1041213",
+      "source_horse_id": "1041213",
+      "source_sha256": "c4f5df5b337f76dd0bdd2346db0e0384b34666026b07e2b3f1babff6e732469a"
+    },
+    "728599": {
+      "date": "2023-03-13",
+      "track": "Taunton",
+      "race_type": "Hurdle",
+      "race_name": "WilliamHill Champion Chase Top Price Guarantee Maiden Hurdle (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1009496",
+      "source_horse_id": "1009496",
+      "source_sha256": "6711144ecfba15fbcc84bd29427512cf648f82994df8c5ad88097382658919e4"
+    },
+    "732554": {
+      "date": "2023-04-26",
+      "track": "Punchestown",
+      "race_type": "Chase",
+      "race_name": "Ladbrokes Punchestown Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1041213",
+      "source_horse_id": "1041213",
+      "source_sha256": "c4f5df5b337f76dd0bdd2346db0e0384b34666026b07e2b3f1babff6e732469a"
+    },
+    "734062": {
+      "date": "2023-04-22",
+      "track": "Nottingham",
+      "race_type": "Flat",
+      "race_name": "Castle Rock Harvest Pale Chase Maiden Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1076383",
+      "source_horse_id": "1076383",
+      "source_sha256": "f1935909aba7654aa308171cc2abb418034449e360f496ba0d80c8c76c23276c"
+    },
+    "737639": {
+      "date": "2023-05-16",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm British EBF Fillies' Novice Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1099109",
+      "source_horse_id": "1099109",
+      "source_sha256": "1de98bb5b3e904762f5d588bc1218fba0cb4eef33805e75e71351f93adce3083"
+    },
+    "741655": {
+      "date": "2023-06-08",
+      "track": "Uttoxeter",
+      "race_type": "Hurdle",
+      "race_name": "Chasetown Civil Engineering Mares' Handicap Hurdle",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1025907",
+      "source_horse_id": "1025907",
+      "source_sha256": "219ec19772e39ae5b7928d5a026ca029fd47353a3971b51e26eff875c280d9de"
+    },
+    "743004": {
+      "date": "2023-06-16",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm British EBF Maiden Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1102902",
+      "source_horse_id": "1102902",
+      "source_sha256": "7b8aff2253782fcf3c054f8ab7cd1dfaf479399a88aa0e71956a1ca221e5a618"
+    },
+    "745631": {
+      "date": "2023-07-01",
+      "track": "Newcastle",
+      "race_type": "Flat",
+      "race_name": "JenningsBet Chipchase Stakes (Group 3)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1036232",
+      "source_horse_id": "1036232",
+      "source_sha256": "abfd8f3cf18300f50a351364ac10d6c6caad7c883cd3f84889d39f795fc5d95a"
+    },
+    "746529": {
+      "date": "2023-07-07",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Vintage Acquisitions Whisky Chaser Handicap (Female Amateur Jockeys)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1018843",
+      "source_horse_id": "1018843",
+      "source_sha256": "7b128bcc63b63c120fafe42b8b438120e9cd7e15a290e03aa7873792c5460c7b"
+    },
+    "748942": {
+      "date": "2023-07-21",
+      "track": "Nottingham",
+      "race_type": "Flat",
+      "race_name": "Chase The Dream At ctdracing.co.uk EBF Fillies' Restricted Novice Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1075699",
+      "source_horse_id": "1075699",
+      "source_sha256": "507ac87b981ef58cd28c37a6615c475b4bf98e5cc55e2cf9b08372870682ad0f"
+    },
+    "749743": {
+      "date": "2023-07-26",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm British EBF Maiden Fillies' Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1098782",
+      "source_horse_id": "1098782",
+      "source_sha256": "88172d76bc8254de3f6d01c27826daa9d4db7102127f76a7a1c0d9107e64bb63"
+    },
+    "759130": {
+      "date": "2023-09-20",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Fortune Stakes (Listed)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1019564",
+      "source_horse_id": "1019564",
+      "source_sha256": "8b339db5b251f9faf7dacfdfe565fffa1456ad46590acfecfc293da76ddcc7e9"
+    },
+    "766025": {
+      "date": "2023-10-29",
+      "track": "Galway",
+      "race_type": "Hurdle",
+      "race_name": "Purchase By 3pm Today To WINABMW.ie Mares Maiden Hurdle",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1074211"
+    },
+    "779202": {
+      "date": "2024-02-03",
+      "track": "Leopardstown",
+      "race_type": "Chase",
+      "race_name": "Paddy Power Irish Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1041213",
+      "source_horse_id": "1041213",
+      "source_sha256": "c4f5df5b337f76dd0bdd2346db0e0384b34666026b07e2b3f1babff6e732469a"
+    },
+    "792008": {
+      "date": "2024-04-09",
+      "track": "Thirsk",
+      "race_type": "Flat",
+      "race_name": "Storm Chaser Handicap",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1023455",
+      "source_horse_id": "1023455",
+      "source_sha256": "fdaa4fb363d58a072b91ff57d6e0e6af0927305a5a4006fdf53d40b78a971722"
+    },
+    "793182": {
+      "date": "2024-05-01",
+      "track": "Punchestown",
+      "race_type": "Chase",
+      "race_name": "Ladbrokes Punchestown Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1003171",
+      "source_horse_id": "1003171",
+      "source_sha256": "e0addbadd22bea0a609ccbde07daf01f388422d626940447611c6487b4bca634"
+    },
+    "793390": {
+      "date": "2024-04-22",
+      "track": "Hexham",
+      "race_type": "Hurdle",
+      "race_name": "Tay Valley Chasers Patrick Crofts Memorial Junior 'National Hunt' Hurdle (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1125573",
+      "source_horse_id": "1125573",
+      "source_sha256": "4bc94f0ecaa45451cf8519f3b9baac6dde2368b2729f72e6367de8c010879a54"
+    },
+    "796502": {
+      "date": "2024-05-10",
+      "track": "Nottingham",
+      "race_type": "Flat",
+      "race_name": "Lindsay Finance Hire Purchase And Leasing Handicap",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1011633",
+      "source_horse_id": "1011633",
+      "source_sha256": "2a29c77a05fdac3f14ffd2272c9268e975fb49fe0e55aa5d372292a338bd961d"
+    },
+    "798805": {
+      "date": "2024-05-23",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Henry II Stakes (Group 3)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1034954",
+      "source_horse_id": "1034954",
+      "source_sha256": "a541438498bdff7ebf639a11d88d33ee810c4f718b50a838aa77e612210b8009"
+    },
+    "798806": {
+      "date": "2024-05-23",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Brigadier Gerard Stakes (Group 3)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1099476"
+    },
+    "798807": {
+      "date": "2024-05-23",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Stud Staff Heron Stakes (Listed)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1099206",
+      "source_horse_id": "1099206",
+      "source_sha256": "5e3a6c1225f8a555d31470c4a4871f7a7f5a68a3dbc086065f8d5dd9436f5ec5"
+    },
+    "805323": {
+      "date": "2024-06-29",
+      "track": "Chester",
+      "race_type": "Flat",
+      "race_name": "Chase Distillery EBF Fillies' Handicap",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1080106",
+      "source_horse_id": "1080106",
+      "source_sha256": "c6925a4090e3011b9c808594d27fe5a34a64e9cbded89282a8db35d58adaf7f6"
+    },
+    "805359": {
+      "date": "2024-06-29",
+      "track": "Newcastle",
+      "race_type": "Flat",
+      "race_name": "JenningsBet Nun Street Newcastle Open Now Chipchase Stakes (Group 3)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1053302",
+      "source_horse_id": "1053302",
+      "source_sha256": "d1fe82e3817eb27d8be02f7be5f24e3790be617c8b3f477c29b3dfcb3dcc28f4"
+    },
+    "807469": {
+      "date": "2024-07-12",
+      "track": "Chepstow",
+      "race_type": "Flat",
+      "race_name": "Cruises Chase Handicap",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1002065",
+      "source_horse_id": "1002065",
+      "source_sha256": "0966ecda8b12a038b296edd072ead49b26956a8323c7b7cd96cf23f7bdaa025c"
+    },
+    "807473": {
+      "date": "2024-07-12",
+      "track": "Chepstow",
+      "race_type": "Flat",
+      "race_name": "Hullabaloos Chase Handicap",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1044810",
+      "source_horse_id": "1044810",
+      "source_sha256": "79a8b639415284c8c6467f342be888642c2902ab99e73134d801c89364eca8e9"
+    },
+    "818667": {
+      "date": "2024-09-12",
+      "track": "Epsom Downs",
+      "race_type": "Flat",
+      "race_name": "No Hurdles With Emplas Jump Jockeys Derby Handicap (Professional Jump Jockeys)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/938860"
+    },
+    "826598": {
+      "date": "2024-10-27",
+      "track": "Galway",
+      "race_type": "Hurdle",
+      "race_name": "Purchase By 3pm Today To WINABMW.ie Mares Maiden Hurdle",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1042198",
+      "source_horse_id": "1042198",
+      "source_sha256": "5c0dc599429861418de34710a2b76c31e204ad7035ea44ddf3d3a1246587b6da"
+    },
+    "837036": {
+      "date": "2025-01-02",
+      "track": "Huntingdon",
+      "race_type": "Flat",
+      "race_name": "Purchase Hospitality At Huntingdon In 2025 NH Flat Race (Conditional/Amateurs) (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1110545",
+      "source_horse_id": "1110545",
+      "source_sha256": "7bfb492d733144f861b114892ed7abb5364d3c67bf4ad74ed54b79afcc8f526f"
+    },
+    "842429": {
+      "date": "2025-02-06",
+      "track": "Huntingdon",
+      "race_type": "Flat",
+      "race_name": "Purchase Hospitality At Huntingdon In 2025 Open NH Flat Race (GBB Race) (Div 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1162372"
+    },
+    "842430": {
+      "date": "2025-02-06",
+      "track": "Huntingdon",
+      "race_type": "Flat",
+      "race_name": "Purchase Hospitality At Huntingdon In 2025 Open NH Flat Race (GBB Race) (Div 2)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1162770",
+      "source_horse_id": "1162770",
+      "source_sha256": "f5c1833614b55444d57e2b0d8d78d1e767169fd9329e9c7711e854e91cf5d956"
+    },
+    "844645": {
+      "date": "2025-02-20",
+      "track": "Huntingdon",
+      "race_type": "Hurdle",
+      "race_name": "Purchase Hospitality At Huntingdon Conditional Jockeys' Mares' Novices' Limited Handicap Hurdle",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1152819"
+    },
+    "847568": {
+      "date": "2025-03-12",
+      "track": "Huntingdon",
+      "race_type": "Flat",
+      "race_name": "Purchase Hospitality At Huntingdon Racecourse Open NH Flat Race (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1163430",
+      "source_horse_id": "1163430",
+      "source_sha256": "97b85c50e6b49fbc68ca315cdd9a4978e4ffcbe457cdf502a70319ff02c9fbb2"
+    },
+    "852193": {
+      "date": "2025-04-11",
+      "track": "Huntingdon",
+      "race_type": "Hurdle",
+      "race_name": "Purchase Hospitality At Huntingdon Racecourse 'National Hunt' Maiden Hurdle (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1131580",
+      "source_horse_id": "1131580",
+      "source_sha256": "6cdeb1f050799756ee3a8d8b5c119b766e152965d4b33908e63feebe06df4ca8"
+    },
+    "855074": {
+      "date": "2025-04-30",
+      "track": "Punchestown",
+      "race_type": "Chase",
+      "race_name": "Ladbrokes Punchestown Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1010846"
+    },
+    "864582": {
+      "date": "2025-06-25",
+      "track": "Salisbury",
+      "race_type": "Flat",
+      "race_name": "West Chase British EBF Maiden Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1157547",
+      "source_horse_id": "1157547",
+      "source_sha256": "5d788196dcc1fdffcc059616682231d18da95204faf5a453514701d73eeb843e"
+    },
+    "865311": {
+      "date": "2025-06-28",
+      "track": "Newcastle",
+      "race_type": "Flat",
+      "race_name": "JenningsBet Chipchase Stakes (Group 3)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1004823",
+      "source_horse_id": "1004823",
+      "source_sha256": "6520d3818721961a93332602631114a34a3b1b770cf7bab69e10acf2f3116b80"
+    },
+    "869982": {
+      "date": "2025-07-25",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm EBF Maiden Fillies' Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1181998",
+      "source_horse_id": "1181998",
+      "source_sha256": "956afacd4b0fd26ce38fb56fa029bb750f12679c1df595ee7a7e409e0c8b2283"
+    },
+    "870757": {
+      "date": "2025-07-30",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm EBF Novice Stakes (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1182024",
+      "source_horse_id": "1182024",
+      "source_sha256": "8d87c1666aaae564c24a81bdfd012e2f5ba92ed800fc52058b4f81cb3b5d3fd5"
+    },
+    "870758": {
+      "date": "2025-07-30",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Stud Staff Handicap",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1139458",
+      "source_horse_id": "1139458",
+      "source_sha256": "030ecc6ffbc3dad3b106203bdaae756cf0b947baa225e238bd78edda195cc65c"
+    },
+    "870760": {
+      "date": "2025-07-30",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm Handicap (GBBPlus Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1156089",
+      "source_horse_id": "1156089",
+      "source_sha256": "fb1531d9877da2e40bceff5e8e16c6d5e9a34e9a081793378d4ab92265cb9b36"
+    },
+    "872330": {
+      "date": "2025-08-07",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm EBF Maiden Stakes (GBB/GBBPlus Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1190171",
+      "source_horse_id": "1190171",
+      "source_sha256": "bb850a44e6d13fc8a8da7622e857c1f4974dac3d354741e85eb3a774ade95286"
+    },
+    "876150": {
+      "date": "2025-08-29",
+      "track": "Sandown",
+      "race_type": "Flat",
+      "race_name": "Chasemore Farm EBF Maiden Stakes",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1191215",
+      "source_horse_id": "1191215",
+      "source_sha256": "6d93797a86402f3a3c8129bdf3fa9d0636ce68afd8cc9ae8ab3e665866b1c4ad"
+    },
+    "886393": {
+      "date": "2025-10-26",
+      "track": "Galway",
+      "race_type": "Hurdle",
+      "race_name": "Purchase By 3pm Today To WINABMW.ie Mares Maiden Hurdle",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1194523"
+    },
+    "888858": {
+      "date": "2025-11-11",
+      "track": "Huntingdon",
+      "race_type": "Flat",
+      "race_name": "Book Now For The Peterborough Chase Fillies' 'Junior' NH Flat Race (GBB Race)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1201873",
+      "source_horse_id": "1201873",
+      "source_sha256": "a745197825a96baac7c4c8a5a7431702b86d9cf7271e72124da51ebb30cc03e4"
+    },
+    "898113": {
+      "date": "2026-01-15",
+      "track": "Fairyhouse",
+      "race_type": "Hurdle",
+      "race_name": "Bobbyjo Chase Day February 21st Mares Maiden Hurdle",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1133259",
+      "source_horse_id": "1133259",
+      "source_sha256": "8a31a8149ab6ab6bfa74b52db460f3a7bf2569e4f3d9b57c08e98ee8e4ce2319"
+    },
+    "901514": {
+      "date": "2026-02-02",
+      "track": "Leopardstown",
+      "race_type": "Chase",
+      "race_name": "Paddy Power Irish Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1018649"
+    },
+    "912709": {
+      "date": "2026-04-29",
+      "track": "Punchestown",
+      "race_type": "Chase",
+      "race_name": "Ladbrokes Punchestown Gold Cup (Grade 1)",
+      "source_url": "https://www.sportinglife.com/racing/profiles/horse/1018649"
+    }
+  },
+  "additional_source_audit": "data/audit/trip_suitability_032/type_source_receipts.json"
+}

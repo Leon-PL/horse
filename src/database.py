@@ -23,10 +23,14 @@ Usage::
 """
 
 import logging
+import hashlib
+import json
 import os
 import sys
 import sqlite3
-from datetime import datetime, timedelta
+import tempfile
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -70,6 +74,7 @@ CREATE TABLE IF NOT EXISTS results (
     odds              REAL,
     official_rating   INTEGER,
     finish_position   INTEGER,
+    finish_pos_label  TEXT,
     won               INTEGER,
     lengths_behind    REAL,
     horse_runs        INTEGER,
@@ -94,6 +99,21 @@ CREATE TABLE IF NOT EXISTS results (
 _CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_results_date ON results(race_date);
 """
+
+# New source evidence is append-only and separate from the canonical model
+# matrix. Adding optional metadata must not fabricate old observations or
+# silently invalidate all existing feature histories by adding empty columns.
+_CREATE_CONTEXT = """
+CREATE TABLE IF NOT EXISTS result_context_observations (
+    race_id TEXT NOT NULL, horse_name TEXT NOT NULL, horse_id TEXT,
+    race_date TEXT NOT NULL, declared_weight_lbs REAL,
+    reported_jockey_claim_lbs REAL, weight_penalty_lbs REAL,
+    ride_description TEXT, nonfinish_reason TEXT, result_amendment_json TEXT,
+    content_sha256 TEXT NOT NULL, observed_at TEXT NOT NULL,
+    PRIMARY KEY (race_id, horse_name, content_sha256)
+);
+"""
+_CONTEXT_FIELDS = ("reported_jockey_claim_lbs", "weight_penalty_lbs", "ride_description", "nonfinish_reason", "result_amendment_json")
 
 # Legacy rows have no scrape manifest. Recheck a small recent window without
 # unexpectedly re-scraping years of existing history on the first upgraded run.
@@ -127,11 +147,18 @@ CREATE TABLE IF NOT EXISTS result_sync_races (
 # Connection helpers
 # -----------------------------------------------------------------------
 
-def _get_conn() -> sqlite3.Connection:
-    """Return a connection to the database (creates it if needed)."""
+@contextmanager
+def _get_conn():
+    """Commit or roll back an operation, then release its database handles."""
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        with conn:
+            yield conn
+    finally:
+        # sqlite3.Connection.__exit__ manages the transaction, not lifetime.
+        # Leaving handles to GC retained WAL files and Windows file locks.
+        conn.close()
 
 
 def init_db() -> None:
@@ -139,6 +166,13 @@ def init_db() -> None:
     with _get_conn() as conn:
         conn.execute(_CREATE_TABLE)
         conn.execute(_CREATE_INDEX)
+        conn.execute(_CREATE_CONTEXT)
+        # Context remains separate from canonical training columns. An explicit
+        # insert column list below supports old tables whose new column appends.
+        context_columns = {row[1] for row in conn.execute("PRAGMA table_info(result_context_observations)")}
+        if "result_amendment_json" not in context_columns:
+            conn.execute("ALTER TABLE result_context_observations ADD COLUMN result_amendment_json TEXT")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_context_date ON result_context_observations(race_date)")
         conn.execute(_CREATE_SYNC_DATES)
         conn.execute(_CREATE_SYNC_RACES)
         # Migrate: add columns that may not exist in older databases
@@ -154,11 +188,13 @@ def init_db() -> None:
             # NULL = not yet backfilled; 0/1 once scraped/backfilled
             # (scripts/backfill_wind_surgery.py).
             ("wind_surgery", "INTEGER"),
+            ("finish_pos_label", "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
-            except sqlite3.OperationalError:
-                pass  # column already exists
+            except sqlite3.OperationalError as error:
+                if "duplicate column name" not in str(error).lower():
+                    raise
     logger.info(f"Database ready at {DB_PATH}")
 
 
@@ -174,7 +210,7 @@ _COLUMNS = [
     "weight_lbs",
     "draw", "form", "days_since_last_run", "odds",
     "official_rating",
-    "finish_position", "won", "lengths_behind", "horse_runs",
+    "finish_position", "finish_pos_label", "won", "lengths_behind", "horse_runs",
     "horse_wins", "horse_places", "surface", "handicap",
     "sire", "dam", "damsire",
     "weather_temp_max", "weather_temp_min", "weather_precip_mm",
@@ -234,7 +270,46 @@ def _insert_results(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
 
     changes_before = conn.total_changes
     conn.executemany(sql, subset.values.tolist())
-    return conn.total_changes - changes_before
+    inserted = conn.total_changes - changes_before
+    _insert_result_context(conn, df)
+    return inserted
+
+
+def _insert_result_context(conn, frame):
+    """Persist supplied result evidence in the same transaction as its field."""
+    if not any(c in frame for c in _CONTEXT_FIELDS):
+        return
+    fields = ("race_id", "horse_name", "horse_id", "race_date", "weight_lbs", *_CONTEXT_FIELDS)
+    observed = datetime.now().astimezone(timezone.utc).isoformat(timespec="microseconds")
+    rows = []
+    for record in frame.reindex(columns=fields).to_dict("records"):
+        record = {k: (None if pd.isna(v) else v) for k,v in record.items()}
+        if not any(record[c] is not None for c in _CONTEXT_FIELDS):
+            continue
+        # Adding optional metadata must not duplicate unchanged legacy evidence.
+        content_record = {k: v for k, v in record.items() if k != "result_amendment_json" or v is not None}
+        content = json.dumps(content_record, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False)
+        digest = hashlib.sha256(content.encode()).hexdigest()
+        rows.append(tuple(record[c] for c in fields)+(digest, observed))
+    columns = ["declared_weight_lbs" if c == "weight_lbs" else c for c in fields] + ["content_sha256", "observed_at"]
+    conn.executemany("INSERT OR IGNORE INTO result_context_observations (" + ",".join(columns) + ") VALUES (" +
+                     ",".join("?" for _ in columns) + ")", rows)
+
+
+def load_result_context(*, start=None, end=None):
+    """Latest observed dated context, kept separate from default training inputs."""
+    init_db()
+    clauses, parameters = [], []
+    for operator, value in ((">=", start), ("<=", end)):
+        if value is not None:
+            clauses.append("race_date "+operator+" ?")
+            parameters.append(str(value))
+    query = "SELECT * FROM result_context_observations"
+    if clauses:
+        query += " WHERE "+" AND ".join(clauses)
+    with _get_conn() as conn:
+        frame = pd.read_sql_query(query+" ORDER BY observed_at, content_sha256", conn, params=parameters)
+    return frame.drop_duplicates(["race_id", "horse_name"], keep="last").reset_index(drop=True)
 
 
 # -----------------------------------------------------------------------
@@ -317,12 +392,69 @@ def _validate_race_results(df: pd.DataFrame, date_str: str, race_id: str) -> Non
         raise ValueError("Missing or duplicate runner names")
     # Non-finishers (including position 99) are legitimate runners. Retain
     # them, but require a winner before declaring the whole result settled.
-    if not pd.to_numeric(df["finish_position"], errors="coerce").eq(1).any():
+    positions = pd.to_numeric(df["finish_position"], errors="coerce")
+    if positions.isna().any() or positions.lt(0).any() or positions.mod(1).ne(0).any():
+        raise ValueError("Missing or invalid finish position")
+    if not positions.eq(1).any():
         raise ValueError("Result response has no settled winner")
+    if "won" in df.columns:
+        won = pd.to_numeric(df["won"], errors="coerce")
+        if not won.isin([0, 1]).all() or not won.eq(1).equals(positions.eq(1)):
+            raise ValueError("Winner labels disagree with finish positions")
     if "num_runners" in df.columns:
-        expected = pd.to_numeric(df["num_runners"], errors="coerce").max()
-        if pd.notna(expected) and len(df) < expected:
-            raise ValueError(f"Incomplete field: {len(df)} of {expected:g} runners")
+        counts = pd.to_numeric(df["num_runners"], errors="coerce")
+        if counts.isna().any() or counts.le(0).any() or counts.nunique() != 1:
+            raise ValueError("Missing or inconsistent field size")
+        expected = counts.iloc[0]
+        if len(df) != expected:
+            raise ValueError(f"Incomplete or inconsistent field: {len(df)} of {expected:g} runners")
+
+
+def _replace_race_results(conn: sqlite3.Connection, df: pd.DataFrame) -> int:
+    """Replace a validated complete field inside the caller's transaction.
+
+    Updating supplied columns preserves separate weather/pedigree enrichment.
+    Runners absent from the authoritative field are removed, so rescraping an
+    old fragment can also correct obsolete non-runner rows. The caller must
+    validate the complete response before invoking this function.
+    """
+    race_id = str(df["race_id"].iloc[0])
+    previous = {row[0] for row in conn.execute(
+        "SELECT horse_name FROM results WHERE race_id = ?", (race_id,),
+    )}
+    names = set(df["horse_name"])
+    cols = [c for c in _COLUMNS if c in df.columns]
+    updates = [f"{col} = excluded.{col}" for col in cols
+               if col not in {"race_id", "horse_name"}]
+    updates.append("scraped_at = datetime('now')")
+    sql = (f"INSERT INTO results ({', '.join(cols)}) "
+           f"VALUES ({', '.join('?' for _ in cols)}) "
+           f"ON CONFLICT(race_id, horse_name) DO UPDATE SET {', '.join(updates)}")
+    conn.executemany(sql, df[cols].values.tolist())
+    obsolete = previous - names
+    conn.executemany("DELETE FROM results WHERE race_id = ? AND horse_name = ?",
+                     [(race_id, name) for name in obsolete])
+    _insert_result_context(conn, df)
+    return len(names - previous)
+
+
+def _export_results_snapshot(frame: pd.DataFrame, path: str) -> None:
+    """Publish a whole-history CSV without exposing a partially written file."""
+    folder = os.path.dirname(os.path.abspath(path))
+    os.makedirs(folder, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", newline="",
+                                         dir=folder, suffix=".tmp", delete=False) as fh:
+            temporary = fh.name
+            frame.to_csv(fh, index=False)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.remove(temporary)
 
 
 def queue_history_audit(start: str | None = None, end: str | None = None) -> int:
@@ -351,7 +483,26 @@ def queue_history_audit(start: str | None = None, end: str | None = None) -> int
     return len(dates)
 
 
-def sync_database(days_back: int = 90) -> pd.DataFrame:
+def sync_database(days_back: int = 90, *, enrich: bool = True) -> pd.DataFrame:
+    """Resume result ingestion and atomically export the complete history.
+
+    Keep one idle connection for the operation's lifetime. Transactions use
+    their own short-lived handles; the idle handle prevents SQLite from
+    checkpointing the WAL after every individual race's connection closes.
+    It never opens a read or write transaction across network requests.
+    Set ``enrich=False`` to collect results without optional source backfills.
+    """
+    if days_back < 0:
+        raise ValueError("days_back must be non-negative")
+    init_db()
+    with _get_conn() as idle:
+        # Touch the initialized database so this connection actually joins
+        # the WAL; merely opening a connection does not open its WAL pager.
+        idle.execute("SELECT race_id FROM results LIMIT 1").fetchall()
+        return _sync_database(days_back, enrich=enrich)
+
+
+def _sync_database(days_back: int, *, enrich: bool = True) -> pd.DataFrame:
     """Resume incomplete race scrapes and return/export the full history.
 
     Each listed unfinished race is attempted once per invocation, within the
@@ -413,15 +564,21 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
                     # Adopt complete legacy races without refetching their
                     # pages; a stored fragment must still be retried.
                     stored = conn.execute("""
-                        SELECT COUNT(*), MAX(num_runners), MAX(finish_position = 1)
+                        SELECT COUNT(*), MAX(num_runners), MAX(finish_position = 1),
+                               MIN(num_runners)
                         FROM results WHERE race_date = ? AND race_id = ?
                     """, (date_str, race_id)).fetchone()
                     complete = int(bool(stored[0] and stored[2]
-                                        and stored[0] >= (stored[1] or 0)))
+                                        and stored[0] == stored[1] == stored[3]))
                     conn.execute("""
                         INSERT INTO result_sync_races (race_date, race_id, url, completed)
                         VALUES (?, ?, ?, ?)
-                        ON CONFLICT(race_date, race_id) DO UPDATE SET url = excluded.url
+                        ON CONFLICT(race_date, race_id) DO UPDATE SET
+                            url = excluded.url,
+                            completed = CASE
+                                WHEN result_sync_races.last_error LIKE 'not run:%'
+                                THEN result_sync_races.completed
+                                ELSE excluded.completed END
                     """, (date_str, race_id, url, complete))
                 conn.execute("""
                     UPDATE result_sync_dates SET listing_succeeded = 1, last_error = NULL
@@ -469,7 +626,7 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
                     frame = pd.DataFrame(future.result())
                     _validate_race_results(frame, ds, race_id)
                     with _get_conn() as conn:
-                        added = _insert_results(conn, frame)
+                        added = _replace_race_results(conn, frame)
                         conn.execute("""
                             UPDATE result_sync_races SET completed = 1, last_error = NULL
                             WHERE race_date = ? AND race_id = ?
@@ -500,7 +657,7 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
     logger.info("Inserted %d new runner rows; %d races closed as not run; "
                 "%d race requests remain pending", inserted, not_run, len(jobs) - completed)
 
-    if inserted > 0:
+    if inserted > 0 and enrich:
         try:
             from src.weather import backfill_weather_in_db
             backfill_weather_in_db(dates=sorted(inserted_dates))
@@ -519,7 +676,7 @@ def sync_database(days_back: int = 90) -> pd.DataFrame:
     # the feature store down to the scrape window.
     full_df = load_from_database()
     csv_path = os.path.join(config.RAW_DATA_DIR, "race_results.csv")
-    full_df.to_csv(csv_path, index=False)
+    _export_results_snapshot(full_df, csv_path)
     logger.info(f"  Saved full CSV snapshot ({len(full_df):,} rows) → {csv_path}")
 
     return full_df
@@ -599,6 +756,10 @@ if __name__ == "__main__":
              "relist (use with a --sync window that covers the history)",
     )
     parser.add_argument(
+        "--results-only", action="store_true",
+        help="Skip optional weather and pedigree backfills during results sync",
+    )
+    parser.add_argument(
         "--stats",
         action="store_true",
         help="Print database statistics",
@@ -626,7 +787,7 @@ if __name__ == "__main__":
 
     if args.sync:
         print(f"\n🔄 Syncing database (last {args.sync} days)...")
-        df = sync_database(days_back=args.sync)
+        df = sync_database(days_back=args.sync, enrich=not args.results_only)
         print(f"  Done — {len(df)} records available\n")
 
     if args.export:

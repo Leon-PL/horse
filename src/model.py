@@ -13,6 +13,7 @@ import json
 import logging
 import warnings
 import importlib
+from math import comb
 from typing import Optional, Callable
 
 # Suppress sklearn validation warning when a saved model was fitted with
@@ -78,7 +79,7 @@ from src.bet_settlement import placed_mask, value_bet_selection as _value_bet_se
 # Re-exported for backwards compatibility — the betting simulation now
 # lives in src.bet_analysis.
 from src.bet_analysis import analyse_test_set, max_drawdown as _max_drawdown  # noqa: F401
-from src.betfair import attach_bsp, bsp_implied_prob, load_bsp
+from src.betfair import attach_bsp, load_bsp, market_prob_bsp_preferred
 from src.probability_calibration import fit_temperature, race_temperature
 
 logging.basicConfig(level=logging.INFO)
@@ -113,13 +114,13 @@ def _off_time_to_seconds(off_time: pd.Series) -> pd.Series:
 
 
 class _IdentityScaler:
-    """No-op scaler for tree-based models (keeps API compatibility)."""
+    """Use the same float32 input precision in training and live predictions."""
 
     def fit_transform(self, X):
-        return np.asarray(X)
+        return np.asarray(X, dtype=np.float32)
 
     def transform(self, X):
-        return np.asarray(X)
+        return np.asarray(X, dtype=np.float32)
 
     def __reduce__(self):
         # Streamlit re-execs app.py via exec(), which creates shadow copies
@@ -528,6 +529,7 @@ def _get_focal_lgbm_class():
 
 # Columns to exclude from features (identifiers, targets, leaky features)
 EXCLUDE_COLUMNS = [
+    "prize_money_original", "prize_currency", "prize_fx_date",
     "race_id",
     "race_date",
     "horse_name",
@@ -538,12 +540,16 @@ EXCLUDE_COLUMNS = [
     "race_class",
     "race_type",
     "finish_position",
+    "finish_pos_label",
     "won",
     "placed",
     "placed_bf",
     "relevance",
     "finish_time_secs",
+    "winning_time_secs",
+    "off_time_actual",
     "lengths_behind",
+    "beaten_lengths",  # current-race result; only lagged histories are inputs
     "season",
     # Raw odds column — never used as a feature directly, but kept
     # in the DataFrame for test-set betting analysis (value bets,
@@ -603,8 +609,8 @@ EXCLUDE_COLUMNS = [
     "horse_runs",
     "horse_wins",
     "horse_places",
-    # Whole-dataset appearance counts: an entity's total row count
-    # includes its FUTURE races, so high freq ⇒ long career ⇒ quality.
+    # Raw cumulative entity counts remain excluded. Causal race-relative
+    # variants may be selected separately.
     "horse_name_freq",
     "jockey_freq",
     "trainer_freq",
@@ -646,6 +652,16 @@ ODDS_DERIVED_COLUMNS = [
     "beaten_fav_last",
 ]
 EXCLUDE_COLUMNS += [c for c in ODDS_DERIVED_COLUMNS if c not in EXCLUDE_COLUMNS]
+
+# Legacy sectional composites use full-dataset standardisation, so appending
+# future races changes earlier values. Block their descendants in every mode,
+# including unrestricted selection and explicit allowlists, until rebuilt
+# with date-safe statistics. Neither production nor experiment 002 uses them.
+EXCLUDE_COLUMNS += [
+    f"{base}{suffix}"
+    for base in ("atr_speed_score", "atr_stride_x_gallop")
+    for suffix in ("", "_vs_field", "_z_in_race", "_rank_pct_in_race", "_vs_best_in_race")
+]
 
 # XGB-compatible hyperparameter names (used to filter params for
 # classifier sub-models that may receive tuned dicts)
@@ -703,7 +719,7 @@ class _SoftLabelClassifier:
 
     Used for market-probability distillation: the win model learns the
     market-implied win probability (a low-noise teacher) instead of the
-    0/1 outcome, which improves calibration/log-loss. Inference stays
+    0/1 outcome. Predictive benefit requires separate evaluation. Inference stays
     odds-free — odds are only the training *target*, never a feature.
     """
 
@@ -1056,6 +1072,9 @@ def _quick_prune_mask(
 def prepare_multi_target_data(
     df: pd.DataFrame,
     dataset_start: "pd.Timestamp | None" = None,
+    holdout_days: int | None = None,
+    *,
+    training_only: bool = False,
 ) -> dict:
     """
     Prepare a shared train/test split with **multiple** target arrays.
@@ -1160,14 +1179,29 @@ def prepare_multi_target_data(
     fp = df["finish_position"].values.astype(int)
     df["relevance"] = make_relevance_labels(fp)
 
-    # Time-based split (aligned to race boundary)
-    split_idx = int(len(df) * (1 - config.TEST_SIZE))
-    split_race = df.iloc[split_idx]["race_id"]
-    while split_idx < len(df) and df.iloc[split_idx]["race_id"] == split_race:
-        split_idx += 1
-
-    train_df = df.iloc[:split_idx]
-    test_df = df.iloc[split_idx:]
+    if training_only:
+        if holdout_days is not None:
+            raise ValueError("A deployment fit cannot also reserve a holdout")
+        train_df, test_df = df.copy(), df.iloc[:0].copy()
+    elif holdout_days is not None:
+        if isinstance(holdout_days, bool) or int(holdout_days) != holdout_days or holdout_days < 1:
+            raise ValueError("holdout_days must be a positive integer or None")
+        cutoff = df["race_date"].max().normalize() - pd.Timedelta(days=int(holdout_days) - 1)
+        in_test = df["race_date"].dt.normalize() >= cutoff
+        train_df = df.loc[~in_test].copy()
+        test_df = df.loc[in_test].copy()
+        logger.info("Calendar holdout: %d days from %s (%d runners)",
+                    holdout_days, cutoff.date(), len(test_df))
+    else:
+        # Legacy percentage split, aligned to a race boundary.
+        split_idx = int(len(df) * (1 - config.TEST_SIZE))
+        split_race = df.iloc[split_idx]["race_id"]
+        while split_idx < len(df) and df.iloc[split_idx]["race_id"] == split_race:
+            split_idx += 1
+        train_df = df.iloc[:split_idx]
+        test_df = df.iloc[split_idx:]
+    if train_df.empty or (test_df.empty and not training_only):
+        raise ValueError("Training and holdout must both contain races; add history or shorten the holdout")
     train_df = train_df.drop(columns=["_event_dt"], errors="ignore")
     test_df = test_df.drop(columns=["_event_dt"], errors="ignore")
 
@@ -1175,7 +1209,7 @@ def prepare_multi_target_data(
     # Remove training rows within PURGE_DAYS of the test boundary
     # to prevent feature leakage from overlapping horse form.
     _purge_days = getattr(config, "PURGE_DAYS", 7)
-    if _purge_days > 0:
+    if _purge_days > 0 and not training_only:
         _test_start = test_df["race_date"].min()
         _purge_cutoff = _test_start - pd.Timedelta(days=_purge_days)
         _n_before = len(train_df)
@@ -1245,13 +1279,14 @@ def prepare_multi_target_data(
     # penalty (last + 10L) so the regressor treats them as poor outcomes
     # rather than as winners (0.0).
     def _impute_lb(df: pd.DataFrame) -> np.ndarray:
-        lb = df["lengths_behind"].copy()
+        from src.result_margins import margin_values
+        lb = margin_values(df).copy()
         if "finish_position" in df.columns:
             non_finisher = df["finish_position"].fillna(0).astype(int) < 1
         else:
             non_finisher = lb.isna()
         # For non-finishers: use max lb in race + 10, or 30 if unknown
-        race_max_lb = df.groupby("race_id")["lengths_behind"].transform("max")
+        race_max_lb = lb.groupby(df["race_id"]).transform("max")
         lb = lb.where(~non_finisher, race_max_lb + 10.0)
         lb = lb.fillna(30.0)
         return lb.values.astype(np.float32)
@@ -1268,24 +1303,19 @@ def prepare_multi_target_data(
     ip_tr = normalise_implied_prob_by_race(train_df)
     ip_te = normalise_implied_prob_by_race(test_df)
 
-    # BSP-preferred distillation teacher: the overround-normalised Betfair BSP
-    # implied probability where BSP is present (sharper, lower-variance), else
-    # the SP-implied probability (ip_tr) — preserving the pre-2025 history and
-    # any uncovered race. Used only as the win-model soft target, never a
-    # feature, so inference stays odds-free.
-    def _bsp_preferred(part_df, ip_sp):
-        if "bsp" not in part_df.columns:
-            return ip_sp
-        bsp_p = bsp_implied_prob(
-            part_df["bsp"].to_numpy(), part_df["race_id"].to_numpy()
-        )
-        return np.where(np.isfinite(bsp_p), bsp_p, ip_sp).astype(np.float32)
-
-    win_teacher_tr = _bsp_preferred(train_df, ip_tr)
-    win_teacher_te = _bsp_preferred(test_df, ip_te)
+    # One complete market per field: BSP, else SP, else no teacher. Mixing
+    # separately normalised partial BSP and SP runner by runner creates
+    # probability totals above one. Targets never become inference inputs.
+    win_teacher_tr = market_prob_bsp_preferred(train_df).astype(np.float32)
+    win_teacher_te = market_prob_bsp_preferred(test_df).astype(np.float32)
     if "bsp" in train_df.columns:
-        _bsp_cov = float(np.isfinite(train_df["bsp"].to_numpy()).mean())
-        logger.info("BSP-preferred teacher: BSP covers %.1f%% of train rows", 100 * _bsp_cov)
+        _bsp_valid = pd.Series(
+            np.isfinite(train_df["bsp"].to_numpy()) & (train_df["bsp"].to_numpy() > 1),
+            index=train_df.index,
+        )
+        _complete_bsp = _bsp_valid.groupby(train_df["race_id"], sort=False).all()
+        logger.info("Teacher has complete BSP for %d/%d training fields; fallback is whole-field SP",
+                    int(_complete_bsp.sum()), len(_complete_bsp))
 
     y_train_resid = y_train_won.astype(np.float32) - ip_tr
     y_test_resid = y_test_won.astype(np.float32) - ip_te
@@ -1630,6 +1660,7 @@ class RacePredictor:
         # Isotonic calibration (fitted after Platt)
         self.win_iso_cal: IsotonicRegression | None = None
         self.place_iso_cal: IsotonicRegression | None = None
+        self.place_refinement = None
         # Market anchor (Benter combination) fitted on OOF predictions
         self.market_anchor: dict | None = None
         # n_jobs override — capped during autotune to leave CPU headroom
@@ -1691,6 +1722,93 @@ class RacePredictor:
             return None
         return tr_end_row, vl_start_row
 
+    def fit_as_of(
+        self, df: pd.DataFrame, as_of, *, params: dict | None = None,
+        dataset_start=None, win_only: bool = False,
+    ) -> dict:
+        """Fit a locked recipe through a settled date, without claiming test scores.
+
+        Capacity and calibration use purged chronological training slabs.
+        The final estimators use every eligible row through the cutoff. This
+        is also the win-only research path, sharing native fits/calibration
+        with serving rather than training place models and simulating bets.
+        The caller owns strict field validation and evaluation on later data.
+        """
+        cutoff = pd.Timestamp(as_of)
+        if pd.isna(cutoff) or cutoff.tzinfo is not None or cutoff != cutoff.normalize():
+            raise ValueError("as_of must be an unambiguous calendar date")
+        dates = pd.to_datetime(df["race_date"], errors="coerce")
+        if dates.isna().any():
+            raise ValueError("Cannot fit with missing or invalid race dates")
+        allowed = df.loc[dates.dt.normalize() <= cutoff].copy()
+        if allowed.empty:
+            raise ValueError("No settled history at or before as_of")
+        data = prepare_multi_target_data(allowed, dataset_start=dataset_start, training_only=True)
+        self.feature_cols, self.scaler = data["feature_cols"], data["scaler"]
+        self.metrics = self.test_analysis = None
+        self.market_anchor = None  # Same-time market correction is fitted separately on OOS predictions.
+        self.place_model = None
+        X, groups = data["X_train"], data["groups_train"]
+        row_dates = pd.to_datetime(data["train_df"]["race_date"])
+        starts = np.r_[0, np.cumsum(groups)[:-1]]
+        race_dates = pd.DatetimeIndex(row_dates.to_numpy()[starts])
+        self.eval_split_info = {
+            "mode": "fit_as_of", "as_of": cutoff.date().isoformat(),
+            "training_first_date": str(row_dates.min())[:10],
+            "training_last_date": str(row_dates.max())[:10],
+            "training_races": len(groups), "training_runners": len(X),
+            "validation_races": 0, "holdout_races": 0, "win_only": bool(win_only),
+            "performance_claim": "None; link the separately validated update recipe",
+        }
+        soft_y = None
+        if bool(getattr(config, "WIN_SOFT_LABEL_DISTILL", False)):
+            blend = float(getattr(config, "WIN_SOFT_LABEL_BLEND", 1.0))
+            teacher = data["win_teacher_train"]
+            soft_y = np.where(teacher > 0, blend * teacher + (1 - blend) * data["y_train_won"], data["y_train_won"])
+        split = (self._early_stop_split(groups, race_dates, purge_days=int(getattr(config, "PURGE_DAYS", 7)))
+                 if int(getattr(config, "EARLY_STOPPING_ROUNDS", 0)) > 0 else None)
+        model_params = params or {}
+        for role, target, fit in (
+            ("classifier", data["y_train_won"], self._train_win_classifier),
+            ("place", data["y_train_placed"], self._train_place_classifier),
+        ):
+            if role == "place" and win_only:
+                continue
+            role_params = model_params.get(role)
+            hl, seasonal, shape = self._extract_recency_params(role_params)
+            weights = (data["sample_weight_train"] if all(v is None for v in (hl, seasonal, shape))
+                       else compute_recency_sample_weights(row_dates, half_life_days=hl,
+                                                           seasonal_boost=seasonal, decay_shape=shape))
+            extras = {"soft_y": soft_y} if role == "classifier" else {}
+            final_kwargs = {"sample_weight": weights,
+                            "scale_pos_weight": (len(target) - target.sum()) / max(target.sum(), 1), **extras}
+            if split is not None:
+                end, validation = split
+                selected = fit(X[:end], target[:end], params=role_params,
+                               sample_weight=weights[:end], eval_set=[(X[validation:], target[validation:])],
+                               **({"soft_y": soft_y[:end] if soft_y is not None else None}
+                                  if role == "classifier" else {}))
+                fitted = self._refit_selected_model(selected, role, fit, X, target, role_params, **final_kwargs)
+            else:
+                fitted = fit(X, target, params=role_params, **final_kwargs)
+            if role == "classifier":
+                self.clf_model = fitted
+            else:
+                self.place_model = fitted
+        calibrated = self._fit_training_slab_calibrators(
+            X, groups, data["y_train_won"], data["y_train_placed"], data["fp_train"],
+            model_params, data["sample_weight_train"], race_dates=race_dates,
+            soft_y=soft_y, fit_place=not win_only,
+            training_frame=data["train_df"],
+        )
+        if not calibrated:
+            # An apparently valid artifact with a stale/identity calibrator is
+            # worse than an explicit failure when history is too short.
+            self.clf_model = self.place_model = None
+            raise ValueError("Insufficient chronological history for training-only calibration")
+        self.eval_split_info["calibration"] = dict(self._slab_calibration_info)
+        return dict(self.eval_split_info)
+
     # ── Training ─────────────────────────────────────────────────
     def train(
         self,
@@ -1702,6 +1820,7 @@ class RacePredictor:
         auto_tune: dict | None = None,
         blend_market_odds: bool | None = None,
         dataset_start: "pd.Timestamp | None" = None,
+        holdout_days: int | None = None,
         **_ignored,
     ) -> dict:
         """Train two task-specific models:
@@ -1713,7 +1832,7 @@ class RacePredictor:
         Phase 1b (optional): Optuna auto-tune per model.
         Phase 2: Retrain on full data → evaluate → betting simulation.
         """
-        data = prepare_multi_target_data(df, dataset_start=dataset_start)
+        data = prepare_multi_target_data(df, dataset_start=dataset_start, holdout_days=holdout_days)
 
         self.feature_cols = data["feature_cols"]
         self.scaler = data["scaler"]
@@ -1748,6 +1867,9 @@ class RacePredictor:
         eval_df = test_df
 
         self.eval_split_info = {
+            "holdout_days": holdout_days,
+            "training_last_date": str(data["train_df"]["race_date"].max())[:10],
+            "holdout_first_date": str(test_df["race_date"].min())[:10],
             "holdout_races": int(len(groups_test)),
             "validation_races": int(len(groups_eval)),
             "validation_runners": int(len(X_eval)),
@@ -2041,7 +2163,7 @@ class RacePredictor:
                 decay_shape=_shape,
             )
 
-        logger.info("Retraining 3 task-specific models on full training data …")
+        logger.info("Retraining win and place models on full training data …")
 
         n_test = len(X_eval)
 
@@ -2108,6 +2230,13 @@ class RacePredictor:
                 eval_set=[(X_es_vl, y_es_won_vl)],
                 soft_y=(_win_soft_full[:es_tr_end] if _win_soft_full is not None else None),
             )
+            self.clf_model = self._refit_selected_model(
+                self.clf_model, "classifier", self._train_win_classifier,
+                X_train, data["y_train_won"], _p.get("classifier"),
+                sample_weight=_sw_clf_full, soft_y=_win_soft_full,
+                scale_pos_weight=(len(X_train) - data["y_train_won"].sum())
+                                 / max(data["y_train_won"].sum(), 1),
+            )
         else:
             n_pos_w = int(data["y_train_won"].sum())
             n_neg_w = len(data["y_train_won"]) - n_pos_w
@@ -2133,6 +2262,13 @@ class RacePredictor:
                 params=_p.get("place"), sample_weight=_sw_place_es,
                 eval_set=[(X_es_vl, y_es_placed_vl)],
             )
+            self.place_model = self._refit_selected_model(
+                self.place_model, "place", self._train_place_classifier,
+                X_train, data["y_train_placed"], _p.get("place"),
+                sample_weight=_sw_place_full,
+                scale_pos_weight=(len(X_train) - data["y_train_placed"].sum())
+                                 / max(data["y_train_placed"].sum(), 1),
+            )
         else:
             n_pos_p = int(data["y_train_placed"].sum())
             n_neg_p = len(data["y_train_placed"]) - n_pos_p
@@ -2152,6 +2288,7 @@ class RacePredictor:
             sample_weight=sw_full,
             race_dates=race_dates_idx,
             soft_y=_win_soft_full,
+            training_frame=data["train_df"],
         )
         if _used_training_slab_cal:
             logger.info("  Calibration refit on latest training slab; holdout left untouched.")
@@ -2201,7 +2338,9 @@ class RacePredictor:
         # Apply training-only calibration (+ market anchor when fitted)
         win_probs = self._calibrate_win_probs(clf_test_probs_raw, groups_eval, eval_df)
         win_probs = self._apply_market_anchor(win_probs, groups_eval, eval_df)
-        place_probs = self._calibrate_place_probs(place_test_probs_raw)
+        place_probs = self._compute_place_probabilities(
+            eval_df, None, win_probs, groups_eval, raw_place_probs=place_test_probs_raw,
+        )
         _vc = dict(value_config or {})
         if auto_tune is not None:
             # Tune the value threshold on OOF predictions, NOT the
@@ -2212,7 +2351,9 @@ class RacePredictor:
                     _all_clf_logits, _all_groups, _oof_df,
                 )
                 _vt_win = self._apply_market_anchor(_vt_win, _all_groups, _oof_df)
-                _vt_place = self._calibrate_place_probs(_all_place_probs)
+                _vt_place = self._compute_place_probabilities(
+                    _oof_df, None, _vt_win, _all_groups, raw_place_probs=_all_place_probs,
+                )
                 _vc = self._tune_value_threshold(
                     win_probs=_vt_win,
                     groups_eval=_all_groups,
@@ -2321,7 +2462,9 @@ class RacePredictor:
                 calibrated_probs=_oof_win_probs,
                 value_threshold=float(_vc.get("value_threshold", 0.05)),
             )
-            _oof_place_cal = self._calibrate_place_probs(_all_place_probs)
+            _oof_place_cal = self._compute_place_probabilities(
+                _oof_df, None, _oof_win_probs, _all_groups, raw_place_probs=_all_place_probs,
+            )
             train_metrics["place_classifier"] = self._evaluate_place_model(
                 _oof_place_cal, _all_place_probs, _oof_df, _all_groups,
             )
@@ -2868,6 +3011,35 @@ class RacePredictor:
         logger.info(f"Win Classifier ({fw.upper()}) training complete")
         return model
 
+    def _refit_selected_model(self, selected, role, fit, X, y, params, **fit_kwargs):
+        """Use early stopping to choose capacity, then fit all allowed rows.
+
+        X/y are the purged training split, never the final holdout. Calibration
+        still uses its independent training-slab predictions below.
+        """
+        framework = self.frameworks[role]
+        estimator = selected.reg if isinstance(selected, _SoftLabelClassifier) else selected
+        if framework == "lgbm":
+            rounds = getattr(estimator, "best_iteration_", None)
+            if not rounds:
+                rounds = getattr(estimator, "n_estimators_", None)
+        elif framework == "cat":
+            best = estimator.get_best_iteration()
+            rounds = best + 1 if best is not None and best >= 0 else estimator.tree_count_
+        else:
+            try:
+                rounds = estimator.best_iteration + 1  # XGBoost is zero-based.
+            except AttributeError:
+                rounds = None
+        if rounds is None or int(rounds) < 1:
+            raise ValueError(f"Cannot determine selected tree count for {role}; refusing an ambiguous refit")
+        refit_params = dict(params or {})
+        refit_params["n_estimators"] = int(rounds)
+        logger.info("Refitting %s on all %d training rows with %d selected trees", role, len(X), rounds)
+        fitted = fit(X, y, params=refit_params, **fit_kwargs)
+        self.eval_split_info.setdefault("refit_rounds", {})[role] = int(rounds)
+        return fitted
+
     def _train_win_classifier(self, X, y, scale_pos_weight=1.0, params=None, sample_weight=None, eval_set=None, soft_y=None):
         """Train a binary classifier predicting P(win).
 
@@ -3088,10 +3260,9 @@ class RacePredictor:
             gl = y_test[offset:offset + g]
             gs = scores[offset:offset + g]
             offset += g
-            # Skip races with no label variation (no clear ground-truth winner)
-            # OR where all scores are identical (model has no opinion).
-            # Counting argmax ties as "correct" would inflate top-1 accuracy.
-            if g < 2 or gl.max() == gl.min() or gs.max() == gs.min():
+            # Only the labels determine evaluation eligibility. An uncertain
+            # model must not get to remove its tied races from the denominator.
+            if g < 2 or gl.max() == gl.min():
                 continue
             total += 1
             try:
@@ -3099,10 +3270,21 @@ class RacePredictor:
                 ndcg3.append(_ndcg([gl], [gs], k=3))
             except ValueError:
                 pass
-            if np.argmax(gs) == np.argmax(gl):
-                top1 += 1
-            if np.argmax(gl) in set(np.argsort(gs)[-3:]):
-                win3 += 1
+            # Expected credit under a uniform tie-break, independent of input
+            # row order. sklearn's NDCG also averages tied rankings by default.
+            winners = gl == gl.max()
+            top_ties = gs == gs.max()
+            top1 += float(winners[top_ties].mean())
+            k = min(3, g)
+            boundary = np.partition(gs, g - k)[g - k]
+            above, tied = gs > boundary, gs == boundary
+            if winners[above].any():
+                win3 += 1.0
+            else:
+                slots = k - int(above.sum())
+                tied_count = int(tied.sum())
+                tied_losers = tied_count - int(winners[tied].sum())
+                win3 += 1.0 - comb(tied_losers, slots) / comb(tied_count, slots)
 
         # Binary win labels for calibration metrics
         if "finish_position" in test_df.columns:
@@ -3495,6 +3677,8 @@ class RacePredictor:
         race_dates=None,
         soft_y: np.ndarray | None = None,
         market_odds: np.ndarray | None = None,
+        fit_place: bool = True,
+        training_frame=None,
     ) -> bool:
         """Fit the configured win and place calibrators on a training-only slab.
 
@@ -3504,6 +3688,7 @@ class RacePredictor:
         calibration that is closer to live deployment than old OOF folds.
         """
         n_races = len(groups_train)
+        self.place_refinement = None
         if n_races < 25:
             return False
 
@@ -3545,7 +3730,7 @@ class RacePredictor:
         placed_cal_vl = y_placed[cal_row_start:].astype(np.float64)
         fp_cal_vl = finish_positions[cal_row_start:]
 
-        if np.unique(won_cal_vl).size < 2 or np.unique(placed_cal_vl).size < 2:
+        if np.unique(won_cal_vl).size < 2 or (fit_place and np.unique(placed_cal_vl).size < 2):
             return False
 
         clf_params = (model_params or {}).get("classifier") if isinstance(model_params, dict) else None
@@ -3584,34 +3769,40 @@ class RacePredictor:
             eval_set=_s_eval_w,
             soft_y=_s_soft,
         )
-        n_pos_p = max(int(_s_y_placed.sum()), 1)
-        cal_place = self._train_place_classifier(
-            _s_X,
-            _s_y_placed,
-            scale_pos_weight=(len(_s_y_placed) - n_pos_p) / n_pos_p,
-            params=place_params,
-            sample_weight=_s_sw,
-            eval_set=_s_eval_p,
-        )
-
         cal_clf_probs = cal_clf.predict_proba(X_cal_vl)[:, 1]
-        cal_place_raw = cal_place.predict_proba(X_cal_vl)[:, 1]
 
         self._fit_win_calibrator(
             cal_clf_probs,
             cal_groups,
             fp_cal_vl,
         )
-        self.place_platt_a, self.place_platt_b = self._optimise_place_platt(
-            cal_place_raw,
-            placed_cal_vl,
-        )
-
-        # Discard the OOF place map before replacing it, so the replacement
-        # learns from direct Platt outputs, just as it receives at inference.
-        self.place_iso_cal = None
-        cal_place_probs = self._calibrate_place_probs(cal_place_raw)
-        self.place_iso_cal = self._fit_isotonic(cal_place_probs, placed_cal_vl)
+        if fit_place:
+            n_pos_p = max(int(_s_y_placed.sum()), 1)
+            cal_place = self._train_place_classifier(
+                _s_X, _s_y_placed, scale_pos_weight=(len(_s_y_placed) - n_pos_p) / n_pos_p,
+                params=place_params, sample_weight=_s_sw, eval_set=_s_eval_p,
+            )
+            cal_place_raw = cal_place.predict_proba(X_cal_vl)[:, 1]
+            self.place_platt_a, self.place_platt_b = self._optimise_place_platt(cal_place_raw, placed_cal_vl)
+            # Learn the replacement map directly from Platt outputs.
+            self.place_iso_cal = None
+            cal_place_probs = self._calibrate_place_probs(cal_place_raw)
+            self.place_iso_cal = self._fit_isotonic(cal_place_probs, placed_cal_vl)
+        self._slab_calibration_info = {
+            "base_training_runners": int(len(_s_X)), "calibration_runners": int(len(X_cal_vl)),
+            "calibration_races": int(len(cal_groups)),
+            "base_training_last_date": str(race_dates[cal_train_races - 1])[:10] if race_dates is not None else None,
+            "first_date": str(race_dates[cal_bnd])[:10] if race_dates is not None else None,
+            "last_date": str(race_dates[-1])[:10] if race_dates is not None else None,
+        }
+        if fit_place and training_frame is not None and bool(getattr(config,"RECENT_PLACE_REFINEMENT",False)):
+            from src.probability_calibration import fit_recent_place_refinement
+            self.place_refinement, detail = fit_recent_place_refinement(
+                self,X_train,groups_train,y_won,y_placed,finish_positions,race_dates,
+                soft_y=soft_y,model_params=model_params,
+                race_types=training_frame["race_type"].to_numpy() if "race_type" in training_frame else None,
+                handicap=training_frame["handicap"].to_numpy() if "handicap" in training_frame else None)
+            self._slab_calibration_info["place_refinement"] = detail
         if market_odds is not None:
             market_probs, market_valid = market_probs_from_odds(
                 np.asarray(market_odds)[cal_row_start:], cal_groups,
@@ -3672,16 +3863,12 @@ class RacePredictor:
         predict_df = race_df.reset_index(drop=True).copy()
         missing = [c for c in self.feature_cols if c not in predict_df.columns]
         if missing:
-            # Zero-filling silently degrades predictions; make schema
-            # drift between training FE and live FE loud.
-            logger.warning(
-                "Prediction frame is missing %d of %d model features "
-                "(zero-filled): %s%s",
-                len(missing), len(self.feature_cols), missing[:10],
-                " …" if len(missing) > 10 else "",
+            # The live feature store supplies genuine all-zero category
+            # indicators. Missing model inputs here have no justified value.
+            raise ValueError(
+                f"Prediction frame is missing model features: {missing[:10]}"
+                + (" ..." if len(missing) > 10 else "")
             )
-        for col in missing:
-            predict_df[col] = 0
 
         X = predict_df[self.feature_cols].values
         X_scaled_np = self.scaler.transform(X)
@@ -3691,17 +3878,28 @@ class RacePredictor:
     def _compute_place_probabilities(
         self,
         predict_df: pd.DataFrame,
-        X_scaled: pd.DataFrame,
+        X_scaled: pd.DataFrame | None,
         win_probs: np.ndarray,
         groups: np.ndarray,
+        raw_place_probs: np.ndarray | None = None,
     ) -> np.ndarray:
         total_rows = len(predict_df)
         if total_rows == 0:
             return np.empty(0, dtype=np.float64)
 
         place_probs = np.zeros(total_rows, dtype=np.float64)
-        if self.place_model is not None:
-            raw_place = self.place_model.predict_proba(X_scaled)[:, 1]
+        if raw_place_probs is not None or self.place_model is not None:
+            raw_place = (self.place_model.predict_proba(X_scaled)[:, 1]
+                         if raw_place_probs is None else np.asarray(raw_place_probs, dtype=float))
+            if raw_place.shape != (total_rows,):
+                raise ValueError("Expected one raw place probability per runner")
+            if getattr(self,"place_refinement",None) is not None:
+                starts = np.r_[0,np.cumsum(groups)[:-1]]
+                sizes = np.asarray(groups,int)
+                hcap = predict_df["handicap"].iloc[starts].to_numpy().astype(bool) if "handicap" in predict_df else np.zeros(len(sizes),bool)
+                places = np.minimum(sizes,np.where(sizes<=4,3,np.where(sizes<=7,2,np.where((sizes>=16)&hcap,4,3))))
+                codes = predict_df["race_type"].iloc[starts].astype(str).to_numpy() if "race_type" in predict_df else np.full(len(sizes),"Unknown")
+                return self.place_refinement.predict(raw_place,win_probs,groups,places,codes)
             base_place = self._calibrate_place_probs(raw_place)
         else:
             base_place = None
@@ -3733,7 +3931,8 @@ class RacePredictor:
                     place_probs[sl] = np.zeros(n, dtype=np.float64)
         return place_probs
 
-    def predict_races(self, featured_df: pd.DataFrame, ew_fraction: float | None = None) -> pd.DataFrame:
+    def predict_races(self, featured_df: pd.DataFrame, ew_fraction: float | None = None,
+                      *, win_only: bool = False) -> pd.DataFrame:
         if self.clf_model is None:
             raise ValueError("Model not trained. Call train() or load() first.")
         if "race_id" not in featured_df.columns:
@@ -3755,21 +3954,23 @@ class RacePredictor:
         clf_probs_raw = self.clf_model.predict_proba(X_scaled)[:, 1] if self.clf_model is not None else np.repeat(1.0 / np.maximum(groups, 1), groups)
         win_probs = self._calibrate_win_probs(clf_probs_raw, groups, predict_df)
         win_probs = self._apply_market_anchor(win_probs, groups, predict_df)
-        place_probs = self._compute_place_probabilities(predict_df, X_scaled, win_probs, groups)
+        if not win_only:
+            place_probs = self._compute_place_probabilities(predict_df, X_scaled, win_probs, groups)
 
-        result_cols = [col for col in ["race_id", "track", "off_time", "race_name", "horse_name", "jockey", "trainer", "odds", "num_runners", "handicap"] if col in predict_df.columns]
+        result_cols = [col for col in ["race_id", "race_date", "race_type", "track", "off_time", "race_name", "horse_name", "jockey", "trainer", "odds", "num_runners", "handicap"] if col in predict_df.columns]
         results = predict_df[result_cols].copy()
         results["win_probability"] = win_probs
-        results["place_probability"] = place_probs
+        if not win_only:
+            results["place_probability"] = place_probs
         results["predicted_rank"] = results.groupby("race_id", sort=False)["win_probability"].rank(ascending=False, method="min").astype(int)
 
-        if "odds" in predict_df.columns:
+        if not win_only and "odds" in predict_df.columns:
             raw_ip = 1.0 / predict_df["odds"].values
             overround = np.add.reduceat(raw_ip, offsets)
             results["implied_prob"] = raw_ip / np.maximum(np.repeat(overround, groups), 1e-9)
             results["value_score"] = results["win_probability"] - results["implied_prob"]
 
-        if "odds" in predict_df.columns:
+        if not win_only and "odds" in predict_df.columns:
             try:
                 from src.each_way import compute_ew_columns
 
@@ -3866,6 +4067,9 @@ class RacePredictor:
 
         # ── Build results ────────────────────────────────────────
         results = race_df[["horse_name"]].copy()
+        for column in ("race_id","race_date","race_type"):
+            if column in race_df:
+                results[column] = race_df[column]
         if "jockey" in race_df.columns:
             results["jockey"] = race_df["jockey"]
         if "trainer" in race_df.columns:
@@ -3929,8 +4133,11 @@ class RacePredictor:
         return explanations
 
     # ── Persistence ──────────────────────────────────────────────
-    def save(self):
-        path = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
+    def save(self, path: str | os.PathLike | None = None):
+        """Serialize this predictor to an explicit run path or the legacy default."""
+        if path is None:
+            path = os.path.join(config.MODELS_DIR, "triple_ensemble_models.joblib")
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         joblib.dump(
             {
                 "clf_model": self.clf_model,
@@ -3945,9 +4152,11 @@ class RacePredictor:
                 "place_platt_b": self.place_platt_b,
                 "win_iso_cal": self.win_iso_cal,
                 "place_iso_cal": self.place_iso_cal,
+                "place_refinement": getattr(self,"place_refinement",None),
                 "market_anchor": self.market_anchor,
                 "frameworks": self.frameworks,
                 "random_seed": getattr(self, "random_seed", config.RANDOM_SEED),
+                "eval_split_info": getattr(self, "eval_split_info", {}),
             },
             path,
         )
@@ -3978,9 +4187,11 @@ class RacePredictor:
         self.place_platt_b = float(data.get("place_platt_b", 0.0))
         self.win_iso_cal = data.get("win_iso_cal")
         self.place_iso_cal = data.get("place_iso_cal")
+        self.place_refinement = data.get("place_refinement")
         self.market_anchor = data.get("market_anchor")
         self.frameworks = data.get("frameworks", {"classifier": "cat", "place": "cat"})
         self.random_seed = int(data.get("random_seed", config.RANDOM_SEED))
+        self.eval_split_info = data.get("eval_split_info", {})
         logger.info(f"Models loaded (frameworks: {self.frameworks})")
 
     # ── Walk-forward fold helper ─────────────────────────────────
@@ -4074,10 +4285,7 @@ class RacePredictor:
                 if bsp is not None and {"track", "off_time", "horse_name"}.issubset(teacher_df.columns):
                     teacher_df["race_date"] = pd.to_datetime(teacher_df["race_date"]).dt.strftime("%Y-%m-%d")
                     teacher_df = attach_bsp(teacher_df, bsp, cols=("bsp",))
-            teacher = normalise_implied_prob_by_race(teacher_df)
-            if "bsp" in teacher_df.columns:
-                bsp_probs = bsp_implied_prob(teacher_df["bsp"].to_numpy(), teacher_df["race_id"].to_numpy())
-                teacher = np.where(np.isfinite(bsp_probs), bsp_probs, teacher)
+            teacher = market_prob_bsp_preferred(teacher_df)
             blend = float(getattr(config, "WIN_SOFT_LABEL_BLEND", 1.0))
             win_soft = np.where(teacher > 0, blend * teacher + (1.0 - blend) * y_won, y_won)
 
@@ -4099,6 +4307,7 @@ class RacePredictor:
             race_dates=race_dates,
             soft_y=win_soft,
             market_odds=calibration_odds,
+            training_frame=train_df,
         ):
             # Too few races — skip calibration
             self.calibration_temp = 1.0
@@ -4130,7 +4339,10 @@ class RacePredictor:
 
         win_probs = self._calibrate_win_probs(clf_probs_raw, groups_test)
         win_probs = self._apply_market_anchor(win_probs, groups_test, test_df)
-        place_probs = self._calibrate_place_probs(place_probs_raw)
+        context = test_df if test_df is not None else pd.DataFrame(index=np.arange(len(X_test)))
+        place_probs = self._compute_place_probabilities(
+            context, None, win_probs, groups_test, raw_place_probs=place_probs_raw,
+        )
 
         if return_place_probs:
             return win_probs, place_probs

@@ -1,0 +1,5 @@
+# Genuine timestamped pre-race snapshots; not eligible for the historical trial
+rtv_pre_timeform_rating
+rtv_pre_timeform_stars
+rtv_pre_pace_position
+rtv_pre_draw_advantage

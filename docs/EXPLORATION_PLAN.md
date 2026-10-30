@@ -1,5 +1,9 @@
 # Exploration plan: five unconventional ideas (2026-10-14)
 
+**Historical experiment plan, 14 October 2026.** Its proposed sequence is retained
+for interpreting the research, rather than as a current work queue. Start with
+the [operating guide](../README.md) and [inventory](PROJECT_INVENTORY.md).
+
 *For an autonomous agent session. The operator chose these five from a longer
 list after the project's standard route - beating the closing price with a
 form model built from public data - was measured and closed (ACTION_PLAN 7,

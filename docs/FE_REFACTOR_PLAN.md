@@ -1,5 +1,10 @@
 # Feature-Engineering: target architecture & migration plan
 
+**Historical design and migration record.** Several stages below have since
+shipped. The normal training refresh now enters through `src.store_refresh`;
+see the [inventory's consolidation boundaries](PROJECT_INVENTORY.md#consolidation-boundaries)
+for the remaining overlap and the [README](../README.md) for operation.
+
 > **Status (2026-10-13): phases 0–2 are built and shipped**, so the sections
 > below describing them are a record, not a to-do. The single seam
 > (`featured_dataset.get_featured_dataset`), both freshness guards

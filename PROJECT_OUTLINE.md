@@ -1,4 +1,9 @@
 # Horse Racing Machine Learning & Betting System
+
+**Historical architecture reference.** Start with the [operating guide](README.md)
+and [project inventory](docs/PROJECT_INVENTORY.md) for current procedures and
+dependencies. Tables and status statements below reflect earlier checkpoints;
+the old table A is not an exhaustive list of code affecting today's pipeline.
 **Project Handover & Context Document**
 
 This document serves as a high-level overview of the project architecture, current status, and critical context for any AI agent or developer continuing work on the codebase.
@@ -71,7 +76,7 @@ proposing a new feature or data source** — most plausible ideas are already in
 
 | Deleted 2026-10-13 | Was | Verdict |
 |---|---|---|
-| `rtv_scraper` + `add_rtv_features` | Racing TV RACEiQ sectionals | superseded by ATR (broader coverage, richer record); stage was already unwired |
+| `rtv_scraper` + `add_rtv_features` | Racing TV RACEiQ sectionals | superseded by ATR (broader coverage, richer record); stage was already unwired. The scraper was rebuilt on 2026-10-29 as a collector; `add_rtv_features` stays deleted |
 | `stewards_features`, `ihrb_daily_enquiries_scraper` | stewards-report trouble signals | derived trouble beat the report text, and both were tiny (ledger 7 + 2b) |
 | `par_time_features` | going-corrected par-time speed figures | most discriminative new family yet CLV-flat → redundant (ledger 4) |
 | `tattersalls_sales_scraper` | public sale price as a debutant proxy | market prices it fully (residual corr 0.0000) (ledger 5) |
@@ -94,7 +99,7 @@ Wiring it in requires registering it in `_FE_SOURCE_FILES`.
 *   **Status:** Stable / In Production.
 *   **Description:** Extracts race results and live racecards. Includes caching logic (`data/raw/`, `data/racecards_cache/`) to limit network usage and API bans.
 *   **Notable modules:** `database.py` manages historical data access; `attheraces_scraper.py` fetches At The Races / TPD sectionals (needs `curl_cffi` or the system `curl` for the Fastly challenge) and is the only sectional source. Also present: `betfair.py` (BSP/LTP joins) and `weather.py` (the sync writes raw weather into the DB; since 2026-10-13 no feature stage reads it). `trainer_locations.py` and `bha_stewards_scraper.py` are unwired data tools: the trainer-travel stage that used them was removed on 2026-10-13 (ledger 13).
-*   **Retired scrapers** (deleted 2026-10-13, recoverable from git): Racing TV sectionals (`rtv_scraper.py`, superseded by ATR), IHRB/BHA stewards reports and Tattersalls sale prices (both refuted — see `docs/NEGATIVE_RESULTS.md`). `data/rtv_cache/` is now orphaned and safe to delete.
+*   **Retired scrapers** (deleted 2026-10-13, recoverable from git): IHRB/BHA stewards reports and Tattersalls sale prices (both refuted — see `docs/NEGATIVE_RESULTS.md`). The Racing TV scraper deleted on the same day was rebuilt on 2026-10-29 as a collector only (`src/rtv_scraper.py`, not wired into features; see `docs/RTV_SCRAPER.md`). `data/rtv_cache/` is its store and holds the only Irish sectional data — do not delete it.
 *   **Pedigree:** the results/racecard APIs never include breeding, so the `sire`/`dam`/`damsire` columns in `results` are always null at scrape time. `src/pedigree_backfill.py` fills a `horse_pedigree` table from Sporting Life horse *profile* pages (keyed by horse_id; pedigree stored by NAME because the profile JSON's nested ids are buggy). `data_processor.process_data` joins it in; `sync_database` fetches profiles for first-time runners automatically. Full historical backfill completed 2026-06-12 (70k+ horses).
 
 ### 2.3 Feature Engineering & Ratings (`src/feature_engineer.py`, `src/ratings.py`, `src/data_processor.py`)
@@ -102,7 +107,7 @@ Wiring it in requires registering it in `_FE_SOURCE_FILES`.
 *   **Description:** Transforms raw horse racing outcomes into lag features, rolling statistics, and rating systems.
 *   **Rating systems** (`src/ratings.py`): adaptive-K Elo (horse/jockey/trainer + per-dimension variants + margin Elo), Glicko-1 (horse; rating deviation inflates with layoffs) and TrueSkill (n-way free-for-all mu/sigma; `TRUESKILL_ENABLED`, on by default since the 2026-06-12 sweep). Also implemented but **off after losing their sweeps**: jockey/trainer Glicko, per-dimension Glicko, margin-weighted Glicko, Glicko-2 volatility, collateral form (`COLLATERAL_FORM`). The generic engine is `_glicko_pass` (arbitrary entity keying; same-entity runners never play each other).
 *   **FE constants** (`ELO_K_BASE=16`, `MARGIN_ELO_SCALE=3`, `TE_EWMA_HALF_LIFE_RACES=20`) were chosen by walk-forward sweep (`scripts/fe_sweep.py`, 2026-06-11) — re-sweep when meaningful new features land.
-*   **CRITICAL Context:** 
+*   **CRITICAL Context:**
     *   **Pandas GroupBy Pitfall**: *Never* use `df.groupby(key)[col].cummax().shift(1)`. The `.shift(1)` behaves globally in pandas, causing catastrophic data leakage across different horses/races. Always use `transform(lambda x: x.cummax().shift(1))` instead. An AST-based lint (`tests/test_leakage_patterns.py`) guards this and the leak-equivalent spellings (`.transform("cummax").shift(1)`, `.rolling(3).mean().shift(1)`) across `src/`, `scripts/` and the apps.
     *   **Elo Nulls / Non-Finishers Handling**: Custom logic exists for how non-finishers (falls, unseated riders) are penalized in historical rating datasets.
     *   **Scrape-time columns are post-race:** `horse_runs`/`horse_wins`/`horse_places` from the API describe the horse AFTER the race; `*_freq` counts span the whole dataset (future included). Both are explicitly in `EXCLUDE_COLUMNS` — never feed them to a model.
@@ -127,7 +132,7 @@ Wiring it in requires registering it in `_FE_SOURCE_FILES`.
 
 1.  **Strictly Python/Streamlit:** Rely on standard python practices. The project is managed with standard `pip` (`requirements.txt`).
 2.  **Performance Constraints:** Features are computed over thousands of races. Numba and optimized pandas operations are favored over loops.
-3.  **Data Leakage Prevention:** Always ensure that calculations representing a horse's past performance *strictly* exclude the current race. 
+3.  **Data Leakage Prevention:** Always ensure that calculations representing a horse's past performance *strictly* exclude the current race.
 5.  **Environment:** Handled via a local `.venv` on Windows (`c:\Users\Leonp\Documents\horse\.venv`).
 
 ## 4. Current state & where to go next
@@ -231,7 +236,7 @@ Cleared on 2026-10-13 — 32 files and ≈5,200 lines removed; see §2.0 table C
   exists.** Change the id before using it.
 - **2 of 8 saved runs carry no feature signature**, so
   `run_store.feature_generation_status` reports `unknown` for them.
-- **`data/rtv_cache/` is orphaned** now that the Racing TV scraper is gone.
+- **`data/rtv_cache/` is in use again** by the rebuilt Racing TV scraper (2026-10-29); the old `rtv_metrics.parquet` inside it is kept.
 - **Six single functions are unreferenced and were deliberately kept**, because
   a reference count is not a reason to strip a module's API:
   `bet_settlement.settle_place_exchange_bets` (the vectorised twin of a formula

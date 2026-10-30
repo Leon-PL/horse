@@ -38,6 +38,9 @@ class TestLengthsBehind:
             ("8 ½", 8.5),
             ("1¼", 1.25),
             ("2¾", 2.75),
+            ("2.5", 2.5),
+            ("1 1/4", 1.25),
+            ("1/2", .5),
         ],
     )
     def test_values(self, raw, expected):
@@ -45,6 +48,10 @@ class TestLengthsBehind:
 
     def test_empty_is_nan(self):
         assert math.isnan(_parse_lengths_behind(""))
+
+    @pytest.mark.parametrize("raw", ["dist", "unknown", "-2", "nan", "inf", "1/0"])
+    def test_unknown_margin_is_not_a_zero_length_defeat(self, raw):
+        assert math.isnan(_parse_lengths_behind(raw))
 
     def test_named_code_not_matched_as_substring(self):
         # The old bug: "snk" returned 0.3 because "nk" was found inside it.
@@ -68,8 +75,11 @@ class TestFractionalOdds:
         assert _parse_fractional_odds(raw) == pytest.approx(expected)
 
     def test_zero_denominator_does_not_crash(self):
-        # Falls through to the default rather than dividing by zero.
-        assert _parse_fractional_odds("5/0") == 5.0
+        assert math.isnan(_parse_fractional_odds("5/0"))
+
+    @pytest.mark.parametrize("raw", ["", None, "unknown", "nan", "inf", "1", "0", "-2"])
+    def test_unknown_price_is_not_an_invented_four_to_one_quote(self, raw):
+        assert math.isnan(_parse_fractional_odds(raw))
 
 
 class TestDistanceAndWeight:
@@ -80,6 +90,9 @@ class TestDistanceAndWeight:
             ("1m 4f", 12.0),
             ("5f", 5.0),
             ("2m 7f 96y", 23.0 + 96 / 220.0),
+            ("1.5m", 12.0),
+            ("1m 0.5f", 8.5),
+            ("1m4½f", 12.5),
         ],
     )
     def test_distance(self, raw, expected):
@@ -91,10 +104,22 @@ class TestDistanceAndWeight:
             ("11-9", 11 * 14 + 9),
             ("8-0", 112),
             ("10-7", 147),
+            ("11–9", 163),
+            ("11st 9lb", 163),
+            ("11-9½", 163.5),
+            ("140lb", 140),
         ],
     )
     def test_weight(self, raw, expected):
         assert _parse_weight_to_lbs(raw) == expected
+
+    @pytest.mark.parametrize("raw", [None, "", "unknown", "nan", "-1f", "0m", "1m rubbish", "1600m"])
+    def test_unknown_distance_is_not_fabricated_as_ten_furlongs(self, raw):
+        assert math.isnan(_parse_distance_to_furlongs(raw))
+
+    @pytest.mark.parametrize("raw", [None, "", "unknown", "0-1", "0-5", "9-20", "1", "5", "nan", "140oops"])
+    def test_unknown_or_impossible_weight_is_not_a_real_numeric_input(self, raw):
+        assert math.isnan(_parse_weight_to_lbs(raw))
 
 
 class TestArabianGuard:

@@ -50,9 +50,19 @@ FE_CONFIG_KEYS = [
 #: nor exempted below — a missing entry silently serves stale features, which
 #: is how the 2026-06 "place-market edge" mirage happened.
 _FE_SOURCE_FILES = (
+    "src/verified_race_metadata.py", "reference/verified_race_types.json",
+    "reference/verified_runner_ratings.json",
+    "src/prize_currency_features.py", "reference/track_prize_currency.json",
     "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
+    "src/result_margins.py",
+    "src/result_status.py", "src/rating_reuse.py",
+    "src/feature_semantics.py", "src/audited_surface_features.py",
+    "src/established_form_features.py",
+    "src/prior_market_research.py", "src/forecast_evaluation.py",
+    "scripts/build_feature_store_batched.py",
     "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
     "src/atr_features.py",
+    "src/rtv_features.py",
     "src/pedigree_backfill.py", "src/track_config.py", "src/utils.py",
     # Merge/column contract consumed by an FE stage: the sectional joins feed
     # add_atr_features.
@@ -190,15 +200,23 @@ def _atr_signature(cutoff) -> dict:
     return {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": atr_cache_signature(cutoff)}
 
 
+def _rtv_signature(cutoff) -> dict:
+    from src.feature_inputs import rtv_cache_signature
+    return {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": rtv_cache_signature(cutoff)}
+
+
 def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
     """Atomically stamp metadata while retaining the dataset operation's lock."""
     with store._access():
         m = store.meta()
         m["fe_signature"] = fe_sig
         m["data_signature"] = data_sig
+        from src.prize_currency_features import reference_signature
+        m["prize_reference_signature"] = reference_signature()
         last = store.last_date()
         if last is not None:
             m["atr_signature"] = _atr_signature(last)
+            m["rtv_signature"] = _rtv_signature(last)
         fd, temporary = tempfile.mkstemp(prefix=".meta-", suffix=".json", dir=store.root)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -303,6 +321,11 @@ def get_featured_dataset(
                 logger.info("FeatureStore stale: ATR sectional cache changed beneath it — full rebuild")
                 return _rebuild(store, processed, fe_sig)
 
+        rtv = meta.get("rtv_signature")
+        current_rtv = _rtv_signature(last)
+        if (rtv is not None or any(current_rtv["sig"].values())) and rtv != current_rtv:
+            logger.info("FeatureStore stale: RTV observation cache changed beneath it — full rebuild")
+            return _rebuild(store, processed, fe_sig)
         store.append(processed)
         _stamp(store, fe_sig, data_signature(processed, cutoff=store.last_date()))
         cols = _model_load_columns(store)

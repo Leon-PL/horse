@@ -15,12 +15,15 @@ Run it (own port, alongside the picks app):
 from __future__ import annotations
 
 import os
+from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 import config
-from src.featured_dataset import fe_signature, get_featured_dataset
+from src.featured_dataset import fe_signature
+from src.store_refresh import get_training_dataset as get_featured_dataset
 from src.feature_store import FeatureStore
 from src.run_store import (
     GENERATION_MATCH,
@@ -244,10 +247,12 @@ if page == "📦 Data":
 
     st.markdown("### Catch-up scrape")
     cu = st.number_input("Days to scrape into the DB", 1, 90, 14)
+    enrich_recent = st.checkbox("Also update missing pedigree and weather", value=False,
+                               help="These optional backfills can fetch older missing records too.")
     if st.button("Scrape recent days"):
         with st.spinner(f"Scraping last {cu}d …"):
-            from src.database import sync_database
-            df = sync_database(days_back=int(cu))
+            from src.source_pipeline import sync_database
+            df = sync_database(days_back=int(cu), enrich=enrich_recent)
         st.success(f"DB synced — {len(df):,} rows total in the DB.")
         _db_stats.clear()
 
@@ -257,8 +262,8 @@ if page == "📦 Data":
 # ══════════════════════════════════════════════════════════════════════
 elif page == "🤖 Train":
     st.title("🤖 Train")
-    st.caption("Configure a run → train via the shared `train_run` → review "
-               "calibration · backtest ROI · CLV vs BSP → promote.")
+    st.caption("Evaluate a model on later races, or refit an evaluated recipe "
+               "on newer settled results. Review each saved run before promotion.")
 
     with st.form("train_cfg"):
         name = st.text_input("Run name", value="training run")
@@ -272,6 +277,10 @@ elif page == "🤖 Train":
             window = st.number_input("Train window (days)", 90, 3000, 600,
                                      help="Used only when 'Full history' is UNticked "
                                           "(ignored otherwise).")
+            holdout_days = st.number_input(
+                "Evaluate on latest (days)", 1, 730, 90,
+                help="These recent races measure model quality and are kept out of fitting.",
+            )
         with col3:
             clf = st.selectbox("Win framework", ["lgbm", "cat", "xgb"],
                                index=["lgbm", "cat", "xgb"].index(
@@ -291,8 +300,7 @@ elif page == "🤖 Train":
             index=["platt_isotonic", "race_temperature"].index(config.WIN_CALIBRATION_METHOD),
             format_func=lambda value: {"platt_isotonic": "Platt + isotonic (current default)",
                                        "race_temperature": "Race temperature (experimental)"}[value],
-            help="Temperature calibration improved the audit's chronological scores; "
-                 "confirm on rebuilt features before promoting a model.",
+            help="Compare probability accuracy on later races before choosing a method.",
         )
         submitted = st.form_submit_button("🚀 Train", type="primary")
 
@@ -300,6 +308,7 @@ elif page == "🤖 Train":
         cfg = TrainingConfig(
             name=name, refresh_data=refresh, catchup_days=int(catchup),
             train_window_days=None if full_hist else int(window),
+            holdout_days=int(holdout_days),
             frameworks={"classifier": clf, "place": place},
             blend_market_odds=blend, run_walk_forward=wf,
             win_calibration_method=calibration,
@@ -318,13 +327,58 @@ elif page == "🤖 Train":
         except Exception as exc:
             st.exception(exc)
 
+    with st.expander("Refit a validated model with newer results"):
+        st.caption("Keep an evaluated model's settings and fit through a settled date. "
+                   "The new model references the earlier evaluation and has no new test scores.")
+        report_dir = Path(config.DATA_DIR) / "validation_reports"
+        references = {
+            row["run_id"]: row for row in list_runs()
+            if ((row.get("training_config") or {}).get("split") or {}).get("holdout_races", 0) > 0
+            and ((row.get("training_config") or {}).get("recipe")
+                 or (report_dir / f"{row['run_id']}.json").exists())
+            and run_has_model(row["run_id"])
+        }
+        if references:
+            with st.form("deployment_refit"):
+                reference = st.selectbox("Evaluated model", list(references),
+                    format_func=lambda rid: f"{references[rid].get('name', rid)} ({rid})")
+                latest = date.fromisoformat(str(_db["latest_date"])[:10]) if _db.get("latest_date") else date.today() - timedelta(days=1)
+                maximum = min(latest, date.today() - timedelta(days=1))
+                settled = st.date_input("Fit results through", value=min(maximum, date.today() - timedelta(days=7)),
+                                       max_value=maximum)
+                refit = st.form_submit_button("Fit with newer results")
+            if refit:
+                try:
+                    from src.deployment_validation import write_validation_report
+                    certificate = report_dir / f"{reference}.json"
+                    if not certificate.exists():
+                        write_validation_report(reference, certificate)
+                    cfg = TrainingConfig.deployment(certificate, settled.isoformat(),
+                        name=f"Refit of {references[reference].get('name', reference)}", threads=4)
+                    with st.spinner("Fitting the validated recipe on settled results..."):
+                        run_id = train_run(cfg)
+                    st.session_state["last_run_id"] = run_id
+                    _db_stats.clear()
+                    st.success(f"Refit saved as {run_id}. Review it before promotion.")
+                except Exception as exc:
+                    st.exception(exc)
+        else:
+            st.info("Complete an evaluation run before refitting its recipe.")
+
     # ── results of the last run this session ──
     last = st.session_state.get("last_run_id")
     if last:
         meta = load_run_meta(last)
         evals = _evals_of(meta)
         st.markdown(f"### Results — {meta.get('name')} ({last})")
-        _render_evals(evals)
+        split = (meta.get("training_config") or {}).get("split") or {}
+        if split.get("mode") == "fit_as_of":
+            reference = (meta.get("training_config") or {}).get("validation_reference") or {}
+            st.info(f"Parameters fitted through {split.get('training_last_date')}. "
+                    f"Recipe evaluation: {reference.get('validation_run_id')}. "
+                    "This refit has no held-out test scores.")
+        else:
+            _render_evals(evals)
         _promote_with_feedback(last, key="promote_after_train")
 
 

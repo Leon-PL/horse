@@ -1,5 +1,10 @@
 # Session log — long autonomous session from 2026-10-13
 
+**Historical session record.** Preserve entries as written. Use the
+[README](../README.md) for current operation, [CONTINUATION](../CONTINUATION.md)
+for the latest handoff, and [implementation progress](MARKET_PERFORMANCE_PROGRESS.md)
+for the evidence index.
+
 Running state for the session driven by [NEXT_AGENT_BRIEF.md](NEXT_AGENT_BRIEF.md).
 Newest entries at the bottom. Measurements go in
 [NEGATIVE_RESULTS.md](NEGATIVE_RESULTS.md); this file only tracks where the
@@ -269,3 +274,301 @@ build).
     2026-06-11..2026-10-10**: 11-30 June 100% of DB races, Jul-Oct ~98%;
     43,795 hold-out runners, 99.6% with an 11:00 price. Not yet used for any
     test (the frozen 11:00 rule needs ~600 strikes; ~4 months gives ~150).
+
+## 2026-10-25
+
+51. **Project audit integrated** ([report](PROJECT_AUDIT.md)). Independent
+    local starter-field evidence repaired 3,297 result fields and removed
+    6,445 extra rows, preserving true non-finishers. Original affected rows
+    were backed up before applying one fingerprint-checked transaction.
+    The rebuilt store has 749,261 runners / 79,664 races through 2026-10-12,
+    FE `221fcd4db0fc5631`, data `f2a120a477c117a1`. Twenty-two fields remain
+    unresolved. Ingestion now validates exact field counts and replaces
+    verified fields atomically, without losing separate enrichment.
+52. **New production: `20261025_193016_331639`**, replacing and preserving
+    `20261014_105017`. The trainer now defaults to a 90-day calendar holdout
+    and refits all eligible rows at the early-stopped tree count. New run:
+    149 features, 629,311 fitting rows through 2026-07-08, seven-day purge,
+    holdout 2026-07-15..2026-10-12, seed 42, LightGBM win/place, default
+    Platt/isotonic, no market blend. On the same 3,471 complete races / 32,357
+    runners (947 non-finishers), Brier 0.0863669 -> 0.0860888, binary log loss
+    0.2990108 -> 0.2967461, race log loss 1.8970388 -> 1.8773931. The fixed
+    gate required all three scores to avoid worsening. Paired race log-loss
+    delta CI [-0.0336752, -0.0088206]; race-averaged Brier CI crosses zero.
+    Dates were already inspected elsewhere: **retrospective evidence**, not
+    untouched confirmation. The closing-price reference remains stronger.
+53. **Final verification: 686 tests passed.** Actual LightGBM, XGBoost and
+    CatBoost fits verify full refits and holdout exclusion. Saved win/place
+    forecasts match public inference on 32 shuffled fields; a further replay
+    through the promoted loader passed on eight fields. Final deep status
+    verifies database/store/code/model consistency, with a 13-day age warning.
+    Exact local source archives, runtime versions, comparison forecasts and
+    the promotion decision are retained under `data/audit/20261025/`.
+54. **Market plan implementation began** ([first comparison](MARKET_COMPARISON_001.md),
+    [progress](MARKET_PERFORMANCE_PROGRESS.md)). Added strict shared probability
+    scoring, faithful timestamped T-5 field/price replay, all-history
+    `fit_as_of` with a shared win-only research path, and a frozen chronological
+    market-ladder benchmark. On 3,380 identical 2026Q3 races /31,235 runners,
+    independent race log loss 1.873924 trails market 1.759440; Brier 0.086853
+    versus 0.083297. Pre-test validation gave the independent forecast zero
+    blend weight; its small market correction adds no demonstrated gain.
+    These are retrospective LTP-reference results, not fresh confirmation or
+    executable-price returns. Production is unchanged. Full suite 726 passed;
+    61 further focused checks passed after diagnostic corrections. Two unused
+    sectional composites and their eight descendants have future-data
+    dependence and are excluded from the next, not-yet-run feature trial.
+
+## 2026-10-26
+
+55. **Independent sectional trial completed; candidate rejected**
+    ([report](MARKET_COMPARISON_002.md)). Before fitting, 206 eligible additions
+    passed actual feature-function temporal checks; no equivalent earlier
+    independent full-family proper-score comparison was recovered. Six fixed
+    historical fits compared 149 versus 355 inputs on 2025Q3, 2025Q4 and
+    2026Q1. On 9,356 races / 85,863 runners, race log loss worsened 1.872045
+    -> 1.876713, paired delta +0.004668, 95% interval [+0.000852, +0.009229];
+    date-cluster sensitivity agrees. Every quarter worsened; pooled runner
+    Brier and binary log loss also worsened. Retain 149 inputs; no subset
+    search or production change. Secondary T-5 context on 8,942 identical
+    fields gives baseline/candidate/market race log loss 1.868796 / 1.872976 /
+    1.749283; neither independent forecast approaches parity, including the
+    fixed freshness subset. Local replay overlaps agree; all exclusions,
+    fitted artifacts, source snapshots and paired forecasts are preserved.
+56. **Feature-selection guard extended after the frozen experiment.** The ten
+    future-dependent sectional composites/descendants are now excluded even
+    with all-feature selection or an explicit allowlist. Regression cases
+    reproduced both holes before the fix. Production and both trial recipes
+    already omitted them, so their probabilities and feature values do not
+    change. A win-only inference path also avoids unused place/betting work
+    while reproducing full-path win probabilities exactly. Final regression:
+    737 passed, 24 warnings. A 64-field / 635-runner production replay has
+    saved win-probability error 1.67e-16 and full versus win-only error zero.
+    Deep status passes; data are 14 days old after midnight. Original fit,
+    assessment and post-guard implementation sources are preserved separately.
+57. **Bounded race-objective trial completed; neither challenger advances**
+    ([report](MARKET_COMPARISON_003.md)). Recovered the older scratch comparison
+    from Git; it removed actual non-finishers and lacked the repaired protocol.
+    Six fixed challenger fits used the same 149 inputs and binary forecasts
+    on 9,356 races / 85,863 runners. Conditional linear logit loses all proper
+    scores (race LL 1.890830 versus 1.872045). Race-softmax trees improve Brier
+    .08754346 -> .08736141 in every quarter, and mean race LL to 1.871035, but
+    primary LL delta interval [-.005101,+.003276] crosses zero; date sensitivity
+    agrees. Preserve the secondary gain as unpromoted research evidence;
+    do not shift the gate or start a hyperparameter sweep. On 8,942 matched
+    fields tree/market LL 1.867684 / 1.749283; no parity. Full suite 742 passed,
+    24 warnings; nine real model artifacts replay shuffled forecasts to
+    1.11e-16. Final deep status passes with the existing 14-day data-age warning.
+    No production, canonical data, feature values or default feature recipe
+    changed. Registered choices, prior source, all models, paired forecasts,
+    source archives and checksums are retained.
+58. **Monthly versus quarterly refitting completed; primary benefit unresolved**
+    ([report](MARKET_COMPARISON_004.md)). All six new native fits completed before
+    score inspection; three first months share their exact quarterly forecasts.
+    Same 149 inputs and nine-month population: 9,356 races / 85,863 runners.
+    Race LL 1.87204489 -> 1.87097477 improves in all quarters, but difference
+    interval [-.00436065,+.00347671] crosses zero; date sensitivity agrees.
+    Brier .08754346 -> .08746770 improves in every quarter, with a negative
+    pooled one-sided upper95 bound. Preserve the secondary evidence; the fixed
+    primary gate remains unmet. Mean parameter age 52.46 -> 22.21 days.
+    Matched monthly/market LL 1.86755050 / 1.74928256 closes only 1.04% of the
+    market gap at the point estimate. Freshness sensitivity also fails parity.
+    Stop this cadence comparison without a sweep or production change.
+    Full suite 745 passed (24 warnings); nine saved artifacts replay 576
+    shuffled fields / 5,307 runners to 1.43e-14. Saved calibration cutoffs,
+    feature lists, methods, fitting cutoffs and exact shared-month identity
+    pass. A reporting-only change makes project status show the actual saved
+    parameter cutoff separately from feature freshness (32 focused checks
+    passed). Deep status passes, with data 14 days old and production parameters
+    fitted through July 8. Canonical data, feature values and production stay
+    unchanged; source/evidence/registration hashes and all forecasts are retained.
+59. **Current-data deployment fitting completed and activated**
+    ([report](DEPLOYMENT_FITTING_005.md)). Shared training/CLI/app now support
+    explicit settled cutoffs and inherit a fingerprinted evaluated recipe.
+    New refits save their actual fitting/calibration dates and empty test
+    metrics, linking the earlier evaluation separately. Results-only refresh
+    avoids optional unbounded backfills. Preserved and verified all five old
+    store files, raw CSV, production pointer and a consistent database backup.
+    The first append exposed full-matrix memory duplication; it was stopped
+    before any staged commit and all old file hashes matched. New streamed
+    consolidation shares one writer with the batched builder, preserving
+    native calculations, processed columns and transactional state. Native
+    parity/rollback tests pass; all 749,261 historical rows across 1,163 columns
+    match exactly. Added 4,473 validated rows; store 753,734 runners / 80,135
+    races through Oct25, FE221fcd4db0fc5631 / data f3259ac47f8249b0. Sixteen
+    recent inconsistent fields stay pending. Full suite 769 passed,108 warnings;
+    35 focused checks passed. Run **20261026_140950_205296** fits 665,252 eligible
+    runners / 71,207 races through Oct19, with purged training-only calibration.
+    Complete-field policy excludes 162 invalid/degenerate fields / 1,549 input
+    rows; true DNFs stay. Original/save-load win and place probabilities match
+    exactly on 64 fields / 574 runners, including after production activation.
+    Prior **20261025_193016_331639** remains available for rollback. This is the
+    selected base recipe's operational refit; no new proper-score, forward-test
+    or market-parity claim. Uncertain research challengers remain unpromoted.
+
+60. **Forward baseline forecast recorder006 complete** (2026-10-26). Added a
+    shared manual CLI and Forecast record page using the
+    actual pinned model, fresh one-race Sporting Life cards and refreshed
+    Matchbook WIN GBP best-back prices. Source, recipe, runtime, first schedule,
+    quote age, complete fields and actual publication are recorded and checked.
+    Exclusive attempt folders preserve all available evidence; first eligible
+    pairs cannot be replaced. Missing prices and field changes never produce
+    a partial renormalized pair. Native live inference took about two minutes;
+    the first nine-runner Southwell capture correctly failed card freshness.
+    Preserved that study, added an exact fresh-card recheck after inference and
+    registered a revised study. A nine-runner Kempton capture passed freshness.
+    Both saved model inputs and raw prices replay with zero probability error.
+    Today's pairs precede the October27 registered start and are monitoring
+    only. Shared assessment preserves result snapshots, DNFs and exclusions;
+    UI saved-record/assessment/retired-study smoke checks pass. Full regression
+    793 passed,108 warnings,583.03s; all24 new checks pass. The interim native
+    test/store-lock conflict is retained in its log; the final serial run
+    passes. All41 sealed005 evidence files and13 archived inputs verify;
+    current model/feature hashes match, database schema and every row in all
+    six tables match the preserved backup. Both live studies and final sources
+    are archived with checksums in data/audit/forward_forecasts/006. Active
+    study20261026_baseline_v2 starts eligible recording October27. No new training, research
+    winner, production change, automation or market-parity declaration.
+
+61. **Confirmation feasibility and fixed baseline pilot007** (2026-10-26).
+    Added a reproducible, exclusive variance-planning tool and publication-only
+    pilot readiness checker. No training or model selection. Frozen estimates
+    use retained independent predictions on inspected 2025Q3/2025Q4/2026Q1 and
+    the unpromoted correction on inspected 2026Q3, with pooled/quarter and fixed
+    freshness sensitivity. Preserve runner weighting and race/date dependence;
+    four required gates target 80% joint power under the normal approximation.
+    If truly equal in mean with archived variance, estimates are 1,215,235
+    independent races versus 2,244 correction races; correction observed-mean
+    scenario 3,093. Independent historical mean outside margins has no
+    high-power parity sample. No assertion about the current refit's scores or
+    transfer from Betfair LTP to Matchbook. Registered a baseline companion
+    pilot before October 27: 84 calendar days, 1,000 eligible published pairs,
+    60 distinct race dates, then seven days for labels. Outcome-free stopping,
+    complete last-day inclusion, immutable plan/source anchor, no early parity
+    claim or promotion. Earliest possible readout January 26, 2027, conditional
+    on counts. UI shows progress 0/1000 and 0/60. All 62 focused checks pass in
+    25.12s, including27 new tests; UI progress and saved 9-runner display pass.
+    Existing793-test full baseline remains the prior regression receipt; it
+    was not rerun for these isolated additions. Evidence under
+    data/audit/confirmation/007_feasibility. Packages001–006 and all original
+    forecasts stay immutable; no scheduled collection or external messages.
+
+62. **Bounded manual timed recording008 complete** (2026-10-26). Added optional
+    --at-window and UI Record in eligible window.
+    Compute native probabilities first, then bounded wait, fresh exact-card
+    recheck and current market read. Target opening+2seconds; at most600seconds
+    waiting, sleep steps at most1second, monotonic/UTC divergence and deadline
+    guards. Timed eligible pairs require intent and receipt evidence; actual
+    publication/field/history/price rules unchanged. New baseline_v3, same
+    production20261026_140950_205296 and original pilot policy/startOctober27.
+    Prior v1/v2 kept, original records and plans not changed. New v3 action and
+    retired v2 nine-runner table pass UI checks. Live20:30Southwell six-runner
+    attempt inferred by20:22:13, waited138.54seconds, published20:24:33.448130
+    within window. Correctly rejected model pair after odds changed on three
+    runners; preserved fresh market vector, exact replay error0. Date also
+    precedes registered start. UI shows market-only, model unavailable and
+    pair count0. All prior006/007 sealed evidence and original study files
+    verify; original model and all forecast/pilot contract fields match.
+    Initial35focused checks pass. Final full suite833passed,108warnings,490.45s,
+    including13new timing/recorder tests and27planning/readout tests from007.
+    Single-field native replay from the refreshed card changes none of149
+    selected inputs; reconstructed win probabilities differ by0. Diagnostic
+    only, no general odds-invariance claim, original rejected record remains
+    model-unavailable. Paired scores remain conditional on unchanged cards.
+    Broader native odds-dependency verification is the next coverage task
+    before considering a new input policy. Active studybaseline_v3 retains
+    the original October27pilot conditions. Source/runtime/recording snapshots
+    and final checksum verification are in008_timing. Quick status passes;
+    feature code/parameters/data generation unchanged, no new deep data scan.
+    No scheduled collector, orders, model
+    fitting, promotion, data refresh or forecasting-lift claim.
+
+63. **Actual model prediction work009 complete** (2026-10-26). User redirected
+    work from infrastructure to forecasting. Registered and trained149-input
+    baseline versus176-input pace/setup candidate, six native fits on three
+    later historical quarters. Temporal feature audit passed all27additions;
+    no FE rebuild or serving change. All9,356races/85,863runners scored. Race
+    LL1.87204489→1.87310002, Brier.08754346→.08752490, binary loss worsens;
+    LL improves only one quarter. Primary interval crosses0, candidate rejected.
+    No favourable partial/subset selection. Market assessment8,942fields:
+    baseline/candidate/market LL1.86879634/1.86965468/1.74928256. Saved models
+    replay64shuffled fields per model within1e−12;15focused checks pass.
+    Single worst underestimation exceeds net loss deterioration, motivating
+    separate training-only tail/calibration research rather than dropping an
+    outcome. Retained all artifacts, registrations and source/input hashes.
+    About82.7minutes of fitting/evaluation. Production remains unchanged.
+
+64. **Direct calibration experiment010 complete** (2026-10-26). Reused all six
+    saved009 models, preserving trees/maps/features. Fit one coefficient on
+    Jul1–Sep24 OOS forecasts, validate Oct1–Dec22, freeze before Jan–Mar and
+    Apr–May scoring.149-input model selects82.867%Platt; pace diagnostic selects
+    zero under the earlier Brier constraint. Primary2,591races: winnerLL
+    1.81799380→1.81818510, Brier.09050170→.09046597; primary confidence interval
+    crosses0. Transfer2,439races with fixedDecember trees: LL1.90437727→1.90275709,
+    also uncertain. No near-zero winning forecast in either later period;
+    no claim that these scores validate rare-tail protection. Severe individual
+    underestimates improve, but no primary lift or market parity. Exact native,
+    retained009 and overlay probability replays have zero difference. All18
+    focused calibration/scoring tests pass; independent read-only verification
+    validates19sealed files, source archive, models/features and market manifests.
+    225.33seconds without tree fitting. Research-only module/script/overlays;
+    production20261026_140950_205296, all009artifacts and activebaseline_v3 study
+    stay unchanged. See MODEL_CALIBRATION_010.md and model-010logs. Every period
+    is inspected retrospective development, not fresh confirmation. Continue
+    actual prediction work; a narrow positive tail smoother is a distinct
+    hypothesis, and calibration alone has not closed the market gap.
+
+65. **Narrow tail smoothing011 complete** (2026-10-26). New research-only
+    relative-floor method below1%, capped at25%Platt; seven registered strengths,
+    earlierQ3fit/Q4validation with existing proper-score guards, fixed009trees
+    and010saved probability stages.149learns0.1 but Q4LLworsens0.00002891;
+    176fails strict fittingBrierguard. Both select zero, later forecasts exactly
+    unchanged. Separate post-result diagnostic records earlier fitLLminimum
+    without Brier veto,0.25both. Actual known Naas pace forecast rises1e-9→
+    0.000971833 (validation example, not fresh evidence).149Q1deltaLL−0.00005136,
+    uncertain, transfer+0.00002678;176Q1+0.00012877 with positive interval,
+    transfergainuncertain. Tiny Brier increases alone are not material damage,
+    but removing the veto still gives no reliable overall gain. All32focused
+    tests pass, including14new checks. Verify011 validates11primary+4diagnostic
+    artifacts, source archives/CRC, source/input/model/study hashes and exact
+    replay0. All001–010artifacts, production20261026_140950_205296 and activev3
+    study unchanged. No new tree fitting/data refresh. Primary run8.88seconds
+    using cached010forecasts; sessions95555/99147 collected exit0. Main result
+    and secondary diagnostic separately frozen, no retrospective promotion or
+    rescue of009. Docs MODEL_TAIL_SMOOTHING_011.md, ledger30, progress andREADME.
+    Close this floor/blend line; next original-plan target is history-depth/
+    missing-history/estimate-uncertainty information after prior-artifact review.
+
+66. **History-family012 completed across PC shutdown** (2026-10-27). Trained
+    three165-input models, reusing exact verified009149-input references.
+    Initial17-column/166-input attempt stopped before saving/scoring after an
+    outcome-free audit found duplicate availability flags. All records kept;
+    compact16-column registration frozen before fits. Seven native temporal/
+    live-card controls pass; initial NaN-card fixture failure preserved and
+    corrected to existing numeric-zero serving contract. Q3/Q4LL improve;
+    Q1worsens. Pooled9,356races LL1.87204489→1.87133338,95%delta crosses0.
+    Brier/binary point gains; no advancement. Matched market gap closes only
+    0.38%. External-form776-field diagnostic motivates separate013, no slice
+    rescue. All fits finished/saved before shutdown; morning checks recovered
+    completed results without retraining. Corrected stale initial running-status
+    claim after checking saved files. Verify012 exit0:17evidence files and
+    64shuffled fields per model, maxerror2.004e-14<1e-12; all baseline forecasts
+    exact.48focused tests pass. Two additional baseline alias pairs recorded,
+    no baseline/production changes. Core comparison45.39minutes; trees
+    1986/1647/1977. Docs MODEL_HISTORY_012.md.
+
+67. **Exploratory history-context ensemble013 complete** (2026-10-27). Reused
+    saved149/165forecasts; two coefficients fit onQ3 and validatedQ4, no new
+    trees. Frozen weights0.494305(no external form)/1.0(contains external form).
+    PrimaryQ1LL1.81799380→1.81767994; transferApril–May1.90437727→1.90248792,
+    both95%intervals cross0. Brier/binary point estimates improve, market remains
+    ahead. Context lead includes inspected012Q1outcomes, so no fresh confirmation
+    or promotion claim and no reversal of012. Fit/validation periods never
+    pooled into test evidence. New transfer165inference uses sameDecember22
+    artifact, baseline matches010exactly,8invalid fields excluded as before.
+    All66focused tests pass(8new);9sealed files/source archive verify; overlay
+    replay0 and64shuffled native transfer fields maxerror1.11e-16. Runtime39.50s;
+    sessions54078/40612 collected exit0, no jobs remain. All001–012sealed work,
+    production20261026_140950_205296 and activebaseline_v3 study unchanged.
+    Ledger wording now distinguishes uncertain results from refutation and
+    baseline representability from a guarantee of future performance. No further
+    subgroup/weight searches on these same outcomes. Docs MODEL_HISTORY_BLEND_013.

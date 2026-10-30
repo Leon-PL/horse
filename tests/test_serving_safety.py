@@ -27,6 +27,7 @@ def registry_dirs(tmp_path, monkeypatch):
     for rid in ("20260101_120000", "20260201_120000", "20260301_120000"):
         (runs / rid).mkdir()
         (runs / rid / "model.joblib").write_bytes(rid.encode())
+        (runs / rid / "meta.json").write_text(json.dumps({"run_id": rid}))
     return runs
 
 

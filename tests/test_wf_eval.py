@@ -240,6 +240,7 @@ class TestCombinationNesting:
         assert verdict["ok"] is False
         assert verdict["excess_logloss"] == pytest.approx(0.20)
         assert "suspect the fit" in verdict["reason"]
+        assert "does not prove a pipeline error" in verdict["reason"]
 
     def test_tolerates_noise_sized_differences(self):
         assert check_combination_nesting(1.005, 1.000, tolerance=0.01)["ok"] is True

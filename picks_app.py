@@ -8,6 +8,7 @@ loads the full feature store at startup, so it opens fast.
 
 Pages:
 - 💰 Today's Picks — live racecards, value picks, manual custom-race entry
+- 📋 Forecast record — timestamped independent and market baseline monitoring
 - 🔌 Matchbook API — exchange connectivity harness
 
 Training, tuning, backtesting, insights and promotion live in the separate
@@ -39,10 +40,8 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from src.data_collector import (
-    get_scraped_racecards,
-    scrape_todays_results,
-)
+from src.source_pipeline import get_scraped_racecards
+from src.data_collector import scrape_todays_results
 from src.data_processor import process_data
 from src.live_prediction import (
     feature_engineer_with_history_core,
@@ -544,6 +543,7 @@ page = st.sidebar.radio(
     "Navigation",
     [
         "💰 Today's Picks",
+        "📋 Forecast record",
         "🔌 Matchbook API",
     ],
 )
@@ -562,7 +562,7 @@ if _db and _db.get("total_runners", 0) > 0:
         f"💾 **DB size:** {_db.get('db_size_mb', 0):.1f} MB"
     )
 else:
-    st.sidebar.info("🌐 Data via **Sporting Life** scraper — no keys needed.")
+    st.sidebar.info("🌐 Racecards via **Sporting Life**; **Racing TV** pace maps and telemetry are collected alongside for analysis.")
 
 # ── Active (production) model ─────────────────────────────────────────
 # The serving app loads the promoted model lazily via the registry pointer —
@@ -1836,6 +1836,10 @@ if page == "💰 Today's Picks":
 # =====================================================================
 #  MATCHBOOK API
 # =====================================================================
+elif page == "📋 Forecast record":
+    from src.forward_ui import render_forward_page
+    render_forward_page()
+
 elif page == "🔌 Matchbook API":
     st.title("🔌 Matchbook API")
     st.caption(

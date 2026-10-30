@@ -1,5 +1,10 @@
 # Roadmap after the October 2026 audit
 
+**Historical decision document, 13 October 2026.** Its diagnosis and priorities
+belong to that checkpoint. See the [operating guide](../README.md) for the
+current workflow and the [implementation record](MARKET_PERFORMANCE_PROGRESS.md)
+for later evidence.
+
 *Written 2026-10-13 for the operator, to decide what this project should be
 next. Every number here is recorded, with its method and caveats, in
 [NEGATIVE_RESULTS.md](NEGATIVE_RESULTS.md) (sections 13-16 are this

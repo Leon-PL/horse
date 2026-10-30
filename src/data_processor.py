@@ -105,7 +105,8 @@ for _g in [
 
 def _normalise_going(going: str) -> str:
     """Map a detailed going description to one of five groups."""
-    return _GOING_MAP.get(str(going).strip().lower(), "Good")
+    from src.feature_semantics import normalise_going
+    return normalise_going(going, _GOING_MAP)
 
 
 # ── Form string parsers ──────────────────────────────────────────────────
@@ -199,6 +200,10 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.title()
 
+    from src.verified_race_metadata import apply_verified_race_types, apply_verified_runner_ratings
+    df = apply_verified_race_types(df)
+    df = apply_verified_runner_ratings(df)
+
     # --- Sex: birth sex only (look-ahead leak, ledger 15) ---
     # Results pages report a horse's sex as of the day they were SCRAPED, not
     # race day (2,842 two-year-olds are coded as mares). The code therefore
@@ -256,6 +261,17 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # Sporting Life's raw finish_distance is the gap to the PREVIOUS horse.
+    # The legacy raw column is unfortunately named lengths_behind. Preserve
+    # it for source replay; all new history calculations use this explicit
+    # distance behind the winner. Reprocessing is idempotent.
+    if "lengths_behind" in df.columns and "finish_position" in df.columns:
+        from src.result_margins import cumulative_beaten_lengths
+        df["beaten_lengths"] = cumulative_beaten_lengths(df)
+    if "finish_position" in df:
+        from src.result_status import result_labels
+        df["finish_pos_label"] = result_labels(df)
+
     # --- Parse form string into numeric features ---
     if "form" in df.columns:
         df["form_str"] = df["form"].astype(str).str.strip()
@@ -288,8 +304,11 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     # and differs when a live card is processed by itself.
     if "official_rating" in df.columns:
         ratings = pd.to_numeric(df["official_rating"], errors="coerce")
-        df["has_official_rating"] = (ratings > 0).astype(int)
-        ratings = ratings.where(ratings > 0)
+        observed = ratings.gt(0)
+        if "has_official_rating" in df:
+            observed &= pd.to_numeric(df.has_official_rating, errors="coerce").eq(1)
+        df["has_official_rating"] = observed.astype(int)
+        ratings = ratings.where(observed)
         race_median_or = ratings.groupby(df["race_id"]).transform("median")
         df["official_rating"] = ratings.fillna(race_median_or)
 
@@ -322,6 +341,14 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Handle missing numeric values ---
     if "weight_lbs" in df.columns:
+        # Keep impossible source values out of both today's field and future
+        # weight-change histories. No guessed replacement of the raw record.
+        df["weight_lbs"] = df["weight_lbs"].where(df["weight_lbs"].between(50, 220))
+        observed = df["weight_lbs"].notna()
+        if "has_observed_weight" in df:
+            observed &= pd.to_numeric(df.has_observed_weight, errors="coerce").eq(1)
+        df["has_observed_weight"] = observed.astype(np.int8)
+        df["weight_lbs"] = df["weight_lbs"].where(observed)
         field_weight = df.groupby("race_id")["weight_lbs"].transform("median")
         df["weight_lbs"] = df["weight_lbs"].fillna(field_weight)
 
@@ -329,6 +356,8 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
 
     if "prize_money" in df.columns:
         df["prize_money"] = df["prize_money"].fillna(0)
+        from src.prize_currency_features import normalise_prize_money
+        df = normalise_prize_money(df)
 
     logger.info(f"Clean data: {len(df)} records remaining")
     return df
@@ -350,6 +379,15 @@ def encode_categorical(df: pd.DataFrame) -> pd.DataFrame:
     for col in low_cardinality:
         if col in df.columns:
             dummies = pd.get_dummies(df[col], prefix=col, dtype=int)
+            # A card containing only Flat races or only males still needs the
+            # model's Chase/Female indicators, correctly set to zero. Their
+            # existence must not depend on unrelated races in the same batch.
+            required = {"race_type": ("Flat", "Hurdle", "Chase"),
+                        "sex": ("Male", "Female")}.get(col, ())
+            for category in required:
+                name = f"{col}_{category}"
+                if name not in dummies:
+                    dummies[name] = 0
             df = pd.concat([df, dummies], axis=1)
 
     # --- Expanding frequency encoding for high-cardinality fields ---

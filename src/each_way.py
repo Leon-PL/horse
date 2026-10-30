@@ -67,10 +67,9 @@ def adjust_place_probs_for_race(
     2. **Shrink** logits toward their mean by a factor that depends on
        ``places_paid / n_runners``.  High ratio (small field) → more
        shrinkage → probabilities bunch toward 50%.
-    3. **Shift** the shrunken logits by a scalar δ so that
-       σ(logit + δ) sums to ``places_paid`` (Newton, 2–4 iterations).
-    4. Floor each runner at its win probability.
-    5. Clip to [0, 1].
+    3. Solve a bounded monotone shift with each runner's win probability
+       included as a lower bound. The resulting probabilities sum to the
+       available places; applying that floor afterwards would increase mass.
 
     Args:
         place_probs: Raw model P(top-k) values for each runner.
@@ -80,19 +79,31 @@ def adjust_place_probs_for_race(
 
     Returns:
         Adjusted and normalised place probabilities.
+
+    This retains the existing fixed-slot approximation that all available
+    places are filled. Estimating fewer filled slots when many horses fail
+    to finish is a separate modelling question.
     """
     if places_paid <= 0:
         return np.zeros_like(place_probs)
 
-    n = len(place_probs)
-    adjusted = place_probs.astype(np.float64).copy()
+    adjusted = np.asarray(place_probs, dtype=np.float64).copy()
+    lower = np.asarray(win_probs, dtype=np.float64)
+    if adjusted.ndim != 1 or lower.shape != adjusted.shape or not np.isfinite(adjusted).all() or not np.isfinite(lower).all():
+        raise ValueError("Expected aligned finite place/win probabilities")
+    if np.any((lower < 0) | (lower > 1)):
+        raise ValueError("Win probabilities must be between zero and one")
+    n = len(adjusted)
+    target = float(min(places_paid, n))
+    if lower.sum() > target + 1e-10:
+        raise ValueError("Win-probability floors exceed the available place mass")
     total = adjusted.sum()
 
     if places_paid >= n:
         adjusted = np.ones(n, dtype=np.float64)
-    elif total < 1e-8:
-        adjusted = np.full(n, places_paid / n, dtype=np.float64)
     else:
+        if total < 1e-8:
+            adjusted[:] = places_paid / n
         _eps = 1e-6
         clamped = np.clip(adjusted, _eps, 1.0 - _eps)
         logits = np.log(clamped / (1.0 - clamped))
@@ -106,25 +117,19 @@ def adjust_place_probs_for_race(
         mean_logit = logits.mean()
         logits = mean_logit + shrink_factor * (logits - mean_logit)
 
-        # Newton shift: find δ so Σ σ(logit_i + δ) = places_paid
-        # Initialise near the analytic solution for uniform logits.
-        target = float(places_paid)
-        target_mean = np.clip(target / n, 1e-6, 1.0 - 1e-6)
-        delta = np.log(target_mean / (1.0 - target_mean)) - logits.mean()
-        for _ in range(20):
-            p = 1.0 / (1.0 + np.exp(-np.clip(logits + delta, -60.0, 60.0)))
-            residual = p.sum() - target
-            if abs(residual) < 1e-8:
+        # Bisection also handles near-certain probabilities, where a Newton
+        # derivative can vanish and leave an impossible expected-place total.
+        lo, hi = -80.0-float(logits.max()), 80.0-float(logits.min())
+        for _ in range(60):
+            delta = (lo+hi)/2
+            adjusted = np.maximum(1.0/(1.0+np.exp(-np.clip(logits+delta, -80., 80.))), lower)
+            residual = adjusted.sum()-target
+            if abs(residual) < 1e-11:
                 break
-            grad = (p * (1.0 - p)).sum()
-            if grad < 1e-12:
-                break
-            delta -= residual / grad
-
-        adjusted = 1.0 / (1.0 + np.exp(-np.clip(logits + delta, -60.0, 60.0)))
-
-    # Floor: P(place) >= P(win) — you can't win without placing
-    adjusted = np.maximum(adjusted, win_probs.astype(np.float64))
+            if residual > 0:
+                hi = delta
+            else:
+                lo = delta
 
     return np.clip(adjusted, 0.0, 1.0)
 

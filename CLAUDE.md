@@ -1,14 +1,16 @@
 # CLAUDE.md
 
-Start with **[PROJECT_OUTLINE.md §2.0](PROJECT_OUTLINE.md)** — the map of what
-is actually live. The repo is **one pipeline plus a research toolkit**; if a
-module is not in that section's table A, it cannot affect a bet. The rest of
-PROJECT_OUTLINE is the architecture and handover detail. For what to work on
-next, and why the model loses to the market, see
-**[docs/ACTION_PLAN.md](docs/ACTION_PLAN.md)**. Starting a long autonomous
-session? **[docs/NEXT_AGENT_BRIEF.md](docs/NEXT_AGENT_BRIEF.md)** is the
-standing brief: current tree state, a stage-by-stage audit checklist, the live
-work queue, and the specific self-deceptions to avoid.
+Start with **[README.md](README.md)**, the current operating guide, then use
+**[the project inventory](docs/PROJECT_INVENTORY.md)** to find operational,
+maintenance and research tools. Run `scripts/project_status.py` for actual
+readiness; dated prose is not a substitute for that check.
+
+**[CONTINUATION.md](CONTINUATION.md)** holds session handoff detail.
+**[Implementation progress](docs/MARKET_PERFORMANCE_PROGRESS.md)** and the
+**[negative-results ledger](docs/NEGATIVE_RESULTS.md)** index measured evidence.
+`PROJECT_OUTLINE.md`, older plans and `NEXT_AGENT_BRIEF.md` retain historical
+architecture and research context; their old work queues and model IDs do not
+define the current task or installation.
 
 The rules below are the ones that cause real damage when violated.
 
@@ -67,9 +69,13 @@ prices; `scripts/audit_selection_rule.py` reports both.
 
 ## Practical notes
 
-- Environment: local `.venv` on Windows; plain `pip` with
-  `requirements.txt` (loose) and `requirements.lock` (pinned).
-- Run tests with `.venv/Scripts/python.exe -m pytest tests/ -q`.
+- Live environment: existing `.venv` on Windows. Use `scripts/tooling.ps1 setup`
+  for isolated development; do not synchronize a running recorder's `.venv`
+  during setup. Dependencies are declared in `pyproject.toml`, resolved in
+  `uv.lock`, and exported to `requirements.lock`.
+- Run `scripts/tooling.ps1 test` for pilot checks or
+  `scripts/tooling.ps1 test -TestPath tests` for the full suite. See
+  [development tools](docs/DEVELOPMENT_TOOLS.md) for compatibility limits.
 - Default model framework is **LightGBM** (see
   `config.SUB_MODEL_FRAMEWORKS`), not XGBoost/CatBoost.
 - `data/` and `models/` are gitignored and large; run snapshots are

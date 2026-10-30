@@ -128,6 +128,7 @@ def test_signature_survives_a_relocated_checkout(tmp_path, monkeypatch):
     # Copy bytes, not text: the hash is over raw bytes and Windows text mode
     # would rewrite the line endings.
     for rel in _FE_SOURCE_FILES:
+        (scratch / rel).parent.mkdir(parents=True, exist_ok=True)
         (scratch / rel).write_bytes((SRC.parent / rel).read_bytes())
     _relocate_project(monkeypatch, scratch)
 
@@ -141,6 +142,7 @@ def test_signature_changes_when_a_registered_source_changes(tmp_path, monkeypatc
     scratch = tmp_path / "proj"
     (scratch / "src").mkdir(parents=True)
     for rel in _FE_SOURCE_FILES:
+        (scratch / rel).parent.mkdir(parents=True, exist_ok=True)
         (scratch / rel).write_bytes((SRC.parent / rel).read_bytes())
     _relocate_project(monkeypatch, scratch)
 
@@ -162,6 +164,7 @@ def test_signature_ignores_line_endings(tmp_path, monkeypatch):
     scratch = tmp_path / "proj"
     (scratch / "src").mkdir(parents=True)
     for rel in _FE_SOURCE_FILES:
+        (scratch / rel).parent.mkdir(parents=True, exist_ok=True)
         (scratch / rel).write_bytes((SRC.parent / rel).read_bytes())
     _relocate_project(monkeypatch, scratch)
 

@@ -1,5 +1,20 @@
 # Action Plan
 
+**Historical research plan, retained with later annotations.** The [README](../README.md)
+is the current operating guide. Use the [inventory](PROJECT_INVENTORY.md) and
+[implementation record](MARKET_PERFORMANCE_PROGRESS.md) to place this plan's
+work queues and decision gates in their historical context.
+
+**Current work, 28 October 2026:** use [the canonical correction report](CANONICAL_FEATURE_REPAIRS_026.md),
+[the expanded teaching-data report](BSP_TEACHER_REFRESH_027.md), and
+[market-performance progress](MARKET_PERFORMANCE_PROGRESS.md). Verified fixes
+are part of normal training; their adoption depends on correctness, not a
+retrospective performance veto. Experimental feature/model designs still
+require measured comparisons against this corrected reference. The primary
+objective is calibrated win probabilities, judged by race log loss and Brier;
+winner accuracy is secondary. The older diagnoses below describe earlier
+models and do not override that objective or the latest measured evidence.
+
 **Written 2026-10-12.** Supersedes the old `plan.txt` (deleted 2026-10-13;
 recoverable from git), whose Stage 2–5 assumptions predate the refutations in
 [NEGATIVE_RESULTS.md](NEGATIVE_RESULTS.md).
@@ -35,11 +50,15 @@ does not know *which* horse wins. The market picks the winner ~30% more often
 That splits the problem into five separate failures with five different fixes,
 and they are not equally expensive to attack.
 
-### 1a. It is NOT a calibration problem — stop working on calibration
+### 1a. Earlier aggregate calibration evidence is incomplete
 
-ECE 0.0054, the best of the three, and the selection-rule audit found
-predicted win rate within 0.0023 of actual in *every* price band. Platt +
-isotonic are doing their job. Further calibration work has no upside.
+The earlier ECE0.0054 and broad price-band agreement do not establish that
+every probability range is reliable. Later audits reproduced isotonic
+near-zero probabilities for eventual winners, with a material log-loss cost.
+The first calibration alternatives did not pass their fixed validation gates;
+see [010](MODEL_CALIBRATION_010.md) and [011](MODEL_TAIL_SMOOTHING_011.md).
+Further changes require measured proper-score improvements. Aggregate ECE
+alone is insufficient to accept or dismiss them.
 
 ### 1b-prime. The sharper diagnosis (2026-10-12): the disagreements are noise
 
@@ -359,12 +378,14 @@ exactly where the deficit is.
 **Honest prior:** a Plackett-Luce LightGBM objective already lost to the plain
 binary classifier once (2026-06-12). But that test predates the leak fix and
 the current store, and — per §1b — "beats the binary classifier" may be a low
-bar if the binary classifier ranks worse than logistic regression. Re-test, and
-**judge on ranking metrics (top-1, NDCG) not log loss**, since log loss is the
-one metric where the current model is already competitive.
+bar if the binary classifier ranks worse than logistic regression. Any retest
+must use race log loss and Brier, with ranking metrics as
+secondary diagnostics. The historical assertion that probability quality was
+already competitive is superseded by the matched market comparisons.
 
-**Success criterion:** top-1 and NDCG@1 beat the current model *and* the
-logistic baseline on the locked walk-forward.
+**Current success criterion:** improve race log loss and Brier against the
+matched current model on the fixed chronological comparison. Report top-1,
+NDCG and market context separately.
 
 ### 4b. Fix the objective before changing the architecture — **DONE 2026-10-13: ruled out (ledgers 13, 16)**
 

@@ -39,7 +39,7 @@ def clean_runner_name(name: Any) -> str:
     """Strip Matchbook's leading saddlecloth number from a runner name
     (e.g. ``"1 Louis The Fifth"`` → ``"Louis The Fifth"``) so it matches our
     racecard horse names under :func:`normalise_horse_key`."""
-    return re.sub(r"^\s*\d+\s+", "", str(name or "")).strip()
+    return re.sub(r"^\s*\d+\.?\s+", "", str(name or "")).strip()
 
 
 def _best_price(prices: list[dict[str, Any]], sides: set[str]) -> tuple[float | None, float | None]:

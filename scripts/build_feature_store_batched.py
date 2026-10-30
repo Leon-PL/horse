@@ -1,4 +1,4 @@
-"""One-time, memory-bounded build of the feature store over the full history.
+"""Memory-bounded history build, shared by normal training and explicit rebuilds.
 
 A monolithic ``get_featured_dataset(rebuild=True)`` over the whole DB (~707k
 rows → a ~6 GB featured frame, plus several intermediate copies during FE)
@@ -41,8 +41,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -52,7 +50,8 @@ from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore, _stringify_objects
 from src.featured_dataset import data_signature, fe_signature
-from src.feature_inputs import atr_cache_signature
+from src.feature_inputs import atr_cache_signature, rtv_cache_signature
+from src.parquet_io import combine_parquet_parts
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,16 +92,27 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--chunk-rows", type=int, default=120_000,
                     help="approx rows per chunk (split on date boundaries)")
+    ap.add_argument("--store-root", default=None,
+                    help="optional separate store for a versioned candidate build")
+    ap.add_argument("--reuse-ratings-from", default=None,
+                    help="unchanged rating snapshot, requiring a frozen receipt")
+    ap.add_argument("--ratings-receipt", default=None)
     args = ap.parse_args()
 
-    store = FeatureStore()
+    store = FeatureStore(args.store_root) if args.store_root is not None else FeatureStore()
+    ratings_cache = None
+    if bool(args.reuse_ratings_from) != bool(args.ratings_receipt):
+        ap.error("--reuse-ratings-from and --ratings-receipt are required together")
+    if args.reuse_ratings_from:
+        from src.rating_reuse import ValidatedRatingCache
+        ratings_cache = ValidatedRatingCache(args.reuse_ratings_from, args.ratings_receipt)
     with store._staged_update() as pending:
-        meta = _build(pending, args.chunk_rows)
+        meta = _build(pending, args.chunk_rows, ratings_cache=ratings_cache)
     logger.info("Feature store committed: %d featured rows", meta["featured_rows"])
     print(json.dumps(meta, indent=2))
 
 
-def _build(store: FeatureStore, chunk_rows: int) -> dict:
+def _build(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processed=None) -> dict:
     """Build into the supplied staging store without touching the live files."""
     t0 = time.perf_counter()
     # Fix the signature BEFORE any work. Reading it at the end described
@@ -116,9 +126,13 @@ def _build(store: FeatureStore, chunk_rows: int) -> dict:
         os.remove(old)
 
     logger.info("Loading full processed history…")
-    processed = process_data(save=False)
+    processed = process_data(save=False) if processed is None else processed.copy()
     processed["race_date"] = pd.to_datetime(processed["race_date"], errors="coerce")
     processed = processed.sort_values("race_date", kind="stable").reset_index(drop=True)
+    reused_ratings = ratings_cache.prepare(processed) if ratings_cache is not None else None
+    if reused_ratings:
+        logger.info("Reusing %d rating columns after validating all %d processed rows",
+                    len(reused_ratings["rating_columns"]), len(processed))
     rd = processed["race_date"]
     vc = rd.value_counts()
     dates = np.sort(rd.dropna().unique())
@@ -137,7 +151,11 @@ def _build(store: FeatureStore, chunk_rows: int) -> dict:
         # Seed ratings from the prior chunk's end-state (None == from scratch),
         # attach the rating columns, then feature the chunk's rows only with
         # every pandas stage resumed from carried counts_state.
-        keyed, _cols, ratings_state = store._seeded_rating_frame(chunk, ratings_state)
+        if ratings_cache is None:
+            keyed, _cols, ratings_state = store._seeded_rating_frame(chunk, ratings_state)
+        else:
+            keyed = ratings_cache.for_chunk(chunk)
+            ratings_state = ratings_cache.final_state
         rated = chunk.merge(keyed, on=["race_id", "horse_name"], how="left")
         featured = engineer_features(
             rated, save=False, skip_ratings=True, counts_state=counts_state,
@@ -159,8 +177,6 @@ def _build(store: FeatureStore, chunk_rows: int) -> dict:
     # ── unify schemas across chunks (later chunks gain RTV columns once RTV
     # data starts; all such extras are float, NaN for earlier rows in a
     # monolithic build, so adding them as typed nulls is exact). ───────────
-    schemas = [pq.read_schema(p) for p in part_paths]
-    unified = pa.unify_schemas(schemas)
 
     # Preserve missing speed histories; no future-dependent global fill.
 
@@ -189,27 +205,20 @@ def _build(store: FeatureStore, chunk_rows: int) -> dict:
         # The sectional cache is read inside FE, outside both signatures.
         "atr_signature": {"cutoff": str(last_date.date()),
                           "sig": atr_cache_signature(last_date)},
+        "rtv_signature": {"cutoff": str(last_date.date()), "sig": rtv_cache_signature(last_date)},
     }
+    from src.prize_currency_features import reference_signature
+    meta["prize_reference_signature"] = reference_signature()
+    if reused_ratings:
+        meta["rating_reuse"] = reused_ratings
 
     # ── consolidate parts → single featured.parquet (streaming, pyarrow) ──
     # Conform each part to the unified schema (add missing columns as typed
     # nulls; never .cast a narrower table) without imputing unknown histories.
-    def _conform(tbl: pa.Table) -> pa.Table:
-        have = set(tbl.schema.names)
-        arrays = [
-            tbl.column(f.name).cast(f.type) if f.name in have
-            else pa.nulls(tbl.num_rows, f.type)
-            for f in unified
-        ]
-        return pa.Table.from_arrays(arrays, schema=unified)
-
     logger.info("Consolidating %d parts → %s", len(part_paths), store.featured_path)
-    with pq.ParquetWriter(store.featured_path, unified) as writer:
-        for p in part_paths:
-            with pq.ParquetFile(p) as pf:
-                for batch in pf.iter_batches(batch_size=50_000):
-                    tbl = _conform(pa.Table.from_batches([batch]))
-                    writer.write_table(tbl)
+    written = combine_parquet_parts(part_paths, store.featured_path)
+    if written != total_rows:
+        raise RuntimeError("Batched feature consolidation changed the row count")
     logger.info("featured.parquet written (RSS %.1f GB)", _rss_gb())
 
     with open(store.meta_path, "w", encoding="utf-8") as fh:

@@ -1,22 +1,4 @@
-pandas>=2.0.0
-numpy>=1.24.0
-scikit-learn>=1.3.0
-xgboost>=2.0.0
-lightgbm>=4.0.0
-catboost>=1.2.0
-requests>=2.31.0
-# curl_cffi impersonates a browser TLS fingerprint so the At The Races
-# scraper (src/attheraces_scraper.py) clears the Fastly JS/TLS challenge.
-# Optional: the scraper falls back to the system `curl` binary if absent.
-curl_cffi>=0.7.0
-beautifulsoup4>=4.12.0
-lxml>=4.9.0
-streamlit>=1.28.0
-plotly>=5.18.0
-optuna>=3.6.0
-joblib>=1.3.0
-numba>=0.59.0
-pyarrow>=14.0.0
-pytest>=8.0.0
-python-dotenv>=1.0.0
-trueskill
+# Compatibility entry point for pip. Direct dependencies live in pyproject.toml;
+# uv.lock is authoritative and requirements.lock is its runtime-only export.
+# Development/validation tools: .\scripts\tooling.ps1 setup
+-r requirements.lock

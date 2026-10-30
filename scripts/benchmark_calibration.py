@@ -3,6 +3,8 @@
 This is an offline research benchmark: no scraping, model saving, promotion,
 or mutation of the feature store. Use the audit's repaired feature snapshot,
 or a fully rebuilt store. Results from a partial repair are diagnostic only.
+The reserved project holdout and its purge gap are excluded by default.
+Opting in is retrospective analysis, not evidence of an untouched holdout.
 
 Example:
     python scripts/benchmark_calibration.py --features data/audit/20261011/repaired_features.parquet
@@ -25,33 +27,27 @@ import pyarrow.parquet as pq
 import config
 from src.model import RacePredictor, _grouped_normalize, get_feature_columns
 from src.probability_calibration import fit_temperature, race_temperature
+from src.forecast_evaluation import paired_interval, probability_metrics, valid_race_mask
+from src.wf_eval import development_mask, golden_holdout_start, holdout_mask, purge_days
 
 
-def probability_metrics(probabilities, winners, groups):
-    p = np.clip(probabilities, 1e-12, 1 - 1e-12)
-    starts = np.r_[0, np.cumsum(groups)[:-1]]
-    brier = np.square(p - winners)
-    binary_loss = -(winners * np.log(p) + (1 - winners) * np.log1p(-p))
-    race_loss = -np.add.reduceat(winners * np.log(p), starts)
-    per_race_brier = np.add.reduceat(brier, starts) / groups
-    bucket = np.minimum((p * 10).astype(int), 9)
-    ece = sum(abs(p[bucket == b].sum() - winners[bucket == b].sum())
-              for b in range(10)) / len(p)
-    top = starts + np.array([np.argmax(p[s:s + n]) for s, n in zip(starts, groups)])
-    return {
-        "brier": float(brier.mean()), "binary_log_loss": float(binary_loss.mean()),
-        "race_log_loss": float(race_loss.mean()), "ece": float(ece),
-        "top1_accuracy": float(winners[top].mean()),
-    }, race_loss, per_race_brier
-
-
-def paired_interval(delta, seed=42, draws=1000):
-    """Resample whole races; bounded memory even with large test windows."""
-    rng = np.random.default_rng(seed)
-    means = np.array([delta[rng.integers(len(delta), size=len(delta))].mean()
-                      for _ in range(draws)])
-    return {"mean": float(np.mean(delta)),
-            "ci95": np.quantile(means, [0.025, 0.975]).tolist()}
+def research_boundary(df, *, include_reserved_holdout=False):
+    """Apply the shared research cutoff before constructing any windows."""
+    allowed = development_mask(df["race_date"])
+    selected = df if include_reserved_holdout else df.loc[allowed]
+    metadata = {
+        "include_reserved_holdout": bool(include_reserved_holdout),
+        "reserved_holdout_start": str(golden_holdout_start().date()),
+        "development_purge_days": purge_days(),
+        "excluded_by_research_boundary_rows": 0 if include_reserved_holdout else int((~allowed).sum()),
+        "reserved_holdout_rows_in_benchmark": int(holdout_mask(selected["race_date"]).sum()),
+        "evaluation_scope": "retrospective_including_reserved_dates" if include_reserved_holdout else "development_dates_only",
+        "confirmation_limitation": (
+            "Confirmation is held out only from candidate selection within this run. "
+            "It may have been examined in prior research and is not a claim of universally unseen data."
+        ),
+    }
+    return selected.reset_index(drop=True), metadata
 
 
 def window_masks(dates, test_start, *, train_days=730, calibration_days=90,
@@ -80,17 +76,15 @@ def run(args):
     metadata = [c for c in ("race_id", "race_date", "horse_name", "won",
                             "finish_position", "num_runners", "odds") if c in schema.names]
     df = pd.read_parquet(args.features, columns=sorted(set(features + metadata)))
-    df["race_date"] = pd.to_datetime(df["race_date"]).dt.normalize()
+    df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce").dt.normalize()
     df = df.sort_values(["race_date", "race_id", "horse_name"], kind="stable").reset_index(drop=True)
-    winners = pd.to_numeric(df["won"], errors="coerce")
-    counts = df.groupby("race_id", sort=False)["race_id"].transform("size")
-    valid = (winners.groupby(df["race_id"]).transform("sum") == 1) & (counts >= 2)
-    if "num_runners" in df:
-        valid &= counts == pd.to_numeric(df["num_runners"], errors="coerce")
-    # Drop entire incomplete/invalid races, never individual runners.
-    valid = valid.groupby(df["race_id"]).transform("all")
+    valid = valid_race_mask(df)
     excluded = int((~valid).sum())
     df = df[valid].reset_index(drop=True)
+    df["finish_position"] = pd.to_numeric(df["finish_position"])
+    df, boundary = research_boundary(df, include_reserved_holdout=args.include_reserved_holdout)
+    if df.empty:
+        raise ValueError("No valid races remain within the permitted research dates")
     y = df["won"].to_numpy(dtype=float)
     X = df[features].to_numpy(dtype=np.float32)
     X[~np.isfinite(X)] = np.nan
@@ -99,8 +93,9 @@ def run(args):
         "features_file": str(Path(args.features).resolve()),
         "source_note": args.source_note,
         "feature_count": len(features), "excluded_rows": excluded,
+        "research_boundary": boundary,
         "folds": [], "protocol": "train -> purge -> early stopping -> purge -> calibration -> purge -> test",
-        "selection_rule": "Development folds first; latest fold is confirmation. Lower Brier/log loss is better.",
+        "selection_rule": "Development folds first; latest fold is within-run confirmation only. Lower Brier/log loss is better.",
     }
     params = {**config.CLASSIFIER_PARAMS, "objective": "binary", "n_jobs": args.threads,
               "verbosity": -1, "random_state": args.seed, "subsample_freq": 1}
@@ -161,7 +156,7 @@ def run(args):
     return output
 
 
-if __name__ == "__main__":
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--features", required=True)
     parser.add_argument("--output", default="data/audit/calibration_benchmark.json")
@@ -171,4 +166,10 @@ if __name__ == "__main__":
     parser.add_argument("--train-days", type=int, default=730)
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
-    run(parser.parse_args())
+    parser.add_argument("--include-reserved-holdout", action="store_true",
+                        help="Include reserved holdout dates for retrospective analysis; results are not an untouched-holdout test.")
+    return parser
+
+
+if __name__ == "__main__":
+    run(build_parser().parse_args())

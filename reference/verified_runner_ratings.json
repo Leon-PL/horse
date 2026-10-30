@@ -1,0 +1,60 @@
+{
+  "source_audit": "data/audit/established_form_029/rating_source_cases/",
+  "scope": "Published historical pre-race official ratings only; no performance figures, results, current profile ratings or inferred numerical repairs",
+  "races": {
+    "622382": {
+      "date": "2021-04-21",
+      "track": "Catterick",
+      "race_name": "Download the vickers.bet Handicap",
+      "source_url": "https://www.racingpost.com/results/10/catterick/2021-04-21/780429/",
+      "conflicting_source_url": "https://www.sportinglife.com/racing/results/2021-04-21/catterick/622382/download-the-vickers-bet-handicap",
+      "runners": {
+        "967261": {
+          "horse_name": "Hope Probe",
+          "source_original_rating": -3,
+          "official_rating": 55
+        },
+        "990168": {
+          "horse_name": "Mellys Flyer",
+          "source_original_rating": 6,
+          "official_rating": 64
+        },
+        "978849": {
+          "horse_name": "Shesaheart",
+          "source_original_rating": -3,
+          "official_rating": 55
+        },
+        "975305": {
+          "horse_name": "Fircombe Hall",
+          "source_original_rating": -4,
+          "official_rating": 54
+        },
+        "982046": {
+          "horse_name": "Ginato",
+          "source_original_rating": 9,
+          "official_rating": 67
+        },
+        "984990": {
+          "horse_name": "Midnight Poppy",
+          "source_original_rating": 5,
+          "official_rating": 63
+        },
+        "962783": {
+          "horse_name": "Loweswater",
+          "source_original_rating": 0,
+          "official_rating": 58
+        },
+        "981754": {
+          "horse_name": "Love Of Zoffany",
+          "source_original_rating": 6,
+          "official_rating": 64
+        },
+        "975032": {
+          "horse_name": "Fliss Floss",
+          "source_original_rating": -1,
+          "official_rating": 57
+        }
+      }
+    }
+  }
+}

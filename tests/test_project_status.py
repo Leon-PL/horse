@@ -71,15 +71,29 @@ def test_warnings_do_not_block(status, monkeypatch):
     assert report["blockers"] == []
 
 
-def test_a_failing_probe_degrades_instead_of_crashing(status, monkeypatch):
+def test_recorder_health_is_reported_without_inventing_a_serving_failure(status, monkeypatch):
+    monkeypatch.setattr(status, "_forward_recording", lambda:{"state":status.WARN,"detail":"recording stopped"})
+    report = _collect_with(status, monkeypatch, _sections(status))
+    assert report["servable"]
+    assert report["sections"]["forward_recording"]["state"] == status.WARN
+    assert "recording stopped" in status.render(report)
+
+
+@pytest.mark.parametrize("probe", ["_database", "_feature_store", "_runs", "_production"])
+def test_a_failing_probe_blocks_readiness_without_crashing(status, monkeypatch, probe):
+    for name, section in zip(
+        ["_database", "_feature_store", "_runs", "_production"], _sections(status).values(),
+    ):
+        monkeypatch.setattr(status, name, lambda section=section: section)
+
     def boom():
         raise RuntimeError("disk gone")
 
-    monkeypatch.setattr(status, "_feature_store", boom)
+    monkeypatch.setattr(status, probe, boom)
     report = status.collect()
-    assert report["sections"]["feature_store"]["state"] == status.WARN
-    assert "disk gone" in report["sections"]["feature_store"]["detail"]
-    status.render(report)  # must still render
+    assert report["servable"] is False
+    assert any("disk gone" in message for message in report["blockers"])
+    assert "not ready" in status.render(report)
 
 
 def test_stale_results_are_reported_as_blocking(status):
@@ -132,7 +146,113 @@ class TestStoreFindings:
                                              atr_now="a2")
         assert state == status.BAD and any("ATR" in n for n in notes)
 
-    def test_unstamped_store_is_a_warning_not_a_pass(self, status):
+    def test_unstamped_store_blocks_readiness(self, status):
         meta = {k: v for k, v in self.META.items() if k != "atr_signature"}
         state, _ = status.store_findings(meta, live_fe_sig="fe1", live_data_sig="d1")
-        assert state == status.WARN
+        assert state == status.BAD
+
+    @pytest.mark.parametrize("cutoff", [None, "", "not-a-date", "2026-10-11", "2026-10-13"])
+    def test_atr_stamp_requires_store_cutoff(self, status, cutoff):
+        meta = {**self.META, "atr_signature": {"sig": "a1", "cutoff": cutoff}}
+        state, notes = status.store_findings(meta, live_fe_sig="fe1", live_data_sig="d1")
+        assert state == status.BAD
+        assert any("sectional cache unverified" in note for note in notes)
+
+    @pytest.mark.parametrize("missing", ["data_signature", "last_date"])
+    def test_incomplete_provenance_blocks_even_quick_check(self, status, missing):
+        meta = {k: v for k, v in self.META.items() if k != missing}
+        state, _ = status.store_findings(meta, live_fe_sig="fe1")
+        assert state == status.BAD
+
+
+def test_unknown_model_generation_is_not_ready(status, monkeypatch):
+    import src.run_store as run_store
+
+    monkeypatch.setattr(run_store, "feature_generation_status", lambda: {
+        "state": run_store.GENERATION_UNKNOWN,
+        "run_id": "old-run", "message": "feature generation unknown",
+    })
+    assert status._production()["state"] == status.BAD
+
+
+def test_production_reports_parameter_cutoff_from_fitting_split(status, monkeypatch):
+    import src.run_store as run_store
+
+    monkeypatch.setattr(run_store, "feature_generation_status", lambda: {
+        "state": run_store.GENERATION_MATCH, "run_id": "new-artifact",
+        "message": "Feature generation matches.",
+    })
+    monkeypatch.setattr(run_store, "load_run_meta", lambda rid: {
+        "timestamp": "2026-10-25T19:30:16",
+        "data_last_date": "2026-10-12",
+        "training_config": {"split": {"training_last_date": "2026-07-08"}},
+    })
+    section = status._production()
+    assert section["state"] == status.OK
+    assert section["training_last_date"] == "2026-07-08"
+    assert section["parameter_age_days"] == status._days_behind("2026-07-08")
+    assert "fitted through 2026-07-08" in section["detail"]
+    assert "2026-10-12" not in section["detail"]
+
+
+@pytest.mark.parametrize("training", [None, {}, {"split": None},
+    {"split": {"training_last_date": "bad-date"}}])
+def test_production_never_infers_missing_fit_cutoff(status, monkeypatch, training):
+    import src.run_store as run_store
+
+    monkeypatch.setattr(run_store, "feature_generation_status", lambda: {
+        "state": run_store.GENERATION_MATCH, "run_id": "legacy",
+        "message": "Feature generation matches.",
+    })
+    monkeypatch.setattr(run_store, "load_run_meta", lambda rid: {
+        "timestamp": "2026-10-25T19:30:16", "training_config": training,
+    })
+    section = status._production()
+    assert section["training_last_date"] is None
+    assert section["parameter_age_days"] is None
+    assert "cutoff unknown" in section["detail"]
+    assert section["state"] == status.OK  # No invented age-based readiness rule.
+
+
+def test_status_command_returns_failure_when_check_fails(status, monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["project_status.py"])
+    report = {"checked_at": "today", "sections": {}, "servable": False,
+              "blockers": ["feature_store: check failed"]}
+    monkeypatch.setattr(status, "collect", lambda **kwargs: report)
+    assert status.main() == 1
+
+
+def test_deep_probe_fingerprints_database_even_if_csv_is_stale(status, monkeypatch):
+    import pandas as pd
+    from src import database, data_processor, feature_inputs, feature_store, featured_dataset
+
+    live = pd.DataFrame({"race_id": ["123"], "horse_id": ["456"], "jockey": [""]})
+    captured = {}
+
+    class Store:
+        def exists(self):
+            return True
+
+        def meta(self):
+            return TestStoreFindings.META.copy()
+
+    def process(df=None, save=True):
+        assert df is not None, "A default call would fingerprint the old CSV"
+        assert df.race_id.tolist() == [123]  # CSV contract infers numeric IDs.
+        assert df.horse_id.tolist() == [456]
+        assert df.jockey.isna().all()       # Empty database strings match CSV NA.
+        assert save is False
+        captured["processed"] = True
+        return df
+
+    monkeypatch.setattr(feature_store, "FeatureStore", Store)
+    monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "fe1")
+    monkeypatch.setattr(database, "load_from_database", lambda: live)
+    monkeypatch.setattr(database, "get_latest_date", lambda: "2026-10-12")
+    monkeypatch.setattr(data_processor, "process_data", process)
+    monkeypatch.setattr(featured_dataset, "data_signature", lambda frame, cutoff: "corrected-db")
+    monkeypatch.setattr(feature_inputs, "atr_cache_signature", lambda cutoff: "a1")
+    result = status._feature_store(deep=True)
+    assert captured["processed"]
+    assert result["state"] == status.BAD
+    assert "data_signature" in result["detail"]

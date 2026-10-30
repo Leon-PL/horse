@@ -3,6 +3,7 @@
 from collections import Counter
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+import sqlite3
 import sys
 
 import pandas as pd
@@ -81,6 +82,18 @@ def ledger():
         """).fetchall()
 
 
+def test_results_only_preserves_full_export_without_enrichment(sync_env):
+    old = "2026-09-01"
+    database.insert_results(pd.DataFrame(runners("old", old)))
+    sync_env.scraper.listings[YESTERDAY] = ["new"]
+    result = database.sync_database(days_back=1, enrich=False)
+    assert set(result.race_id) == {"old", "new"}
+    exported = pd.read_csv(sync_env.root / "race_results.csv")
+    assert set(exported.race_id) == {"old", "new"}
+    assert ledger() == [("new", 1, 1)]
+    assert sync_env.enrichments == []
+
+
 def test_partial_failure_is_retried_without_refetching_successes(sync_env):
     fake = sync_env.scraper
     fake.listings[YESTERDAY] = ["a", "b"]
@@ -132,6 +145,14 @@ def test_persisted_race_is_retried_even_when_relisting_fails(sync_env, listing_e
     runners("wrong-race"),
     runners("a", "2026-10-11"),
     [{**row, "horse_name": ""} for row in runners("a")],
+    runners("a") + [{**runners("a")[1], "horse_name": "obsolete non-runner"}],
+    [{**row, "num_runners": 0} for row in runners("a")],
+    [{**row, "num_runners": None} for row in runners("a")],
+    [runners("a")[0], {**runners("a")[1], "num_runners": 3}],
+    [runners("a")[0], {**runners("a")[1], "finish_position": None}],
+    [runners("a")[0], {**runners("a")[1], "finish_position": float("inf")}],
+    [runners("a")[0], {**runners("a")[1], "finish_position": 1.5}],
+    [runners("a")[0], {**runners("a")[1], "won": 1}],
 ])
 def test_bad_responses_remain_pending_until_full_settled_field(sync_env, invalid):
     fake = sync_env.scraper
@@ -147,16 +168,16 @@ def test_bad_responses_remain_pending_until_full_settled_field(sync_env, invalid
 
 def test_inserts_and_completion_commit_atomically(sync_env, monkeypatch):
     sync_env.scraper.listings[YESTERDAY] = ["a"]
-    real_insert = database._insert_results
+    real_insert = database._replace_race_results
 
     def interrupted_insert(conn, frame):
-        real_insert(conn, frame.iloc[:1])
+        real_insert(conn, frame)
         raise RuntimeError("interrupted before completion")
 
-    monkeypatch.setattr(database, "_insert_results", interrupted_insert)
+    monkeypatch.setattr(database, "_replace_race_results", interrupted_insert)
     assert database.sync_database(days_back=1).empty
     assert ledger() == [("a", 0, 1)]
-    monkeypatch.setattr(database, "_insert_results", real_insert)
+    monkeypatch.setattr(database, "_replace_race_results", real_insert)
     assert len(database.sync_database(days_back=1)) == 2
     assert ledger() == [("a", 1, 2)]
 
@@ -264,3 +285,90 @@ def test_recent_dormant_race_stays_open(sync_env):
     database.sync_database(days_back=1)
     assert fake.fetched == {"late": 2}
     assert ledger() == [("late", 1, 2)]
+
+
+@pytest.mark.parametrize("already_completed", [False, True])
+def test_overfull_stored_race_is_replaced_and_enrichment_preserved(sync_env, already_completed):
+    old = runners("a") + [{**runners("a")[1], "horse_name": "obsolete non-runner"}]
+    database.insert_results(pd.DataFrame(old))
+    with database._get_conn() as conn:
+        conn.execute("UPDATE results SET odds = 5, weather_temp_max = 17 WHERE race_id = 'a'")
+        if already_completed:
+            conn.execute("INSERT INTO result_sync_dates (race_date, listing_succeeded) VALUES (?, 1)",
+                         (YESTERDAY,))
+            conn.execute("INSERT INTO result_sync_races (race_date, race_id, url, completed) "
+                         "VALUES (?, 'a', 'https://example.test/a', 1)", (YESTERDAY,))
+    fake = sync_env.scraper
+    fake.listings[YESTERDAY] = ["a"]
+    fake.responses["a"] = [{**row, "odds": 12} for row in runners("a")]
+    result = database.sync_database(days_back=1)
+    assert len(result) == 2
+    assert set(result.horse_name) == {"Horse 0", "Horse 1"}
+    assert result.odds.eq(12).all()
+    assert result.weather_temp_max.eq(17).all()
+    assert fake.fetched == {"a": 1}
+    assert ledger() == [("a", 1, 1)]
+
+
+@pytest.mark.parametrize("failure", ["invalid_response", "transaction_failure"])
+def test_failed_replacement_preserves_entire_previous_race(sync_env, monkeypatch, failure):
+    old = runners("a") + [{**runners("a")[1], "horse_name": "obsolete non-runner"}]
+    database.insert_results(pd.DataFrame(old))
+    fake = sync_env.scraper
+    fake.listings[YESTERDAY] = ["a"]
+    if failure == "invalid_response":
+        fake.responses["a"] = runners("a")[:1]
+    else:
+        original = database._replace_race_results
+
+        def interrupted(conn, frame):
+            original(conn, frame)
+            raise RuntimeError("interrupted after replacement")
+
+        monkeypatch.setattr(database, "_replace_race_results", interrupted)
+    result = database.sync_database(days_back=1)
+    assert len(result) == 3
+    assert set(result.horse_name) == {"Horse 0", "Horse 1", "obsolete non-runner"}
+    assert ledger() == [("a", 0, 1)]
+
+
+def test_inconsistent_stored_counts_are_not_adopted_as_complete(sync_env):
+    old = [runners("a")[0], {**runners("a")[1], "num_runners": 1}]
+    database.insert_results(pd.DataFrame(old))
+    sync_env.scraper.listings[YESTERDAY] = ["a"]
+    result = database.sync_database(days_back=1)
+    assert result.num_runners.eq(2).all()
+    assert sync_env.scraper.fetched == {"a": 1}
+
+
+def test_interrupted_snapshot_publish_preserves_previous_whole_file(tmp_path, monkeypatch):
+    target = tmp_path / "results.csv"
+    original = pd.DataFrame(runners("old"))
+    original.to_csv(target, index=False)
+    previous_bytes = target.read_bytes()
+
+    def fail_replace(*args):
+        raise OSError("injected publish failure")
+
+    monkeypatch.setattr(database.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="injected"):
+        database._export_results_snapshot(pd.DataFrame(runners("new")), str(target))
+    assert target.read_bytes() == previous_bytes
+    assert list(tmp_path.iterdir()) == [target]
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_database_operation_always_releases_handle_and_transaction(sync_env, interrupted):
+    database.init_db()
+    try:
+        with database._get_conn() as conn:
+            database._insert_results(conn, pd.DataFrame(runners("a")))
+            if interrupted:
+                raise RuntimeError("interrupted operation")
+    except RuntimeError:
+        assert interrupted
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+    with database._get_conn() as fresh:
+        actual = fresh.execute("SELECT COUNT(*) FROM results").fetchone()[0]
+    assert actual == (0 if interrupted else 2)

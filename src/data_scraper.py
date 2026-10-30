@@ -33,6 +33,7 @@ Usage::
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -62,6 +63,35 @@ USER_AGENT = (
 )
 
 SPORTING_LIFE_BASE = "https://www.sportinglife.com"
+
+# Structured casualty enums verified in cached full Sporting Life results.
+# Unknown reasons remain unknown; never infer a result from profile prose.
+_NONFINISH_REASON_LABELS = {
+    "PulledUp": "PU",
+    "Fell": "F",
+    "UnseatedRider": "UR",
+    "Refused": "R",
+}
+
+
+def _official_finish_value(ride: dict, num_runners: int = 0):
+    """Use an explicit final placing, preserving legacy raw nonfinish labels.
+
+    A malformed nonempty amendment cannot silently restore the original winner.
+    Only positive integral amended placings have a verified source contract.
+    """
+    original = ride.get("finish_position", 0)
+    amended = ride.get("amended_position")
+    if amended is None or amended == "":
+        return original
+    try:
+        value = float(amended)
+    except (TypeError, ValueError):
+        raise ValueError("Invalid amended finishing position") from None
+    if (isinstance(amended, bool) or not math.isfinite(value) or value <= 0
+            or not value.is_integer() or (num_runners > 0 and value > num_runners)):
+        raise ValueError("Invalid amended finishing position")
+    return int(value)
 
 REQUEST_DELAY = 0.5   # seconds between requests (per-thread minimum)
 MAX_WORKERS = 5       # concurrent HTTP requests for race pages
@@ -122,25 +152,30 @@ def _parse_distance_to_furlongs(dist_str: str) -> float:
 
     1 mile = 8 furlongs, 1 furlong = 220 yards.
     """
-    if not dist_str:
-        return 10.0
+    text = str(dist_str or "").strip().lower()
+    for symbol, fraction in (("¼", .25), ("½", .5), ("¾", .75)):
+        text = re.sub(r"(\d*)" + symbol,
+                      lambda m: str(float(m.group(1) or 0) + fraction), text)
+    number = r"(\d+(?:\.\d+)?)"
+    match = re.fullmatch(rf"(?:{number}\s*m(?:iles?)?\s*)?(?:{number}\s*f(?:urlongs?)?\s*)?(?:{number}\s*y(?:ards?)?\s*)?", text)
+    if not match or not any(match.groups()):
+        return float("nan")
+    miles, furlongs, yards = (float(v or 0) for v in match.groups())
+    total = miles * 8 + furlongs + yards / 220.
+    # The provider renders UK/Irish distances in miles/furlongs/yards. An
+    # unrecognised token is unknown, never an invented ten-furlong race.
+    return round(total, 2) if math.isfinite(total) and 1 <= total <= 64 else float("nan")
 
-    dist_str = dist_str.strip().lower()
 
-    miles = furlongs = yards = 0
-    m_match = re.search(r'(\d+)\s*m(?:ile)?', dist_str)
-    f_match = re.search(r'(\d+)\s*f', dist_str)
-    y_match = re.search(r'(\d+)\s*y', dist_str)
-
-    if m_match:
-        miles = int(m_match.group(1))
-    if f_match:
-        furlongs = int(f_match.group(1))
-    if y_match:
-        yards = int(y_match.group(1))
-
-    total = miles * 8 + furlongs + yards / 220.0
-    return round(total, 2) if total > 0 else 10.0
+def _parse_reported_lbs(value) -> float | None:
+    """A reported claim/penalty; absence is unknown, never an observed zero."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and 0 <= number <= 30 and number.is_integer() else None
 
 
 def _parse_weight_to_lbs(weight_str: str) -> float:
@@ -148,18 +183,19 @@ def _parse_weight_to_lbs(weight_str: str) -> float:
     Convert weight like ``'11-9'`` (11 st 9 lb) to total pounds.
     1 stone = 14 lb.
     """
-    if not weight_str:
-        return 140.0
-
-    match = re.search(r'(\d+)\s*[-–]\s*(\d+)', str(weight_str))
+    text = str(weight_str or "").strip().lower()
+    text = re.sub(r"(\d*)½", lambda m: str(float(m.group(1) or 0) + .5), text)
+    match = re.fullmatch(r"(\d+)\s*(?:[-–—−]|st(?:ones?)?\s*)\s*(\d+(?:\.\d+)?)\s*(?:lbs?)?", text)
     if match:
-        return int(match.group(1)) * 14 + int(match.group(2))
-
-    match = re.search(r'(\d+)', str(weight_str))
-    if match:
-        return float(match.group(1))
-
-    return 140.0
+        stones, pounds = (float(v) for v in match.groups())
+        total = stones * 14 + pounds if pounds < 14 else float("nan")
+    elif re.fullmatch(r"\d+(?:\.\d+)?\s*(?:lbs?)?", text):
+        total = float(re.sub(r"\s*lbs?$", "", text))
+    else:
+        return float("nan")
+    # Broad physical sanity bounds, not a typical-weight imputation. The
+    # source itself contains impossible "0-1" and "0-5" historical weights.
+    return total if math.isfinite(total) and 50 <= total <= 220 else float("nan")
 
 
 def _parse_fractional_odds(odds_str: str) -> float:
@@ -168,7 +204,7 @@ def _parse_fractional_odds(odds_str: str) -> float:
     to decimal odds (e.g. 5/2 → 3.5).
     """
     if not odds_str:
-        return 5.0
+        return float("nan")
 
     odds_str = str(odds_str).strip().lower()
     odds_str = odds_str.replace("f", "").replace("j", "").strip()
@@ -176,22 +212,24 @@ def _parse_fractional_odds(odds_str: str) -> float:
     if odds_str in ("evs", "evens", "ev"):
         return 2.0
 
-    match = re.match(r'(\d+)\s*/\s*(\d+)', odds_str)
+    match = re.fullmatch(r'(\d+)\s*/\s*(\d+)', odds_str)
     if match:
         num, den = int(match.group(1)), int(match.group(2))
         if den > 0:
             return round(num / den + 1, 2)
 
     try:
-        return float(odds_str)
+        value = float(odds_str)
+        return value if np.isfinite(value) and value > 1 else float("nan")
     except (ValueError, TypeError):
-        return 5.0
+        return float("nan")
 
 
 def _parse_lengths_behind(dist_str: str) -> float:
     """
     Parse finish distance strings like ``'8 ½'``, ``'nk'``, ``'1¼'``
-    into a numeric lengths-behind value.
+    into a numeric gap to the PREVIOUS finisher. This is not a cumulative
+    distance behind the winner; data_processor derives that separately.
     """
     if not dist_str:
         return float('nan')
@@ -218,12 +256,21 @@ def _parse_lengths_behind(dist_str: str) -> float:
             total += fval
             s = s.replace(fchar, "")
 
-    # Whole number part
-    whole_match = re.search(r'(\d+)', s)
-    if whole_match:
-        total += int(whole_match.group(1))
-
-    return total
+    # Accept decimal and ASCII fraction variants too. An unrecognised token
+    # is unknown, never a fabricated zero-length gap/dead heat.
+    s = s.strip()
+    if s:
+        try:
+            from fractions import Fraction
+            parts = s.split()
+            if len(parts) > 2:
+                return float("nan")
+            total += sum(float(Fraction(part)) for part in parts)
+        except (ValueError, ZeroDivisionError):
+            return float("nan")
+    elif total == 0.0:
+        return float("nan")
+    return total if np.isfinite(total) and total >= 0 else float("nan")
 
 
 _WINNING_TIME_RE = re.compile(r"(?:(\d+)\s*m)?\s*([\d.]+)\s*s", re.I)
@@ -245,26 +292,50 @@ def _parse_winning_time_secs(raw) -> float:
     return v if 5.0 < v < 1200.0 else float('nan')
 
 
-def _infer_race_type(race_name: str, run_type: str = "") -> str:
-    """Infer race type from race name or ``run_type`` field."""
-    if run_type:
-        rt = run_type.upper()
-        if rt == "CHASE":
-            return "Chase"
-        if rt in ("HURDLE", "HURDL"):
-            return "Hurdle"
-        if rt in ("FLAT", "AW FLAT"):
-            return "Flat"
-        if rt in ("BUMPER", "NHF"):
-            return "Flat"
+_SOURCE_RACE_CODES = {"FLAT": "Flat", "AW FLAT": "Flat", "CHASE": "Chase",
+    "STEEPLECHASE": "Chase", "HURDLE": "Hurdle", "HURDL": "Hurdle",
+    "NH FLAT": "Flat", "NHF": "Flat", "INH FLAT": "Flat", "BUMPER": "Flat"}
+_NAMED_CHASES = re.compile(r"\b(?:punchestown|irish)\s+gold\s+cup\b", re.I)
+_RACE_DISCIPLINE = re.compile(r"\b(?:national\s+hunt\s+flat|[i.]?n[.]?h[.]?\s+flat|flat\s+race|bumper|hurdle|steeplechase|chase|stakes)\b", re.I)
 
-    name = (race_name or "").lower()
-    if "chase" in name:
-        return "Chase"
-    if "hurdle" in name:
-        return "Hurdle"
-    if "bumper" in name or "nh flat" in name:
+
+def _infer_race_type(race_name: str, run_type: str = "") -> str:
+    """Prefer an explicit source code, then match actual discipline words.
+
+    Sponsor words such as Purchase/Chipchase cannot imply fences. Where a
+    title advertises another race before its own kind, the final kind wins.
+    The two named Gold Cups omit 'Chase' in this provider's titles; their
+    discipline is confirmed by the cached, dated public performances in025.
+    This does not extend to the Ascot Gold Cup or any generic 'Gold Cup'.
+    Keep bumpers in the existing coarse Flat label until a separate feature
+    representation demonstrates a gain.
+    """
+    source = re.sub(r"\s+", " ", str(run_type or "").upper().replace(".", "").strip())
+    if source in _SOURCE_RACE_CODES:
+        return _SOURCE_RACE_CODES[source]
+    name = str(race_name or "")
+    matches = []
+    for match in _RACE_DISCIPLINE.finditer(name):
+        kind, tail = match.group().lower(), name[match.end():]
+        # Event-specific source codes in032 confirm these sponsor phrases.
+        # Ignore the sponsor occurrence, leaving any later actual Chase intact.
+        if kind == "chase" and (
+                re.match(r"\s+(?:day|distillery)\b", tail, re.I)
+                or re.search(r"\b(?:cruises|hullabaloos)\s*$", name[:match.start()], re.I)):
+            continue
+        # A rider restriction describes the jockey, not an NH Flat race.
+        if re.fullmatch(r"flat\s+race", kind, re.I) and re.match(r"\s+jockeys?\b", tail, re.I):
+            continue
+        matches.append(match)
+    if matches:
+        kind = matches[-1].group().lower()
+        if kind in ("chase", "steeplechase"):
+            return "Chase"
+        if kind == "hurdle":
+            return "Hurdle"
         return "Flat"
+    if _NAMED_CHASES.search(name):
+        return "Chase"
     return "Flat"
 
 
@@ -449,9 +520,21 @@ class SportingLifeScraper:
         m = _NEXT_DATA_RE.search(resp.text)
         if m:
             try:
-                return json.loads(m.group(1))
+                data = json.loads(m.group(1))
             except json.JSONDecodeError:
                 logger.warning(f"Failed to parse __NEXT_DATA__ from {url}")
+                return None
+            # A redirected/malformed horse page must not be cached under the
+            # requested horse's identity (including by the pedigree backfill).
+            from urllib.parse import urlsplit
+            requested = re.search(r"/racing/profiles/horse/(\d+)(?:/|$)", urlsplit(url).path)
+            if requested:
+                profile = data.get("props", {}).get("pageProps", {}).get("profile") or {}
+                returned = (profile.get("horse_reference") or {}).get("id")
+                if str(returned) != requested.group(1):
+                    logger.warning("Profile identity mismatch for horse %s (returned %s)", requested.group(1), returned)
+                    return None
+            return data
         return None
 
     # ==================================================================
@@ -547,6 +630,17 @@ class SportingLifeScraper:
             summary = race_data.get("race_summary", {})
             race_stage = str(summary.get("race_stage") or "").upper()
 
+            # A first-past-post winner can already exist while an inquiry is
+            # pending. Do not let that provisional order close the sync job.
+            # Legacy payloads without a stage retain their existing contract.
+            if race_stage in NOT_RUN_STAGES:
+                if raise_if_not_run:
+                    raise RaceNotRun(race_stage, race_url)
+                return []
+            if race_stage and race_stage != "WEIGHEDIN":
+                logger.info("Result is not yet weighed in (%s): %s", race_stage, race_url)
+                return []
+
             # ---- race-level metadata ----
             race_id = str(
                 summary.get("race_summary_reference", {}).get("id", "")
@@ -573,14 +667,37 @@ class SportingLifeScraper:
                 date_str = summary.get("date", "")
 
             distance_f = _parse_distance_to_furlongs(distance)
-            race_type = _infer_race_type(race_name)
+            race_type = _infer_race_type(race_name, summary.get("run_type", ""))
             prize_money = _extract_prize_money(race_data.get("prizes"))
 
             is_uk = page_props.get("isUkorIreMeeting", True)
             region = "UK" if is_uk else "INT"
 
+            # Amended placings and physical arrival gaps describe different
+            # orderings. Never accumulate the original gaps in the final order.
+            rides = race_data.get("rides", [])
+            # A disqualified horse can be placed after all declarations,
+            # including withdrawn horses (e.g. eighth among seven starters).
+            # Keep the source's explicit ordinal, bounded by the declaration
+            # roster; field size continues to mean actual starters.
+            position_limit = max(num_runners, len(rides))
+            starters = [r for r in rides if re.sub(r"[^A-Z]", "", str(r.get("ride_status", "")).upper()) not in {"NONRUNNER", "WITHDRAWN"}]
+            finals = [_safe_int(_official_finish_value(r, position_limit)) for r in starters]
+            beyond = [i for i, value in enumerate(finals) if value > num_runners > 0]
+            if beyond:
+                positive = sorted(value for value in finals if value > 0)
+                terminal = (len(beyond) == 1 and finals[beyond[0]] == len(rides)
+                    and positive == [*range(1, len(positive)), len(rides)]
+                    and _safe_int(starters[beyond[0]].get("finish_position")) < finals[beyond[0]])
+                if not terminal:
+                    raise ValueError("Invalid amended finishing position beyond the started field")
+            positions_changed = any(
+                _safe_int(_official_finish_value(ride, position_limit)) != _safe_int(ride.get("finish_position", 0))
+                for ride in rides
+                if re.sub(r"[^A-Z]", "", str(ride.get("ride_status", "")).upper()) not in {"NONRUNNER", "WITHDRAWN"}
+            )
             # ---- parse each ride (runner) ----
-            for ride in race_data.get("rides", []):
+            for ride in rides:
                 row = self._ride_to_dict(
                     ride,
                     race_id=race_id,
@@ -600,6 +717,8 @@ class SportingLifeScraper:
                     is_result=True,
                     winning_time_secs=winning_time_secs,
                     off_time_actual=off_time_actual,
+                    result_positions_changed=positions_changed,
+                    result_position_limit=position_limit,
                 )
                 if row:
                     runners.append(row)
@@ -750,7 +869,7 @@ class SportingLifeScraper:
                 date_str = summary.get("date", "")
 
             distance_f = _parse_distance_to_furlongs(distance)
-            race_type = _infer_race_type(race_name)
+            race_type = _infer_race_type(race_name, summary.get("run_type", ""))
             prize_money = _extract_prize_money(race_data.get("prizes"))
 
             is_uk = page_props.get("isUkorIreMeeting", True)
@@ -808,6 +927,8 @@ class SportingLifeScraper:
         is_result: bool,
         winning_time_secs: float = float('nan'),
         off_time_actual: str = "",
+        result_positions_changed: bool = False,
+        result_position_limit: int = 0,
     ) -> Optional[dict]:
         """
         Convert a single Sporting Life *ride* object into a flat dict
@@ -819,7 +940,9 @@ class SportingLifeScraper:
         # the old exact "NON-RUNNER" check silently let every result-page
         # non-runner through as a finish_position=0 row.
         status_norm = re.sub(r"[^A-Z]", "", str(ride.get("ride_status", "")).upper())
-        if status_norm == "NONRUNNER":
+        # WITHDRAWN is a separate source status on some result/card pages.
+        # Keep started non-finishers (RUNNER + Fell/PulledUp/etc.) in history.
+        if status_norm in {"NONRUNNER", "WITHDRAWN"}:
             return None
 
         # --- horse ---
@@ -909,19 +1032,40 @@ class SportingLifeScraper:
         finish_pos_label = ""
         won = 0
         lengths_behind = float('nan')
+        amendment_json = None
 
         if is_result:
-            _raw_fp = ride.get("finish_position", 0)
+            original_fp = ride.get("finish_position", 0)
+            _raw_fp = _official_finish_value(ride, result_position_limit or num_runners)
             finish_pos = _safe_int(_raw_fp)
-            # Keep the raw label for non-finishers (PU, F, UR, BD, RR, WO, etc.)
-            if finish_pos == 0 and _raw_fp not in (None, "", 0):
-                finish_pos_label = str(_raw_fp).strip().upper()
+            changed_order = result_positions_changed or finish_pos != _safe_int(original_fp)
+            if changed_order:
+                # Preserve physical source evidence separately from model inputs.
+                amendment_json = json.dumps({
+                    "original_finish_position": original_fp,
+                    "amended_position": ride.get("amended_position"),
+                    "original_finish_distance": ride.get("finish_distance"),
+                    "original_winning_time_secs": (float(winning_time_secs)
+                        if np.isfinite(winning_time_secs) else None),
+                    "physical_margins_and_time_withheld": True,
+                }, sort_keys=True, allow_nan=False)
+                winning_time_secs = float('nan')
+            if finish_pos == 0:
+                # Some feeds put the label in finish_position; full result
+                # pages instead use numeric 0 plus casualty.reason.
+                raw_label = "" if _raw_fp is None else str(_raw_fp).strip().upper()
+                if raw_label not in {"", "0", "0.0"}:
+                    finish_pos_label = raw_label
+                else:
+                    casualty = ride.get("casualty")
+                    reason = casualty.get("reason") if isinstance(casualty, dict) else None
+                    if isinstance(reason, str):
+                        finish_pos_label = _NONFINISH_REASON_LABELS.get(reason.strip(), "")
             won = 1 if finish_pos == 1 else 0
             if finish_pos >= 1:
                 # Only parse lengths behind for horses that finished
-                lengths_behind = _parse_lengths_behind(
-                    ride.get("finish_distance", "")
-                )
+                if not changed_order:
+                    lengths_behind = _parse_lengths_behind(ride.get("finish_distance", ""))
                 # Winner has 0.0 lengths behind (parse returns NaN for empty string)
                 if finish_pos == 1 and np.isnan(lengths_behind):
                     lengths_behind = 0.0
@@ -957,6 +1101,10 @@ class SportingLifeScraper:
             "headgear": headgear,
             "wind_surgery": wind_surgery,
             "weight_lbs": weight_lbs,
+            # Keep allocated weight, rider claim and penalty in separate units.
+            # A penalty may already be included in the allocated weight.
+            "reported_jockey_claim_lbs": _parse_reported_lbs(ride.get("jockey_claim")),
+            "weight_penalty_lbs": _parse_reported_lbs(ride.get("weight_penalty")),
             "draw": draw,
             "form": form,
             "days_since_last_run": days_since,
@@ -965,7 +1113,7 @@ class SportingLifeScraper:
             "finish_position": finish_pos,
             "finish_pos_label": finish_pos_label,
             "won": won,
-            "lengths_behind": lengths_behind,
+            "lengths_behind": lengths_behind,  # legacy raw name: gap to preceding finisher
             "horse_runs": runs,
             "horse_wins": wins,
             "horse_places": places,
@@ -975,6 +1123,13 @@ class SportingLifeScraper:
             # SCHEDULED time (used by merge keys); these are the actual values.
             "winning_time_secs": winning_time_secs,
             "off_time_actual": off_time_actual,
+            # Event-specific result evidence, never current profile commentary.
+            "ride_description": (ride.get("ride_description")
+                                 if is_result and isinstance(ride.get("ride_description"), str) else None),
+            "nonfinish_reason": ((ride.get("casualty") or {}).get("reason")
+                                 if is_result and isinstance(ride.get("casualty"), dict)
+                                 and isinstance(ride["casualty"].get("reason"), str) else None),
+            "result_amendment_json": amendment_json,
         }
 
 
@@ -1268,6 +1423,104 @@ def save_racecards_cache(df: pd.DataFrame, date_str: str | None = None) -> None:
     logger.info(f"💾 Saved {len(df)} runners to cache: {path}")
 
 
+def enrich_racecard_pedigree(df, *, scraper=None, cache_dir=None, known=None):
+    """Supply pre-race immutable breeding for horses missing from local results.
+
+    The historical pedigree backfill only queues horses already in results.
+    A first local visitor must not wait until after its debut for its pedigree.
+    This card-only cache never updates historical results/pedigree tables and
+    never imports current form, lifetime totals, ratings, age or trainer data.
+    """
+    from pathlib import Path
+    from datetime import timezone
+    import tempfile
+    from src.pedigree_backfill import fetch_horse_pedigree, load_pedigree
+    from src.utils import normalise_horse_key
+
+    required = {"horse_id", "horse_name", "race_date"}
+    if df is None or df.empty or not required.issubset(df):
+        return df
+    out = df.copy()
+    parents = ("sire", "dam", "damsire")
+    for parent in parents:
+        if parent not in out:
+            out[parent] = pd.Series(None, index=out.index, dtype=object)
+    def present(values):
+        return values.notna() & ~values.astype(str).str.strip().str.lower().isin(["", "nan", "none", "<na>"])
+    ids = pd.to_numeric(out.horse_id, errors="coerce")
+    ids = ids.where(ids.gt(0) & ids.mod(1).eq(0)).astype("Int64").astype("string")
+    if known is None:
+        try:
+            known = load_pedigree()
+        except Exception as error:
+            logger.warning("Local pedigree lookup unavailable: %s", error)
+            known = pd.DataFrame()
+    if not known.empty:
+        lookup = known.copy()
+        lookup["horse_id"] = pd.to_numeric(lookup.horse_id, errors="coerce").astype("Int64").astype("string")
+        lookup = lookup.set_index("horse_id")
+        for parent in parents:
+            out[parent] = out[parent].where(present(out[parent]), ids.map(lookup[parent]))
+    missing = ~pd.concat([present(out[c]) for c in parents], axis=1).all(axis=1)
+    directory = Path(cache_dir or Path(config.DATA_DIR) / "racecard_pedigree")
+    if missing.any():
+        directory.mkdir(parents=True, exist_ok=True)
+    for identity in ids.loc[missing].dropna().unique():
+        rows = ids.eq(identity).fillna(False)
+        expected_names = out.loc[rows, "horse_name"].map(normalise_horse_key).unique()
+        if len(expected_names) != 1 or not expected_names[0]:
+            continue
+        destination = directory / f"{identity}.json"
+        payload = None
+        if destination.exists():
+            try:
+                payload = json.loads(destination.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = None
+        def matches(value):
+            return (isinstance(value, dict) and str(value.get("horse_id")) == identity
+                    and normalise_horse_key(value.get("horse_name", "")) == expected_names[0])
+        if not matches(payload):
+            try:
+                if scraper is None:
+                    scraper = SportingLifeScraper()
+                fetched = fetch_horse_pedigree(scraper, identity)
+            except Exception as error:
+                logger.warning("Card pedigree unavailable for horse %s: %s", identity, error)
+                continue
+            if not matches(fetched):
+                continue
+            payload = {k: fetched.get(k) for k in ("horse_id", "horse_name", *parents)}
+            payload.update(source_url=f"{SPORTING_LIFE_BASE}/racing/profiles/horse/{identity}",
+                           fetched_at=datetime.now(timezone.utc).isoformat())
+            # Look-ahead cards can contain the same horse on several dates.
+            # Independent readers must not race over one shared .tmp filename.
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                             prefix=f".{identity}-", suffix=".tmp", delete=False) as stream:
+                json.dump(payload, stream)
+                temporary = Path(stream.name)
+            try:
+                # Windows can briefly refuse a replacement while another
+                # look-ahead card publishes/reads the same horse's cache.
+                # The fetched identity-checked parents remain usable even
+                # if this optional cache stays locked after bounded retries.
+                for attempt in range(4):
+                    try:
+                        temporary.replace(destination)
+                        break
+                    except PermissionError as error:
+                        if attempt == 3:
+                            logger.warning("Could not publish card pedigree cache for %s: %s", identity, error)
+                        else:
+                            time.sleep(.02 * 2**attempt)
+            finally:
+                temporary.unlink(missing_ok=True)
+        for parent in parents:
+            if payload.get(parent):
+                out.loc[rows & ~present(out[parent]), parent] = payload[parent]
+    return out
+
+
 def get_scraped_racecards(
     date_str: str = None,
     uk_only: bool = True,
@@ -1279,13 +1532,14 @@ def get_scraped_racecards(
 
     On the first call of the day the racecards are scraped from Sporting
     Life and saved to ``data/racecards_cache/racecards_YYYY-MM-DD.csv``.
-    Subsequent calls return the cached file instantly unless
-    *force_refresh* is ``True``.
+    Subsequent calls reuse the cached card unless *force_refresh* is ``True``.
+    Missing immutable pedigree may need one profile request per horse, cached
+    separately so a first local runner receives the same information as training.
     """
     if not force_refresh:
         cached = load_cached_racecards(date_str)
         if cached is not None:
-            return cached
+            return enrich_racecard_pedigree(cached)
 
     df = scrape_todays_racecards(
         uk_only=uk_only, date_str=date_str,
@@ -1300,8 +1554,8 @@ def get_scraped_racecards(
         # model features (2026-10-13).
         reloaded = load_cached_racecards(date_str)
         if reloaded is not None:
-            return reloaded
-    return df
+            return enrich_racecard_pedigree(reloaded)
+    return enrich_racecard_pedigree(df)
 
 
 # =====================================================================

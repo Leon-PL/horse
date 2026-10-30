@@ -346,18 +346,14 @@ def check_combination_nesting(
     *,
     tolerance: float = 0.01,
 ) -> dict:
-    """Tripwire: a fitted combination must not be far worse than the market.
+    """Diagnostic tripwire for observed loss exceeding a chosen tolerance.
 
-    A market-anchored combination ``softmax(a*log p_model + b*log p_market)``
-    contains the market alone as the special case ``a = 0, b = 1``. So if the
-    fitted combination scores materially *worse* out of sample than the market
-    by itself, the honest conclusion is that the **fit is broken** — not that
-    combining is a bad idea. That distinction matters: the in-sample stacking
-    bug described in this module's docstring produced exactly this signature
-    (a combination worse than both of its own inputs) and it was read as
-    evidence against the hypothesis instead of against the harness.
-
-    Returns a verdict dict; ``ok`` is False when the tripwire fires.
+    The family contains the market at a=0, b=1. This constrains a successfully
+    optimised, unpenalised *fitting* objective, not out-of-sample performance.
+    Worse test scores can reflect overfitting, sampling noise or regime change
+    as well as a pipeline error. This check alone cannot distinguish them.
+    ``ok`` means the observed excess is within the caller's tolerance; it is
+    neither an equivalence test nor a guarantee that the fit is correct.
     """
     if not (np.isfinite(combined_logloss) and np.isfinite(market_logloss)):
         return {"ok": True, "reason": "log loss unavailable; nesting not checked",
@@ -370,11 +366,12 @@ def check_combination_nesting(
         "combined_logloss": round(float(combined_logloss), 6),
         "market_logloss": round(float(market_logloss), 6),
         "reason": (
-            "combination is at least as good as its market-only special case"
+            "observed combination loss is within the allowed tolerance of market-only"
             if ok else
-            f"combination is {excess:.4f} nats WORSE than market-only, which the "
-            "model nests — suspect the fit (in-sample second stage? wrong "
-            "normalisation?) before concluding the signal is absent"
+            f"combination is {excess:.4f} nats worse than market-only; inspect "
+            "generalisation and sampling uncertainty, and suspect the fit if "
+            "training-data checks also fail. Out-of-sample worsening alone "
+            "does not prove a pipeline error"
         ),
     }
 

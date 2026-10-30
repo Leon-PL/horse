@@ -1,0 +1,105 @@
+{
+  "provenance": {
+    "source_url": "https://www.sportinglife.com/racing/results/2023-08-27/goodwood/754950/city-of-chichester-handicap",
+    "observed_at": "2026-10-29T19:03:37.436325+00:00",
+    "response_sha256": "6bee2966bdef2d8c7666c4bb51bb3f7a1f97d88674ce6fa92178afa151f43e39"
+  },
+  "scope": "Minimal factual source fields; additional race context is public display metadata. No profile prose or current career data.",
+  "payload": {
+    "props": {
+      "pageProps": {
+        "isUkorIreMeeting": true,
+        "race": {
+          "race_summary": {
+            "race_summary_reference": {
+              "id": 754950
+            },
+            "name": "City Of Chichester Handicap",
+            "course_name": "Goodwood",
+            "date": "2023-08-27",
+            "time": "16:45",
+            "off_time": "16:45",
+            "distance": "1m",
+            "ride_count": 5,
+            "has_handicap": true,
+            "race_class": 2,
+            "race_stage": "WEIGHEDIN",
+            "winning_time": "1m 42.74s"
+          },
+          "stewards": "AMENDEDRESULT",
+          "rides": [
+            {
+              "finish_position": 2,
+              "amended_position": 1,
+              "finish_distance": "nse",
+              "ride_status": "RUNNER",
+              "horse": {
+                "name": "The Gatekeeper",
+                "horse_reference": {
+                  "id": 1015073
+                }
+              }
+            },
+            {
+              "finish_position": 1,
+              "amended_position": 2,
+              "ride_status": "RUNNER",
+              "horse": {
+                "name": "Thunder Ball",
+                "horse_reference": {
+                  "id": 1065144
+                }
+              }
+            },
+            {
+              "finish_position": 3,
+              "amended_position": 3,
+              "finish_distance": "1 \u00bc",
+              "ride_status": "RUNNER",
+              "horse": {
+                "name": "Ouzo",
+                "horse_reference": {
+                  "id": 891129
+                }
+              }
+            },
+            {
+              "finish_position": 4,
+              "amended_position": 4,
+              "finish_distance": "4",
+              "ride_status": "RUNNER",
+              "horse": {
+                "name": "Escobar",
+                "horse_reference": {
+                  "id": 415860
+                }
+              }
+            },
+            {
+              "finish_position": 5,
+              "amended_position": 5,
+              "finish_distance": "3 \u00bc",
+              "ride_status": "RUNNER",
+              "horse": {
+                "name": "Sudden Ambush",
+                "horse_reference": {
+                  "id": 1070138
+                }
+              }
+            },
+            {
+              "finish_position": 0,
+              "ride_status": "NONRUNNER",
+              "horse": {
+                "name": "Bless Him",
+                "horse_reference": {
+                  "id": 839908
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

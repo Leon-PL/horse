@@ -29,6 +29,8 @@ FORBIDDEN_CLASSES = {"G"}
 # the full breakdown; the dominant class drives the append strategy.)
 STAGE_TAXONOMY: dict[str, str] = {
     "add_horse_features": "C",
+    "add_established_form_features": "C",
+    "add_prior_market_features": "B",
     "add_hidden_form_features": "R",
     "add_pedigree_features": "C",
     "add_medical_features": "C",  # wind_ops_prior cumulative (gelding part is L)
@@ -52,6 +54,7 @@ STAGE_TAXONOMY: dict[str, str] = {
     "add_trainer_specialisation_features": "C",
     "add_speed_figure_features": "B",
     "add_atr_features": "B",
+    "add_rtv_features": "R",  # as-of lookup in separately fingerprinted immutable run observations
     "add_market_features": "R",
     "add_trainer_runner_intent_features": "W",
     "add_jockey_intent_features": "L",

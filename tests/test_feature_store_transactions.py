@@ -208,7 +208,7 @@ def test_batched_rebuild_failure_preserves_store(store, rows, monkeypatch):
     with monkeypatch.context() as patch:
         def broken(*args, **kwargs):
             raise OSError("injected consolidation failure")
-        patch.setattr(batched.pq, "ParquetWriter", broken)
+        patch.setattr(batched, "combine_parquet_parts", broken)
         with pytest.raises(OSError, match="injected consolidation failure"):
             batched.main()
     assert _snapshot(store) == original
@@ -216,6 +216,24 @@ def test_batched_rebuild_failure_preserves_store(store, rows, monkeypatch):
     _assert_complete(store, rows)
     assert store.meta()["fe_signature"] == "current-fe"
     assert store.meta()["data_signature"] == "current-data"
+
+
+def test_batched_rebuild_can_use_separate_store(store, rows, monkeypatch, tmp_path):
+    from scripts import build_feature_store_batched as batched
+
+    original = _snapshot(store)
+    destination = tmp_path / "candidate"
+    monkeypatch.setattr(batched, "process_data", lambda **kwargs: rows.copy())
+    monkeypatch.setattr(batched, "engineer_features", feature_store.engineer_features)
+    monkeypatch.setattr(batched, "fe_signature", lambda: "candidate-fe")
+    monkeypatch.setattr(batched, "data_signature", lambda *args, **kwargs: "same-data")
+    monkeypatch.setattr(batched, "atr_cache_signature", lambda cutoff: "same-atr")
+    monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2", "--store-root", str(destination)])
+    batched.main()
+    assert _snapshot(store) == original
+    candidate = FeatureStore(str(destination))
+    _assert_complete(candidate, rows)
+    assert candidate.meta()["fe_signature"] == "candidate-fe"
 
 
 def test_batched_rebuild_refuses_to_stamp_code_that_changed_mid_build(store, rows, monkeypatch):

@@ -30,7 +30,6 @@ state above is the template for that work.
 
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -420,24 +419,25 @@ class FeatureStore:
         Same bounded fast path as :meth:`append` (ratings seeded from persisted
         state, every stateful stage resumed from carried ``counts_state``,
         ``skip_ratings=True``), so live features match training exactly. Unlike
-        ``append`` it operates on a COPY of the carried state and never persists,
+        ``append`` it operates on freshly deserialised state and never persists,
         so result-less rows can't corrupt the store. This is the correct live-FE
         path: it avoids both the all-default ratings of a from-scratch sweep over
         stale/empty history AND the OOM of feature-engineering full history in one
         shot."""
         if not self.exists():
             raise RuntimeError("FeatureStore is empty; build() it before live featurisation.")
-        if self.load_counts_state() is None:
+        counts_state = self.load_counts_state()
+        if counts_state is None:
             raise RuntimeError(
                 "FeatureStore lacks carried state (pre-flip store); rebuild via "
                 "get_featured_dataset(rebuild=True) before live featurisation.")
-        card = self._continue_freq_counts(card)
+        from src.result_status import pending_card
+        card = self._continue_freq_counts(pending_card(card))
         seed = self.load_state()
         keyed_ratings, _rating_cols, _advanced = self._seeded_rating_frame(card, seed)
         card_rated = card.merge(keyed_ratings, on=["race_id", "horse_name"], how="left")
-        # Deep-copy the carried state so the in-place stage advances are discarded
-        # (the card has no results — the store must not move forward).
-        counts_state = copy.deepcopy(self.load_counts_state() or {})
+        # pickle.load creates a private object graph for this request. Discard
+        # its in-memory advances; neither a second load nor a deep copy is needed.
         featured = engineer_features(
             card_rated, save=False, skip_ratings=True, counts_state=counts_state)
 

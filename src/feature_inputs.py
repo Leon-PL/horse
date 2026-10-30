@@ -19,10 +19,37 @@ from __future__ import annotations
 
 import hashlib
 import os
+from functools import lru_cache
 
 import pandas as pd
 
 import config
+
+
+@lru_cache(maxsize=32)
+def _rtv_part_signature(path, modified, size, cutoff):
+    frame = pd.read_parquet(path)
+    if cutoff is not None and not frame.empty:
+        dated = frame["available_date"] if "available_date" in frame else frame.race_date
+        frame = frame.loc[pd.to_datetime(dated).le(pd.Timestamp(cutoff))]
+    keys = [c for c in ("race_date", "race_id", "horse_id", "track_key", "off_key", "horse_key", "observed_at") if c in frame]
+    frame = frame.sort_values(keys, kind="stable") if keys else frame
+    h = hashlib.sha256(str(len(frame)).encode())
+    h.update(pd.util.hash_pandas_object(frame[sorted(frame.columns)].astype("string"), index=False).values.tobytes())
+    return h.hexdigest()[:16]
+
+
+def rtv_cache_signature(cutoff=None) -> dict:
+    """Hash only values available to the dated history; include snapshots causally."""
+    from src.rtv_features import runs_path, pre_path
+    output = {}
+    for name, path in (("runs", runs_path()), ("pre", pre_path())):
+        if not path.exists():
+            output[name] = None
+            continue
+        stat = path.stat()
+        output[name] = _rtv_part_signature(str(path.resolve()), stat.st_mtime_ns, stat.st_size, str(cutoff) if cutoff is not None else None)
+    return output
 
 ATR_CACHE_FILE = os.path.join(config.DATA_DIR, "atr_cache", "atr_sectionals.parquet")
 

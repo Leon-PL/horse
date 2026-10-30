@@ -29,9 +29,10 @@ import re
 import numpy as np
 import pandas as pd
 
+import config
 from src.utils import normalise_horse_key, normalise_off_time_key, normalise_track_key
 
-DEFAULT_BSP_PATH = os.path.join("data", "processed", "betfair_bsp.parquet")
+DEFAULT_BSP_PATH = os.path.join(config.PROCESSED_DATA_DIR, "betfair_bsp.parquet")
 _PUNCT_RE = re.compile(r"[^a-z0-9 ]")
 
 # Betfair uses shorter course names than the RTV-sourced DB for a few tracks.
@@ -98,8 +99,10 @@ def bf_horse_key(name) -> str:
     return _PUNCT_RE.sub("", normalise_horse_key(name).lower()).strip()
 
 
-def load_bsp(path: str = DEFAULT_BSP_PATH) -> pd.DataFrame | None:
-    """Load the BSP parquet, or ``None`` if it has not been built yet."""
+def load_bsp(path: str | None = None) -> pd.DataFrame | None:
+    """Load the project-rooted cache, or ``None`` if it has not been built yet."""
+    if path is None:
+        path = DEFAULT_BSP_PATH
     if not os.path.exists(path):
         return None
     return pd.read_parquet(path)
@@ -156,23 +159,29 @@ def attach_bsp(
     right = bsp[["race_date", "track", "off_key", "horse_key", *cols]].copy()
     right["race_date"] = _date10(right["race_date"])
     right["track_key"] = right["track"].map(bf_track_key)
-    right = right[["race_date", "track_key", "off_key", "horse_key", *cols]].drop_duplicates(
-        subset=["race_date", "track_key", "off_key", "horse_key"]
-    )
+    keys = ["race_date", "track_key", "off_key", "horse_key"]
+    right = right[[*keys, *cols]].drop_duplicates()
+    # Identical duplicates are harmless. Conflicting values or multiple left
+    # runners collapsing onto one normalised identity are not a price match.
+    right = right.loc[~right.duplicated(keys, keep=False)]
+    ambiguous_left = left_keys.duplicated(keys, keep=False).to_numpy()
     merged = left_keys.merge(
-        right, on=["race_date", "track_key", "off_key", "horse_key"], how="left"
+        right, on=keys, how="left", sort=False, validate="many_to_one"
     )
     for c in cols:
         out[c] = merged[c].to_numpy()
+        out.loc[ambiguous_left, c] = np.nan
     return out
 
 
 def _grouped_overround_normalise(prob: np.ndarray, race_ids: np.ndarray) -> np.ndarray:
-    """Normalise raw implied probabilities to sum to 1 within each race."""
+    """Normalise complete positive fields; an incomplete field stays unknown."""
     s = pd.Series(prob, dtype="float64")
-    grp = s.groupby(pd.Series(race_ids))
+    ids = pd.Series(race_ids)
+    grp = s.groupby(ids)
     totals = grp.transform("sum")
-    out = np.where((totals > 0) & np.isfinite(totals), s / totals, np.nan)
+    complete = pd.Series(np.isfinite(s) & s.gt(0)).groupby(ids).transform("all")
+    out = np.where(complete & (totals > 0) & np.isfinite(totals), s / totals, np.nan)
     return out
 
 
@@ -181,10 +190,11 @@ def bsp_implied_prob(bsp, race_ids) -> np.ndarray:
 
     Exchange overround is tiny but non-zero; normalising per race makes the
     probabilities a proper distribution (and comparable to the SP-implied
-    convention used elsewhere). NaN BSP -> NaN out.
+    convention used elsewhere). Any unavailable/invalid BSP makes the whole
+    field unavailable; a covered subset is not a probability distribution.
     """
     bsp_arr = np.asarray(bsp, dtype="float64")
-    raw = np.divide(1.0, bsp_arr, out=np.full_like(bsp_arr, np.nan), where=bsp_arr > 1.0)
+    raw = np.divide(1.0, bsp_arr, out=np.full_like(bsp_arr, np.nan), where=np.isfinite(bsp_arr) & (bsp_arr > 1.0))
     return _grouped_overround_normalise(raw, np.asarray(race_ids))
 
 
@@ -195,19 +205,25 @@ def market_prob_bsp_preferred(
     bsp_col: str = "bsp",
     sp_col: str = "odds",
 ) -> np.ndarray:
-    """Unified market probability: BSP-implied where present, SP-implied else.
+    """One complete market per race: BSP, else SP, else unavailable.
 
-    Both legs are overround-normalised within their race so the fallback is on
-    the same scale. This is the distillation/market-anchor *teacher*; pre-2025
-    rows (no BSP) fall back to the bookmaker SP that was always used there.
+    Never mix separately normalised sources runner by runner. If num_runners
+    is supplied, require that the input contains the declared complete field.
+    These are training targets, not prices available before the historical off.
     """
     race_ids = df[race_id_col].to_numpy()
     bsp_p = bsp_implied_prob(df[bsp_col].to_numpy(), race_ids) if bsp_col in df else None
-    sp_raw = np.asarray(df[sp_col].to_numpy(), dtype="float64")
+    sp_raw = (np.asarray(df[sp_col].to_numpy(), dtype="float64") if sp_col in df
+              else np.full(len(df), np.nan))
     sp_p = _grouped_overround_normalise(
-        np.divide(1.0, sp_raw, out=np.full_like(sp_raw, np.nan), where=sp_raw > 1.0),
+        np.divide(1.0, sp_raw, out=np.full_like(sp_raw, np.nan), where=np.isfinite(sp_raw) & (sp_raw > 1.0)),
         race_ids,
     )
-    if bsp_p is None:
-        return sp_p
-    return np.where(np.isfinite(bsp_p), bsp_p, sp_p)
+    result = sp_p if bsp_p is None else np.where(np.isfinite(bsp_p), bsp_p, sp_p)
+    if "num_runners" in df:
+        ids = pd.Series(race_ids)
+        declared = pd.Series(pd.to_numeric(df["num_runners"], errors="coerce").to_numpy())
+        size = ids.groupby(ids).transform("size")
+        complete = declared.eq(size).groupby(ids).transform("all").to_numpy()
+        result = np.where(complete, result, np.nan)
+    return result

@@ -52,6 +52,13 @@ def _races():
     return pd.DataFrame(rows)
 
 
+def test_missing_model_signal_is_not_silently_replaced_with_zero():
+    frame = _races().drop(columns="signal")
+    with pytest.raises(ValueError, match="missing model features.*signal"):
+        _predictor().predict_races(frame)
+    assert "signal" not in frame
+
+
 @pytest.mark.parametrize("market_anchor", [None, {"alpha": 0.3, "beta": 0.8}])
 def test_interleaved_batch_matches_individual_races(market_anchor):
     predictor = _predictor()
@@ -239,6 +246,16 @@ def test_exchange_settlement_and_targets_never_enter_form_features(monkeypatch):
     # An allowlist must never override mandatory leakage exclusions.
     monkeypatch.setattr(config, "FEATURE_ALLOWLIST", list(frame.columns))
     assert model_module.get_feature_columns(frame) == ["horse_win_rate"]
+
+
+@pytest.mark.parametrize("explicit_allowlist", [False, True])
+def test_future_dependent_sectional_composites_never_enter_model_features(monkeypatch, explicit_allowlist):
+    unsafe = [f"{base}{suffix}" for base in ("atr_speed_score", "atr_stride_x_gallop")
+              for suffix in ("", "_vs_field", "_z_in_race", "_rank_pct_in_race", "_vs_best_in_race")]
+    frame = pd.DataFrame({"horse_win_rate": [.1, .2], "atr_finishing_speed_pct_avg_3": [98., 101.],
+                          **{name: [1., 2.] for name in unsafe}})
+    monkeypatch.setattr(config, "FEATURE_ALLOWLIST", list(frame) if explicit_allowlist else None)
+    assert model_module.get_feature_columns(frame) == ["horse_win_rate", "atr_finishing_speed_pct_avg_3"]
 
 
 @pytest.mark.parametrize("contents", ["", "# nothing selected\n", "[]", "[not json]", '[12]'])

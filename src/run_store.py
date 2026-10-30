@@ -22,15 +22,21 @@ The module exposes a small set of functions that the Streamlit app
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import logging
 import tempfile
+from pathlib import Path
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
 import config
+
+if TYPE_CHECKING:
+    from src.model import RacePredictor
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +50,23 @@ def _ensure_dir(path: str) -> None:
 
 
 def _make_run_id() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+
+def _allocate_run_dir() -> tuple[str, str]:
+    """Reserve one directory exclusively, even when two clocks return one ID."""
+    _ensure_dir(RUNS_DIR)
+    base_id = _make_run_id()
+    suffix = 0
+    while True:
+        run_id = base_id if suffix == 0 else f"{base_id}_{suffix:04d}"
+        run_dir = os.path.join(RUNS_DIR, run_id)
+        try:
+            os.mkdir(run_dir)
+        except FileExistsError:
+            suffix += 1
+        else:
+            return run_id, run_dir
 
 
 def _safe_json(obj):
@@ -86,15 +108,17 @@ def save_run(
     wf_report: dict | None = None,
     featured_df: pd.DataFrame | None = None,
     processed_df: pd.DataFrame | None = None,
+    predictor: RacePredictor | None = None,
 ) -> str:
     """
     Persist a complete training run to disk.
 
-    Returns the ``run_id`` string (e.g. ``"20250715_143022"``).
+    Pass the trained ``predictor`` to serialize that exact object. Omitting it
+    retains the legacy global-model snapshot behavior. Metadata is published
+    last, so registry readers never see a partially saved run.
+
+    Returns the unique ``run_id`` string.
     """
-    run_id = _make_run_id()
-    run_dir = os.path.join(RUNS_DIR, run_id)
-    _ensure_dir(run_dir)
 
     # ── Separate DataFrames from test_analysis ───────────────────
     bets_df: pd.DataFrame | None = None
@@ -115,6 +139,7 @@ def save_run(
                 ta_serialisable[k] = v
 
     # ── Build meta dict ──────────────────────────────────────────
+    run_id, run_dir = _allocate_run_dir()
     meta = {
         "run_id": run_id,
         "name": name,
@@ -134,34 +159,41 @@ def save_run(
     }
 
     # ── Write files ──────────────────────────────────────────────
-    meta_path = os.path.join(run_dir, "meta.json")
-    with open(meta_path, "w") as f:
-        json.dump(_safe_json(meta), f, indent=2, default=str)
+    try:
+        if bets_df is not None and not bets_df.empty:
+            bets_df.to_csv(os.path.join(run_dir, "bets.csv"), index=False)
 
-    if bets_df is not None and not bets_df.empty:
-        bets_df.to_csv(os.path.join(run_dir, "bets.csv"), index=False)
+        if curves_df is not None and not curves_df.empty:
+            curves_df.to_csv(os.path.join(run_dir, "curves.csv"), index=False)
 
-    if curves_df is not None and not curves_df.empty:
-        curves_df.to_csv(os.path.join(run_dir, "curves.csv"), index=False)
+        if predictions_df is not None and not predictions_df.empty:
+            predictions_df.to_csv(os.path.join(run_dir, "predictions.csv"), index=False)
 
-    if predictions_df is not None and not predictions_df.empty:
-        predictions_df.to_csv(os.path.join(run_dir, "predictions.csv"), index=False)
+        # ── Walk-forward data ────────────────────────────────────
+        if wf_report is not None:
+            for key in ("summary", "bets", "curves"):
+                frame = wf_report.get(key)
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    frame.to_csv(os.path.join(run_dir, f"wf_{key}.csv"), index=False)
 
-    # ── Walk-forward data ────────────────────────────────────────
-    if wf_report is not None:
-        wf_summary = wf_report.get("summary")
-        if isinstance(wf_summary, pd.DataFrame) and not wf_summary.empty:
-            wf_summary.to_csv(os.path.join(run_dir, "wf_summary.csv"), index=False)
-        wf_bets = wf_report.get("bets")
-        if isinstance(wf_bets, pd.DataFrame) and not wf_bets.empty:
-            wf_bets.to_csv(os.path.join(run_dir, "wf_bets.csv"), index=False)
-        wf_curves = wf_report.get("curves")
-        if isinstance(wf_curves, pd.DataFrame) and not wf_curves.empty:
-            wf_curves.to_csv(os.path.join(run_dir, "wf_curves.csv"), index=False)
+        # Serialize the caller's predictor, never a shared mutable checkpoint.
+        if predictor is not None:
+            predictor.save(os.path.join(run_dir, "model.joblib"))
+        else:
+            _snapshot_model(run_dir)
+        _snapshot_datasets(run_dir, featured_df=featured_df, processed_df=processed_df)
 
-    # ── Snapshot model artifact + exact datasets ────────────────
-    _snapshot_model(run_dir)
-    _snapshot_datasets(run_dir, featured_df=featured_df, processed_df=processed_df)
+        temporary_meta = os.path.join(run_dir, "meta.json.tmp")
+        with open(temporary_meta, "w", encoding="utf-8") as f:
+            json.dump(_safe_json(meta), f, indent=2, default=str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary_meta, os.path.join(run_dir, "meta.json"))
+    except BaseException:
+        # This is our exclusively allocated directory; other saves and the
+        # currently promoted run are never cleanup targets.
+        shutil.rmtree(run_dir, ignore_errors=True)
+        raise
 
     logger.info(f"Run {run_id} ({name}) saved to {run_dir}")
     return run_id
@@ -318,11 +350,8 @@ def prune_runs(keep_latest: int = 5) -> list[str]:
         raise ValueError("keep_latest must be >= 1")
     if not os.path.isdir(RUNS_DIR):
         return []
-    run_ids = sorted(
-        (e for e in os.listdir(RUNS_DIR)
-         if os.path.isdir(os.path.join(RUNS_DIR, e))),
-        reverse=True,
-    )
+    # A folder without published metadata may still be saving its artifacts.
+    run_ids = [run["run_id"] for run in list_runs()]
     deleted: list[str] = []
     for run_id in run_ids[keep_latest:]:
         if delete_run(run_id):
@@ -509,6 +538,34 @@ def feature_generation_status(run_id: str | None = None) -> dict:
     elif run_sig == store_sig:
         result["state"] = GENERATION_MATCH
         result["message"] = f"Run {rid} matches the feature store ({run_sig})."
+        # A calibration/helper edit can alter probabilities without changing
+        # any engineered feature. New runs may pin those runtime sources;
+        # check their actual files before permitting serving or promotion.
+        metadata = load_run_meta(rid)
+        recorded = (metadata.get("training_config") or {}).get("runtime_model_sources")
+        if recorded:
+            changed = []
+            if not isinstance(recorded, dict):
+                changed.append("unreadable probability-code evidence")
+            else:
+                root = Path(config.BASE_DIR).resolve()
+                for relative, digest in recorded.items():
+                    try:
+                        source = (root / relative).resolve()
+                        if Path(relative).is_absolute() or not source.is_relative_to(root):
+                            changed.append(str(relative))
+                            continue
+                        with source.open("rb") as stream:
+                            actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                        if actual != digest:
+                            changed.append(str(relative))
+                    except (OSError, TypeError, ValueError):
+                        changed.append(str(relative))
+            if changed:
+                result["state"] = GENERATION_MISMATCH
+                result["runtime_source_mismatches"] = changed
+                result["message"] = (f"Probability code changed since run {rid} was recorded: " + ", ".join(changed)
+                    + ". Restore that code or validate and publish a compatible model.")
     else:
         result["state"] = GENERATION_MISMATCH
         result["message"] = (

@@ -1,11 +1,130 @@
 # Negative Results Ledger
 
+## 044. Fixed RTV history family — uncertain development gain (30 October 2026)
+
+One preset 400-tree comparison adds 26 causal telemetry/history inputs to the
+corrected 154-input baseline. Q4 2025 covers 3,234 fields / 30,094 runners;
+exactly two new fits, no subset/seed/quarter/capacity search. Race LL improves
+1.84690718→1.84372079 and Brier .08545918→.08534314. Established-handicap
+LL improves 1.98538384→1.98148413 across 1,071 fields. Overall date-cluster
+95% LL-delta interval [-.00717584,+.00095211] crosses zero: no input selection
+or predictive-gain claim. Do not mine these outcomes for a better subset.
+The four true pre-race snapshot inputs lack historical evaluation. Historical
+telemetry backfill has unknown original revision times. Implementation remains
+available in the normal pipeline; mandatory factual repairs are independent of
+this verdict. [Implementation and evidence](RTV_FEATURES_REPAIRS_044.md).
+
+## 038. Date-local smooth win calibration — not selected (29 October2026)
+
+One fixed90-calendar-day calibration proposal uses native temporary heads
+fitted through17September2025, a seven-day purge, and24September–22December
+training-only calibration forecasts. Final033 trees are reused unchanged.
+There are exactly two new temporary fits shared with the separate place
+comparison; no seed, quarter, capacity or calibration-family search.
+
+On the same2,591 already-inspected Q1 fields, win race LL worsens
+1.798224325→1.799563197 and Brier .089957954→.090005218. Date95% LL-delta
+interval[-.000497202,+.003039582] crosses zero. Established-handicap point
+scores worsen too. No win change is selected. This does not prove the older
+calibration slab is ideal; it rejects this fixed replacement. Do not repeat
+the same smoothing/window search against these outcomes.
+
+The separately evaluated place layer passes its registered overall Brier
+gate; see [038 results](PREDICTIVE_REVIEW_038.md). Its gain is not a reversal
+of the win result or evidence of prospective market parity.
+
+## 32. Earlier-fitted history-context blend — small uncertain gain (2026-10-27)
+
+Experiment013 follows012's inspected external-form lead, so it is exploratory,
+not fresh confirmation. Fit two whole-race mixture coefficients onQ3OOS
+forecasts, validateQ4 and freeze beforeQ1/April–May scoring. Selected new-model
+weights are0.4943for fields without external form and1.0for fields containing
+it. No new trees or test-selected fallback. Q1LL1.81799380→1.81767994,
+delta−0.00031387,95%[-0.00247654,+0.00203919]. TransferLL1.90437727→1.90248792,
+also uncertain. Brier/binary point estimates improve but primary uncertainty
+gates fail; market remains substantially ahead. No promotion or reversal of012.
+Do not search more context gates on these same outcomes. See
+[results](MODEL_HISTORY_BLEND_013.md).
+
+## 31. History depth, pooled rates and availability family — not qualified (2026-10-27)
+
+Experiment012 adds16existing inputs to149after one outcome-free duplicate
+removal. Three native fits, unchanged recipe/fields, exact saved baselines.
+On9,356races, LL1.87204489→1.87133338, delta−0.00071151,
+95%[-0.00269877,+0.00126808]; winter worsens. Brier/binary point estimates
+improve, but primary uncertainty gates fail. Matched market gap closes only
+0.38%in point estimate. No promotion. The776-field external-form diagnostic
+is a useful hypothesis, not permission to select that slice retroactively;
+its separate exploratory ensemble is013. Preserve all original scores.
+See [results](MODEL_HISTORY_012.md).
+
+## 30. Narrow relative floors on extreme-tail forecasts — no qualified gain (2026-10-26)
+
+Experiment011 floors only probabilities below1% that are heavily suppressed
+relative to the pre-isotonic Platt stage, then normalizes complete fields.
+Strength selected on2025Q3;2025Q4 validates or falls back to identity. The149
+model learns0.1 but validationLL worsens0.00002891; the176 model fails the
+strict fitting Brier guard. Both selected strengths are zero. No change to
+production or previous experiment results.
+
+A separately registered post-result diagnostic chooses the earlier fitting
+LLminimum without the Brier veto,0.25 for both models. It repairs the known
+Naas near-zero probability to0.0972%, but does not establish overall lift:
+149Q1LLdelta−0.00005136,95%[-0.00044380,+0.00015391], transferdelta+0.00002678;
+176Q1delta+0.00012877,95%strictlypositive, transfergainuncertain. Brier changes
+are tiny, so strict rejection is not evidence of material Brier damage, but
+removing that veto still fails to yield a reliable later gain. The diagnostic
+is explicitly promotion-ineligible and cannot reverse011/009. No near-zero
+winning forecast occurs in either later period; no prospective efficacy claim.
+Close this floor/blend search on these inspected quarters. See
+[results](MODEL_TAIL_SMOOTHING_011.md).
+
+## 29. Broad shrinkage of isotonic forecasts toward Platt — not confirmed (2026-10-26)
+
+Experiment010 keeps all009 trees and feature sets fixed. One Brier-constrained
+coefficient is fitted on2025Q3 OOS forecasts, validated onQ4 and frozen before
+later evaluation. The149-input model selects82.867%Platt; the176-input pace
+diagnostic selects zero adjustment under its earlier Brier constraint.
+
+On2,591January–March races, primary LL1.81799380→1.81818510, delta+0.00019130
+(95%[-0.00187169,+0.00209070]); Brier improves slightly. April–May with the same
+December trees improves LL1.90437727→1.90275709 but its interval also crosses0.
+Neither later period contains a winner assigned below1e-7 by the old model:
+do not call this direct validation of protection against near-zero winners.
+Some severe underestimates improve, but that does not establish overall lift.
+The market remains substantially ahead; no production change or rescue of009.
+This does not reject every tail smoother. Do not repeat this broad blend or
+choose only its favourable period. See [results](MODEL_CALIBRATION_010.md).
+
+## 28. Existing pace/setup family in independent forecasts — no reliable gain (2026-10-26)
+
+Experiment009 tested the149-input recipe against the same recipe plus27
+existing run-style, field-pressure and course-bias features. These columns
+were absent from the earlier206ATR-feature trial. Six native historical fits
+completed on the three registered development quarters; no feature/parameter
+sweep and no production change.
+
+On9,356races, primary race log loss changes1.87204489→1.87310002, delta+0.00105513
+(95%paired interval−0.00190667to+0.00513894). Only one quarter improves. Brier
+improves slightly0.08754346→0.08752490, but uncertainty includes no benefit;
+binary loss worsens. The candidate fails the registered rule and is not
+promoted. The matched market gap also widens slightly. Do not repeat this
+unchanged family or choose subsets from these test results.
+
+Exploratory error attribution shows one extreme underestimation dominates
+the net LL deterioration. Retain that race and all original scores. It
+motivates a separate training-only calibration/tail-robustness hypothesis,
+not a post-hoc rescue of this candidate. See [results](MODEL_PREDICTIONS_009.md).
+
 **Read this before proposing a new feature, data source or edge.**
 
-Every entry below is an idea that was built, measured and *refuted*. They are
-recorded because the expensive failure mode in this project is not a bug — it
-is re-testing something that was already disproved, or worse, re-discovering a
-"+15% edge" that is really a stale cache. Several entries here cost weeks.
+These ideas were built and measured but did not meet their declared criteria.
+Some results are strongly negative; others remain uncertain. An interval
+crossing zero does not prove a hypothesis false. The record prevents repeating
+unchanged failed tests or rediscovering an apparent edge caused by stale data.
+Several entries cost weeks. For win-probability forecasting, use the current
+`MARKET_PERFORMANCE_PLAN.md` and proper-score protocol; the older CLV/ROI
+checks below concern betting claims.
 
 Dates are when the result was established. "Dead" means it was measured and
 did not survive; it does not mean the code was deleted — most of the data
@@ -17,9 +136,11 @@ collection is still in place and worth keeping.
 
 Bitter experience produced this bar. Apply it to every candidate:
 
-1. **Orthogonality first.** Correlate the candidate with the *market residual*
-   (`won − market_implied_prob`), not with the outcome. If the correlation is
-   ~0, the market already prices it — stop, whatever the raw predictiveness.
+1. **Assess incremental information against the right target.** For a market
+   edge, inspect association with the same-time market residual
+   (`won − market_implied_prob`). Near-zero marginal correlation lowers the
+   prior, but can miss interactions and does not rule out improving an
+   independent forecast. Test incremental proper scores on later races.
 2. **CLV at BSP is the metric; ROI is secondary.** Betfair Starting Price is
    sharp. Beating it on closing-line value is the only durable claim. Read it
    from `median_clv` / `geometric_mean_clv` / `pct_beat_close`
@@ -37,11 +158,12 @@ Bitter experience produced this bar. Apply it to every candidate:
 6. **Cluster confidence intervals by race.** Bets in one race are not
    independent; `wf_eval.bootstrap_roi_ci` resamples races. An i.i.d.
    bootstrap over bets is how a result gets called "significant".
-7. **Give the method a baseline it must beat by construction.** If a model
-   that nests the market scores *worse than market-only on race log loss*, the
-   fit is broken (`wf_eval.check_combination_nesting`). Note this is about
-   probability scoring, not ROI: losing to "bet everything in the band" is a
-   staking comparison and says nothing about the fit.
+7. **Keep a representable baseline and test it fairly.** A model that nests
+   market-only must be compared with that same forecast on identical fields.
+   It can still lose on later races; representability does not guarantee
+   future non-worsening. Audit fitting, selection and fallback timing before
+   interpreting the failure. Treat `wf_eval.check_combination_nesting` as a
+   diagnostic, not a guarantee about unseen outcomes.
 8. **Do not overturn a result on a partial re-run.** A two-fold re-run of §2
    disagreed with the recorded verdict; eight folds reproduced it. Extend the
    sample before rewriting the conclusion.
@@ -534,6 +656,14 @@ model-versus-market gap in §2c carries no meaningful label offset.
 
 ### The residual 0.04% is amended results, not scrape noise
 
+**30October2026 update:** [repair042](AMENDED_RESULTS_042.md) now addresses
+this previously documented source defect. The ordinary parser honours final
+amendments, and primary-source checks qualify164 complete fields, including
+131 changed winners and463 changed placings. The corrected history and its
+combined current refit are installed as `20261030_015917_823047`. The frequency estimate below is
+historical; it does not account for propagation into later horse, jockey and
+trainer histories. There is no measured predictive-gain claim from042 yet.
+
 The obvious explanation — dead heats — is wrong: only 9 of the 252 fall in a
 race where our DB records multiple winners. The rest arrive in **pairs**, and
 always the same shape:
@@ -610,6 +740,18 @@ race-level, so the interaction is too.
 column and cannot help on its own. Only worth it as an input to interactions
 with each horse's own going record - and that family scores 0.0019, so expect
 nothing.
+
+**Qualification from the 2026-10-25 audit:** the statement above that *any*
+race-normalized model cancels race constants is too broad. A common additive
+logit cancels in softmax, and within-race centering removes constants from this
+triage. The deployed model uses binary sigmoid probabilities before race
+normalization: normalizing `sigmoid([0, 1])` gives `[0.4062, 0.5938]`, while
+adding the same 2 to both logits gives `[0.4804, 0.5196]`. Context can therefore
+change confidence even without changing rank. Trees can also learn contextual
+interactions that a marginal screen does not test. The measured screening
+results remain as recorded; they do not prove that every such feature is
+irrelevant to probability scores. Any pruning or inclusion still needs a
+proper chronological ablation.
 
 ## 2h. Sibling (dam-produce) form: priced overall; the debutant lead failed on the hold-out (2026-10-13)
 
@@ -1851,13 +1993,147 @@ Life's dividend fields (the scrape is ~80k pages, ~1 request/s, about a day,
 resumable), or a licensed source (the Tote's own data, or a paid racing data
 API that carries dividends and pool sizes).
 
+## 25. Full ATR family in the independent probability model (2026-10-26)
+
+Experiment 002, registered before execution: existing 149 inputs versus 355
+columns (206 added historical sectional features), identical complete fields,
+native LightGBM fitting/calibration and fixed 2025Q3, 2025Q4 and 2026Q1 folds.
+Ten future-dependent composites/descendants were removed before fitting;
+the remaining additions passed temporal invariance checks. This asks about
+independent probability quality, separately from earlier market-residual tests.
+
+All six fits completed. On 9,356 races / 85,863 runners, race log loss worsened
+**1.872045 -> 1.876713**, candidate minus baseline **+0.004668**, paired 95%
+interval **[+0.000852, +0.009229]**; date-cluster interval
+**[+0.000980, +0.009326]**. All three quarters worsened. Runner Brier worsened
+0.08754346 -> 0.08755972 and binary log loss 0.30088334 -> 0.30140404.
+Small winner-accuracy/ECE gains do not rescue a probability forecast that
+worsens the registered proper scores.
+
+**Do not repeat this unchanged family addition or select subsets against its
+test quarters.** It fails every advancement condition. This is not a rejection
+of all possible sectional methods, nor an independent market-parity claim.
+Any reopening needs a materially changed hypothesis and predeclared evidence.
+The one bounded race-objective comparison was subsequently completed under
+the newer probability-scoring plan; see section 26.
+See [experiment report](MARKET_COMPARISON_002.md) and the frozen models,
+source/input manifests and paired forecasts in
+`data/audit/market_performance/002_atr_family/`.
+
+## 26. Race-objective comparison: linear loses; tree primary gain unresolved (2026-10-26)
+
+Experiment 003 recovered the prior June scratch script: it dropped actual
+non-finishers and did not establish the current all-starter probability
+comparison. One bounded repeat used the retained 149 inputs, exact cached
+binary forecasts and identical 2025Q3/Q4/2026Q1 fields. All six challenger
+fits finished before scoring; two fixed candidates, no post-test search.
+
+On 9,356 races / 85,863 runners:
+
+| Recipe | Runner Brier | Binary LL | Race LL |
+|---|---:|---:|---:|
+| Binary baseline | .08754346 | .30088334 | 1.87204489 |
+| Conditional linear logit | .08806124 | .30328719 | 1.89083039 |
+| Race-softmax LightGBM | .08736141 | .30062028 | 1.87103531 |
+
+The fixed linear recipe loses all three quarters and every proper score.
+Race-LL delta +.01878550, 95% interval [+.01088235,+.02613680]; reject it.
+
+**The tree is not a blanket negative.** Its Brier improves in every quarter,
+pooled runner delta -.00018205 (one-sided race-cluster upper95 -.00008701).
+Race LL improves in two quarters, but pooled delta -.00100958 has interval
+[-.00510065,+.00327606]; date sensitivity [-.00503771,+.00326771]. It fails
+the registered primary confidence gate. Neither candidate advances. Do not
+change the primary criterion to Brier after seeing this secondary gain.
+
+On 8,942 matched T-5 fields the tree's LL 1.86768444 remains well behind
+market 1.74928256. Its point gain closes only ~0.93% of the baseline LL gap;
+freshness sensitivity gives the same conclusion. No independent parity.
+
+**Stop the bounded architecture expansion.** Preserve the fixed tree as an
+unpromoted research challenger; its primary benefit remains unresolved and
+would require registered confirmation on other data. Do not tune a favourable
+quarter, Hessian, regularisation, calibration, feature subset, seed or blend
+against these outcomes. This result does not reject every possible race model.
+See [full report](MARKET_COMPARISON_003.md) and immutable evidence under
+`data/audit/market_performance/003_race_objective/`. Final full suite: 742 passed;
+nine actual model artifacts replay saved probabilities to 1.11e-16. Production
+and canonical feature/data snapshots are unchanged.
+
+## 27. Monthly refitting: small Brier gain, primary benefit unresolved (2026-10-26)
+
+Experiment 004 tested the accepted plan's fixed monthly refresh against exact
+cached quarterly binary forecasts. Same 149 features, recipe, daily feature
+history, all-starter fields and seven-day calendar cutoff. Six new fits,
+three exactly shared first-month models; no cadence or hyperparameter search.
+
+On 9,356 races / 85,863 runners, race LL improves 1.87204489 -> 1.87097477.
+All three quarter point estimates improve, but difference -.00107012 has
+95% race interval [-.00436065,+.00347671] and date-cluster interval
+[-.00426195,+.00305721]. **The primary advancement gate is unmet.**
+
+This is not a blanket negative: runner Brier improves .08754346 -> .08746770
+in every quarter; pooled one-sided upper95 difference is -.00001120. Binary
+LL also improves. Mean parameter age falls from 52.46 to 22.21 days. Preserve
+these secondary findings without relabelling them primary confirmation.
+Overall ECE worsens .00146349 -> .00197548. The six changed-model months alone
+also have a primary LL interval crossing zero and do not change the decision.
+
+On 8,942 matched T-5 fields monthly LL 1.86755050 remains behind market
+1.74928256. Its point gain closes 1.04% of the quarterly model's market gap;
+the 7,719-race freshness subset also fails parity. No current-race prices were
+added, no market correction fitted and no canonical outcome changed.
+
+Close this fixed cadence comparison. No weekly/daily/window/calibration sweep
+on these dates. Retain the monthly recipe as unpromoted research; primary
+confirmation requires other data and a registered test. This does not close
+operational all-settled fitting or data-refresh work. Full suite 745 passed;
+32 status checks passed after an explicit parameter-cutoff reporting change.
+Nine actual artifacts replay 576 shuffled fields to 1.43e-14. Production and
+the canonical data/store remain unchanged. See [full report](MARKET_COMPARISON_004.md).
+
+## 28. Market-history proposals034–035 (2026-10-29)
+
+The corrected154-input baseline includes the adopted033 repairs and prior-price
+history. A new400-tree baseline was fitted once and reused for both screens.
+Transfer/recency034 adds5 inputs and passes its small point-score screen; one
+native159-input win check follows, with saved154-input native baseline and no
+place/current-data fit. Native overall LL1.798224→1.795672 and Brier improve,
+but established-handicap Brier worsens .09756486→.09760743. Overall date-cluster
+LL interval[-.005913,+.000824] crosses zero. It fails the fixed advancement rule.
+Preserve the modest overall gain as uncertain; do not claim all transfer
+features are useless or force another installed fit.
+
+Market-relative finishing context035 adds3 inputs. Its single small fit worsens
+target LL1.981946→1.982161 and Brier .09162586→.09165907. Stop there. The joint
+rule required both standalone families to pass, so no joint proposal follows.
+Eight checks per helper and real full/prefix/seed equality pass; these failures
+are measured predictive results rather than causal-history implementation errors.
+See [034–035 report](MARKET_HISTORY_REVIEW_034_035.md).
+
+## 29. Simple market-assisted refresh036 (2026-10-29)
+
+Reuse the same frozen December154-input model across earlier coefficient fit,
+purged validation and May–10June development test. No new tree model. Whole
+fresh Betfair T-5 last-traded books are required; no executable-quote claim.
+Fit a market temperature and bounded two-coefficient model/market combination.
+Validation chooses the raw market before the test. On1,351 later fields,
+market LL1.778875 versus combination1.780645; on487 established handicaps,
+1.789571 versus1.792246. Both date-cluster difference intervals favour market.
+The temperature's tiny overall test gain is uncertain and did not earn prior
+selection. Do not switch to it after seeing the test. No correction is deployed.
+This closes this fixed simple correction, not all market-assisted approaches.
+See [036 report](MARKET_ASSISTED_REFRESH_036.md).
+
 ## Things that are true and worth not re-deriving
 
-- **RTV sectional coverage starts in 2023 at selected tracks.** Low coverage is
-  *expected* — do not flag it as a bug or attempt a backfill. RTV has since
-  been superseded by the At The Races / TPD scraper
-  (`src/attheraces_scraper.py`); `add_rtv_features` is retired and no longer in
-  the pipeline.
+- **RTV RaceiQ coverage starts on 2023-06-10 and is near-complete after it**
+  (corrected 2026-10-29; this line used to say coverage was low at selected
+  tracks). The old cache holds 98.8% of GB races and ~80% of Irish races
+  (86–100% from 2024). There is no earlier RaceiQ history to backfill.
+  `add_rtv_features` remains retired; the scraper was rebuilt as a collector
+  only — see [RTV audit](RTV_SCRAPER_AUDIT_2026-10-29.md) and
+  [RTV scraper](RTV_SCRAPER.md).
 - **At The Races scraping** needs `curl_cffi` or the system `curl` to clear the
   Fastly TLS/JS challenge. ~2.5s per request, GB-only, resumable.
 - **Bodyweight / run-to-run weight change** — the single most valuable
@@ -1869,10 +2145,48 @@ API that carries dividends and pool sizes).
 
 - **Market microstructure** — traded volume and ladder depth from Betfair
   historic PRO files. The only untapped orthogonal signal identified (§9).
-- **Race-aware modelling** — conditional logit / softmax over the field, or
-  learning-to-rank, instead of a per-horse binary classifier plus
-  normalisation. Note a Plackett-Luce LightGBM objective already lost to the
-  plain binary classifier once (2026-06-12, `scripts/_ab_pl_objective.py`).
+- **Confirmation of the fixed race-softmax recipe** — primary improvement
+  remains unresolved after section 26; secondary Brier improved, but neither
+  challenger advanced. Only registered confirmation on other data could reopen
+  it. The bounded architecture sweep is complete; do not repeat it unchanged.
 - **Each-way 1/5-odds re-run** and a locked CLV harness — parked.
-- **Retrain on the leak-fixed store** — pending; see
-  `scripts/project_status.py`, which currently reports no promoted model.
+- **Retrain on the repaired store** — completed 2026-10-25; production
+  `20261025_193016_331639` passes provenance and replay checks. See
+  [the project audit](PROJECT_AUDIT.md). Data refresh, further model comparisons
+  and genuinely fresh forward confirmation remain separate work.
+
+
+##039–040. Market-adjusted connection form and own cadence: not selected (29October2026)
+
+Both families use the corrected154-input frozen baseline, unchanged native win
+training source and exact numeric/cache/forecast replay. One400-tree candidate
+per family; no new baseline/native/place/calibration/current-data fit. Fixed
+training24September2023–23September2025; previously inspectedQ42025development.
+
+039 adds trainer/jockey60-day observed-minus-market-expected win rates, shrunk
+with20neutral starts, and priced support. OverallLL1.845981→1.845247, but target
+LL1.981946→1.983893 and Brier .09162586→.09172128.040 adds a horse's gap relative
+to its own last-five median, the median and support (three prior intervals,
+730days). OverallLL1.845981→1.845848, target1.981946→1.982299, target Brier
+.09162586→.09164178. Both overall date95%LL intervals cross zero.
+
+Stop these fixed recipes after the small screens. Their source/cadence coverage
+is high for the established target; do not explain away the result by selecting
+a favourable subset or change windows/shrinkage after seeing it. The tests do
+not reject every possible connection-form/cadence model.27related checks pass;
+all678085source rows have strict full/prefix/append equality. No new source
+error was established. [Full definitions and results](ESTABLISHED_CONTEXT_039_040.md).
+
+##041. Raw place-head information for win: not selected (29October2026)
+
+Reused the frozen December154-input win/place heads, with zero new tree fits.
+Two tiny coefficient fits compare a bounded positive raw-place correction
+against identity and a win-only temperature control. January–February fits,
+purged March validation and May–10June development test use the same saved
+heads. The fitted place coefficient is exactly0; validation selects identity.
+The remaining sharpening worsens overall validation LL1.840156→1.842319 and
+target1.880653→1.881153; both Briers worsen. Later-test overall LL1.878711→1.881416
+and target1.936083→1.937554 also worsen. No native transfer, new tree fit or
+production change follows.19helper/optimizer checks pass, native replay is exact,
+and current-label/price poisoning leaves both heads unchanged. Preserve the
+pre042 source-label version of this evidence. [Definition and results](AUXILIARY_PLACE_WIN_041.md).

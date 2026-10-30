@@ -56,6 +56,13 @@ def _print_summary(run_id: str) -> None:
     evals = (meta.get("training_config") or {}).get("evals", {})
     print("\n================ SUMMARY ================")
     print("run_id:", run_id)
+    split = (meta.get("training_config") or {}).get("split") or {}
+    if split.get("mode") == "fit_as_of":
+        print(f"  Parameters fitted through {split.get('training_last_date')} "
+              f"(declared cutoff {split.get('as_of')}).")
+        reference = (meta.get("training_config") or {}).get("validation_reference") or {}
+        print(f"  Recipe validation: {reference.get('validation_run_id', 'unknown')}; "
+              "this refit has no held-out scores.")
     for name, m in (evals.get("calibration") or {}).items():
         if "brier_score" in m:
             print(f"  {name:16s} brier={m['brier_score']:.6f} logloss={m.get('log_loss', float('nan')):.4f} "
@@ -75,33 +82,67 @@ def main() -> None:
     ap.add_argument("--name", default="cli training run")
     ap.add_argument("--no-refresh", action="store_true", help="skip the catch-up scrape")
     ap.add_argument("--catchup-days", type=int, default=14)
+    ap.add_argument("--features", default=None, metavar="PATH",
+                    help="explicit feature allow-list, e.g. feature_sets/win_with_rtv.txt")
     ap.add_argument("--window-days", type=int, default=None,
                     help="train on the last N days only (default: full history)")
+    fitting = ap.add_mutually_exclusive_group()
+    fitting.add_argument("--holdout-days", type=int, default=90,
+                    help="reserve the latest N calendar days for evaluation; 0 uses the legacy percentage split")
+    fitting.add_argument("--fit-as-of", default=None, metavar="YYYY-MM-DD",
+                    help="fit a validated deployment recipe through this settled cutoff")
+    ap.add_argument("--validation-report", default=None, metavar="PATH",
+                    help="recipe validation certificate required for --fit-as-of")
+    ap.add_argument("--threads", type=int, default=None,
+                    help="limit workers used by native model fitting")
     ap.add_argument("--frameworks", default=None,
                     help="e.g. 'classifier=cat,place=lgbm'")
     ap.add_argument("--blend-market-odds", action="store_true",
                     help="enable the Benter market anchor (SP known only at off — optimistic)")
     ap.add_argument("--win-calibration", choices=("platt_isotonic", "race_temperature"),
-                    default=config.WIN_CALIBRATION_METHOD,
+                    default=None,
                     help="win probability calibration method, saved with the run")
     ap.add_argument("--backtest", action="store_true", help="run walk-forward validation")
     ap.add_argument("--promote", action="store_true", help="promote the new run to production")
     args = ap.parse_args()
+    if args.features:
+        if args.fit_as_of:
+            ap.error("Deployment features come from --validation-report; evaluate a changed feature list separately")
+        feature_path = os.path.abspath(args.features)
+        if not os.path.isfile(feature_path):
+            ap.error(f"Feature allow-list does not exist: {feature_path}")
+        config.FEATURE_ALLOWLIST = feature_path
+    if args.holdout_days < 0:
+        ap.error("--holdout-days must be non-negative")
 
-    cfg = TrainingConfig(
-        name=args.name,
-        refresh_data=not args.no_refresh,
-        catchup_days=args.catchup_days,
-        train_window_days=args.window_days,
-        frameworks=_parse_frameworks(args.frameworks) or dict(config.SUB_MODEL_FRAMEWORKS),
-        blend_market_odds=args.blend_market_odds,
-        win_calibration_method=args.win_calibration,
-        run_walk_forward=args.backtest,
-    )
+    if args.fit_as_of is not None:
+        if not args.validation_report:
+            ap.error("--fit-as-of requires --validation-report")
+        if (args.frameworks is not None or args.win_calibration is not None
+                or args.window_days is not None or args.blend_market_odds or args.backtest):
+            ap.error("Deployment settings come from --validation-report; evaluate changed settings separately")
+        cfg = TrainingConfig.deployment(args.validation_report, args.fit_as_of,
+            name=args.name, refresh_data=not args.no_refresh,
+            catchup_days=args.catchup_days, threads=args.threads)
+    else:
+        cfg = TrainingConfig(
+            name=args.name,
+            refresh_data=not args.no_refresh,
+            catchup_days=args.catchup_days,
+            train_window_days=args.window_days,
+            holdout_days=args.holdout_days or None,
+            validation_report=args.validation_report,
+            frameworks=_parse_frameworks(args.frameworks) or dict(config.SUB_MODEL_FRAMEWORKS),
+            blend_market_odds=args.blend_market_odds,
+            win_calibration_method=args.win_calibration or config.WIN_CALIBRATION_METHOD,
+            run_walk_forward=args.backtest,
+            threads=args.threads,
+        )
     run_id = train_run(cfg)
     _print_summary(run_id)
     if args.promote:
-        promote(run_id)
+        if not promote(run_id):
+            raise SystemExit(f"Run {run_id} was saved. Promotion refused; inspect its feature compatibility.")
         print(f"\nPromoted {run_id} to production.")
 
 

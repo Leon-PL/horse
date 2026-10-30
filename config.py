@@ -105,7 +105,7 @@ LIGHTGBM_PARAMS = {
 # These override XGBOOST_PARAMS / LIGHTGBM_PARAMS where set.
 
 CLASSIFIER_PARAMS = {
-    "n_estimators": 2000,
+    "n_estimators": 4000,
     "max_depth": 6,
     "learning_rate": 0.008,
     "subsample": 0.6,
@@ -142,6 +142,9 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
 # fully rebuilt feature store. Saved models preserve their fitted method.
 # Values: "platt_isotonic", "race_temperature".
 WIN_CALIBRATION_METHOD = "platt_isotonic"
+#038's qualified place-only refinement. Saved older models retain their exact
+#legacy probabilities; normal future fits learn this layer from earlier data.
+RECENT_PLACE_REFINEMENT = True
 
 # --- Market Anchor (Benter combination) ---
 # After Platt/isotonic calibration, combine the win classifier with the
@@ -175,15 +178,15 @@ QC_DEFAULTS = {
 # --- Win-model market-probability distillation ---
 # When True, the win classifier trains on the market-implied win
 # probability (a low-noise teacher) via cross-entropy instead of the 0/1
-# outcome, which improves calibration/log-loss. Odds are used only as the
+# outcome. Its effect requires a paired outcome-based comparison. Odds are used only as the
 # training *target* — never an inference feature, so the model stays
 # odds-free at predict time. LGBM classifier only.
 # WIN_SOFT_LABEL_BLEND: target = blend*market_prob + (1-blend)*won
-#   1.0 = pure probability target; 0.5 = even blend (best-calibrated in tests).
-# Validated gain on the full dataset was small (~-0.0013 log-loss) and
-# improves accuracy only — it does NOT create a betting edge.
-WIN_SOFT_LABEL_DISTILL = False
-WIN_SOFT_LABEL_BLEND = 1.0
+#   1.0 = pure probability target; 0.5 = even blend.
+# Earlier gain comments had no recoverable equivalent native audit receipt.
+# Corrected targets require a complete BSP field, else a complete SP field.
+WIN_SOFT_LABEL_DISTILL = True
+WIN_SOFT_LABEL_BLEND = 0.5
 
 # --- Glicko Settings ---
 GLICKO_ENABLED = True    # adds horse_glicko* features in feature engineering

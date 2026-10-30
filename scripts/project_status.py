@@ -23,6 +23,7 @@ skips that.
 from __future__ import annotations
 
 import argparse
+import tempfile
 import json
 import logging
 import os
@@ -61,7 +62,7 @@ def _database() -> dict:
     # makes every history feature describe a different horse than the one
     # running today. That is a blocker, not a warning.
     if behind is None:
-        state = WARN
+        state = BAD
     elif behind <= 2:
         state = OK
     elif behind <= FRESH_DATA_DAYS:
@@ -82,7 +83,7 @@ def _database() -> dict:
 
 
 def store_findings(meta: dict, *, live_fe_sig: str, db_latest=None,
-                   live_data_sig: str | None = None, atr_now: str | None = None) -> tuple[str, list[str]]:
+                   live_data_sig: str | None = None, atr_now: str | None = None, rtv_now=None) -> tuple[str, list[str]]:
     """Judge the store against everything that can make it stale.
 
     The FE signature alone missed three ways a store goes stale while its code
@@ -108,13 +109,22 @@ def store_findings(meta: dict, *, live_fe_sig: str, db_latest=None,
         state = BAD
         notes.append(f"database has results to {str(db_latest)[:10]} not yet in the store -> refresh")
     atr = meta.get("atr_signature")
-    if isinstance(atr, dict) and atr.get("sig"):
+    if (isinstance(atr, dict) and atr.get("sig")
+            and atr.get("cutoff") == last and last):
         if atr_now is not None and atr_now != atr["sig"]:
             state = BAD
             notes.append("ATR sectional cache changed beneath the store -> REBUILD")
-    elif state == OK:
-        state = WARN
-        notes.append("sectional cache unverified (store predates the ATR stamp)")
+    else:
+        state = BAD
+        notes.append("sectional cache unverified (missing stamp or cutoff differs from store)")
+    if not meta.get("data_signature") or _days_behind(last) is None:
+        state = BAD
+        notes.append("store provenance incomplete -> rebuild")
+    if rtv_now is not None:
+        recorded = meta.get("rtv_signature")
+        if (recorded is not None or any(rtv_now["sig"].values())) and recorded != rtv_now:
+            state = BAD
+            notes.append("RTV observations changed beneath the store -> REBUILD")
     return state, notes
 
 
@@ -135,14 +145,31 @@ def _feature_store(deep: bool = True) -> dict:
         pass
     if deep and meta.get("last_date"):
         # Recompute from the database: catches a backfill beneath the store.
+        # process_data() alone reads the exported CSV, which can still be old
+        # after a DB repair or an interrupted snapshot publication.
+        from src.database import load_from_database
         from src.data_processor import process_data
-        live_data_sig = data_signature(process_data(save=False), cutoff=meta["last_date"])
+        # Match the CSV ingest contract (numeric IDs, empty strings, NA values
+        # and float parsing) using current DB contents, never the existing CSV.
+        # Otherwise TEXT IDs in SQLite and inferred integers in the CSV hash
+        # differently even when they describe the exact same historical data.
+        import pandas as pd
+        current = load_from_database()
+        # Spool rather than retaining a second full CSV string in memory.
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as snapshot:
+            current.to_csv(snapshot, index=False)
+            del current
+            snapshot.seek(0)
+            canonical = pd.read_csv(snapshot)
+        live_data_sig = data_signature(process_data(df=canonical, save=False), cutoff=meta["last_date"])
     atr = meta.get("atr_signature")
     if isinstance(atr, dict) and atr.get("cutoff"):
         from src.feature_inputs import atr_cache_signature
         atr_now = atr_cache_signature(atr["cutoff"])
+    from src.featured_dataset import _rtv_signature
+    rtv_now = _rtv_signature(meta["last_date"]) if meta.get("last_date") else None
     state, notes = store_findings(meta, live_fe_sig=live_sig, db_latest=db_latest,
-                                  live_data_sig=live_data_sig, atr_now=atr_now)
+                                  live_data_sig=live_data_sig, atr_now=atr_now, rtv_now=rtv_now)
     behind = _days_behind(meta.get("last_date"))
     return {
         "state": state,
@@ -168,7 +195,7 @@ def _runs() -> dict:
     try:
         runs = list_runs()
     except Exception as exc:  # pragma: no cover
-        return {"state": WARN, "detail": f"unreadable ({exc})"}
+        return {"state": BAD, "detail": f"unreadable ({exc})"}
     if not runs:
         return {"state": BAD, "detail": "no training runs recorded"}
     newest = runs[0]
@@ -190,7 +217,7 @@ def _runs() -> dict:
 def _production() -> dict:
     from src.run_store import (
         GENERATION_MATCH, GENERATION_MISMATCH, GENERATION_NO_MODEL,
-        feature_generation_status,
+        feature_generation_status, load_run_meta,
     )
 
     status = feature_generation_status()
@@ -198,13 +225,99 @@ def _production() -> dict:
         GENERATION_MATCH: OK,
         GENERATION_MISMATCH: BAD,
         GENERATION_NO_MODEL: BAD,
-    }.get(status["state"], WARN)
+    }.get(status["state"], BAD)
+    # A recently created artifact can still contain parameters fitted months
+    # earlier. Only the saved fitting split establishes that cutoff; neither
+    # the artifact timestamp nor the feature store's end date establishes it.
+    training_last_date = None
+    if status["run_id"]:
+        try:
+            meta = load_run_meta(status["run_id"])
+            training = meta.get("training_config", {})
+            split = training.get("split", {}) if isinstance(training, dict) else {}
+            value = split.get("training_last_date") if isinstance(split, dict) else None
+            if isinstance(value, str):
+                training_last_date = date.fromisoformat(value).isoformat()
+        except (FileNotFoundError, OSError, ValueError):
+            pass
+    age = _days_behind(training_last_date)
+    detail = status["message"]
+    if status["run_id"]:
+        detail += (
+            f" Parameters fitted through {training_last_date} ({age} days ago)."
+            if training_last_date else " Parameter fitting cutoff unknown."
+        )
     return {
         "state": state,
         "generation_state": status["state"],
         "run_id": status["run_id"],
-        "detail": status["message"],
+        "training_last_date": training_last_date,
+        "parameter_age_days": age,
+        "detail": detail,
     }
+
+
+def _forward_recording() -> dict:
+    """Monitor evidence collection separately from model-serving readiness."""
+    from pathlib import Path
+    from src.forward_store import timestamp, utcnow
+    from src.run_store import get_production_run_id
+    pointer = Path(config.DATA_DIR)/"forecasts"/"recorder.json"
+    if not pointer.exists():
+        return {"state":WARN, "detail":"no continuous recorder configured"}
+    settings = json.loads(pointer.read_text())
+    study = Path(settings["study"])
+    heartbeat_path = study/"recorder_heartbeat.json"
+    if not heartbeat_path.exists():
+        return {"state":WARN, "detail":"configured; no recorder heartbeat yet", **settings}
+    heartbeat = json.loads(heartbeat_path.read_text())
+    now = utcnow()
+    age = (now-timestamp(heartbeat["observed_at"])).total_seconds()
+    healthy = heartbeat.get("mode") == "recording" and 0 <= age <= 300
+    pairs = heartbeat.get("selected_pairs",0)
+    detail = f"{heartbeat.get('mode')}; {pairs} paired forecasts; heartbeat age {age:.0f}s"
+    discovered = heartbeat.get("last_discovery")
+    discovery_age = (now-timestamp(discovered)).total_seconds() if discovered else None
+    # Discovery normally runs every15minutes. A living retry loop is not
+    # evidence that the market feed is reachable; allow five minutes' grace.
+    if discovery_age is None:
+        healthy = False
+        detail += "; no successful market discovery"
+    else:
+        healthy &= 0 <= discovery_age <= 1200
+        detail += f"; market discovery age {discovery_age:.0f}s"
+    expected_model = settings.get("model_id")
+    expected_study = heartbeat.get("study")
+    identity_matches = (bool(expected_model) and heartbeat.get("model_id") == expected_model
+        and bool(expected_study) and Path(expected_study).resolve() == study.resolve()
+        and get_production_run_id() == expected_model)
+    if not identity_matches:
+        healthy = False
+        detail += "; recorder/model/study mismatch"
+    return {"state":OK if healthy else WARN, "detail":detail, "discovery_age_seconds":discovery_age,
+        "study":str(study), "heartbeat":heartbeat, "scheduled_task":settings.get("scheduled_task")}
+
+
+def _rtv_collection():
+    """Sidecar health is visible but cannot invalidate an unchanged model."""
+    from pathlib import Path
+    from datetime import timezone
+    root = Path(config.DATA_DIR) / "rtv_cache/pipeline"
+    values = {}
+    for kind in ("history", "snapshot"):
+        path = root / (kind + "_status.json")
+        if path.exists():
+            values[kind] = json.loads(path.read_text(encoding="utf-8"))
+    if not values:
+        return {"state": WARN, "detail": "RTV has not been refreshed by the source pipeline"}
+    healthy = True
+    for kind in ("history", "snapshot"):
+        value = values.get(kind, {})
+        observed = value.get("checked_at")
+        age = ((datetime.now(timezone.utc)-datetime.fromisoformat(observed)).total_seconds() if observed else float("inf"))
+        healthy &= value.get("state") == "ok" and 0 <= age <= (86400 if kind == "history" else 3600)
+    return {"state": OK if healthy else WARN, "detail": "; ".join(
+        f"{kind}: {values.get(kind, {}).get('state', 'missing')}" for kind in ("history", "snapshot")), **values}
 
 
 def collect(deep: bool = True) -> dict:
@@ -220,13 +333,23 @@ def collect(deep: bool = True) -> dict:
         try:
             sections[name] = probe()
         except Exception as exc:  # pragma: no cover - probe must never crash the report
-            sections[name] = {"state": WARN, "detail": f"check failed: {exc}"}
+            # A failed check establishes nothing about readiness. Keep the
+            # report usable, but do not publish a success exit code.
+            sections[name] = {"state": BAD, "detail": f"check failed: {exc}"}
 
     blockers = [
         f"{name}: {body['detail']}"
         for name, body in sections.items()
         if body["state"] == BAD
     ]
+    try:
+        sections["forward_recording"] = _forward_recording()
+    except Exception as exc:
+        sections["forward_recording"] = {"state":WARN, "detail":f"recorder monitoring failed: {exc}"}
+    try:
+        sections["rtv_collection"] = _rtv_collection()
+    except Exception as exc:
+        sections["rtv_collection"] = {"state": WARN, "detail": f"RTV monitoring failed: {exc}"}
     # Every link must hold: a promoted model matching a current store, built
     # from results recent enough for rolling-form features to mean anything.
     servable = not blockers
@@ -249,6 +372,8 @@ def render(report: dict) -> str:
         "feature_store": "Feature store",
         "training_runs": "Training runs",
         "production_model": "Promoted model",
+        "forward_recording": "Forward recorder",
+        "rtv_collection": "Racing TV source",
     }
     for name, body in report["sections"].items():
         lines.append(f"  {_MARK[body['state']]:>7}  {labels[name]:<18} {body['detail']}")

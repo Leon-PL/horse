@@ -23,6 +23,29 @@ for _dir in (LIVE_FEATURE_CACHE_DIR, LIVE_FEATURE_BASELINE_DIR, LOOKAHEAD_CACHE_
     os.makedirs(_dir, exist_ok=True)
 
 
+def _serving_input_signature() -> str:
+    """Invalidate live vectors when their preparation changes, independently of FE."""
+    with open(__file__, "rb") as stream:
+        source = stream.read().replace(b"\r\n", b"\n")
+    from src.prize_currency_features import reference_signature
+    return hashlib.sha256(source + reference_signature().encode()).hexdigest()[:20]
+
+
+def stable_card_indicators(processed: pd.DataFrame) -> pd.DataFrame:
+    """Keep the training indicator meanings on cards containing one category.
+
+    Completing these inputs before FE also preserves derived jumps/draw
+    interactions. Filling absent indicator columns after FE is too late.
+    """
+    result = processed.copy()
+    categories = {"race_type": ("Flat", "Hurdle", "Chase"), "sex": ("Male", "Female")}
+    for name, labels in categories.items():
+        if name in result:
+            for label in labels:
+                result[f"{name}_{label}"] = result[name].eq(label).fillna(False).astype("int8")
+    return result
+
+
 def history_source_signature(
     history_df: pd.DataFrame | None,
     *,
@@ -30,6 +53,7 @@ def history_source_signature(
     source_mtime: float | None = None,
 ) -> str:
     payload: dict[str, object] = {
+        "serving_inputs": _serving_input_signature(),
         "version": int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)),
         "history_months": int(getattr(config, "LIVE_FE_HISTORY_MONTHS", 30)),
         "source_path": os.path.abspath(source_path) if source_path else None,
@@ -80,6 +104,8 @@ def feature_engineer_with_history_core(
     extra_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Feature-engineer live rows using processed historical context."""
+    from src.result_status import pending_card
+    live_processed = stable_card_indicators(pending_card(live_processed))
     history_frames: list[pd.DataFrame] = []
     if history_df is not None and not history_df.empty:
         history_frames.append(history_df)
@@ -131,13 +157,24 @@ def feature_engineer_with_history_core(
                 grp = "race_id" if col in race_level_vars else ["race_id", col]
                 combined[freq_col] = combined.groupby(grp)[freq_col].transform("min")
 
-    weather_cols = {
-        "weather_temp_max", "weather_temp_min", "weather_precip_mm",
-        "weather_wind_kmh", "weather_precip_prev3",
-    }
-    numeric_cols = combined.select_dtypes(include=["number"]).columns.difference(weather_cols)
-    if len(numeric_cols) > 0:
-        combined.loc[:, numeric_cols] = combined.loc[:, numeric_cols].fillna(0)
+    # Unknown measurements retain the missing-value branches learned during
+    # training. Only structural one-hot absences have a zero interpretation.
+    # add_time_features drops its temporary season label after encoding it.
+    # Include that explicit domain even when concatenation cannot recover it.
+    supported = {"race_type": ("Flat", "Hurdle", "Chase"), "sex": ("Male", "Female"),
+                 "season": ("Winter", "Spring", "Summer", "Autumn")}
+    for category in ("going", "race_class", "race_type", "region", "sex", "surface", "season"):
+        labels = set(supported.get(category, ()))
+        if category in combined:
+            labels.update(combined[category].dropna().unique())
+        # Match actual encoded category names. A numeric measurement such as
+        # going_numeric is not a dummy merely because its observed range is0/1.
+        for label in labels:
+            column = f"{category}_{label}"
+            if column in combined and pd.api.types.is_numeric_dtype(combined[column]):
+                observed = combined[column].dropna()
+                if observed.isin([0, 1]).all():
+                    combined[column] = combined[column].fillna(0)
 
     logger.info(
         "Feature engineering with history: %s historical + %s live = %s total rows",
@@ -166,7 +203,10 @@ def feature_store_signature(store=None) -> str:
     from src.featured_dataset import fe_signature
 
     store = store or FeatureStore()
-    parts = {"fe_signature": fe_signature(), "meta": store.meta()}
+    parts = {"fe_signature": fe_signature(), "meta": store.meta(),
+             "serving_inputs": _serving_input_signature()}
+    from src.feature_inputs import rtv_cache_signature
+    parts["rtv_inputs"] = rtv_cache_signature()
     for name in ("featured_path", "processed_path", "state_path", "counts_state_path"):
         path = getattr(store, name)
         try:
@@ -358,6 +398,8 @@ def features_for_live_cards(
     if last is not None and pd.Timestamp(date_str).normalize() <= pd.Timestamp(last).normalize():
         raise ValueError("Live prediction requires a race date after the stored results; use saved evaluations for historical races.")
     _require_current_history(last, date_str)
+    from src.prize_currency_features import prepare_prize_references
+    prepare_prize_references(cards)
     sig = cards_signature(cards)
     history_sig = feature_store_signature(store)
     if use_cache:
@@ -366,11 +408,9 @@ def features_for_live_cards(
             return cached
     card = cards.copy()
     card = _match_store_id_types(card)
-    card["won"] = 0
-    card["finish_position"] = 0
-    card["finish_time_secs"] = 0.0
-    card["lengths_behind"] = float("nan")
-    processed = process_data(df=card, save=False)
+    from src.result_status import pending_card
+    card = pending_card(card)
+    processed = stable_card_indicators(process_data(df=card, save=False))
     featured = store.featurize_live(processed)
     # Never publish features from a mixture of concurrent history generations.
     if feature_store_signature(store) != history_sig:

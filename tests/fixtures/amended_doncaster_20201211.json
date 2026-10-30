@@ -1,0 +1,181 @@
+{
+  "source_url": "https://www.sportinglife.com/racing/results/2020-12-11/doncaster/601907/sky-sports-racing-sky-415-handicap-hurdle",
+  "observed_at_utc": "2026-10-29T22:30:58.159588+00:00",
+  "response_sha256": "5fb0aed42c0e38cab1196a0967cd5700f9edae276bea7e8d29a2002c0c0b2ce3",
+  "scope": "Minimal factual result fixture; no profile or commentary text",
+  "payload": {
+    "props": {
+      "pageProps": {
+        "race": {
+          "race_summary": {
+            "race_summary_reference": {
+              "id": 601907,
+              "external_reference": []
+            },
+            "date": "2020-12-11",
+            "name": "Sky Sports Racing Sky 415 Handicap Hurdle",
+            "course_name": "Doncaster",
+            "going": "Good to Soft",
+            "distance": "2m 3f 88y",
+            "race_class": "3",
+            "time": "14:17",
+            "off_time": "14:17:45",
+            "winning_time": "4m 55.15s",
+            "ride_count": 8,
+            "has_handicap": true,
+            "course_surface": {
+              "surface": "TURF"
+            },
+            "race_stage": "WEIGHEDIN"
+          },
+          "rides": [
+            {
+              "ride_status": "RUNNER",
+              "finish_position": 2,
+              "amended_position": 1,
+              "finish_distance": "7",
+              "casualty": {},
+              "horse": {
+                "horse_reference": {
+                  "id": 887384,
+                  "external_reference": []
+                },
+                "name": "Ecco",
+                "age": 5,
+                "sex": {
+                  "type": "g"
+                }
+              }
+            },
+            {
+              "ride_status": "RUNNER",
+              "finish_position": 3,
+              "amended_position": 2,
+              "finish_distance": "1 \u00bc",
+              "casualty": {},
+              "horse": {
+                "horse_reference": {
+                  "id": 956982,
+                  "external_reference": []
+                },
+                "name": "Glynn",
+                "age": 6,
+                "sex": {
+                  "type": "g"
+                }
+              }
+            },
+            {
+              "ride_status": "RUNNER",
+              "finish_position": 4,
+              "amended_position": 3,
+              "finish_distance": "7",
+              "casualty": {},
+              "horse": {
+                "horse_reference": {
+                  "id": 898706,
+                  "external_reference": []
+                },
+                "name": "Group Stage",
+                "age": 4,
+                "sex": {
+                  "type": "g"
+                }
+              }
+            },
+            {
+              "ride_status": "RUNNER",
+              "finish_position": 5,
+              "amended_position": 4,
+              "finish_distance": "23",
+              "casualty": {},
+              "horse": {
+                "horse_reference": {
+                  "id": 926826,
+                  "external_reference": []
+                },
+                "name": "Carys' Commodity",
+                "age": 5,
+                "sex": {
+                  "type": "g"
+                }
+              }
+            },
+            {
+              "ride_status": "RUNNER",
+              "finish_position": 6,
+              "amended_position": 5,
+              "finish_distance": "11",
+              "casualty": {},
+              "horse": {
+                "horse_reference": {
+                  "id": 425627,
+                  "external_reference": []
+                },
+                "name": "Canyon City",
+                "age": 7,
+                "sex": {
+                  "type": "g"
+                }
+              }
+            },
+            {
+              "ride_status": "RUNNER",
+              "finish_position": 1,
+              "amended_position": 6,
+              "casualty": {},
+              "horse": {
+                "horse_reference": {
+                  "id": 23244,
+                  "external_reference": []
+                },
+                "name": "Eaton Hill",
+                "age": 8,
+                "sex": {
+                  "type": "g"
+                }
+              }
+            },
+            {
+              "ride_status": "RUNNER",
+              "finish_position": 0,
+              "casualty": {
+                "reason": "PulledUp"
+              },
+              "horse": {
+                "horse_reference": {
+                  "id": 878245,
+                  "external_reference": []
+                },
+                "name": "Clarendon Street",
+                "age": 7,
+                "sex": {
+                  "type": "g"
+                }
+              }
+            },
+            {
+              "ride_status": "RUNNER",
+              "finish_position": 0,
+              "casualty": {
+                "reason": "PulledUp"
+              },
+              "horse": {
+                "horse_reference": {
+                  "id": 873078,
+                  "external_reference": []
+                },
+                "name": "Doctor Dex",
+                "age": 7,
+                "sex": {
+                  "type": "g"
+                }
+              }
+            }
+          ]
+        },
+        "isUkorIreMeeting": true
+      }
+    }
+  }
+}
