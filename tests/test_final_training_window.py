@@ -55,12 +55,11 @@ def test_training_only_keeps_latest_history_without_fabricated_test(history):
 
 
 @pytest.mark.parametrize("win_only", [True, False])
-@pytest.mark.parametrize("framework", ["lgbm", "xgb", "cat"])
-def test_as_of_native_fit_uses_latest_allowed_date_and_never_future(history, monkeypatch, win_only, tmp_path, framework):
+def test_as_of_native_fit_uses_latest_allowed_date_and_never_future(history, monkeypatch, win_only, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(config, "EARLY_STOPPING_ROUNDS", 2)
     monkeypatch.setattr(config, "WIN_SOFT_LABEL_DISTILL", False)
-    predictor = RacePredictor(frameworks={"classifier": framework, "place": framework})
+    predictor = RacePredictor(frameworks={"classifier": "lgbm", "place": "lgbm"})
     predictor._autotune_njobs = 1
     cutoff = history.race_date.max() - pd.Timedelta(days=20)
     last_signal = float(history.loc[history.race_date <= cutoff, "signal"].max())
@@ -117,17 +116,14 @@ def test_as_of_future_changes_cannot_change_fit(history, monkeypatch):
     assert predictors[0].clf_model.booster_.model_to_string() == predictors[1].clf_model.booster_.model_to_string()
 
 
-@pytest.mark.parametrize("framework,selected,expected", [
-    ("lgbm", SimpleNamespace(best_iteration_=7), 7),
-    ("lgbm", SimpleNamespace(best_iteration_=0, n_estimators_=11), 11),
-    ("lgbm", _SoftLabelClassifier(SimpleNamespace(best_iteration_=9)), 9),
-    ("xgb", SimpleNamespace(best_iteration=6), 7),
-    ("cat", SimpleNamespace(get_best_iteration=lambda: 6), 7),
-    ("cat", SimpleNamespace(get_best_iteration=lambda: -1, tree_count_=11), 11),
+@pytest.mark.parametrize("selected,expected", [
+    (SimpleNamespace(best_iteration_=7), 7),
+    (SimpleNamespace(best_iteration_=0, n_estimators_=11), 11),
+    (_SoftLabelClassifier(SimpleNamespace(best_iteration_=9)), 9),
 ])
-def test_refit_uses_selected_capacity_all_training_rows_and_no_holdout(history, framework, selected, expected):
+def test_refit_uses_selected_capacity_all_training_rows_and_no_holdout(history, selected, expected):
     data = prepare_multi_target_data(history, holdout_days=30)
-    predictor = RacePredictor(frameworks={"classifier": framework, "place": "lgbm"})
+    predictor = RacePredictor(frameworks={"classifier": "lgbm", "place": "lgbm"})
     predictor.eval_split_info = {}
     params = {"n_estimators": 100, "learning_rate": .05}
     weights = np.linspace(1, 2, len(data["X_train"]))
@@ -160,15 +156,12 @@ def test_refit_refuses_unknown_capacity(history):
                                         np.ones((3, 1)), np.array([1, 0, 0]), {})
 
 
-@pytest.mark.parametrize("framework", ["lgbm", "xgb", "cat"])
-def test_real_training_refits_both_models_without_holdout_rows(history, monkeypatch, framework, tmp_path):
-    # CatBoost writes training diagnostics by default; keep them out of the
-    # user's working directory and any real training job's diagnostics.
+def test_real_training_refits_both_models_without_holdout_rows(history, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(config, "CV_N_FOLDS", 2)
     monkeypatch.setattr(config, "EARLY_STOPPING_ROUNDS", 2)
     monkeypatch.setattr(config, "WIN_SOFT_LABEL_DISTILL", False)
-    predictor = RacePredictor(frameworks={"classifier": framework, "place": framework})
+    predictor = RacePredictor(frameworks={"classifier": "lgbm", "place": "lgbm"})
     # Deliberately miscalibrated independent marginals make the adjustment
     # observable; old evaluation reported .9 while serving constrained them.
     monkeypatch.setattr(predictor, "_calibrate_place_probs", lambda p: np.full(len(p), .9))

@@ -206,7 +206,7 @@ def get_data(frac: float):
     return prepare_multi_target_data(df)
 
 
-def fit_raw(data, params, calib_frac=0.15, framework="lgbm", recency_hl=None):
+def fit_raw(data, params, calib_frac=0.15, recency_hl=None):
     """Fit once; return raw (per-race-normalised) probs on calib + test."""
     Xtr, ytr = data["X_train"], data["y_train_won"]
     gtr = data["groups_train"]
@@ -222,17 +222,9 @@ def fit_raw(data, params, calib_frac=0.15, framework="lgbm", recency_hl=None):
         from src.model import compute_recency_sample_weights
         sw = compute_recency_sample_weights(data["train_race_dates"][:row_cut], half_life_days=recency_hl)
     t0 = time.time()
-    if framework == "cat":
-        from catboost import CatBoostClassifier
-        m = CatBoostClassifier(
-            iterations=params.get("n_estimators", 2000), depth=params.get("max_depth", 6),
-            learning_rate=max(params.get("learning_rate", 0.03), 0.03),
-            l2_leaf_reg=params.get("reg_lambda", 3.0), verbose=0, allow_writing_files=False)
-        m.fit(Xf, yf, sample_weight=sw)
-    else:
-        import lightgbm as lgb
-        m = lgb.LGBMClassifier(**params)
-        m.fit(Xf, yf, sample_weight=sw)
+    import lightgbm as lgb
+    m = lgb.LGBMClassifier(**params)
+    m.fit(Xf, yf, sample_weight=sw)
     fit_s = time.time() - t0
     pc = _grouped_normalize(m.predict_proba(Xc)[:, 1], g_cal)
     pt = _grouped_normalize(m.predict_proba(data["X_test"])[:, 1], data["groups_test"])
@@ -414,78 +406,10 @@ def exp_distill(data):
         _print(eval_calib(raw, calib="platt", label=f"{name}[platt]"))
 
 
-def exp_dl(data):
-    """Benchmark a deep-learning tabular model (pytabkit RealMLP / TabM) vs LightGBM.
-
-    DL models need clean numeric input, so NaNs are median-imputed (fit on the
-    train slice). Same per-race-normalise + Platt calibration + eval as the
-    LGBM path, so numbers are directly comparable.
-    """
-    import time
-    Xtr = data["X_train"]; gtr = data["groups_train"]
-    cut = int(len(Xtr) * 0.85); cum = np.cumsum(gtr); rc = int(np.searchsorted(cum, cut))
-    row = int(cum[rc - 1]) if rc > 0 else 0
-    g_cal = gtr[rc:]
-    yf = np.asarray(data["y_train_won"][:row]).astype(int)
-
-    # median impute (fit on train-fit slice), then standardize-friendly float32
-    med = np.nanmedian(Xtr[:row].astype(np.float64), axis=0)
-    med = np.where(np.isfinite(med), med, 0.0)
-    def _imp(X):
-        X = X.astype(np.float32).copy()
-        bad = ~np.isfinite(X)
-        if bad.any():
-            X[bad] = np.take(med, np.where(bad)[1]).astype(np.float32)
-        return np.ascontiguousarray(X)
-    Xf, Xc, Xte = _imp(Xtr[:row]), _imp(Xtr[row:]), _imp(data["X_test"])
-
-    # LightGBM reference (same harness, full features)
-    _print(eval_calib(fit_raw(data, BASE_PARAMS), calib="platt", label="lgbm(ref)"))
-
-    # Optionally feed the DL models only the top-K features by LGBM importance
-    # (485-feature MLPs are intractable on CPU); LightGBM keeps all features.
-    topk = int(os.environ.get("MODEL_LAB_TOPK", "0"))
-    if topk > 0 and topk < Xf.shape[1]:
-        import lightgbm as lgb
-        _imp_m = lgb.LGBMClassifier(n_estimators=400, num_leaves=31, learning_rate=0.05,
-                                    n_jobs=-1, verbose=-1).fit(Xtr[:row], yf)
-        keep = np.argsort(_imp_m.feature_importances_)[::-1][:topk]
-        Xf, Xc, Xte = Xf[:, keep], Xc[:, keep], Xte[:, keep]
-        print(f"DL feature-reduced to top-{topk} by LGBM importance", flush=True)
-
-    models = []
-    try:
-        from pytabkit import RealMLP_TD_S_Classifier
-        models.append(("RealMLP_TD_S", RealMLP_TD_S_Classifier))
-    except Exception as e:
-        print("RealMLP import failed:", e)
-    try:
-        from pytabkit import TabM_D_Classifier
-        models.append(("TabM_D", TabM_D_Classifier))
-    except Exception as e:
-        print("TabM import failed:", e)
-
-    for name, Cls in models:
-        try:
-            m = Cls(random_state=0)
-        except TypeError:
-            m = Cls()
-        t0 = time.time()
-        m.fit(Xf, yf)
-        fit_s = round(time.time() - t0, 1)
-        raw = dict(pc=_grouped_normalize(m.predict_proba(Xc)[:, 1], g_cal),
-                   yc=np.asarray(data["y_train_won"][row:]).astype(float), g_cal=g_cal,
-                   pt=_grouped_normalize(m.predict_proba(Xte)[:, 1], data["groups_test"]),
-                   yte=data["y_test_won"].astype(float), gte=data["groups_test"],
-                   test_df=data["test_df"], fit_s=fit_s, n_feat=Xtr.shape[1])
-        _print(eval_calib(raw, calib="none", label=f"{name}[raw]"))
-        _print(eval_calib(raw, calib="platt", label=f"{name}[platt]"))
-
-
 def exp_mlp(data):
     """Fast, controllable DL baseline: sklearn MLP with early stopping.
 
-    RealMLP/TabM (pytabkit) are intractable on CPU here; this gives an actual
+    Modern tabular DL (RealMLP/TabM) proved intractable on CPU here; this gives an actual
     neural-net number vs LightGBM. Weaker than modern tabular DL, but bounded.
     """
     import time
@@ -517,11 +441,6 @@ def exp_mlp(data):
                    yte=data["y_test_won"].astype(float), gte=data["groups_test"],
                    test_df=data["test_df"], fit_s=fit_s, n_feat=Xf.shape[1])
         _print(eval_calib(raw, calib="platt", label=f"MLP{hl}[platt]"))
-
-
-def exp_framework(data):
-    _print(eval_calib(fit_raw(data, BASE_PARAMS, framework="lgbm"), calib="platt", label="lgbm(platt)"))
-    _print(eval_calib(fit_raw(data, BASE_PARAMS, framework="cat"), calib="platt", label="catboost(platt)"))
 
 
 def write_allowlist(k: int, frac: float = 1.0) -> None:
@@ -711,10 +630,8 @@ EXPERIMENTS = {
     "reg": exp_reg,
     "capacity": exp_capacity,
     "recency": exp_recency,
-    "framework": exp_framework,
     "ensemble": exp_ensemble,
     "distill": exp_distill,
-    "dl": exp_dl,
     "mlp": exp_mlp,
     "place_ab": exp_place_ab,
     "prune": exp_prune,

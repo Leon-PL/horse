@@ -76,8 +76,8 @@ prices; `scripts/audit_selection_rule.py` reports both.
 - Run `scripts/tooling.ps1 test` for pilot checks or
   `scripts/tooling.ps1 test -TestPath tests` for the full suite. See
   [development tools](docs/DEVELOPMENT_TOOLS.md) for compatibility limits.
-- Default model framework is **LightGBM** (see
-  `config.SUB_MODEL_FRAMEWORKS`), not XGBoost/CatBoost.
+- **LightGBM** is the only model framework. XGBoost and CatBoost were
+  removed on 2026-10-30; `RacePredictor` rejects any other framework.
 - `data/` and `models/` are gitignored and large; run snapshots are
   pruned from the Experiments tab (Delete Runs → Disk Usage & Pruning).
 - Performance: features are computed over hundreds of thousands of rows —

@@ -14,8 +14,6 @@ blinker==1.9.0 ; sys_platform == 'win32'
     # via streamlit
 cachetools==6.2.6 ; sys_platform == 'win32'
     # via streamlit
-catboost==1.2.10 ; sys_platform == 'win32'
-    # via horse-racing-probabilities
 certifi==2026.10.23 ; sys_platform == 'win32'
     # via
     #   curl-cffi
@@ -26,26 +24,20 @@ charset-normalizer==3.5.2 ; sys_platform == 'win32'
     # via requests
 click==8.5.0 ; sys_platform == 'win32'
     # via streamlit
+cloudpickle==3.1.2 ; sys_platform == 'win32'
+    # via shap
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   colorlog
     #   tqdm
 colorlog==6.12.0 ; sys_platform == 'win32'
     # via optuna
-contourpy==1.4.0 ; sys_platform == 'win32'
-    # via matplotlib
 curl-cffi==0.15.0 ; sys_platform == 'win32'
     # via horse-racing-probabilities
-cycler==0.12.1 ; sys_platform == 'win32'
-    # via matplotlib
-fonttools==4.68.0 ; sys_platform == 'win32'
-    # via matplotlib
 gitdb==4.0.12 ; sys_platform == 'win32'
     # via gitpython
 gitpython==3.2.1 ; sys_platform == 'win32'
     # via streamlit
-graphviz==0.21 ; sys_platform == 'win32'
-    # via catboost
 idna==3.20 ; sys_platform == 'win32'
     # via requests
 jinja2==3.1.6 ; sys_platform == 'win32'
@@ -60,16 +52,10 @@ jsonschema==4.26.0 ; sys_platform == 'win32'
     # via altair
 jsonschema-specifications==2025.9.1 ; sys_platform == 'win32'
     # via jsonschema
-kiwisolver==1.5.1 ; sys_platform == 'win32'
-    # via matplotlib
 lightgbm==4.6.0 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 llvmlite==0.46.0 ; sys_platform == 'win32'
-    # via
-    #   horse-racing-probabilities
-    #   numba
-lxml==6.0.2 ; sys_platform == 'win32'
-    # via horse-racing-probabilities
+    # via numba
 mako==1.4.3 ; sys_platform == 'win32'
     # via alembic
 markdown-it-py==4.2.0 ; sys_platform == 'win32'
@@ -78,8 +64,6 @@ markupsafe==3.0.4 ; sys_platform == 'win32'
     # via
     #   jinja2
     #   mako
-matplotlib==3.11.2 ; sys_platform == 'win32'
-    # via catboost
 mdurl==0.1.2 ; sys_platform == 'win32'
     # via markdown-it-py
 narwhals==2.28.0 ; sys_platform == 'win32'
@@ -90,43 +74,38 @@ numba==0.64.0 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 numpy==2.4.2 ; sys_platform == 'win32'
     # via
-    #   catboost
-    #   contourpy
     #   horse-racing-probabilities
     #   lightgbm
-    #   matplotlib
     #   numba
     #   optuna
     #   pandas
     #   pydeck
     #   scikit-learn
     #   scipy
+    #   shap
     #   streamlit
-    #   xgboost
 optuna==4.7.0 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 packaging==26.3 ; sys_platform == 'win32'
     # via
     #   altair
-    #   matplotlib
     #   optuna
     #   plotly
+    #   shap
     #   streamlit
 pandas==2.3.3 ; sys_platform == 'win32'
     # via
-    #   catboost
     #   horse-racing-probabilities
+    #   shap
     #   streamlit
 pillow==12.3.0 ; sys_platform == 'win32'
-    # via
-    #   matplotlib
-    #   streamlit
+    # via streamlit
 plotly==6.5.2 ; sys_platform == 'win32'
-    # via
-    #   catboost
-    #   horse-racing-probabilities
+    # via horse-racing-probabilities
 protobuf==6.33.6 ; sys_platform == 'win32'
     # via streamlit
+psutil==7.2.2 ; sys_platform == 'win32'
+    # via horse-racing-probabilities
 pyarrow==23.0.1 ; sys_platform == 'win32'
     # via
     #   horse-racing-probabilities
@@ -137,12 +116,8 @@ pydeck==0.9.3 ; sys_platform == 'win32'
     # via streamlit
 pygments==2.21.0 ; sys_platform == 'win32'
     # via rich
-pyparsing==3.3.3 ; sys_platform == 'win32'
-    # via matplotlib
 python-dateutil==3.0.0 ; sys_platform == 'win32'
-    # via
-    #   matplotlib
-    #   pandas
+    # via pandas
 python-dotenv==1.2.2 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 pytz==2026.6 ; sys_platform == 'win32'
@@ -164,19 +139,23 @@ rpds-py==2026.9.1 ; sys_platform == 'win32'
     #   jsonschema
     #   referencing
 scikit-learn==1.8.0 ; sys_platform == 'win32'
-    # via horse-racing-probabilities
+    # via
+    #   horse-racing-probabilities
+    #   shap
 scipy==1.17.1 ; sys_platform == 'win32'
     # via
-    #   catboost
     #   horse-racing-probabilities
     #   lightgbm
     #   scikit-learn
-    #   xgboost
+    #   shap
+shap==0.54.1 ; sys_platform == 'win32'
+    # via horse-racing-probabilities
 six==1.17.0 ; sys_platform == 'win32'
     # via
-    #   catboost
     #   python-dateutil
     #   trueskill
+slicer==0.0.8 ; sys_platform == 'win32'
+    # via shap
 smmap==5.0.3 ; sys_platform == 'win32'
     # via gitdb
 soupsieve==3.0.4 ; sys_platform == 'win32'
@@ -196,7 +175,9 @@ toml==0.10.2 ; sys_platform == 'win32'
 tornado==6.6 ; sys_platform == 'win32'
     # via streamlit
 tqdm==4.70.1 ; sys_platform == 'win32'
-    # via optuna
+    # via
+    #   optuna
+    #   shap
 trueskill==0.4.5 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 typing-extensions==4.16.0 ; sys_platform == 'win32'
@@ -214,5 +195,3 @@ urllib3==2.8.0 ; sys_platform == 'win32'
     # via requests
 watchdog==6.0.0 ; sys_platform == 'win32'
     # via streamlit
-xgboost==2.1.4 ; sys_platform == 'win32'
-    # via horse-racing-probabilities

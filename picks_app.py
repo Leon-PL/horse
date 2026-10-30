@@ -736,7 +736,7 @@ with st.sidebar.expander("⚙️ Value Strategy", expanded=False):
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
-    "<small>Built with Streamlit · XGBoost · LightGBM · CatBoost<br>"
+    "<small>Built with Streamlit · LightGBM<br>"
     "⚠️ For educational purposes only</small>",
     unsafe_allow_html=True,
 )

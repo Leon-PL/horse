@@ -267,7 +267,7 @@ elif page == "🤖 Train":
 
     with st.form("train_cfg"):
         name = st.text_input("Run name", value="training run")
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
             refresh = st.checkbox("Catch-up scrape first", value=False)
             catchup = st.number_input("Catch-up days", 1, 90, 14,
@@ -281,13 +281,6 @@ elif page == "🤖 Train":
                 "Evaluate on latest (days)", 1, 730, 90,
                 help="These recent races measure model quality and are kept out of fitting.",
             )
-        with col3:
-            clf = st.selectbox("Win framework", ["lgbm", "cat", "xgb"],
-                               index=["lgbm", "cat", "xgb"].index(
-                                   config.SUB_MODEL_FRAMEWORKS.get("classifier", "lgbm")))
-            place = st.selectbox("Place framework", ["lgbm", "cat", "xgb"],
-                                 index=["lgbm", "cat", "xgb"].index(
-                                     config.SUB_MODEL_FRAMEWORKS.get("place", "lgbm")))
         colb1, colb2 = st.columns(2)
         with colb1:
             blend = st.checkbox("Blend market odds (Benter anchor)", value=False,
@@ -309,7 +302,7 @@ elif page == "🤖 Train":
             name=name, refresh_data=refresh, catchup_days=int(catchup),
             train_window_days=None if full_hist else int(window),
             holdout_days=int(holdout_days),
-            frameworks={"classifier": clf, "place": place},
+            frameworks=dict(config.SUB_MODEL_FRAMEWORKS),
             blend_market_odds=blend, run_walk_forward=wf,
             win_calibration_method=calibration,
             value_config=dict(DEFAULT_VALUE_CONFIG),
@@ -410,11 +403,6 @@ elif page == "🧭 Tune":
             t_full = st.checkbox("Full history", value=False)
             t_window = st.number_input("Window (days)", 90, 3000, 600,
                                        help="Used only when 'Full history' is UNticked.")
-        tf1, tf2 = st.columns(2)
-        with tf1:
-            t_clf = st.selectbox("Win framework", ["lgbm", "cat", "xgb"], key="t_clf")
-        with tf2:
-            t_place = st.selectbox("Place framework", ["lgbm", "cat", "xgb"], key="t_place")
         tsub = st.form_submit_button("🔎 Run search", type="primary")
 
     if tsub:
@@ -422,7 +410,7 @@ elif page == "🧭 Tune":
             st.warning("Pick at least one model to tune.")
         else:
             featured = _window_days(_load_featured(), None if t_full else int(t_window))
-            frameworks = {"classifier": t_clf, "place": t_place}
+            frameworks = dict(config.SUB_MODEL_FRAMEWORKS)
             session = create_autotune_session(
                 name=tname, dataset_meta={"rows": int(len(featured)),
                                           "window_days": None if t_full else int(t_window)},

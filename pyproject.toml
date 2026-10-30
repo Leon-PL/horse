@@ -3,35 +3,36 @@ name = "horse-racing-probabilities"
 version = "0.1.0"
 description = "Local horse-racing data, probability models and forecast evaluation"
 requires-python = ">=3.14,<3.15"
-# Keep the installed stack's direct versions for the isolated tooling project.
-# Its unavailable llvmlite prerelease is replaced here by published 0.46.0;
-# the live environment is not synchronized or upgraded.
+# Keep the installed stack's direct versions for the isolated tooling project;
+# the live environment is not synchronized or upgraded. Exception: shap. The
+# live 0.50.0 pins an unavailable numba prerelease on Python 3.14, so the lock
+# uses 0.54.1, the first release that resolves with numba 0.64.0.
+# Every entry is imported by project code; XGBoost, CatBoost and lxml were
+# removed on 2026-10-30 (unused), and llvmlite is left to numba.
 dependencies = [
     "pandas==2.3.3",
     "numpy==2.4.2",
     "scipy==1.17.1",
     "scikit-learn==1.8.0",
-    "xgboost==2.1.4",
     "lightgbm==4.6.0",
-    "catboost==1.2.10",
     "requests==2.32.5",
     "curl-cffi==0.15.0",
     "beautifulsoup4==4.14.3",
-    "lxml==6.0.2",
     "streamlit==1.54.0",
     "plotly==6.5.2",
     "optuna==4.7.0",
     "joblib==1.5.3",
     "numba==0.64.0",
-    "llvmlite==0.46.0",
     "pyarrow==23.0.1",
     "python-dotenv==1.2.2",
     "trueskill==0.4.5",
+    "shap==0.54.1",
+    "psutil==7.2.2",
 ]
 
 [dependency-groups]
 dev = ["pytest==9.0.3", "hypothesis>=6.0", "ruff>=0.15"]
-tooling = ["pandera[pandas]>=0.26", "duckdb>=1.4", "psutil==7.2.2"]
+tooling = ["pandera[pandas]>=0.26", "duckdb>=1.4"]
 
 [tool.uv]
 # This is a local script project, not an installable src-layout distribution.

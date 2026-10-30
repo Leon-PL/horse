@@ -3,9 +3,7 @@ Data Collector Module
 =====================
 Collects horse racing data from freely available public sources.
 
-Primary sources:
-1. Sample/synthetic data generator for immediate testing
-2. Web scraper for publicly available racing results
+Provides a sample/synthetic data generator for testing the pipeline.
 
 The sample data generator creates realistic horse racing data based on
 real-world distributions, making it perfect for developing and testing
@@ -13,16 +11,12 @@ the prediction pipeline before connecting to live data sources.
 """
 
 import os
-import time
 import random
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
 
 import numpy as np
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
 
 import config
 
@@ -268,115 +262,6 @@ def generate_sample_data(
 # Web scraper for free public racing data
 # ---------------------------------------------------------------------------
 
-class RacingDataScraper:
-    """
-    Scrapes publicly available horse racing results from free websites.
-    Uses respectful scraping practices (delays, user-agent identification).
-    """
-
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": config.USER_AGENT})
-
-    def _get_page(self, url: str) -> Optional[BeautifulSoup]:
-        """Fetch a page with rate limiting and error handling."""
-        try:
-            time.sleep(config.REQUEST_DELAY)
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            return BeautifulSoup(response.text, "lxml")
-        except requests.RequestException as e:
-            logger.warning(f"Failed to fetch {url}: {e}")
-            return None
-
-    def scrape_racing_post_results(
-        self,
-        date: str,
-    ) -> list[dict]:
-        """
-        Scrape race results from a public racing results page.
-
-        NOTE: Web scraping is fragile and site-specific. This is a template
-        that demonstrates the approach. You may need to adjust selectors
-        based on the target website's current structure.
-
-        Args:
-            date: Date string in YYYY-MM-DD format
-        """
-        results = []
-        url = f"https://www.racingpost.com/results/{date}"
-        logger.info(f"Scraping results for {date} from {url}")
-
-        soup = self._get_page(url)
-        if not soup:
-            return results
-
-        # NOTE: Selectors below are illustrative; actual selectors depend
-        # on the website's current HTML structure and may need updating.
-        race_cards = soup.find_all("div", class_="rp-raceTimeCourseName")
-
-        for card in race_cards:
-            try:
-                track_elem = card.find("a", class_="rp-raceTimeCourseName__name")
-                track = track_elem.text.strip() if track_elem else "Unknown"
-
-                rows = card.find_next("table").find_all("tr")
-                for row in rows[1:]:  # Skip header
-                    cols = row.find_all("td")
-                    if len(cols) >= 5:
-                        results.append(
-                            {
-                                "race_date": date,
-                                "track": track,
-                                "finish_position": cols[0].text.strip(),
-                                "horse_name": cols[1].text.strip(),
-                                "jockey": cols[2].text.strip(),
-                                "trainer": cols[3].text.strip(),
-                                "odds": cols[4].text.strip(),
-                            }
-                        )
-            except Exception as e:
-                logger.warning(f"Error parsing race card: {e}")
-                continue
-
-        return results
-
-    def scrape_date_range(
-        self,
-        start_date: str,
-        end_date: str,
-    ) -> pd.DataFrame:
-        """
-        Scrape results for a range of dates.
-
-        Args:
-            start_date: Start date in YYYY-MM-DD format
-            end_date: End date in YYYY-MM-DD format
-        """
-        all_results = []
-        current = datetime.strptime(start_date, "%Y-%m-%d")
-        end = datetime.strptime(end_date, "%Y-%m-%d")
-
-        while current <= end:
-            date_str = current.strftime("%Y-%m-%d")
-            day_results = self.scrape_racing_post_results(date_str)
-            all_results.extend(day_results)
-            logger.info(
-                f"  {date_str}: {len(day_results)} results collected"
-            )
-            current += timedelta(days=1)
-
-        df = pd.DataFrame(all_results)
-        if not df.empty:
-            output_path = os.path.join(
-                config.RAW_DATA_DIR, "scraped_results.csv"
-            )
-            df.to_csv(output_path, index=False)
-            logger.info(f"Saved {len(df)} scraped results to {output_path}")
-
-        return df
-
-
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -391,21 +276,17 @@ def collect_data(
     Main function to collect horse racing data.
 
     Args:
-        source: "sample" for synthetic data, "scrape" for web scraping
+        source: "sample" for synthetic data (the only source here; real
+            results come from src.data_scraper via src.data_collector)
         num_races: Number of races for synthetic data generation
-        start_date: Start date for scraping (YYYY-MM-DD)
-        end_date: End date for scraping (YYYY-MM-DD)
+        start_date, end_date: Unused; kept for call compatibility
 
     Returns:
         DataFrame with race results
     """
     if source == "sample":
         return generate_sample_data(num_races=num_races)
-    elif source == "scrape":
-        scraper = RacingDataScraper()
-        return scraper.scrape_date_range(start_date, end_date)
-    else:
-        raise ValueError(f"Unknown data source: {source}")
+    raise ValueError(f"Unknown data source: {source}")
 
 
 if __name__ == "__main__":

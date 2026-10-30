@@ -73,19 +73,6 @@ TEST_SIZE = 0.2
 RANDOM_SEED = 42
 
 # --- Classifier Hyperparameters ---
-XGBOOST_PARAMS = {
-    "n_estimators": 300,
-    "max_depth": 5,
-    "learning_rate": 0.05,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 3,
-    "reg_alpha": 0.1,
-    "reg_lambda": 1.0,
-    "random_state": RANDOM_SEED,
-    "n_jobs": -1,
-}
-
 LIGHTGBM_PARAMS = {
     "n_estimators": 300,
     "max_depth": 5,
@@ -102,7 +89,7 @@ LIGHTGBM_PARAMS = {
 
 # --- Per-Sub-Model Hyperparameters (Triple Ensemble) ---
 # Each sub-model can have independent tuning.
-# These override XGBOOST_PARAMS / LIGHTGBM_PARAMS where set.
+# These override LIGHTGBM_PARAMS where set.
 
 CLASSIFIER_PARAMS = {
     "n_estimators": 4000,
@@ -130,8 +117,8 @@ PLACE_CLASSIFIER_PARAMS = {
 }
 
 # --- Sub-Model Framework Selection ---
-# For each sub-model role, choose "xgb" (XGBoost), "lgbm" (LightGBM),
-# or "cat" (CatBoost).
+# LightGBM ("lgbm") is the only supported framework; the per-role mapping is
+# kept because saved runs and training recipes record it.
 SUB_MODEL_FRAMEWORKS: dict[str, str] = {
     "classifier": "lgbm",  # Win classifier
     "place": "lgbm",       # Place classifier

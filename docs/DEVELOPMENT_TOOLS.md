@@ -48,14 +48,26 @@ are retained except that the old `llvmlite==0.46.0b1` was unavailable from the
 package index; the isolated environment uses published `0.46.0`. Transitive
 dependencies are resolved and locked separately.
 
-Optional SHAP explanation support is outside this core/tooling lock: its old
-`0.50.0` dependency metadata required the unavailable prerelease. The existing
-live installation retains its SHAP package. This pilot does not establish
-compatibility with every old artifact or optional UI feature.
+SHAP (race explanations in the picks app) is locked at `0.54.1`, the first
+release that resolves with `numba==0.64.0`; the live installation's `0.50.0`
+pins an unavailable numba prerelease on Python 3.14 and cannot be locked.
+`psutil` is a runtime dependency because `build_feature_store_batched.py`
+imports it.
+
+On 2026-10-30 every direct dependency was checked against the project's
+imports. XGBoost, CatBoost and lxml had no remaining use and were removed with
+their code paths (the XGBoost/CatBoost training options, the CatBoost and
+pytabkit experiments in `scripts/model_lab.py`, and an unused template scraper
+in `src/data_collector_sample.py`). All saved runs had used LightGBM only.
 
 H2O, FLAML, experimental neural-network packages and other unrelated extras
-are absent from the new graph. They are not uninstalled from the live
-environment. Previous requirements and installed versions are preserved under
+are absent from the new graph. On 2026-10-30 they were also uninstalled from
+the live `.venv`: 43 packages (about 5 GB, mostly a CUDA build of torch) that
+no project code imports. `greenlet` stays because the live SQLAlchemy 2.0.47
+needs it, unlike the locked 2.1.6. The pre-uninstall `pip freeze` and the
+removed list are in `data/audit/library_consolidation_20261030/`; restore with
+`.venv\Scripts\python.exe -m pip install -r <that list>`. The 2026-10-29
+requirements and installed versions are under
 `data/audit/library_consolidation_20261029/`.
 
 For a deliberate lock update, set `UV_PROJECT_ENVIRONMENT` to

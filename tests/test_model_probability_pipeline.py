@@ -117,9 +117,15 @@ def test_replacing_calibrators_is_independent_of_previous_mapping(monkeypatch):
 
 
 def test_framework_defaults_follow_project_configuration(monkeypatch):
-    monkeypatch.setattr(config, "SUB_MODEL_FRAMEWORKS", {"classifier": "lgbm", "place": "xgb"})
-    assert RacePredictor().frameworks == {"classifier": "lgbm", "place": "xgb"}
-    assert RacePredictor(frameworks={"place": "cat"}).frameworks == {"classifier": "lgbm", "place": "cat"}
+    monkeypatch.setattr(config, "SUB_MODEL_FRAMEWORKS", {"classifier": "lgbm"})
+    assert RacePredictor().frameworks == {"classifier": "lgbm"}
+    assert RacePredictor(frameworks={"place": "lgbm"}).frameworks == {"classifier": "lgbm", "place": "lgbm"}
+
+
+@pytest.mark.parametrize("framework", ["xgb", "cat"])
+def test_removed_frameworks_are_rejected(framework):
+    with pytest.raises(ValueError, match="Unsupported framework"):
+        RacePredictor(frameworks={"place": framework})
 
 
 def test_calibration_slab_purges_dates_and_preserves_soft_targets(monkeypatch):
@@ -226,7 +232,6 @@ def test_model_factory_uses_run_seed(role, monkeypatch):
             return self
 
     monkeypatch.setattr(model_module, "_ensure_lightgbm", lambda: None)
-    monkeypatch.setattr(model_module, "_ensure_xgboost", lambda: None)
     monkeypatch.setattr(model_module, "LGBMClassifier", Model)
     predictor = RacePredictor(frameworks={"classifier": "lgbm", "place": "lgbm"}, random_seed=1729)
     method = predictor._train_win_classifier if role == "classifier" else predictor._train_place_classifier

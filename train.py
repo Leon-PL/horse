@@ -11,8 +11,7 @@ Usage:
     python train.py --no-refresh             # skip the catch-up scrape
     python train.py --window-days 600        # train on the last 600 days only
     python train.py --backtest               # add walk-forward validation
-    python train.py --frameworks classifier=cat,place=lgbm
-    python train.py --promote                # promote the new run to production
+    python train.py --promote               # promote the new run to production
 """
 
 import argparse
@@ -38,7 +37,9 @@ logger = logging.getLogger("train")
 def _parse_frameworks(s: str | None) -> dict | None:
     if not s:
         return None
-    valid_vals = {"xgb", "lgbm", "cat"}
+    from src.model import SUPPORTED_FRAMEWORKS
+
+    valid_vals = set(SUPPORTED_FRAMEWORKS)
     out: dict[str, str] = {}
     for pair in s.split(","):
         k, _, v = pair.strip().partition("=")
@@ -96,7 +97,7 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=None,
                     help="limit workers used by native model fitting")
     ap.add_argument("--frameworks", default=None,
-                    help="e.g. 'classifier=cat,place=lgbm'")
+                    help="e.g. 'classifier=lgbm,place=lgbm' (LightGBM is the only framework)")
     ap.add_argument("--blend-market-odds", action="store_true",
                     help="enable the Benter market anchor (SP known only at off — optimistic)")
     ap.add_argument("--win-calibration", choices=("platt_isotonic", "race_temperature"),

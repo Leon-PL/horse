@@ -194,7 +194,7 @@ def test_train_run_orchestration(monkeypatch, walk_forward, with_incomplete_fiel
     monkeypatch.setattr(bt, "walk_forward_validation", _fake_walk_forward)
     cfg = tr.TrainingConfig(
         name="t", refresh_data=False, seed=123,
-        frameworks={"classifier": "xgb", "place": "lgbm"},
+        frameworks={"classifier": "lgbm", "place": "lgbm"},
         hyperparams={"classifier": {"n_estimators": 75}},
         run_walk_forward=walk_forward, wf_min_train_months=6,
         wf_fast_fold=False, blend_market_odds=True, win_calibration_method="race_temperature",

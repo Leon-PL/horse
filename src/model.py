@@ -12,7 +12,6 @@ import os
 import json
 import logging
 import warnings
-import importlib
 from math import comb
 from typing import Optional, Callable
 
@@ -37,16 +36,11 @@ from sklearn.metrics import (
     ndcg_score,
 )
 from sklearn.model_selection import GroupShuffleSplit
-# Gradient-boosting frameworks are imported lazily: importing lightgbm
-# alone can take 10-30 seconds on Windows (DLL scanning), and the
-# Streamlit app imports this module at startup. Training/prediction
-# entry points call _ensure_lightgbm()/_ensure_xgboost() before use.
+# LightGBM is imported lazily: importing it can take 10-30 seconds on
+# Windows (DLL scanning), and the Streamlit app imports this module at
+# startup. Training/prediction entry points call _ensure_lightgbm() first.
 LGBMRegressor = None
 LGBMClassifier = None
-XGBRegressor = None
-XGBClassifier = None
-CatBoostRegressor = None
-CatBoostClassifier = None
 
 
 def _ensure_lightgbm() -> None:
@@ -57,14 +51,6 @@ def _ensure_lightgbm() -> None:
         LGBMClassifier = lgb.LGBMClassifier
 
 
-def _ensure_xgboost() -> None:
-    global XGBRegressor, XGBClassifier
-    if XGBClassifier is None:
-        import xgboost as xgb
-        XGBRegressor = xgb.XGBRegressor
-        XGBClassifier = xgb.XGBClassifier
-
-
 def __getattr__(name: str):
     """PEP 562 lazy attributes — keeps ``from src.model import
     _FocalLGBMClassifier`` (used by pickled models) working without
@@ -72,7 +58,6 @@ def __getattr__(name: str):
     if name == "_FocalLGBMClassifier":
         return _get_focal_lgbm_class()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-Pool = None
 
 import config
 from src.bet_settlement import placed_mask, value_bet_selection as _value_bet_selection
@@ -307,19 +292,12 @@ def _explain_race_with_shap(
     return explanations, method_label
 
 
-def _require_catboost() -> None:
-    global CatBoostRegressor, CatBoostClassifier, Pool
-    if CatBoostRegressor is not None and CatBoostClassifier is not None and Pool is not None:
-        return
-    try:
-        cb = importlib.import_module("catboost")
-        CatBoostRegressor = cb.CatBoostRegressor
-        CatBoostClassifier = cb.CatBoostClassifier
-        Pool = cb.Pool
-    except Exception as e:
-        raise ImportError(
-            "CatBoost is required for framework='cat'. Install with: pip install catboost"
-        ) from e
+def _require_supported_framework(framework: str, role: str) -> None:
+    if framework not in SUPPORTED_FRAMEWORKS:
+        raise ValueError(
+            f"Unsupported framework {framework!r} for {role}; "
+            f"supported: {', '.join(SUPPORTED_FRAMEWORKS)}"
+        )
 
 
 def get_autotune_search_space(
@@ -330,38 +308,19 @@ def get_autotune_search_space(
 ) -> list[dict]:
     """Return the Optuna search-space spec for a sub-model/framework pair."""
     framework = str(framework)
-    specs: list[dict] = []
-
-    if framework == "cat":
-        specs.extend([
-            {"name": "n_estimators", "kind": "int", "low": 100, "high": 1200, "step": 50},
-            {"name": "depth", "kind": "int", "low": 4, "high": 10},
-            {"name": "learning_rate", "kind": "float", "low": 0.01, "high": 0.3, "log": True},
-            {"name": "l2_leaf_reg", "kind": "float", "low": 1e-3, "high": 20.0, "log": True},
-            {"name": "random_strength", "kind": "float", "low": 0.0, "high": 2.0},
-            {"name": "bagging_temperature", "kind": "float", "low": 0.0, "high": 2.0},
-        ])
-    else:
-        specs.extend([
-            {"name": "n_estimators", "kind": "int", "low": 100, "high": 3500, "step": 100},
-            {"name": "max_depth", "kind": "int", "low": 3, "high": 12},
-            {"name": "learning_rate", "kind": "float", "low": 0.005, "high": 0.3, "log": True},
-            {"name": "subsample", "kind": "float", "low": 0.5, "high": 1.0, "step": 0.05},
-            {"name": "colsample_bytree", "kind": "float", "low": 0.3, "high": 1.0, "step": 0.05},
-            {"name": "reg_alpha", "kind": "float", "low": 1e-8, "high": 10.0, "log": True},
-            {"name": "reg_lambda", "kind": "float", "low": 1e-8, "high": 10.0, "log": True},
-        ])
-        if framework == "xgb":
-            specs.extend([
-                {"name": "min_child_weight", "kind": "int", "low": 1, "high": 20},
-                {"name": "gamma", "kind": "float", "low": 0.0, "high": 5.0, "step": 0.1},
-            ])
-        elif framework == "lgbm":
-            specs.extend([
-                {"name": "min_child_samples", "kind": "int", "low": 10, "high": 40},
-                {"name": "num_leaves", "kind": "int", "low": 20, "high": 100},
-                {"name": "linear_tree", "kind": "categorical", "choices": [True, False]},
-            ])
+    _require_supported_framework(framework, model_key)
+    specs: list[dict] = [
+        {"name": "n_estimators", "kind": "int", "low": 100, "high": 3500, "step": 100},
+        {"name": "max_depth", "kind": "int", "low": 3, "high": 12},
+        {"name": "learning_rate", "kind": "float", "low": 0.005, "high": 0.3, "log": True},
+        {"name": "subsample", "kind": "float", "low": 0.5, "high": 1.0, "step": 0.05},
+        {"name": "colsample_bytree", "kind": "float", "low": 0.3, "high": 1.0, "step": 0.05},
+        {"name": "reg_alpha", "kind": "float", "low": 1e-8, "high": 10.0, "log": True},
+        {"name": "reg_lambda", "kind": "float", "low": 1e-8, "high": 10.0, "log": True},
+        {"name": "min_child_samples", "kind": "int", "low": 10, "high": 40},
+        {"name": "num_leaves", "kind": "int", "low": 20, "high": 100},
+        {"name": "linear_tree", "kind": "categorical", "choices": [True, False]},
+    ]
 
     if include_recency and model_key in {"classifier", "place"}:
         specs.extend([
@@ -618,7 +577,7 @@ EXCLUDE_COLUMNS = [
 ]
 
 # Market/odds-derived columns. Policy: market information is NEVER fed to
-# the LightGBM/CatBoost models directly — it enters ONLY via the optional
+# the LightGBM models directly — it enters ONLY via the optional
 # market anchor (Benter blend), toggled per-train via train(blend_market_odds).
 # These columns stay in the DataFrame (the anchor and betting analysis read
 # the raw ``odds``), but are always excluded from the model feature set.
@@ -663,31 +622,21 @@ EXCLUDE_COLUMNS += [
     for suffix in ("", "_vs_field", "_z_in_race", "_rank_pct_in_race", "_vs_best_in_race")
 ]
 
-# XGB-compatible hyperparameter names (used to filter params for
-# classifier sub-models that may receive tuned dicts)
-_XGB_VALID_HP = {
-    "n_estimators", "max_depth", "learning_rate", "subsample",
-    "colsample_bytree", "reg_alpha", "reg_lambda",
-    "min_child_weight", "gamma",
-}
-
-# LGBM-compatible hyperparameter names
+# LGBM-compatible hyperparameter names (used to filter tuned param dicts)
 _LGBM_VALID_HP = {
     "n_estimators", "max_depth", "learning_rate", "subsample",
     "colsample_bytree", "reg_alpha", "reg_lambda",
     "min_child_samples", "num_leaves", "linear_tree",
 }
 
-# CatBoost-compatible hyperparameter names
-_CAT_VALID_HP = {
-    "n_estimators", "depth", "learning_rate",
-    "l2_leaf_reg", "random_strength", "bagging_temperature",
-}
+# LightGBM is the only framework. XGBoost and CatBoost were removed on
+# 2026-10-30; no saved run had used either.
+SUPPORTED_FRAMEWORKS = ("lgbm",)
 
 # Default framework selection for each sub-model.
 DEFAULT_FRAMEWORKS: dict[str, str] = {
-    "classifier": "cat",
-    "place": "cat",
+    "classifier": "lgbm",
+    "place": "lgbm",
 }
 
 
@@ -1644,6 +1593,8 @@ class RacePredictor:
             **getattr(config, "SUB_MODEL_FRAMEWORKS", DEFAULT_FRAMEWORKS),
             **(frameworks or {}),
         }
+        for role, framework in self.frameworks.items():
+            _require_supported_framework(framework, role)
         self.random_seed = int(config.RANDOM_SEED if random_seed is None else random_seed)
         self.win_calibration_method = self._validate_win_calibration_method(
             getattr(config, "WIN_CALIBRATION_METHOD", "platt_isotonic")
@@ -1671,7 +1622,7 @@ class RacePredictor:
 
     # ── Framework-aware helpers ──────────────────────────────────
     def _clf_predict_proba(self, model, X) -> np.ndarray:
-        """Return P(class=1) from a classifier (XGB or LGBM)."""
+        """Return P(class=1) from a classifier."""
         return model.predict_proba(X)[:, 1]
 
     def _apply_market_anchor(
@@ -2215,7 +2166,7 @@ class RacePredictor:
             logger.info("  Phase-2 early stopping disabled by config")
 
         # 1) Win Classifier (Value Bets / Top Pick model)
-        _clf_fw = self.frameworks.get("classifier", "cat").upper()
+        _clf_fw = self.frameworks.get("classifier", "lgbm").upper()
         _cb(f"Phase 2 — Training Win Classifier ({_clf_fw}) …", 0.72)
         logger.info(f"Training Win Classifier ({_clf_fw}) — Value model …")
         _sw_clf_full = _weights_for_params(train_dates_full, _p.get("classifier"), sw_full)
@@ -2248,7 +2199,7 @@ class RacePredictor:
             )
 
         # 2) Place Classifier (EW model)
-        _place_fw = self.frameworks.get("place", "cat").upper()
+        _place_fw = self.frameworks.get("place", "lgbm").upper()
         _cb(f"Phase 2 — Training Place Classifier ({_place_fw}) …", 0.80)
         logger.info(f"Training Place Classifier ({_place_fw}) — EW model …")
         _sw_place_full = _weights_for_params(train_dates_full, _p.get("place"), sw_full)
@@ -2501,17 +2452,12 @@ class RacePredictor:
 
     # ── Sub-model factories ──────────────────────────────────────
     @staticmethod
-    def _filter_params(params: dict | None, framework: str = "xgb") -> dict:
+    def _filter_params(params: dict | None, framework: str = "lgbm") -> dict:
         """Keep only framework-compatible hyper-parameters."""
         if not params:
             return {}
-        if framework == "lgbm":
-            valid = _LGBM_VALID_HP
-        elif framework == "cat":
-            valid = _CAT_VALID_HP
-        else:
-            valid = _XGB_VALID_HP
-        return {k: v for k, v in params.items() if k in valid}
+        _require_supported_framework(framework, "params")
+        return {k: v for k, v in params.items() if k in _LGBM_VALID_HP}
 
     # ── Per-model Optuna auto-tuning ─────────────────────────────
     def _auto_tune_model(
@@ -2558,7 +2504,7 @@ class RacePredictor:
             "place": "maximize",
         }
 
-        fw = self.frameworks.get(model_key, "xgb")
+        fw = self.frameworks.get(model_key, "lgbm")
         _feat_cols = self.feature_cols
         _search_space = get_autotune_search_space(
             model_key,
@@ -2937,9 +2883,9 @@ class RacePredictor:
 
     def _train_classifier(self, X, y, scale_pos_weight=1.0, params=None, sample_weight=None, eval_set=None):
         _ensure_lightgbm()
-        _ensure_xgboost()
         _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
-        fw = self.frameworks.get("classifier", "xgb")
+        fw = self.frameworks.get("classifier", "lgbm")
+        _require_supported_framework(fw, "classifier")
         hp = {
             "n_estimators": config.CLASSIFIER_PARAMS.get("n_estimators", 500),
             "max_depth": config.CLASSIFIER_PARAMS.get("max_depth", 7),
@@ -2951,62 +2897,25 @@ class RacePredictor:
             "linear_tree": bool(config.CLASSIFIER_PARAMS.get("linear_tree", False)),
         }
         hp.update(self._filter_params(params, fw))
-        if fw == "lgbm":
-            logger.info(
-                "Training win classifier (legacy) with linear_tree=%s",
-                bool(hp.get("linear_tree", False)),
-            )
-            hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
-            model = _get_focal_lgbm_class()(
-                objective=_focal_binary_objective,
-                **hp,
-                subsample_freq=1,
-                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
-                n_jobs=self._autotune_njobs,
-                verbose=-1,
-            )
-            fit_kw: dict = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                from lightgbm import early_stopping as _lgb_es
-                fit_kw["eval_set"] = eval_set
-                fit_kw["eval_metric"] = _focal_logloss_eval
-                fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
-        elif fw == "cat":
-            _require_catboost()
-            hp_cat = {
-                "n_estimators": config.CLASSIFIER_PARAMS.get("n_estimators", 500),
-                "depth": config.CLASSIFIER_PARAMS.get("max_depth", 7),
-                "learning_rate": config.CLASSIFIER_PARAMS.get("learning_rate", 0.05),
-                "l2_leaf_reg": 3.0,
-            }
-            hp_cat.update(self._filter_params(params, "cat"))
-            model = CatBoostClassifier(
-                loss_function="Logloss",
-                auto_class_weights="Balanced",
-                random_seed=getattr(self, "random_seed", config.RANDOM_SEED),
-                verbose=False,
-                **hp_cat,
-            )
-            fit_kw = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                fit_kw["eval_set"] = eval_set
-                fit_kw["use_best_model"] = True
-                fit_kw["early_stopping_rounds"] = _es_rounds
-        else:
-            hp["min_child_weight"] = config.CLASSIFIER_PARAMS.get("min_child_weight", 3)
-            model = XGBClassifier(
-                objective="binary:logistic",
-                scale_pos_weight=scale_pos_weight,
-                eval_metric="logloss",
-                **hp,
-                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
-                n_jobs=self._autotune_njobs,
-            )
-            fit_kw = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                model.set_params(early_stopping_rounds=_es_rounds)
-                fit_kw["eval_set"] = eval_set
-                fit_kw["verbose"] = False
+        logger.info(
+            "Training win classifier (legacy) with linear_tree=%s",
+            bool(hp.get("linear_tree", False)),
+        )
+        hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
+        model = _get_focal_lgbm_class()(
+            objective=_focal_binary_objective,
+            **hp,
+            subsample_freq=1,
+            random_state=getattr(self, "random_seed", config.RANDOM_SEED),
+            n_jobs=self._autotune_njobs,
+            verbose=-1,
+        )
+        fit_kw: dict = {"sample_weight": sample_weight}
+        if eval_set is not None:
+            from lightgbm import early_stopping as _lgb_es
+            fit_kw["eval_set"] = eval_set
+            fit_kw["eval_metric"] = _focal_logloss_eval
+            fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
         model.fit(X, y, **fit_kw)
         logger.info(f"Win Classifier ({fw.upper()}) training complete")
         return model
@@ -3017,20 +2926,11 @@ class RacePredictor:
         X/y are the purged training split, never the final holdout. Calibration
         still uses its independent training-slab predictions below.
         """
-        framework = self.frameworks[role]
+        _require_supported_framework(self.frameworks[role], role)
         estimator = selected.reg if isinstance(selected, _SoftLabelClassifier) else selected
-        if framework == "lgbm":
-            rounds = getattr(estimator, "best_iteration_", None)
-            if not rounds:
-                rounds = getattr(estimator, "n_estimators_", None)
-        elif framework == "cat":
-            best = estimator.get_best_iteration()
-            rounds = best + 1 if best is not None and best >= 0 else estimator.tree_count_
-        else:
-            try:
-                rounds = estimator.best_iteration + 1  # XGBoost is zero-based.
-            except AttributeError:
-                rounds = None
+        rounds = getattr(estimator, "best_iteration_", None)
+        if not rounds:
+            rounds = getattr(estimator, "n_estimators_", None)
         if rounds is None or int(rounds) < 1:
             raise ValueError(f"Cannot determine selected tree count for {role}; refusing an ambiguous refit")
         refit_params = dict(params or {})
@@ -3051,9 +2951,9 @@ class RacePredictor:
         significantly better logloss (0.284 vs 0.328).
         """
         _ensure_lightgbm()
-        _ensure_xgboost()
         _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
         fw = self.frameworks.get("classifier", "lgbm")
+        _require_supported_framework(fw, "classifier")
         hp = {
             "n_estimators": config.CLASSIFIER_PARAMS.get("n_estimators", 500),
             "max_depth": config.CLASSIFIER_PARAMS.get("max_depth", 7),
@@ -3070,14 +2970,8 @@ class RacePredictor:
 
         # ── Market-probability distillation (soft labels) ──────────────
         # Train on the market-implied win probability (a low-noise teacher)
-        # via cross-entropy instead of the 0/1 outcome. LGBM only; odds are
-        # the training target, never an inference feature.
-        if soft_y is not None and fw != "lgbm":
-            logger.warning(
-                "Soft-label distillation is supported only for the LGBM classifier; "
-                "using hard labels for framework '%s'.", fw,
-            )
-            soft_y = None
+        # via cross-entropy instead of the 0/1 outcome. Odds are the training
+        # target, never an inference feature.
         if soft_y is not None:
             hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
             from lightgbm import LGBMRegressor, early_stopping as _lgb_es
@@ -3094,60 +2988,25 @@ class RacePredictor:
             logger.info("Win classifier: LGBM cross-entropy distillation on market-prob soft labels")
             return _SoftLabelClassifier(reg)
 
-        if fw == "lgbm":
-            logger.info(
-                "Training win classifier with linear_tree=%s",
-                bool(hp.get("linear_tree", False)),
-            )
-            hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
-            model = LGBMClassifier(
-                objective="binary",
-                **hp,
-                subsample_freq=1,
-                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
-                n_jobs=self._autotune_njobs,
-                verbose=-1,
-            )
-            fit_kw: dict = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                from lightgbm import early_stopping as _lgb_es
-                fit_kw["eval_set"] = eval_set
-                fit_kw["eval_metric"] = "binary_logloss"
-                fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
-        elif fw == "cat":
-            _require_catboost()
-            hp_cat = {
-                "n_estimators": config.CLASSIFIER_PARAMS.get("n_estimators", 500),
-                "depth": config.CLASSIFIER_PARAMS.get("max_depth", 7),
-                "learning_rate": config.CLASSIFIER_PARAMS.get("learning_rate", 0.05),
-                "l2_leaf_reg": 3.0,
-            }
-            hp_cat.update(self._filter_params(params, "cat"))
-            model = CatBoostClassifier(
-                loss_function="Logloss",
-                random_seed=getattr(self, "random_seed", config.RANDOM_SEED),
-                verbose=False,
-                **hp_cat,
-            )
-            fit_kw = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                fit_kw["eval_set"] = eval_set
-                fit_kw["use_best_model"] = True
-                fit_kw["early_stopping_rounds"] = _es_rounds
-        else:
-            hp["min_child_weight"] = config.CLASSIFIER_PARAMS.get("min_child_weight", 3)
-            model = XGBClassifier(
-                objective="binary:logistic",
-                eval_metric="logloss",
-                **hp,
-                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
-                n_jobs=self._autotune_njobs,
-            )
-            fit_kw = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                model.set_params(early_stopping_rounds=_es_rounds)
-                fit_kw["eval_set"] = eval_set
-                fit_kw["verbose"] = False
+        logger.info(
+            "Training win classifier with linear_tree=%s",
+            bool(hp.get("linear_tree", False)),
+        )
+        hp.setdefault("min_child_samples", config.CLASSIFIER_PARAMS.get("min_child_samples", 10))
+        model = LGBMClassifier(
+            objective="binary",
+            **hp,
+            subsample_freq=1,
+            random_state=getattr(self, "random_seed", config.RANDOM_SEED),
+            n_jobs=self._autotune_njobs,
+            verbose=-1,
+        )
+        fit_kw: dict = {"sample_weight": sample_weight}
+        if eval_set is not None:
+            from lightgbm import early_stopping as _lgb_es
+            fit_kw["eval_set"] = eval_set
+            fit_kw["eval_metric"] = "binary_logloss"
+            fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
         model.fit(X, y, **fit_kw)
         logger.info(f"Win Classifier ({fw.upper()}) training complete")
         return model
@@ -3161,9 +3020,9 @@ class RacePredictor:
         are balanced.
         """
         _ensure_lightgbm()
-        _ensure_xgboost()
         _es_rounds = int(getattr(config, "EARLY_STOPPING_ROUNDS", 0))
-        fw = self.frameworks.get("place", "xgb")
+        fw = self.frameworks.get("place", "lgbm")
+        _require_supported_framework(fw, "place")
         hp = {
             "n_estimators": config.PLACE_CLASSIFIER_PARAMS.get("n_estimators", 500),
             "max_depth": config.PLACE_CLASSIFIER_PARAMS.get("max_depth", 6),
@@ -3175,61 +3034,25 @@ class RacePredictor:
             "linear_tree": bool(config.PLACE_CLASSIFIER_PARAMS.get("linear_tree", False)),
         }
         hp.update(self._filter_params(params, fw))
-        if fw == "lgbm":
-            logger.info(
-                "Training place classifier with linear_tree=%s",
-                bool(hp.get("linear_tree", False)),
-            )
-            hp.setdefault("min_child_samples", config.PLACE_CLASSIFIER_PARAMS.get("min_child_samples", 10))
-            model = LGBMClassifier(
-                objective="binary",
-                **hp,
-                subsample_freq=1,
-                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
-                n_jobs=self._autotune_njobs,
-                verbose=-1,
-            )
-            fit_kw: dict = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                from lightgbm import early_stopping as _lgb_es
-                fit_kw["eval_set"] = eval_set
-                fit_kw["eval_metric"] = "binary_logloss"
-                fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
-        elif fw == "cat":
-            _require_catboost()
-            hp_cat = {
-                "n_estimators": config.PLACE_CLASSIFIER_PARAMS.get("n_estimators", 500),
-                "depth": config.PLACE_CLASSIFIER_PARAMS.get("max_depth", 6),
-                "learning_rate": config.PLACE_CLASSIFIER_PARAMS.get("learning_rate", 0.05),
-                "l2_leaf_reg": 3.0,
-            }
-            hp_cat.update(self._filter_params(params, "cat"))
-            model = CatBoostClassifier(
-                loss_function="Logloss",
-                random_seed=getattr(self, "random_seed", config.RANDOM_SEED),
-                verbose=False,
-                **hp_cat,
-            )
-            fit_kw = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                fit_kw["eval_set"] = eval_set
-                fit_kw["use_best_model"] = True
-                fit_kw["early_stopping_rounds"] = _es_rounds
-        else:
-            hp["min_child_weight"] = config.PLACE_CLASSIFIER_PARAMS.get("min_child_weight", 3)
-            model = XGBClassifier(
-                objective="binary:logistic",
-                scale_pos_weight=scale_pos_weight,
-                eval_metric="logloss",
-                **hp,
-                random_state=getattr(self, "random_seed", config.RANDOM_SEED),
-                n_jobs=self._autotune_njobs,
-            )
-            fit_kw = {"sample_weight": sample_weight}
-            if eval_set is not None:
-                model.set_params(early_stopping_rounds=_es_rounds)
-                fit_kw["eval_set"] = eval_set
-                fit_kw["verbose"] = False
+        logger.info(
+            "Training place classifier with linear_tree=%s",
+            bool(hp.get("linear_tree", False)),
+        )
+        hp.setdefault("min_child_samples", config.PLACE_CLASSIFIER_PARAMS.get("min_child_samples", 10))
+        model = LGBMClassifier(
+            objective="binary",
+            **hp,
+            subsample_freq=1,
+            random_state=getattr(self, "random_seed", config.RANDOM_SEED),
+            n_jobs=self._autotune_njobs,
+            verbose=-1,
+        )
+        fit_kw: dict = {"sample_weight": sample_weight}
+        if eval_set is not None:
+            from lightgbm import early_stopping as _lgb_es
+            fit_kw["eval_set"] = eval_set
+            fit_kw["eval_metric"] = "binary_logloss"
+            fit_kw["callbacks"] = [_lgb_es(_es_rounds, verbose=False)]
         model.fit(X, y, **fit_kw)
         logger.info(f"Place Classifier ({fw.upper()}) training complete")
         return model
@@ -4189,7 +4012,7 @@ class RacePredictor:
         self.place_iso_cal = data.get("place_iso_cal")
         self.place_refinement = data.get("place_refinement")
         self.market_anchor = data.get("market_anchor")
-        self.frameworks = data.get("frameworks", {"classifier": "cat", "place": "cat"})
+        self.frameworks = data.get("frameworks", dict(DEFAULT_FRAMEWORKS))
         self.random_seed = int(data.get("random_seed", config.RANDOM_SEED))
         self.eval_split_info = data.get("eval_split_info", {})
         logger.info(f"Models loaded (frameworks: {self.frameworks})")
@@ -4233,9 +4056,8 @@ class RacePredictor:
             ):
                 hp = fold_params.setdefault(role, {})
                 hp["n_estimators"] = max(1, int(hp.get("n_estimators", defaults.get("n_estimators", 500))) // 2)
-                depth_key = "depth" if self.frameworks[role] == "cat" else "max_depth"
-                depth = int(hp.get(depth_key, defaults.get("max_depth", 6)))
-                hp[depth_key] = min(depth, 5) if depth > 0 else 5
+                depth = int(hp.get("max_depth", defaults.get("max_depth", 6)))
+                hp["max_depth"] = min(depth, 5) if depth > 0 else 5
 
         fp = train_df["finish_position"].values.astype(np.float32)
         y_won = train_df["won"].fillna(0).values.astype(int)
