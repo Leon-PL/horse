@@ -71,14 +71,6 @@ def test_warnings_do_not_block(status, monkeypatch):
     assert report["blockers"] == []
 
 
-def test_recorder_health_is_reported_without_inventing_a_serving_failure(status, monkeypatch):
-    monkeypatch.setattr(status, "_forward_recording", lambda:{"state":status.WARN,"detail":"recording stopped"})
-    report = _collect_with(status, monkeypatch, _sections(status))
-    assert report["servable"]
-    assert report["sections"]["forward_recording"]["state"] == status.WARN
-    assert "recording stopped" in status.render(report)
-
-
 @pytest.mark.parametrize("probe", ["_database", "_feature_store", "_runs", "_production"])
 def test_a_failing_probe_blocks_readiness_without_crashing(status, monkeypatch, probe):
     for name, section in zip(

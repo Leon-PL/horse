@@ -148,8 +148,31 @@ def test_signature_changes_when_a_registered_source_changes(tmp_path, monkeypatc
 
     before = fd.fe_signature()
     target = scratch / "src" / "atr_features.py"
-    target.write_bytes(target.read_bytes() + b"\n# edit\n")
+    target.write_bytes(target.read_bytes() + b"\n_EDIT = 1\n")
     assert fd.fe_signature() != before, "editing a hashed source must invalidate"
+    target.write_bytes(target.read_bytes().replace(b"_EDIT = 1", b"_EDIT = 2"))
+    assert fd.fe_signature() != before, "changing a constant must invalidate"
+
+
+def test_signature_ignores_comments_docstrings_and_formatting(tmp_path, monkeypatch):
+    """None of these can change a feature value, and each used to cost a rebuild."""
+    from src import featured_dataset as fd
+
+    scratch = tmp_path / "proj"
+    (scratch / "src").mkdir(parents=True)
+    for rel in _FE_SOURCE_FILES:
+        (scratch / rel).parent.mkdir(parents=True, exist_ok=True)
+        (scratch / rel).write_bytes((SRC.parent / rel).read_bytes())
+    _relocate_project(monkeypatch, scratch)
+
+    before = fd.fe_signature()
+    target = scratch / "src" / "utils.py"
+    source = target.read_bytes()
+    target.write_bytes(b'"""Reworded module docstring."""\n# a new comment\n\n\n'
+                       + source.split(b'"""', 2)[2] + b"\n\n# trailing note\n")
+    assert fd.fe_signature() == before, "comments, docstrings and blank lines must not invalidate"
+    target.write_bytes(source + b"\nimport config\n_READ = config.ELO_K_BASE\n")
+    assert fd.fe_signature() != before
 
 
 def test_signature_ignores_line_endings(tmp_path, monkeypatch):

@@ -233,7 +233,7 @@ def test_signature_tracks_feature_dependencies(tmp_path, monkeypatch, relative_p
     monkeypatch.setattr(config, "BASE_DIR", str(tmp_path))
     path = tmp_path / relative_path
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("# first revision", encoding="utf-8")
+    path.write_text("SCALE = 1.0", encoding="utf-8")
     before = fe_signature()
-    path.write_text("# corrected feature", encoding="utf-8")
+    path.write_text("SCALE = 1.5", encoding="utf-8")
     assert fe_signature() != before

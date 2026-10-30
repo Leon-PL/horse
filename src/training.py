@@ -174,13 +174,14 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
             raise ValueError("fit_as_of must be a YYYY-MM-DD calendar date") from exc
         if cutoff.isoformat() != cfg.fit_as_of or cutoff >= date.today():
             raise ValueError("fit_as_of must be a settled date before today")
-        if not cfg.validation_report:
-            raise ValueError("Deployment fitting requires a separate validation_report")
         if cfg.blend_market_odds or cfg.run_walk_forward:
             raise ValueError("Deployment refits require separate market correction and historical evaluation")
-        validation = load_validation_report(cfg.validation_report, recipe)
-        if validation["fe_signature"] != fe_signature():
-            raise ValueError("Deployment features differ from the validated feature generation")
+        # A certificate is optional: without one the refit simply has no
+        # held-out score. With one, the recipe must match what was evaluated.
+        if cfg.validation_report:
+            validation = load_validation_report(cfg.validation_report, recipe)
+            if validation["fe_signature"] != fe_signature():
+                raise ValueError("Deployment features differ from the validated feature generation")
 
     def _tick(msg: str, pct: float) -> None:
         logger.info("[train_run] %s (%.0f%%)", msg, 100 * pct)
@@ -256,10 +257,10 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     )
     if cfg.threads is not None:
         predictor._autotune_njobs = cfg.threads
-    if validation:
+    if cfg.fit_as_of is not None:
         predictor.fit_as_of(featured, cfg.fit_as_of, params=cfg.hyperparams,
                             dataset_start=dataset_start)
-        if predictor.feature_cols != validation["features"]:
+        if validation and predictor.feature_cols != validation["features"]:
             raise ValueError("Deployment feature columns differ from the validated model")
         metrics = {}
         evals = {"scope": "Deployment refit has no held-out performance estimate",

@@ -136,10 +136,24 @@ def test_invalid_cutoff_fails_before_collection(monkeypatch, cutoff):
         training.train_run(training.TrainingConfig(fit_as_of=cutoff, validation_report="unused"))
 
 
-def test_missing_validation_and_conflicting_modes_fail_before_collection(monkeypatch):
+def test_a_refit_without_a_certificate_proceeds_to_the_data(monkeypatch):
+    """Experiments may fit through a cutoff; only a certificate that is given is checked."""
+    class Reached(Exception):
+        pass
+
+    def reached(**kw):
+        raise Reached
+
+    import src.deployment_validation as validation
+    monkeypatch.setattr(validation, "load_validation_report", lambda *a: pytest.fail("No certificate"))
+    monkeypatch.setattr(training, "process_data", reached)
+    with pytest.raises(Reached):
+        training.train_run(training.TrainingConfig(fit_as_of="2025-05-15", refresh_data=False))
+
+
+def test_conflicting_modes_fail_before_collection(monkeypatch):
     monkeypatch.setattr(training, "process_data", lambda **kw: pytest.fail("No data access"))
     for cfg, message in [
-        (training.TrainingConfig(fit_as_of="2025-05-15"), "requires a separate"),
         (training.TrainingConfig(validation_report="unused"), "requires an explicit"),
         (training.TrainingConfig(fit_as_of="2025-05-15", validation_report="unused", run_walk_forward=True), "separate market"),
         (training.TrainingConfig(fit_as_of="2025-05-15", validation_report="unused", blend_market_odds=True), "separate market"),
@@ -166,5 +180,23 @@ def test_deployment_cli_inherits_locked_options(monkeypatch, tmp_path):
     assert captured["cfg"].seed == 17
     assert captured["cfg"].hyperparams == {"classifier": {"n_estimators": 11}}
     monkeypatch.setattr(sys, "argv", ["train.py", "--fit-as-of", "2025-05-15", "--holdout-days", "30"])
+    with pytest.raises(SystemExit):
+        cli.main()
+
+
+def test_cli_refit_without_a_certificate_uses_the_given_settings(monkeypatch):
+    import sys
+    import train as cli
+
+    captured = {}
+    monkeypatch.setattr(sys, "argv", ["train.py", "--no-refresh", "--fit-as-of", "2025-05-15",
+                                      "--window-days", "400"])
+    monkeypatch.setattr(cli, "train_run", lambda cfg: captured.update(cfg=cfg) or "run")
+    monkeypatch.setattr(cli, "_print_summary", lambda rid: None)
+    cli.main()
+    assert captured["cfg"].fit_as_of == "2025-05-15"
+    assert captured["cfg"].validation_report is None
+    assert captured["cfg"].train_window_days == 400
+    monkeypatch.setattr(sys, "argv", ["train.py", "--validation-report", "x.json"])
     with pytest.raises(SystemExit):
         cli.main()

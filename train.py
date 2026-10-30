@@ -91,9 +91,9 @@ def main() -> None:
     fitting.add_argument("--holdout-days", type=int, default=90,
                     help="reserve the latest N calendar days for evaluation; 0 uses the legacy percentage split")
     fitting.add_argument("--fit-as-of", default=None, metavar="YYYY-MM-DD",
-                    help="fit a validated deployment recipe through this settled cutoff")
+                    help="fit through this settled cutoff with no held-out evaluation")
     ap.add_argument("--validation-report", default=None, metavar="PATH",
-                    help="recipe validation certificate required for --fit-as-of")
+                    help="optional recipe certificate for --fit-as-of; its settings are reused and checked")
     ap.add_argument("--threads", type=int, default=None,
                     help="limit workers used by native model fitting")
     ap.add_argument("--frameworks", default=None,
@@ -107,7 +107,7 @@ def main() -> None:
     ap.add_argument("--promote", action="store_true", help="promote the new run to production")
     args = ap.parse_args()
     if args.features:
-        if args.fit_as_of:
+        if args.validation_report:
             ap.error("Deployment features come from --validation-report; evaluate a changed feature list separately")
         feature_path = os.path.abspath(args.features)
         if not os.path.isfile(feature_path):
@@ -116,9 +116,9 @@ def main() -> None:
     if args.holdout_days < 0:
         ap.error("--holdout-days must be non-negative")
 
-    if args.fit_as_of is not None:
-        if not args.validation_report:
-            ap.error("--fit-as-of requires --validation-report")
+    if args.validation_report and args.fit_as_of is None:
+        ap.error("--validation-report applies only to --fit-as-of")
+    if args.fit_as_of is not None and args.validation_report:
         if (args.frameworks is not None or args.win_calibration is not None
                 or args.window_days is not None or args.blend_market_odds or args.backtest):
             ap.error("Deployment settings come from --validation-report; evaluate changed settings separately")
@@ -132,7 +132,7 @@ def main() -> None:
             catchup_days=args.catchup_days,
             train_window_days=args.window_days,
             holdout_days=args.holdout_days or None,
-            validation_report=args.validation_report,
+            fit_as_of=args.fit_as_of,
             frameworks=_parse_frameworks(args.frameworks) or dict(config.SUB_MODEL_FRAMEWORKS),
             blend_market_odds=args.blend_market_odds,
             win_calibration_method=args.win_calibration or config.WIN_CALIBRATION_METHOD,

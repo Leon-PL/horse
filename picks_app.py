@@ -8,7 +8,6 @@ loads the full feature store at startup, so it opens fast.
 
 Pages:
 - 💰 Today's Picks — live racecards, value picks, manual custom-race entry
-- 📋 Forecast record — timestamped independent and market baseline monitoring
 - 🔌 Matchbook API — exchange connectivity harness
 
 Training, tuning, backtesting, insights and promotion live in the separate
@@ -543,7 +542,6 @@ page = st.sidebar.radio(
     "Navigation",
     [
         "💰 Today's Picks",
-        "📋 Forecast record",
         "🔌 Matchbook API",
     ],
 )
@@ -1836,10 +1834,6 @@ if page == "💰 Today's Picks":
 # =====================================================================
 #  MATCHBOOK API
 # =====================================================================
-elif page == "📋 Forecast record":
-    from src.forward_ui import render_forward_page
-    render_forward_page()
-
 elif page == "🔌 Matchbook API":
     st.title("🔌 Matchbook API")
     st.caption(

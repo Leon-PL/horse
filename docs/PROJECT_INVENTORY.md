@@ -1,8 +1,7 @@
 # Project inventory
 
 **Racing TV features and repairs, 30 October:** [source pipeline](../src/source_pipeline.py)
-connects collection, comparison and numeric observations to training, apps and
-the recorder. [RTV features](../src/rtv_features.py) compute 26 historical and
+connects collection, comparison and numeric observations to training and apps. [RTV features](../src/rtv_features.py) compute 26 historical and
 four timestamped pre-race inputs; the deployed selection remains 154 after an
 uncertain fixed trial. [Repairs and current operation](RTV_FEATURES_REPAIRS_044.md).
 
@@ -75,13 +74,9 @@ Replace the placeholders with an evaluated run and settled cutoff. Recipe
 compatibility is enforced; an older incompatible certificate may be refused.
 The deployment refit has no new held-out score. Neither command promotes.
 
-For CLI forecast capture, use `scripts/record_forecasts.py --help`: the explicit
-study path is required; `--list` discovers events, and `--event EVENT_ID
---at-window` performs one manually started timed attempt.
-Use `assess_forward_forecasts.py --study STUDY_PATH` for later descriptive
-scoring. These are distinct from model selection and formal confirmation.
-`check_forward_readout.py` requires a registered study-specific plan; earlier
-pilot conditions do not automatically apply to a newer study.
+The forward recorder, its pinned studies and the scripts that created,
+recorded, assessed or transitioned them were removed on 30 October 2026
+(experimentation phase, no live model). They remain in git history.
 
 ## Source-module map
 
@@ -96,7 +91,6 @@ All source modules present at this inventory are grouped below. This is a respon
 | Training and validation | [model](../src/model.py), [training](../src/training.py), [autotune](../src/autotune.py), [probability_calibration](../src/probability_calibration.py), [deployment_validation](../src/deployment_validation.py) | Shared training core, optional tuning/calibration and deployment-recipe checks. |
 | Model selection and serving | [run_store](../src/run_store.py), [live_prediction](../src/live_prediction.py) | Saved runs, explicit production pointer and current-card feature generation. |
 | Scoring and shared rules | [wf_eval](../src/wf_eval.py), [forecast_evaluation](../src/forecast_evaluation.py), [bet_analysis](../src/bet_analysis.py), [backtester](../src/backtester.py), [clv](../src/clv.py), [bet_settlement](../src/bet_settlement.py), [each_way](../src/each_way.py), [quality_control](../src/quality_control.py), [utils](../src/utils.py) | Purged research evaluation, complete-field scoring, settlement, identity joins and app-facing simulation. The research and app backtest interfaces have distinct jobs. |
-| Forward recording | [forward_store](../src/forward_store.py), [forward_capture](../src/forward_capture.py), [forward_timing](../src/forward_timing.py), [forward_recorder](../src/forward_recorder.py), [forward_assessment](../src/forward_assessment.py), [issued_evaluation](../src/issued_evaluation.py), [forward_readout](../src/forward_readout.py), [forward_ui](../src/forward_ui.py), [confirmation_planning](../src/confirmation_planning.py) | Pinned studies, continuous/manual capture, immutable issued fields and withdrawal evidence, paired place controls, descriptive scoring and separately registered planning. |
 | Market data and analysis | [betfair](../src/betfair.py), [matchbook_client](../src/matchbook_client.py), [matchbook_signals](../src/matchbook_signals.py), [paper_trade_store](../src/paper_trade_store.py), [market_replay](../src/market_replay.py), [forecast_benchmark](../src/forecast_benchmark.py) | Historical teaching/evaluation prices, exchange connectivity, paper records, archive replay and benchmark alignment. |
 | App/support interfaces | [app_helpers](../src/app_helpers.py), [data_collector_sample](../src/data_collector_sample.py), [__init__](../src/__init__.py) | UI helpers and explicit synthetic-data support. Importing sample support does not select it for real forecasts. |
 | Research or unwired feature tools | [audited_class_features](../src/audited_class_features.py), [history_blend](../src/history_blend.py), [missing_history_snapshot](../src/missing_history_snapshot.py), [public_history_features](../src/public_history_features.py), [race_probability_model](../src/race_probability_model.py), [sibling_features](../src/sibling_features.py), [tail_calibration](../src/tail_calibration.py), [tail_smoothing](../src/tail_smoothing.py), [trainer_locations](../src/trainer_locations.py), [bha_stewards_scraper](../src/bha_stewards_scraper.py) | Separate experimental predictors, projections, mixtures and unwired collection tools. Presence under src does not mean inclusion in normal predictions. |
@@ -159,18 +153,12 @@ their source snapshots and old input files support the recorded comparisons.
 
 ### Shared operating tools
 
-These support readiness, forecasts and saved-record assessment. Recording, caching, registration and assessment actions can write local files; the readiness check is read-only.
+These support readiness and forecasts. Caching can write local files; the readiness check is read-only.
 
 | File | Purpose and scope |
 |---|---|
-| [assess_forward_forecasts.py](../scripts/assess_forward_forecasts.py) | Score saved eligible pairs against settled results and write a descriptive report. Does not regenerate forecasts. |
 | [build_lookahead.py](../scripts/build_lookahead.py) | Optional forecast-cache preparation using current cards and the shared live feature path. Fetches cards and writes cache files. |
-| [check_forward_readout.py](../scripts/check_forward_readout.py) | Check an existing registered pilot plan; --register can register one. Requires an explicit study and plan; does not schedule collection. |
 | [project_status.py](../scripts/project_status.py) | Read-only readiness check across database, features, runs and production. Full check compares database contents; --quick skips that comparison. |
-| [record_forecasts.py](../scripts/record_forecasts.py) | Create a pinned study, discover events, or manually capture one forecast. Writes immutable study/attempt evidence and uses live feeds. |
-| [configure_forecast_recorder.py](../scripts/configure_forecast_recorder.py) | Create/verify a current-model study, register its readout and probe the public feed. Writes the recorder pointer; does not start a background process. |
-| [run_forecast_recorder.py](../scripts/run_forecast_recorder.py) | Bounded restartable capture/assessment session with persistent attempts, single-instance lock and durable logs. Optional settled-history refresh does not refit weights. |
-| [start_forecast_recorder.ps1](../scripts/start_forecast_recorder.ps1), [install_forecast_recorder.ps1](../scripts/install_forecast_recorder.ps1) | Hidden local session launcher and current-user Windows task registration at09:00/logon. Task registration changes the OS scheduler; inspect the study and pointer before running. |
 
 ## Maintenance and source-data tools
 
@@ -215,7 +203,6 @@ General comparison tools and experiment-specific implementations are kept togeth
 | [fe_sweep.py](../scripts/fe_sweep.py) | Historical feature-constant sweep; BASE_RUN refers to a removed snapshot. Update and re-register before any new use. |
 | [holdout_sibling_test.py](../scripts/holdout_sibling_test.py) | Historical reserved-period sibling-feature test; those inspected dates are not a fresh holdout. |
 | [model_lab.py](../scripts/model_lab.py) | Fast train+eval harness for improving the (odds-free) win model. |
-| [plan_forecast_confirmation.py](../scripts/plan_forecast_confirmation.py) | Freeze assumptions and estimate confirmation feasibility from archived forecasts. |
 | [replay_market_snapshots.py](../scripts/replay_market_snapshots.py) | Create immutable T-5 forecast research inputs from local Betfair archives. |
 | [screen_calibration_choice.py](../scripts/screen_calibration_choice.py) | Experiment 019 calibration-family screen using training-history splits. |
 | [screen_feature_batch.py](../scripts/screen_feature_batch.py) | Experiment 018 registered feature screen after audits. |
@@ -268,8 +255,6 @@ These include completed migration controllers, cohort collectors, simulations an
 
 | File | Purpose and scope |
 |---|---|
-| [adopt_capacity_upgrade.py](../scripts/adopt_capacity_upgrade.py) | Experiment-specific capacity qualification/install controller; can replace production artifacts. |
-| [adopt_prediction_repair.py](../scripts/adopt_prediction_repair.py) | Experiment-specific repair selection and installation controller; can replace source, store and production artifacts. |
 | [build_missing_history_projection.py](../scripts/build_missing_history_projection.py) | Compose the Flat and Cheltenham public-history pilots for one research test. |
 | [build_surface_repair_projection.py](../scripts/build_surface_repair_projection.py) | Freeze a causal research projection of the audited surface repair. |
 | [canonical_training_cache.py](../scripts/canonical_training_cache.py) | Importable exact-fit cache helper used by the 026/027 controllers; retained shared code, not a standalone operating command. |
@@ -370,11 +355,11 @@ The next code consolidation should address these concrete boundaries:
    Completed work does not make every supporting function disposable.
 4. **Plan fingerprint transitions.**
    `src.featured_dataset.fe_signature` hashes registered source paths and
-   contents. `src.forward_store.ForwardStudy.verify` also checks pinned source
-   hashes. Moving or editing these sources can invalidate store/model
-   compatibility and stop an existing study accepting new captures, even when
-   the intended calculations are unchanged. Prove matching outputs and make a
-   deliberate generation/study transition where required; retain sealed evidence.
+   each source's AST (comments, docstrings and formatting excluded since
+   30 October 2026). Moving a registered source or editing its code
+   invalidates store/model compatibility even when the intended calculations
+   are unchanged; prove matching outputs before re-stamping instead of
+   rebuilding. The forward-study source pins were removed with the recorder.
 5. **Split large modules after ownership is clear.**
    Separate responsibilities inside `feature_engineer.py` and `model.py`
    incrementally. Keep date-strict history, complete-field validation,

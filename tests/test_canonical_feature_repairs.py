@@ -36,17 +36,6 @@ def test_unconverted_raw_money_never_reenters_an_all_feature_model(monkeypatch):
     assert get_feature_columns(pd.DataFrame({"signal": [1.], "prize_money_original": [1000.]})) == ["signal"]
 
 
-def test_forward_setup_rejects_an_old_model_and_store_after_normal_code_changes(monkeypatch, tmp_path):
-    from src import forward_store, run_store
-    monkeypatch.setattr(run_store, "get_production_run_id", lambda: "saved-model")
-    monkeypatch.setattr(run_store, "feature_generation_status", lambda model: {
-        "state": run_store.GENERATION_MATCH, "run_fe_signature": "old-generation"})
-    monkeypatch.setattr(forward_store, "fe_signature", lambda: "corrected-generation")
-    with pytest.raises(ValueError, match="current feature generation"):
-        forward_store.create_study(tmp_path / "must-not-publish")
-    assert not (tmp_path / "must-not-publish").exists()
-
-
 @pytest.mark.parametrize("explicit_rebuild", [False, True])
 def test_ordinary_training_rebuild_receives_corrections_without_research_flags(monkeypatch, explicit_rebuild):
     from contextlib import nullcontext

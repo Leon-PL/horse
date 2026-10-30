@@ -12,6 +12,7 @@ calling ``engineer_features`` directly. See ``docs/FE_REFACTOR_PLAN.md`` and
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -114,12 +115,61 @@ def _portable_config_value(value):
     return value
 
 
+_CONFIG_KEY = re.compile(r"[A-Z][A-Z0-9_]*")
+# (path, raw-bytes digest) -> (normalised source, config keys). Parsing every
+# FE source takes most of a second and serving asks for the signature often;
+# hashing the raw bytes is cheap and, unlike mtimes, cannot go stale.
+_SEMANTIC_CACHE: dict[tuple[str, bytes], tuple[bytes, set[str]]] = {}
+
+
+def _semantic_source(rel: str, source: bytes) -> tuple[bytes, set[str]]:
+    """The part of a source that can change a feature value, and its config keys.
+
+    Comments, docstrings, blank lines and formatting cannot change a feature
+    value, but hashing raw bytes made every such edit force a ~56-minute store
+    rebuild. Python hashes as its AST without docstrings or line numbers, JSON
+    as its canonical parsed form. A file that does not parse hashes as raw
+    text, so a broken edit still changes the signature. The AST dump can
+    differ between Python minor versions; an upgrade may force one rebuild.
+    """
+    # Line endings cannot change a feature value either, but git's autocrlf
+    # rewrites them on checkout.
+    source = source.replace(b"\r\n", b"\n")
+    try:
+        if rel.endswith(".json"):
+            value = json.loads(source)
+            return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8"), set()
+        if not rel.endswith(".py"):
+            return source, set()
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return source, set()
+    keys = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if (isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                and body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str)):
+            node.body = body[1:] or [ast.Pass()]
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id == "config" and _CONFIG_KEY.fullmatch(node.attr)):
+            keys.add(node.attr)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr" and len(node.args) >= 2
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == "config"
+                and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)
+                and _CONFIG_KEY.fullmatch(node.args[1].value)):
+            keys.add(node.args[1].value)
+    return ast.dump(tree).encode("utf-8"), keys
+
+
 def fe_signature() -> str:
     """Short hash of the FE code + its config flags + the store schema.
 
     A mismatch with the value stored in the FeatureStore meta means the
     featured rows on disk were produced by different code/config and must be
-    rebuilt.
+    rebuilt. Only edits that can change a value count; see
+    :func:`_semantic_source`.
     """
     h = hashlib.sha256()
     config_keys = set(FE_CONFIG_KEYS)
@@ -127,17 +177,14 @@ def fe_signature() -> str:
         path = os.path.join(config.BASE_DIR, rel)
         try:
             with open(path, "rb") as fh:
-                # Line endings cannot change a feature value (the tokenizer
-                # normalises them), but git's autocrlf rewrites them on any
-                # checkout, which would force a spurious full rebuild.
-                source = fh.read().replace(b"\r\n", b"\n")
+                raw = fh.read()
+            key = (path, hashlib.sha256(raw).digest())
+            if key not in _SEMANTIC_CACHE:
+                _SEMANTIC_CACHE[key] = _semantic_source(rel, raw)
+            source, keys = _SEMANTIC_CACHE[key]
             h.update(rel.encode("utf-8"))
             h.update(source)
-            text = source.decode("utf-8")
-            config_keys.update(re.findall(r"config\.([A-Z][A-Z0-9_]*)", text))
-            config_keys.update(re.findall(
-                r"getattr\(config,\s*['\"]([A-Z][A-Z0-9_]*)['\"]", text
-            ))
+            config_keys.update(keys)
         except OSError:
             # Missing optional sources are part of the signature too.
             h.update(f"missing:{rel}".encode("utf-8"))

@@ -257,47 +257,6 @@ def _production() -> dict:
     }
 
 
-def _forward_recording() -> dict:
-    """Monitor evidence collection separately from model-serving readiness."""
-    from pathlib import Path
-    from src.forward_store import timestamp, utcnow
-    from src.run_store import get_production_run_id
-    pointer = Path(config.DATA_DIR)/"forecasts"/"recorder.json"
-    if not pointer.exists():
-        return {"state":WARN, "detail":"no continuous recorder configured"}
-    settings = json.loads(pointer.read_text())
-    study = Path(settings["study"])
-    heartbeat_path = study/"recorder_heartbeat.json"
-    if not heartbeat_path.exists():
-        return {"state":WARN, "detail":"configured; no recorder heartbeat yet", **settings}
-    heartbeat = json.loads(heartbeat_path.read_text())
-    now = utcnow()
-    age = (now-timestamp(heartbeat["observed_at"])).total_seconds()
-    healthy = heartbeat.get("mode") == "recording" and 0 <= age <= 300
-    pairs = heartbeat.get("selected_pairs",0)
-    detail = f"{heartbeat.get('mode')}; {pairs} paired forecasts; heartbeat age {age:.0f}s"
-    discovered = heartbeat.get("last_discovery")
-    discovery_age = (now-timestamp(discovered)).total_seconds() if discovered else None
-    # Discovery normally runs every15minutes. A living retry loop is not
-    # evidence that the market feed is reachable; allow five minutes' grace.
-    if discovery_age is None:
-        healthy = False
-        detail += "; no successful market discovery"
-    else:
-        healthy &= 0 <= discovery_age <= 1200
-        detail += f"; market discovery age {discovery_age:.0f}s"
-    expected_model = settings.get("model_id")
-    expected_study = heartbeat.get("study")
-    identity_matches = (bool(expected_model) and heartbeat.get("model_id") == expected_model
-        and bool(expected_study) and Path(expected_study).resolve() == study.resolve()
-        and get_production_run_id() == expected_model)
-    if not identity_matches:
-        healthy = False
-        detail += "; recorder/model/study mismatch"
-    return {"state":OK if healthy else WARN, "detail":detail, "discovery_age_seconds":discovery_age,
-        "study":str(study), "heartbeat":heartbeat, "scheduled_task":settings.get("scheduled_task")}
-
-
 def _rtv_collection():
     """Sidecar health is visible but cannot invalidate an unchanged model."""
     from pathlib import Path
@@ -343,10 +302,6 @@ def collect(deep: bool = True) -> dict:
         if body["state"] == BAD
     ]
     try:
-        sections["forward_recording"] = _forward_recording()
-    except Exception as exc:
-        sections["forward_recording"] = {"state":WARN, "detail":f"recorder monitoring failed: {exc}"}
-    try:
         sections["rtv_collection"] = _rtv_collection()
     except Exception as exc:
         sections["rtv_collection"] = {"state": WARN, "detail": f"RTV monitoring failed: {exc}"}
@@ -372,7 +327,6 @@ def render(report: dict) -> str:
         "feature_store": "Feature store",
         "training_runs": "Training runs",
         "production_model": "Promoted model",
-        "forward_recording": "Forward recorder",
         "rtv_collection": "Racing TV source",
     }
     for name, body in report["sections"].items():
