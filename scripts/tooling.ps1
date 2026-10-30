@@ -1,10 +1,10 @@
 <#
-Run the isolated development tools without synchronizing the live .venv.
-Examples: .\scripts\tooling.ps1 setup; .\scripts\tooling.ps1 test
+Run the isolated development tools, or rebuild the project .venv from uv.lock.
+Examples: .\scripts\tooling.ps1 setup; .\scripts\tooling.ps1 test; .\scripts\tooling.ps1 venv
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('setup', 'lint', 'test', 'validate', 'benchmark')]
+    [ValidateSet('setup', 'venv', 'lint', 'test', 'validate', 'benchmark')]
     [string]$Action = 'setup',
     [string[]]$TestPath = @('tests/test_data_contracts.py',
                           'tests/test_generated_racing_invariants.py',
@@ -46,6 +46,16 @@ try {
         & $toolUv python install 3.14.0 --no-bin --no-registry
         if ($LASTEXITCODE -ne 0) { throw 'Could not install the isolated Python runtime' }
         & $toolUv sync --locked --group tooling --python 3.14.0 --managed-python
+    } elseif ($Action -eq 'venv') {
+        # The project .venv: runtime + dev groups on the same project-local
+        # Python. AppData is not used because the Claude app virtualizes it.
+        if (-not (Test-Path -LiteralPath $toolUv)) {
+            throw 'Run .\scripts\tooling.ps1 setup first'
+        }
+        $env:UV_PROJECT_ENVIRONMENT = Join-Path $toolRoot '.venv'
+        & $toolUv python install 3.14.0 --no-bin --no-registry
+        if ($LASTEXITCODE -ne 0) { throw 'Could not install the isolated Python runtime' }
+        & $toolUv sync --locked --no-group tooling --python 3.14.0 --managed-python
     } else {
         if (-not (Test-Path -LiteralPath $toolPython)) {
             throw 'Run .\scripts\tooling.ps1 setup first'

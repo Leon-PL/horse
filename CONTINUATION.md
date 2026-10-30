@@ -1,3 +1,27 @@
+# 30 October 2026 (evening): recorder and source pins removed
+
+The project is in an experimentation phase with no live model. Removed: the
+`HorseForecastRecorder_038` scheduled task (definition saved in
+`data/audit/recorder_removal_20261030/`), the `src/forward_*` recorder and study
+modules, `issued_evaluation`, `confirmation_planning`, the Forecast record page,
+the recorder/study-transition scripts (install_/finish_/adopt_/restart_) and
+their tests. Study data under `data/forecasts/forward/` was left in place.
+
+Iteration costs reduced: `fe_signature` now hashes each FE source's AST, so
+comment/docstring/formatting edits no longer force the ~1 hour store rebuild,
+and `train.py --fit-as-of` no longer requires a validation certificate (one is
+still checked when passed). The store and runs `20261030_122253_088153` /
+`20261030_135650_092286` were re-stamped `b33c884d9edd8a6f` -> `b20404f117a63897`
+after proving the old hash reproduced the stamp from the committed sources;
+backups and receipt are in `data/audit/recorder_removal_20261030/fe_signature_migration/`.
+The FE signature values quoted below are the pre-migration ones.
+
+`.venv` was then rebuilt from `uv.lock` (`scripts/tooling.ps1 venv`) on the
+project-local Python 3.14.0 in `data/tooling/python`, replacing the broken
+`C:\Python314` base. Live-card and stored-history predictions were
+bit-identical before and after; the old env is at
+`data/tooling/venv-old_20261030` for rollback. See docs/DEVELOPMENT_TOOLS.md.
+
 # Installed044: RTV repairs, feature pipeline and current refit
 
 Completed30October2026 at17:28UTC. Authoritative receipt:

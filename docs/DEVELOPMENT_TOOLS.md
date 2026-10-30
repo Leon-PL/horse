@@ -2,7 +2,8 @@
 
 Implemented and measured on **29 October 2026**. The entry point is
 `scripts/tooling.ps1`. It uses a dedicated Python and environment under
-`data/tooling/`; the recorder continues using the original `.venv`.
+`data/tooling/`. Since 30 October 2026 the apps' and CLI's `.venv` is built
+from the same lock on the same Python; see [the project .venv](#the-project-venv).
 
 ## Commands
 
@@ -10,6 +11,7 @@ Run from the project root in PowerShell:
 
 ```powershell
 .\scripts\tooling.ps1 setup
+.\scripts\tooling.ps1 venv
 .\scripts\tooling.ps1 test
 .\scripts\tooling.ps1 validate
 .\scripts\tooling.ps1 lint
@@ -28,10 +30,35 @@ downloads dependencies. No model fitting, source scraping or promotion occurs.
 
 `lint` reports existing code issues and exits nonzero when it finds them. It
 applies no fixes or formatting. Treat its baseline as a review queue rather
-than a count of model defects: source formatting can change fingerprints.
+than a count of model defects. Formatting no longer changes the feature
+signature (it hashes the AST), but it still changes the raw-hash recipe
+certificates in `src/deployment_validation.py`.
 
-Use the wrapper while the recorder runs from `.venv`. Bare `uv sync` normally
-targets `.venv`; it is not the setup command for the running installation.
+`venv` rebuilds or updates the project `.venv` from `uv.lock` (runtime and dev
+groups, no tooling group). Use it after a lock change. Prefer it to bare
+`uv sync`, which would pick up whatever Python and install directory the shell
+happens to provide.
+
+## The project .venv
+
+On 30 October 2026 the `.venv` was rebuilt from `uv.lock`. Before that it was a
+hand-grown installation on a broken base (`C:\Python314` had no standard
+library and loaded it through a registry `PythonPath` key, so `python -I`
+failed). It now runs on the uv-managed Python 3.14.0 in `data/tooling/python`,
+which is inside the project because the Claude desktop app virtualizes
+`AppData` and a base there is invisible to other shells. Do not delete
+`data/tooling/python` without rebuilding `.venv`.
+
+The scientific core was already at the locked versions (pandas 2.3.3,
+numpy 2.4.2, scipy 1.17.1, scikit-learn 1.8.0, LightGBM 4.6.0, numba 0.64.0,
+pyarrow 23.0.1). llvmlite moved from 0.46.0b1 to 0.46.0, shap from 0.50.0 to
+0.54.1, and transitive packages to their locked versions. Parity was checked
+before and after the switch. The promoted model scored the 2026-10-30 card
+through the full live feature path (478 runners, 45 races) and 5,022 stored
+runners from 16 to 29 October. All 154 inputs and every probability column
+were bit-identical between the old and new environments. The old environment
+is kept at `data/tooling/venv-old_20261030` for rollback: move `.venv` aside and
+move that folder back to `.venv`.
 
 ## Dependency ownership and compatibility
 
@@ -63,10 +90,9 @@ in `src/data_collector_sample.py`). All saved runs had used LightGBM only.
 H2O, FLAML, experimental neural-network packages and other unrelated extras
 are absent from the new graph. On 2026-10-30 they were also uninstalled from
 the live `.venv`: 43 packages (about 5 GB, mostly a CUDA build of torch) that
-no project code imports. `greenlet` stays because the live SQLAlchemy 2.0.47
-needs it, unlike the locked 2.1.6. The pre-uninstall `pip freeze` and the
-removed list are in `data/audit/library_consolidation_20261030/`; restore with
-`.venv\Scripts\python.exe -m pip install -r <that list>`. The 2026-10-29
+no project code imports. The pre-uninstall `pip freeze` and the removed list
+are in `data/audit/library_consolidation_20261030/`. That environment was then
+replaced by the locked rebuild described above. The 2026-10-29
 requirements and installed versions are under
 `data/audit/library_consolidation_20261029/`.
 

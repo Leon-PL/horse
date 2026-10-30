@@ -32,7 +32,9 @@ The rules below are the ones that cause real damage when violated.
    `FE_SIGNATURE_EXEMPT` with a reason. Otherwise `fe_signature()` stays
    unchanged, the store is not rebuilt, and stale features are served
    silently — this is what produced the phantom "+15% place edge".
-   `tests/test_fe_signature_coverage.py` enforces it.
+   `tests/test_fe_signature_coverage.py` enforces it. The signature hashes
+   each source's AST, so comments, docstrings and formatting do not force the
+   ~1 hour rebuild; any code, constant or config change still does.
 5. **Never trust a number without checking the instrument first:**
    `.venv/Scripts/python.exe scripts/project_status.py`. It verifies that
    results → store → model → promoted model all agree, and exits non-zero
@@ -69,10 +71,15 @@ prices; `scripts/audit_selection_rule.py` reports both.
 
 ## Practical notes
 
-- Live environment: existing `.venv` on Windows. Use `scripts/tooling.ps1 setup`
-  for isolated development; do not synchronize a running recorder's `.venv`
-  during setup. Dependencies are declared in `pyproject.toml`, resolved in
-  `uv.lock`, and exported to `requirements.lock`.
+- Environment: `.venv` on Windows, built from `uv.lock` by
+  `scripts/tooling.ps1 venv` on the project-local Python in
+  `data/tooling/python` (not AppData, which the Claude app virtualizes).
+  `scripts/tooling.ps1 setup` builds the separate tooling env. Dependencies
+  are declared in `pyproject.toml`, resolved in `uv.lock`, and exported to
+  `requirements.lock`.
+- The project is in an experimentation phase with no live model. The forward
+  recorder and its source-pinned studies were removed on 2026-10-30; do not
+  rebuild that kind of source pinning, which made every edit a new study.
 - Run `scripts/tooling.ps1 test` for pilot checks or
   `scripts/tooling.ps1 test -TestPath tests` for the full suite. See
   [development tools](docs/DEVELOPMENT_TOOLS.md) for compatibility limits.

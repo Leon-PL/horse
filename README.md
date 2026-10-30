@@ -13,7 +13,13 @@ builds historical form and ratings, and predicts each runner's chance of winning
 and placing. The objective is reliable probabilities on later races. Market
 parity and a profitable betting strategy have not been established.
 
-**Racing TV integration, 30 October 2026:** normal training/app/recorder refreshes
+**Experimentation phase, 30 October 2026:** the live forecast recorder, its
+scheduled task and the source-pinned forward studies were removed; there is no
+live model to protect while the model is still being developed. The feature
+signature now ignores comments, docstrings and formatting, and
+`train.py --fit-as-of` no longer requires a validation certificate.
+
+**Racing TV integration, 30 October 2026:** normal training/app refreshes
 collect, compare and compute RTV features alongside Sporting Life. The feature
 paths include 26 prior-run telemetry inputs and four genuine pre-race snapshot
 inputs. The fixed trial's gain is uncertain, so the deployed selection remains
@@ -23,8 +29,7 @@ inputs. The fixed trial's gain is uncertain, so the deployed selection remains
 **Place calibration added29October2026:** the154-input recipe includes
 a recent, training-fitted place-probability layer. Its earlier development
 place Brier improved from0.174255 to0.173851. Those are the038 historical
-scores, not a new score for the freshly corrected042 model. The recorder
-captures future evidence automatically.
+scores, not a new score for the freshly corrected042 model.
 See [the six-issue review and evidence](docs/PREDICTIVE_REVIEW_038.md) and
 [the current handoff](CONTINUATION.md).
 
@@ -49,10 +54,6 @@ Results database -> clean history -> historical feature store
                                         |                       explicit promotion
                                         |                             |
 Today's racecards + historical features + promoted model -> forecasts
-                                                              |
-                                                saved pre-race records
-                                                              |
-                                                  later assessment
 ```
 
 A feature is a piece of information about a runner, such as its earlier form.
@@ -84,11 +85,6 @@ The internal scrape timestamp is excluded consistently from the normal CSV
 contract. Receipts are in `data/audit/rtv_repair_features_044/installation/` and
 `source_contract/`. These are operational checks, not a new predictive-accuracy
 estimate. Rerun status for the latest state.
-
-**Recorder verification, 30 October at 17:28 UTC: passed.** The existing
-daily/logon schedule is running a fresh source/model-pinned study, eligible
-31 October. Successful market discovery and RTV history/snapshot collection
-are verified; the latest capture materialised 7,444 genuine pre-race observations.
 
 **Current installation:** promoted run `20261030_135650_092286` uses 154 inputs,
 separate LightGBM win/place heads with 3,705 / 2,990 trees, and Platt plus
@@ -132,8 +128,6 @@ large fits: [performance](docs/HANDICAP_PERFORMANCE_031.md),
 ```
 
 - **Today's Picks:** inspect win/place probabilities and selection diagnostics.
-- **Forecast record:** manually save genuine pre-race forecasts alongside the
-  current market reference, then assess saved records when results arrive.
 - **Matchbook API:** inspect the exchange connection and prices.
 
 Matchbook credentials belong in the untracked `.env` file. They are needed for
@@ -141,24 +135,11 @@ the exchange-dependent pages; historical data collection and offline training
 do not require them. Selection and paper-trading displays are separate from
 forecast accuracy evidence.
 
-The forecast study matching this installation is
-`20261029_feature_speed_20261029_222758_104473`, under
-`data/forecasts/forward/`, eligible from **30 October 2026**. Windows task
-`HorseForecastRecorder_038` starts at 09:00 and your logon, runs hidden until 03:00,
-and prevents overlapping sessions. The computer must be awake and you must be
-signed in. Each session refreshes settled histories without refitting weights.
-Use `project_status.py` to check its current heartbeat; durable logs are in the
-study's `recorder_logs/` folder. **Recorder restart verified at 2026-10-29T22:45:22.** Check its current heartbeat for feed errors. The task writes the original issued forecasts,
-market references, refined/legacy place pairs, failures and withdrawal evidence.
-Assessment reports both strict matching fields and supported issued fields.
-No observations are eligible before 30 October. Earlier studies and unsuccessful
-setup receipts remain preserved under their original source pins.
-
-For manual capture, select this study and start **Record in eligible window**
-a little before the window; keep that action open until it finishes.
-[Recording rules](docs/FORWARD_FORECASTS_006.md) and
-[timing rules](docs/TIMED_RECORDING_008.md) explain eligibility; their older study
-IDs and pilot plans describe earlier installations.
+There is no forward recorder. It was removed on 30 October 2026 with its
+`src/forward_*` modules, scheduled task and study-transition scripts; the code
+is in git history before that date, and the earlier studies' data remain under
+`data/forecasts/forward/`. The task definition is saved in
+`data/audit/recorder_removal_20261030/`.
 
 ## Maintain: update history or deliberately replace the model
 
@@ -202,9 +183,10 @@ scores, fitting dates and feature compatibility in **Registry**, then explicitly
 promote it and rerun the readiness check. A new saved run does not replace
 production automatically.
 
-To keep a previously evaluated recipe and fit it with newer settled results,
-use **Train -> Refit a validated model with newer results**. That deployment
-refit references the earlier evaluation and has no new held-out score.
+To fit through a settled cutoff with no held-out period, run
+`train.py --fit-as-of YYYY-MM-DD`; the run has no held-out score. Passing
+`--validation-report` (or using **Train -> Refit a validated model with newer
+results**) additionally reuses and checks an earlier evaluated recipe.
 The [inventory](docs/PROJECT_INVENTORY.md#maintenance-commands) includes the
 equivalent commands and explicit full rebuild.
 
@@ -229,12 +211,13 @@ data; inspect their settings and effects before running them.
 
 ## Setup and development
 
-The live installation uses Python 3.14 and its existing `.venv`. Development
-tools use a separate locked environment so setup does not synchronize the
-running recorder's packages. From PowerShell:
+The installation uses Python 3.14 in `.venv`, built from `uv.lock` on the
+project-local runtime in `data/tooling/python`. Development tools use a
+separate locked environment under `data/tooling/`. From PowerShell:
 
 ```powershell
 .\scripts\tooling.ps1 setup
+.\scripts\tooling.ps1 venv
 .\scripts\tooling.ps1 test
 .\scripts\tooling.ps1 validate
 .\scripts\tooling.ps1 lint
