@@ -1,5 +1,13 @@
 # Market performance implementation
 
+**045 rating systems repaired, 30 October 2026 (not yet in the store):** Elo,
+Glicko, TrueSkill and value-added jockey/trainer ratings were rebuilt and
+re-tuned. Standalone held-out race log loss improves sharply (Elo
+2.125 → 2.010, Elo + jockey + trainer 2.030 → 1.952), but no rating, old or
+new, moves SP log loss by more than 0.00015 nats. The store needs one rebuild
+and the promoted model a retrain before serving.
+[Changes, settings and results](RATING_SYSTEMS_045.md).
+
 **042 installed,30 October2026:** production `20261030_015917_823047` uses
 corrected official results and freshly rebuilt horse/connection/rating history.
 The canonical repair covers164 complete fields,131 changed winners and463

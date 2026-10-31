@@ -2190,3 +2190,23 @@ and target1.936083→1.937554 also worsen. No native transfer, new tree fit or
 production change follows.19helper/optimizer checks pass, native replay is exact,
 and current-label/price poisoning leaves both heads unchanged. Preserve the
 pre042 source-label version of this evidence. [Definition and results](AUXILIARY_PLACE_WIN_041.md).
+
+## 045. Repaired skill ratings: much better skill measures, still no market gain (30 October 2026)
+
+The Elo, Glicko, TrueSkill and jockey/trainer ratings were repaired (Elo K too
+small for its scale, non-finishers ignored, jockeys rated on their horses,
+separate surface/race-type/distance pools, undecayed momentum, Glicko RD
+collapse, Glicko-2 φ double-counted, no TrueSkill layoff uncertainty) and
+re-tuned with `scripts/screen_ratings.py`. Held-out race log loss on 29,786
+development races: Elo 2.125 → 2.010, Elo + jockey + trainer 2.030 → 1.952,
+TrueSkill μ 2.050 → 1.996, Glicko 2.012 → 2.004. On top of SP every rating, old
+or new, changes log loss by at most 0.00015 nats. The market prices all of it;
+the rating store is a better description of form, not an edge.
+
+**Field-relative newcomer starts ratchet.** Starting debutants below the rated
+runners they meet, by a fixed gap (50/100/200 points) or a learned one, always
+lost to a fixed start, and lost more in the later test period (Elo gap 200:
+fit 2.105, test 2.198, against fixed 2.023 / 2.010). Maiden fields are mostly
+recent debutants, so each cohort starts relative to the last one's start and
+the scale drifts. Do not retry it without anchoring debutants to something
+outside the debutant pool. [Method, settings and the full table](RATING_SYSTEMS_045.md).

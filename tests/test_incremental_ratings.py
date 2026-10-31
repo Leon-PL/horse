@@ -84,14 +84,14 @@ def test_returned_state_roundtrips_and_is_serializable(split_processed):
     _, hist, _, _ = split_processed
     _, state = compute_elo_features(hist.copy(), return_state=True)
 
+    # Dimensional edge state exists per dimension column present; this
+    # fixture has no dist_category (FE adds it mid-pipeline).
     expected = {
-        "horse_ratings", "jockey_ratings", "trainer_ratings",
-        "horse_race_counts", "jockey_race_counts", "trainer_race_counts",
-        "horse_momentum", "horse_surf_ratings", "horse_rt_ratings",
-        "horse_dc_ratings", "jockey_rt_ratings", "horse_surf_counts",
-        "horse_rt_counts", "horse_dc_counts", "jockey_rt_counts",
+        "horse_ratings", "horse_race_counts", "horse_momentum", "horse_last_dt",
+        "jockey_offsets", "jockey_race_counts", "trainer_offsets", "trainer_race_counts",
+        "horse_surf_edge", "horse_rt_edge", "jockey_rt_edge",
         "horse_margin_ratings", "horse_margin_race_counts",
-        "horse_margin_momentum",
+        "horse_margin_momentum", "horse_margin_last_dt",
     }
     assert expected <= set(state)
     assert all(isinstance(v, dict) for v in state.values())

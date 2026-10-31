@@ -208,6 +208,7 @@ General comparison tools and experiment-specific implementations are kept togeth
 | [screen_feature_batch.py](../scripts/screen_feature_batch.py) | Experiment 018 registered feature screen after audits. |
 | [screen_model_capacity.py](../scripts/screen_model_capacity.py) | Experiment 021 fixed capacity screen. |
 | [screen_prize_currency.py](../scripts/screen_prize_currency.py) | Experiment 020 currency-feature screen. |
+| [screen_ratings.py](../scripts/screen_ratings.py) | Experiment 045 rating-system screen: each rating as a standalone within-race logit, alone and on top of SP; `--set` overrides settings, `--stored` scores the store. |
 | [triage_features.py](../scripts/triage_features.py) | Stage-1 triage: does a candidate feature carry information the market lacks? |
 | [validate_model_capacity.py](../scripts/validate_model_capacity.py) | Experiment 022 wider validation of the selected capacity change. |
 | [wf_benter_combination.py](../scripts/wf_benter_combination.py) | Walk-forward re-validation of the Benter market-combination edge. |
@@ -372,6 +373,14 @@ them. Likewise, research walk-forward primitives and app-facing betting
 simulation have distinct purposes; consolidate shared calculations without
 silently changing their evaluation contracts.
 
+
+## Rating systems045 (30 October 2026)
+
+`src/ratings.py` holds the repaired Elo, margin Elo, Glicko-1/2, TrueSkill and
+value-added jockey/trainer ratings; its settings are in the `config.py` rating
+block. `scripts/screen_ratings.py` scores each rating as a standalone
+within-race logit and on top of SP; `--set` overrides a setting.
+[Changes, settings and results](RATING_SYSTEMS_045.md).
 
 ## Further research039–040 (29October2026)
 

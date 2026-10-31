@@ -1,26 +1,41 @@
 """
-Horse Rating System (Elo-style)
-================================
-Computes dynamic Elo ratings for horses, jockeys, and trainers based on
-head-to-head race results.
+Horse Rating Systems
+====================
+Dynamic strength ratings for horses (Elo, margin Elo, Glicko-1/2, TrueSkill)
+and value-added ratings for jockeys and trainers, computed from head-to-head
+race results.
 
 The key insight: if Horse A beats Horse B, and Horse B beats Horse C,
 then Horse A should be rated above Horse C — *even if they never met*.
 Traditional per-horse win-rate features cannot capture this transitive
-strength.  Elo ratings propagate strength through the entire population.
+strength.  Ratings propagate strength through the entire population.
 
-Algorithm
----------
-After each race, every pair of finishers is compared:
+Every column is the value an entity carried *into* a race: a row never sees
+its own result.
 
-    E_A = 1 / (1 + 10^((R_B - R_A) / 400))   # expected score for A vs B
-    S_A = 1 if A beat B, 0.5 if tied, 0 if lost
+Elo
+---
+After each race every pair of participants is compared::
 
-    R_A_new = R_A + K * (S_A - E_A)
+    E_ij = 1 / (1 + 10^((R_j - R_i) / 400))   # expected score of i vs j
+    S_ij = 1 if i beat j, 0.5 if tied, 0 if lost
 
-With N runners in a race, each horse is updated against all N-1 opponents.
-The K-factor is divided by (N-1) to normalise the update magnitude so a
-big-field race doesn't cause wild swings.
+    R_i_new = R_i + K_i * mean_j(S_ij - E_ij)
+
+``K_i`` decays with the horse's experience. Its size must suit the
+400-point scale: a K that is too small keeps every rating near its start,
+so every expected score sits near 0.5 and the rating degenerates into a
+tally of fields beaten instead of a strength estimate that adjusts for the
+opposition.
+
+Every horse starts at the same rating. Starting debutants relative to the
+rated runners they meet was measured and rejected (experiment 045): maiden
+fields are mostly recent debutants, so any field-relative start compounds
+from cohort to cohort, with a fixed gap or a learned one.
+
+Jockeys and trainers carry *offsets* added to the horse's rating, updated
+from how their runners finish relative to what the horse ratings expected.
+They measure value added, not the quality of the horses they are given.
 
 Usage::
 
@@ -32,7 +47,6 @@ Usage::
 """
 
 import logging
-from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -95,14 +109,31 @@ def _entity_keys(
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 DEFAULT_RATING = 1500.0
-K_FACTOR = 16.0          # legacy fallback (per-opponent K)
+K_FACTOR = 16.0          # legacy signature default; adaptive K is always used
 MIN_RACES_FOR_RATING = 0  # include from the first race
 
-# Adaptive K-factor settings (from config, with fallbacks)
-K_BASE = getattr(config, "ELO_K_BASE", 32.0)
-K_MIN = getattr(config, "ELO_K_MIN", 8.0)
+# Adaptive K-factor settings (from config, with fallbacks). Functions read
+# these module bindings at call time so sweeps can patch them.
+K_BASE = getattr(config, "ELO_K_BASE", 256.0)
+K_MIN = getattr(config, "ELO_K_MIN", 128.0)
 K_DECAY = getattr(config, "ELO_K_DECAY", 0.05)
 MOMENTUM_ALPHA = getattr(config, "ELO_MOMENTUM_ALPHA", 0.3)  # EMA smoothing for momentum
+# Momentum fades towards 0 while a horse is off the track.
+MOMENTUM_HALF_LIFE_DAYS = getattr(config, "ELO_MOMENTUM_HALF_LIFE_DAYS", 180.0)
+# Jockey/trainer value-added offsets (rating points added to the horse).
+ENTITY_K_BASE = getattr(config, "ELO_ENTITY_K_BASE", 32.0)
+ENTITY_K_MIN = getattr(config, "ELO_ENTITY_K_MIN", 4.0)
+# Pseudo-runs shrinking dimension-specific edges towards 0 (must be > 0).
+DIM_PRIOR_RUNS = getattr(config, "RATING_DIM_PRIOR_RUNS", 3.0)
+# Non-finishers (fell, pulled up, ...) lose to every finisher and tie with
+# each other in the Elo, Glicko and TrueSkill updates. Margin Elo always
+# includes them with its own lengths penalty.
+DNF_AS_LOSS = getattr(config, "RATING_DNF_AS_LOSS", True)
+
+# Converts a mean score residual (actual minus expected, averaged over
+# opponents) into rating points: the expected-score slope at evenly
+# matched ratings is ln(10)/400 * 1/4.
+RESID_TO_POINTS = 1600.0 / np.log(10.0)
 
 
 def _day_start_gather(values: np.ndarray, keys: list, dates: np.ndarray) -> np.ndarray:
@@ -125,7 +156,7 @@ def _day_start_gather(values: np.ndarray, keys: list, dates: np.ndarray) -> np.n
     return np.asarray(values)[first]
 
 
-def _adaptive_k(n_races: int) -> float:
+def _adaptive_k(n_races, k_base: float | None = None, k_min: float | None = None):
     """
     Compute an adaptive K-factor based on experience.
 
@@ -134,7 +165,9 @@ def _adaptive_k(n_races: int) -> float:
 
     Uses exponential decay:  K = K_MIN + (K_BASE - K_MIN) * exp(-K_DECAY * n)
     """
-    return K_MIN + (K_BASE - K_MIN) * np.exp(-K_DECAY * n_races)
+    k_base = K_BASE if k_base is None else k_base
+    k_min = K_MIN if k_min is None else k_min
+    return k_min + (k_base - k_min) * np.exp(-K_DECAY * np.asarray(n_races, dtype=float))
 
 
 # ── Margin Elo config ─────────────────────────────────────────────────────
@@ -142,88 +175,58 @@ MARGIN_SCALE = getattr(config, "MARGIN_ELO_SCALE", 5.0)     # base lengths at wh
 MARGIN_REF_DIST = getattr(config, "MARGIN_ELO_REF_DIST", 8.0)  # reference distance (furlongs)
 DNF_PENALTY_LB = getattr(config, "MARGIN_ELO_DNF_PENALTY", 30.0)  # virtual lb for non-finishers
 
-# Non-finisher labels: horses that started but didn't complete
-_DNF_LABELS = frozenset({"PU", "F", "UR", "BD", "RR", "SU", "RO", "CO", "REF", "DSQ"})
 
+# ── Core helpers ──────────────────────────────────────────────────────────
 
-# ── Core Elo helpers ──────────────────────────────────────────────────────
+def _race_outcome(fp_race: np.ndarray, include_dnf: bool) -> tuple[np.ndarray, np.ndarray]:
+    """Rows that take part in a rating update, and their effective positions.
 
-def _expected_score(rating_a: float, rating_b: float) -> float:
-    """Probability that A beats B given their ratings."""
-    return 1.0 / (1.0 + 10.0 ** ((rating_b - rating_a) / 400.0))
-
-
-def _update_ratings_for_race(
-    finish_order: list[tuple[str, int]],
-    ratings: dict[str, float],
-    k: float = K_FACTOR,
-    race_counts: dict[str, int] | None = None,
-) -> dict[str, float]:
+    Finishers (position >= 1) always take part. With ``include_dnf``,
+    non-finishers (position 0) in a race that has a finisher take part as a
+    dead heat for last place. Pending cards (no finisher) never update.
     """
-    Update Elo ratings for all runners in a single race.
+    fp_race = np.asarray(fp_race, dtype=float)
+    fin = np.isfinite(fp_race) & (fp_race > 0)
+    if include_dnf and fin.any():
+        dnf = np.isfinite(fp_race) & (fp_race == 0)
+        if dnf.any():
+            return fin | dnf, np.where(dnf, fp_race[fin].max() + 1.0, fp_race)
+    return fin, fp_race
 
-    Args:
-        finish_order: list of (entity_id, finish_position) — position 1 is
-                      best.  Entities with the same position are treated as
-                      a draw.
-        ratings: mutable dict of entity_id → current rating.
-        k: K-factor per opponent pair (divided by field-1 internally).
-            Used as fallback when race_counts is None.
-        race_counts: Optional dict of entity_id → number of prior races.
-            When provided, an adaptive K is computed per entity.
 
-    Returns:
-        dict mapping entity_id → rating change (delta) for this race.
+def _pair_scores(pos: np.ndarray) -> np.ndarray:
+    """S[i, j] = 1 if i finished ahead of j, 0.5 if level, 0 if behind."""
+    a, b = pos[:, None], pos[None, :]
+    return np.where(a < b, 1.0, np.where(a == b, 0.5, 0.0))
+
+
+def _elo_expected(r: np.ndarray) -> np.ndarray:
+    """E[i, j] = probability that i beats j given their ratings."""
+    return 1.0 / (1.0 + 10.0 ** ((r[None, :] - r[:, None]) / 400.0))
+
+
+def _mean_residual(S: np.ndarray, E: np.ndarray, same: np.ndarray | None = None) -> np.ndarray:
+    """Mean actual-minus-expected score of each runner against its opponents.
+
+    ``same`` marks pairs that are not opponents (two runners of one trainer).
+    A row without any opponent gets NaN: the race says nothing about it.
     """
-    n = len(finish_order)
-    if n < 2:
-        return {}
-
-    deltas: dict[str, float] = defaultdict(float)
-
-    for i, (id_a, pos_a) in enumerate(finish_order):
-        r_a = ratings.get(id_a, DEFAULT_RATING)
-        # Adaptive K: use entity's experience if available
-        if race_counts is not None:
-            k_entity = _adaptive_k(race_counts.get(id_a, 0))
-        else:
-            k_entity = k
-        # Normalise K by number of opponents
-        k_adj = k_entity / (n - 1)
-
-        for j, (id_b, pos_b) in enumerate(finish_order):
-            if i == j:
-                continue
-            r_b = ratings.get(id_b, DEFAULT_RATING)
-
-            expected = _expected_score(r_a, r_b)
-
-            if pos_a < pos_b:
-                actual = 1.0
-            elif pos_a == pos_b:
-                actual = 0.5
-            else:
-                actual = 0.0
-
-            deltas[id_a] += k_adj * (actual - expected)
-
-    # Apply deltas
-    for entity_id, delta in deltas.items():
-        ratings[entity_id] = ratings.get(entity_id, DEFAULT_RATING) + delta
-
-    return dict(deltas)
+    opp = ~np.eye(len(S), dtype=bool)
+    if same is not None:
+        opp &= ~same
+    n_opp = opp.sum(axis=1)
+    total = np.where(opp, S - E, 0.0).sum(axis=1)
+    return np.where(n_opp > 0, total / np.maximum(n_opp, 1), np.nan)
 
 
-def _margin_actual_score(
-    lb_a: float, lb_b: float, margin_scale: float = MARGIN_SCALE,
-) -> float:
+def _margin_score_matrix(lb: np.ndarray, margin_scale: float) -> np.ndarray:
     """
-    Continuous actual score for A vs B based on lengths-behind margin.
+    Continuous actual score S[i, j] from lengths-behind margins.
 
-    Returns a value in (0, 1):
-        - A beats B (lb_a < lb_b): score > 0.5, approaching 1.0 for big margins
-        - A loses to B (lb_a > lb_b): score < 0.5, approaching 0.0 for big margins
-        - Dead heat (lb_a == lb_b): exactly 0.5
+    Returns values in (0, 1):
+        - i beats j (lb_i < lb_j): score > 0.5, approaching 1.0 for big margins
+        - i loses to j: score < 0.5, approaching 0.0 for big margins
+        - Dead heat: exactly 0.5
 
     Uses ``1 - exp(-margin / margin_scale)`` to map the gap size
     to a [0, 0.5) bonus/penalty on top of the 0.5 baseline.
@@ -232,12 +235,9 @@ def _margin_actual_score(
     scale so that the same number of lengths produces a smaller Elo
     swing than in a sprint.
     """
-    margin = lb_b - lb_a  # positive when A beat B
-    if margin == 0.0:
-        return 0.5
-    sign = 1.0 if margin > 0 else -1.0
-    mov = 0.5 * (1.0 - np.exp(-abs(margin) / margin_scale))
-    return 0.5 + sign * mov
+    margin = lb[None, :] - lb[:, None]  # positive when i beat j
+    mov = 0.5 * (1.0 - np.exp(-np.abs(margin) / margin_scale))
+    return 0.5 + np.sign(margin) * mov
 
 
 def _distance_margin_scale(distance_furlongs: float) -> float:
@@ -246,68 +246,119 @@ def _distance_margin_scale(distance_furlongs: float) -> float:
     scale = MARGIN_SCALE * (distance / REF_DIST)
 
     At REF_DIST (default 8f ≈ 1 mile) the scale equals the base
-    MARGIN_SCALE.  A 5f sprint gets a tighter scale (3.1) so a
-    1-length gap has *more* Elo impact.  A 24f chase gets a
-    wider scale (15.0) reflecting that large lb margins are
-    routine at staying distances.
+    MARGIN_SCALE.  A 5f sprint gets a tighter scale so a 1-length gap has
+    *more* rating impact; a 24f chase gets a wider scale, reflecting that
+    large lb margins are routine at staying distances.
     """
     if not np.isfinite(distance_furlongs) or distance_furlongs <= 0:
         return MARGIN_SCALE
     return MARGIN_SCALE * (distance_furlongs / MARGIN_REF_DIST)
 
 
-def _update_margin_elo_for_race(
-    runners: list[tuple[str, float]],
-    ratings: dict[str, float],
-    k: float = K_FACTOR,
-    race_counts: dict[str, int] | None = None,
-    margin_scale: float = MARGIN_SCALE,
-) -> dict[str, float]:
+def _decayed(value: float, last_dt, now, half_life_days: float) -> float:
+    """``value`` faded by half for every ``half_life_days`` since ``last_dt``."""
+    if last_dt is None:
+        return value
+    days = max(float((now - last_dt) / np.timedelta64(1, "D")), 0.0)
+    return value * 0.5 ** (days / half_life_days)
+
+
+class _DimensionEdge:
+    """Shrunk dimension-specific edge (surface, race type, trip) for one keying.
+
+        edge = RESID_TO_POINTS * (sum_d / (n_d + n0) - sum_all / (n_all + n0))
+
+    ``sum_d``/``n_d`` accumulate an entity's mean score residuals (actual
+    minus expected against the field, from its parent rating) in dimension
+    value ``d``; ``sum_all``/``n_all`` over every run with a known value of
+    that dimension. An entity that has only run under one value has an edge
+    of exactly 0, and the edge grows smoothly with evidence — unlike a
+    separate rating pool per dimension, which mostly duplicates the parent
+    rating and has to fall back to it below some run count.
     """
-    Margin-weighted Elo update for one race.
 
-    Like ``_update_ratings_for_race`` but uses continuous scores derived
-    from the lengths-behind gap between each pair, rather than binary
-    win/loss.
+    def __init__(self, state: dict | None = None):
+        state = state or {}
+        self.dim = dict(state.get("dim", {}))
+        self.all = dict(state.get("all", {}))
 
-    Args:
-        runners: list of (entity_id, effective_lengths_behind).
-                 Non-finishers should already have a penalised lb value.
-        ratings: mutable dict of entity_id → current rating.
-        k: K-factor fallback.
-        race_counts: optional entity_id → prior-race count for adaptive K.
-        margin_scale: distance-conditioned scale for the margin → score
-                      mapping (see ``_distance_margin_scale``).
+    def edge(self, key, value) -> float:
+        sd, nd = self.dim.get((key, value), (0.0, 0))
+        sa, na = self.all.get(key, (0.0, 0))
+        return RESID_TO_POINTS * (sd / (nd + DIM_PRIOR_RUNS) - sa / (na + DIM_PRIOR_RUNS))
 
-    Returns:
-        dict mapping entity_id → rating delta for this race.
+    def add(self, key, value, resid: float) -> None:
+        sd, nd = self.dim.get((key, value), (0.0, 0))
+        self.dim[(key, value)] = (sd + resid, nd + 1)
+        sa, na = self.all.get(key, (0.0, 0))
+        self.all[key] = (sa + resid, na + 1)
+
+    def state(self) -> dict:
+        return {"dim": self.dim, "all": self.all}
+
+
+def _dim_value(v):
+    """Hashable dimension value, or None when unknown."""
+    if v is None or (isinstance(v, float) and not np.isfinite(v)) or pd.isna(v):
+        return None
+    return int(v) if isinstance(v, (float, np.floating)) else v
+
+
+def _dimension_edge_sweep(
+    keys: list, values, resid: np.ndarray,
+    race_ids_ordered: np.ndarray, race_group_indices: dict,
+    state: dict | None = None,
+) -> tuple[np.ndarray, dict]:
+    """Chronological pre-race :class:`_DimensionEdge` values for given residuals.
+
+    ``resid`` holds each row's mean score residual from the parent rating
+    pass (NaN where the row did not update it).
     """
-    n = len(runners)
-    if n < 2:
-        return {}
+    tracker = _DimensionEdge(state)
+    out = np.full(len(keys), np.nan)
+    for race_id in race_ids_ordered:
+        idx = race_group_indices[race_id]
+        for i in idx:
+            v = _dim_value(values[i])
+            if keys[i] is not None and v is not None:
+                out[i] = tracker.edge(keys[i], v)
+        for i in idx:
+            v = _dim_value(values[i])
+            if keys[i] is not None and v is not None and np.isfinite(resid[i]):
+                tracker.add(keys[i], v, float(resid[i]))
+    return out, tracker.state()
 
-    deltas: dict[str, float] = defaultdict(float)
 
-    for i, (id_a, lb_a) in enumerate(runners):
-        r_a = ratings.get(id_a, DEFAULT_RATING)
-        if race_counts is not None:
-            k_entity = _adaptive_k(race_counts.get(id_a, 0))
-        else:
-            k_entity = k
-        k_adj = k_entity / (n - 1)
+def _entity_residuals(R: np.ndarray, codes: np.ndarray) -> np.ndarray:
+    """Per-row mean residual against runners of *other* entities.
 
-        for j, (id_b, lb_b) in enumerate(runners):
-            if i == j:
-                continue
-            r_b = ratings.get(id_b, DEFAULT_RATING)
-            expected = _expected_score(r_a, r_b)
-            actual = _margin_actual_score(lb_a, lb_b, margin_scale)
-            deltas[id_a] += k_adj * (actual - expected)
+    ``codes`` are integer entity ids (-1 = unknown, which never updates).
+    Runners sharing an entity (a trainer's stablemates) are not opponents:
+    their relative finish says nothing about that entity.
+    """
+    same = codes[:, None] == codes[None, :]
+    res = _mean_residual(R, np.zeros_like(R), same)
+    return np.where(codes >= 0, res, np.nan)
 
-    for entity_id, delta in deltas.items():
-        ratings[entity_id] = ratings.get(entity_id, DEFAULT_RATING) + delta
 
-    return dict(deltas)
+def _apply_entity_update(
+    rows: np.ndarray, res: np.ndarray, keys: np.ndarray,
+    offsets: dict, counts: dict, delta_col: np.ndarray | None,
+) -> None:
+    """Move each entity's offset by its runners' mean residual, once per race."""
+    by_key: dict = {}
+    for i, r in zip(rows, res):
+        if np.isfinite(r):
+            by_key.setdefault(keys[i], []).append((i, r))
+    for key, items in by_key.items():
+        n = counts.get(key, 0)
+        k = _adaptive_k(n, ENTITY_K_BASE, ENTITY_K_MIN)
+        delta = float(k * np.mean([r for _, r in items]))
+        offsets[key] = offsets.get(key, 0.0) + delta
+        counts[key] = n + 1
+        if delta_col is not None:
+            for i, _ in items:
+                delta_col[i] = delta
 
 
 # ── Public API ────────────────────────────────────────────────────────────
@@ -326,17 +377,23 @@ def compute_elo_features(
     entity's rating *before* the race takes place (i.e. the rating the
     entity carried into the race).  This avoids any look-ahead leakage.
 
-    New columns added:
+    New columns added (selection):
         - ``horse_elo``   — horse's Elo rating entering this race
-        - ``jockey_elo``  — jockey's rating entering this race
-        - ``trainer_elo`` — trainer's rating entering this race
-        - ``horse_elo_delta``  — rating change after this race
-        - ``jockey_elo_delta`` — jockey rating change after this race
+        - ``jockey_elo`` / ``trainer_elo`` — 1500 + the entity's value-added
+          offset: rating points its runners finish above what their horse
+          ratings expect
+        - ``horse_elo_momentum`` — time-faded EMA of recent performances
+          relative to the rating, in rating points
+        - ``horse_elo_{surface,rt,dist_cat}`` and ``_edge`` — rating plus a
+          shrunk dimension-specific edge (``jockey_elo_rt`` likewise)
+        - ``combined_elo`` — horse rating plus jockey and trainer offsets
+        - ``horse_elo_delta`` / ``jockey_elo_delta`` — change after this
+          race (post-race; excluded from models)
 
     Args:
         df: DataFrame with ``race_id``, ``race_date``, ``finish_position``,
             ``horse_name``, and optionally ``jockey`` and ``trainer``.
-        k: K-factor (higher = more reactive).
+        k: Unused; kept for call compatibility (K is adaptive).
 
     Returns:
         DataFrame with new Elo columns.
@@ -361,346 +418,242 @@ def compute_elo_features(
 
     # Optionally seed the rating state from a prior incremental run so the
     # chronological sweep continues from where it left off instead of
-    # restarting from DEFAULT_RATING. The end-state is returned when
+    # restarting from scratch. The end-state is returned when
     # return_state=True so a feature store can persist it and re-feed it on
     # the next append — making the sweep process only the new rows while
     # producing byte-identical pre-race ratings.
     _seed_state = elo_state or {}
 
-    def _seed(name: str, factory):
-        d = defaultdict(factory)
-        prior = _seed_state.get(name)
-        if prior:
-            d.update(prior)
-        return d
+    def _seed(name: str) -> dict:
+        return dict(_seed_state.get(name) or {})
 
-    _R = lambda: DEFAULT_RATING  # noqa: E731 — rating default factory
+    horse_ratings = _seed("horse_ratings")
+    horse_race_counts = _seed("horse_race_counts")
+    horse_momentum = _seed("horse_momentum")
+    horse_last_dt = _seed("horse_last_dt")
+    jockey_offsets = _seed("jockey_offsets")
+    jockey_race_counts = _seed("jockey_race_counts")
+    trainer_offsets = _seed("trainer_offsets")
+    trainer_race_counts = _seed("trainer_race_counts")
+    horse_margin_ratings = _seed("horse_margin_ratings")
+    horse_margin_race_counts = _seed("horse_margin_race_counts")
+    horse_margin_momentum = _seed("horse_margin_momentum")
+    horse_margin_last_dt = _seed("horse_margin_last_dt")
 
-    # Rating dictionaries — persist across all races
-    horse_ratings: dict[str, float] = _seed("horse_ratings", _R)
-    jockey_ratings: dict[str, float] = _seed("jockey_ratings", _R)
-    trainer_ratings: dict[str, float] = _seed("trainer_ratings", _R)
-
-    # Race-count dictionaries for adaptive K-factor
-    horse_race_counts: dict[str, int] = _seed("horse_race_counts", int)
-    jockey_race_counts: dict[str, int] = _seed("jockey_race_counts", int)
-    trainer_race_counts: dict[str, int] = _seed("trainer_race_counts", int)
-
-    # Columns to populate
-    horse_elo_col = np.full(len(df), np.nan)
-    jockey_elo_col = np.full(len(df), np.nan)
-    trainer_elo_col = np.full(len(df), np.nan)
-    horse_delta_col = np.zeros(len(df))
-    jockey_delta_col = np.zeros(len(df))
-    has_horse_elo_col = np.zeros(len(df), dtype=np.int8)
-    has_jockey_elo_col = np.zeros(len(df), dtype=np.int8)
-    has_trainer_elo_col = np.zeros(len(df), dtype=np.int8)
-
-    # Momentum Elo: exponential moving average of recent deltas
-    horse_momentum: dict[str, float] = _seed("horse_momentum", float)
-    horse_momentum_col = np.full(len(df), np.nan)
+    n_rows = len(df)
+    horse_elo_col = np.full(n_rows, np.nan)
+    jockey_off_col = np.full(n_rows, np.nan)
+    trainer_off_col = np.full(n_rows, np.nan)
+    horse_delta_col = np.zeros(n_rows)
+    jockey_delta_col = np.zeros(n_rows)
+    has_horse_elo_col = np.zeros(n_rows, dtype=np.int8)
+    has_jockey_elo_col = np.zeros(n_rows, dtype=np.int8)
+    has_trainer_elo_col = np.zeros(n_rows, dtype=np.int8)
+    horse_momentum_col = np.full(n_rows, np.nan)
+    horse_resid_col = np.full(n_rows, np.nan)
+    jockey_resid_col = np.full(n_rows, np.nan)
 
     # Group by race (preserving chronological order)
-    # Pre-group indices: O(N) once instead of O(N) per-race boolean scan.
     race_ids_ordered = df.drop_duplicates("race_id", keep="first")["race_id"].values
-    _race_groups = df.groupby("race_id", sort=False)
+    race_groups = df.groupby("race_id", sort=False).indices
+    dates = df["race_date"].values
 
     # Pre-extract columns as numpy arrays for fast inner-loop access
     _horse_keys = _entity_keys(df, id_col="horse_id", name_col="horse_name", prefix="horse")
-    _finish_pos = df["finish_position"].values if "finish_position" in df.columns else None
+    _h_ok = pd.notna(pd.Series(_horse_keys)).to_numpy()
+    _finish_pos = (
+        pd.to_numeric(df["finish_position"], errors="coerce").to_numpy(dtype=float)
+        if "finish_position" in df.columns else None
+    )
     _jockey_keys = _entity_keys(df, id_col="jockey_id", name_col="jockey", prefix="jockey") if has_jockey else None
     _trainer_keys = _entity_keys(df, id_col="trainer_id", name_col="trainer", prefix="trainer") if has_trainer else None
+    # Integer ids (-1 = unknown) for same-entity tests inside a race.
+    _jockey_codes = pd.factorize(pd.Series(_jockey_keys))[0] if has_jockey else None
+    _trainer_codes = pd.factorize(pd.Series(_trainer_keys))[0] if has_trainer else None
 
-    # ── Dimensional Elo ──────────────────────────────────────────────
-    # Separate ratings per surface, race_type, and distance category.
-    # Falls back to global Elo when a horse has < MIN_DIM_RACES in
-    # the dimension (cold-start protection).
-    MIN_DIM_RACES = 3
-
-    has_surface = "surface" in df.columns
-    has_race_type = "race_type" in df.columns
-    has_dist_cat = "dist_category" in df.columns
-
-    # Rating dicts: key = (entity_name, dim_value)
-    horse_surf_ratings: dict = _seed("horse_surf_ratings", _R)
-    horse_rt_ratings: dict = _seed("horse_rt_ratings", _R)
-    horse_dc_ratings: dict = _seed("horse_dc_ratings", _R)
-    jockey_rt_ratings: dict = _seed("jockey_rt_ratings", _R)
-
-    horse_surf_counts: dict = _seed("horse_surf_counts", int)
-    horse_rt_counts: dict = _seed("horse_rt_counts", int)
-    horse_dc_counts: dict = _seed("horse_dc_counts", int)
-    jockey_rt_counts: dict = _seed("jockey_rt_counts", int)
-
-    horse_elo_surf_col = np.full(len(df), np.nan)
-    horse_elo_rt_col = np.full(len(df), np.nan)
-    horse_elo_dc_col = np.full(len(df), np.nan)
-    jockey_elo_rt_col = np.full(len(df), np.nan)
-
-    _surfaces = df["surface"].values if has_surface else None
-    _race_types = df["race_type"].values if has_race_type else None
-    _dist_cats = df["dist_category"].values if has_dist_cat else None
+    # ── Dimensional edges ────────────────────────────────────────────
+    # Shrunk per-dimension edges on top of the global rating (see
+    # _DimensionEdge), for surface, race type and distance category.
+    dims = {
+        name: (df[col].values, _DimensionEdge(_seed_state.get(f"horse_{name}_edge")),
+               np.full(n_rows, np.nan))
+        for name, col in [("surf", "surface"), ("rt", "race_type"), ("dc", "dist_category")]
+        if col in df.columns
+    }
+    _race_types = df["race_type"].values if "race_type" in df.columns else None
+    jockey_rt = _DimensionEdge(_seed_state.get("jockey_rt_edge"))
+    jockey_rt_edge_col = np.full(n_rows, np.nan)
+    # A jockey's edge subtracts their all-race-type mean, which every ride
+    # moves, so a day-start gather per race type would still see the day's
+    # earlier rides of other types. Updates are held until the day ends.
+    jockey_rt_pending: list = []
+    jockey_rt_day = None
 
     # ── Margin Elo state ─────────────────────────────────────────────
     # Separate rating pool: penalises for beaten lengths and DNF.
-    horse_margin_ratings: dict[str, float] = _seed("horse_margin_ratings", _R)
-    horse_margin_race_counts: dict[str, int] = _seed("horse_margin_race_counts", int)
-    horse_margin_momentum: dict[str, float] = _seed("horse_margin_momentum", float)
-    horse_margin_elo_col = np.full(len(df), np.nan)
-    horse_margin_delta_col = np.zeros(len(df))
-    horse_margin_momentum_col = np.full(len(df), np.nan)
+    horse_margin_elo_col = np.full(n_rows, np.nan)
+    horse_margin_delta_col = np.zeros(n_rows)
+    horse_margin_momentum_col = np.full(n_rows, np.nan)
     from src.result_margins import margin_values
-    _lengths_behind = margin_values(df).values if "lengths_behind" in df.columns else None
-    _dist_furlongs = df["distance_furlongs"].values if "distance_furlongs" in df.columns else None
+    _lengths_behind = (
+        pd.to_numeric(margin_values(df), errors="coerce").to_numpy(dtype=float)
+        if "lengths_behind" in df.columns else None
+    )
+    _dist_furlongs = (
+        pd.to_numeric(df["distance_furlongs"], errors="coerce").to_numpy(dtype=float)
+        if "distance_furlongs" in df.columns else None
+    )
 
     for race_id in race_ids_ordered:
-        idx = _race_groups.indices[race_id]
+        idx = race_groups[race_id]
+        day = dates[idx[0]]
+        known = idx[_h_ok[idx]]
+        if jockey_rt_pending and day != jockey_rt_day:
+            for args in jockey_rt_pending:
+                jockey_rt.add(*args)
+            jockey_rt_pending.clear()
+        jockey_rt_day = day
 
         # --- Record *pre-race* ratings (no look-ahead) ---
         # Must happen for ALL races including future/unfinished ones
-        # so live racecards get their accumulated Elo ratings.
+        # so live racecards get their accumulated ratings.
+        for i in known:
+            hk = _horse_keys[i]
+            horse_elo_col[i] = horse_ratings.get(hk, DEFAULT_RATING)
+            horse_margin_elo_col[i] = horse_margin_ratings.get(hk, DEFAULT_RATING)
+            has_horse_elo_col[i] = np.int8(horse_race_counts.get(hk, 0) > 0)
+            horse_momentum_col[i] = _decayed(
+                horse_momentum.get(hk, 0.0), horse_last_dt.get(hk), day, MOMENTUM_HALF_LIFE_DAYS)
+            horse_margin_momentum_col[i] = _decayed(
+                horse_margin_momentum.get(hk, 0.0), horse_margin_last_dt.get(hk), day,
+                MOMENTUM_HALF_LIFE_DAYS)
+            for values, tracker, col in dims.values():
+                v = _dim_value(values[i])
+                if v is not None:
+                    col[i] = tracker.edge(hk, v)
         for i in idx:
-            _hk = _horse_keys[i]
-            if pd.notna(_hk):
-                horse_elo_col[i] = horse_ratings[_hk]
-                horse_momentum_col[i] = horse_momentum[_hk]
-                has_horse_elo_col[i] = np.int8(horse_race_counts[_hk] > 0)
-            # Margin Elo pre-race
-            if pd.notna(_hk):
-                horse_margin_elo_col[i] = horse_margin_ratings[_hk]
-                horse_margin_momentum_col[i] = horse_margin_momentum[_hk]
-            if has_jockey and pd.notna(_jockey_keys[i]):
-                jockey_elo_col[i] = jockey_ratings[_jockey_keys[i]]
-                has_jockey_elo_col[i] = np.int8(jockey_race_counts[_jockey_keys[i]] > 0)
-            if has_trainer and pd.notna(_trainer_keys[i]):
-                trainer_elo_col[i] = trainer_ratings[_trainer_keys[i]]
-                has_trainer_elo_col[i] = np.int8(trainer_race_counts[_trainer_keys[i]] > 0)
-
-            # ── Dimensional pre-race ratings ──
-            if pd.isna(_hk):
-                continue
-            if _surfaces is not None and pd.notna(_surfaces[i]):
-                _sk = (_hk, _surfaces[i])
-                horse_elo_surf_col[i] = (
-                    horse_surf_ratings[_sk]
-                    if horse_surf_counts[_sk] >= MIN_DIM_RACES
-                    else horse_ratings[_hk]
-                )
-            if _race_types is not None and pd.notna(_race_types[i]):
-                _rk = (_hk, _race_types[i])
-                horse_elo_rt_col[i] = (
-                    horse_rt_ratings[_rk]
-                    if horse_rt_counts[_rk] >= MIN_DIM_RACES
-                    else horse_ratings[_hk]
-                )
-                if has_jockey and pd.notna(_jockey_keys[i]):
-                    _jrk = (_jockey_keys[i], _race_types[i])
-                    jockey_elo_rt_col[i] = (
-                        jockey_rt_ratings[_jrk]
-                        if jockey_rt_counts[_jrk] >= MIN_DIM_RACES
-                        else jockey_ratings[_jockey_keys[i]]
-                    )
-            if _dist_cats is not None and np.isfinite(_dist_cats[i]):
-                _dk = (_hk, int(_dist_cats[i]))
-                horse_elo_dc_col[i] = (
-                    horse_dc_ratings[_dk]
-                    if horse_dc_counts[_dk] >= MIN_DIM_RACES
-                    else horse_ratings[_hk]
-                )
+            if has_jockey and _jockey_codes[i] >= 0:
+                jk = _jockey_keys[i]
+                jockey_off_col[i] = jockey_offsets.get(jk, 0.0)
+                has_jockey_elo_col[i] = np.int8(jockey_race_counts.get(jk, 0) > 0)
+                v = _dim_value(_race_types[i]) if _race_types is not None else None
+                if v is not None:
+                    jockey_rt_edge_col[i] = jockey_rt.edge(jk, v)
+            if has_trainer and _trainer_codes[i] >= 0:
+                tk = _trainer_keys[i]
+                trainer_off_col[i] = trainer_offsets.get(tk, 0.0)
+                has_trainer_elo_col[i] = np.int8(trainer_race_counts.get(tk, 0) > 0)
 
         # Skip races without finish positions (e.g. racecards / future)
         if _finish_pos is None:
             continue
         fp_race = _finish_pos[idx]
-        valid_mask = np.isfinite(fp_race) & (fp_race > 0)
-        if valid_mask.sum() < 2:
+        if not (np.isfinite(fp_race) & (fp_race > 0)).any():
             continue
 
-        valid_idx = idx[valid_mask]
+        # ── Horse Elo, jockey/trainer offsets, dimensional edges ──
+        part, pos = _race_outcome(fp_race, DNF_AS_LOSS)
+        part &= _h_ok[idx]
+        if part.sum() >= 2:
+            p = idx[part]
+            S = _pair_scores(pos[part])
+            r = horse_elo_col[p]
+            resid = _mean_residual(S, _elo_expected(r))
+            n_prev = np.array([horse_race_counts.get(_horse_keys[i], 0) for i in p])
+            delta = _adaptive_k(n_prev) * resid
+            for i, rr, d, res, n in zip(p, r, delta, resid, n_prev):
+                hk = _horse_keys[i]
+                horse_ratings[hk] = float(rr + d)
+                horse_race_counts[hk] = int(n) + 1
+                horse_delta_col[i] = d
+                horse_resid_col[i] = res
+                # Momentum: EMA of performance relative to the rating, in
+                # points, faded over the time since the last run.
+                horse_momentum[hk] = (
+                    MOMENTUM_ALPHA * res * RESID_TO_POINTS
+                    + (1.0 - MOMENTUM_ALPHA) * horse_momentum_col[i]
+                )
+                horse_last_dt[hk] = day
+                for values, tracker, _ in dims.values():
+                    v = _dim_value(values[i])
+                    if v is not None:
+                        tracker.add(hk, v, float(res))
 
-        # --- Build finish order for Elo update (array access, no iterrows) ---
-        horse_finish = [
-            (_horse_keys[i], int(fp_race[valid_mask][j]))
-            for j, i in enumerate(valid_idx)
-            if pd.notna(_horse_keys[i])
-        ]
-        if len(horse_finish) < 2:
-            continue
-
-        # --- Update horse ratings ---
-        h_deltas = _update_ratings_for_race(
-            horse_finish, horse_ratings, k,
-            race_counts=horse_race_counts,
-        )
-        for i in valid_idx:
-            horse_name = _horse_keys[i]
-            if pd.isna(horse_name):
-                continue
-            _delta = h_deltas.get(horse_name, 0.0)
-            horse_delta_col[i] = _delta
-            horse_race_counts[horse_name] += 1
-            # Update momentum EMA: m_new = alpha * delta + (1 - alpha) * m_old
-            horse_momentum[horse_name] = (
-                MOMENTUM_ALPHA * _delta
-                + (1.0 - MOMENTUM_ALPHA) * horse_momentum[horse_name]
-            )
+            # Jockey/trainer: residuals against the horse ratings plus the
+            # current offsets, so each offset learns only what the horse
+            # ratings and the other offset do not already explain.
+            if has_jockey or has_trainer:
+                s = r.copy()
+                if has_jockey:
+                    s += np.nan_to_num(np.array([jockey_offsets.get(_jockey_keys[i], 0.0)
+                                                 if _jockey_codes[i] >= 0 else 0.0 for i in p]))
+                if has_trainer:
+                    s += np.nan_to_num(np.array([trainer_offsets.get(_trainer_keys[i], 0.0)
+                                                 if _trainer_codes[i] >= 0 else 0.0 for i in p]))
+                R = S - _elo_expected(s)
+                if has_jockey:
+                    jres = _entity_residuals(R, _jockey_codes[p])
+                    jockey_resid_col[p] = jres
+                    _apply_entity_update(p, jres, _jockey_keys, jockey_offsets,
+                                         jockey_race_counts, jockey_delta_col)
+                    if _race_types is not None:
+                        for i, res in zip(p, jres):
+                            v = _dim_value(_race_types[i])
+                            if v is not None and np.isfinite(res):
+                                jockey_rt_pending.append((_jockey_keys[i], v, float(res)))
+                if has_trainer:
+                    tres = _entity_residuals(R, _trainer_codes[p])
+                    _apply_entity_update(p, tres, _trainer_keys, trainer_offsets,
+                                         trainer_race_counts, None)
 
         # ── Margin Elo: includes non-finishers with penalty ──
         if (_lengths_behind is not None
                 and ("beaten_lengths" not in df
-                     or np.isfinite(_lengths_behind[idx][valid_mask]).all())):
-            # Collect all horses that competed (finishers + non-finishers)
-            # Finishers: fp > 0 → use their lengths_behind
-            # Non-finishers: fp == 0 (PU/F/UR/BD) → penalised virtual lb
-            # NR: not in the data (excluded by scraper)
+                     or np.isfinite(_lengths_behind[idx][fp_race > 0]).all())):
+            # Finishers use their lengths behind (winner = 0); non-finishers
+            # (position 0 or unknown) get a penalised virtual margin.
+            # Non-runners are not in the data (excluded by the scraper).
             lb_race = _lengths_behind[idx]
-            fp_full = fp_race
-
-            # Max lb among finishers in this race
-            finisher_lbs = lb_race[valid_mask]
+            finisher_lbs = lb_race[np.isfinite(fp_race) & (fp_race > 0)]
             finite_lbs = finisher_lbs[np.isfinite(finisher_lbs)]
             max_lb = float(finite_lbs.max()) if len(finite_lbs) > 0 else 0.0
 
-            margin_runners = []
-            all_compete_idx = []
+            m_rows, m_lbs = [], []
             for j_pos, i in enumerate(idx):
-                hk = _horse_keys[i]
-                if pd.isna(hk):
+                if not _h_ok[i]:
                     continue
-                fp_i = fp_full[j_pos] if np.isfinite(fp_full[j_pos]) else 0
+                fp_i = fp_race[j_pos] if np.isfinite(fp_race[j_pos]) else 0
                 if fp_i >= 1:
-                    # Finisher: use actual lb (winner = 0.0)
                     lb_i = lb_race[j_pos]
                     if not np.isfinite(lb_i):
                         lb_i = 0.0 if fp_i == 1 else max_lb
-                    margin_runners.append((hk, float(lb_i)))
-                    all_compete_idx.append(i)
+                    m_rows.append(i)
+                    m_lbs.append(float(lb_i))
                 elif fp_i == 0:
-                    # Non-finisher who competed: penalise heavily
-                    margin_runners.append((hk, max_lb + DNF_PENALTY_LB))
-                    all_compete_idx.append(i)
+                    m_rows.append(i)
+                    m_lbs.append(max_lb + DNF_PENALTY_LB)
 
-            if len(margin_runners) >= 2:
-                # Distance-conditioned margin scale
+            if len(m_rows) >= 2:
+                m_rows = np.asarray(m_rows)
                 _race_dist = float(_dist_furlongs[idx[0]]) if _dist_furlongs is not None else MARGIN_REF_DIST
-                _m_scale = _distance_margin_scale(_race_dist)
-                m_deltas = _update_margin_elo_for_race(
-                    margin_runners, horse_margin_ratings, k,
-                    race_counts=horse_margin_race_counts,
-                    margin_scale=_m_scale,
-                )
-                for i in all_compete_idx:
+                S = _margin_score_matrix(np.asarray(m_lbs), _distance_margin_scale(_race_dist))
+                r = horse_margin_elo_col[m_rows]
+                resid = _mean_residual(S, _elo_expected(r))
+                n_prev = np.array([horse_margin_race_counts.get(_horse_keys[i], 0) for i in m_rows])
+                delta = _adaptive_k(n_prev) * resid
+                for i, rr, d, res, n in zip(m_rows, r, delta, resid, n_prev):
                     hk = _horse_keys[i]
-                    if pd.isna(hk):
-                        continue
-                    _md = m_deltas.get(hk, 0.0)
-                    horse_margin_delta_col[i] = _md
-                    horse_margin_race_counts[hk] += 1
+                    horse_margin_ratings[hk] = float(rr + d)
+                    horse_margin_race_counts[hk] = int(n) + 1
+                    horse_margin_delta_col[i] = d
                     horse_margin_momentum[hk] = (
-                        MOMENTUM_ALPHA * _md
-                        + (1.0 - MOMENTUM_ALPHA) * horse_margin_momentum[hk]
+                        MOMENTUM_ALPHA * res * RESID_TO_POINTS
+                        + (1.0 - MOMENTUM_ALPHA) * horse_margin_momentum_col[i]
                     )
+                    horse_margin_last_dt[hk] = day
 
-        # ── Update dimensional horse ratings ──
-        _first_valid = valid_idx[0]
-        if _surfaces is not None and pd.notna(_surfaces[_first_valid]):
-            _rs = _surfaces[_first_valid]
-            _sf = [
-                ((_horse_keys[i], _rs), int(fp_race[valid_mask][j]))
-                for j, i in enumerate(valid_idx)
-                if pd.notna(_horse_keys[i])
-            ]
-            if len(_sf) >= 2:
-                _update_ratings_for_race(
-                    _sf, horse_surf_ratings, k, race_counts=horse_surf_counts,
-                )
-                for i in valid_idx:
-                    if pd.notna(_horse_keys[i]):
-                        horse_surf_counts[(_horse_keys[i], _rs)] += 1
-
-        if _race_types is not None and pd.notna(_race_types[_first_valid]):
-            _rr = _race_types[_first_valid]
-            _rf = [
-                ((_horse_keys[i], _rr), int(fp_race[valid_mask][j]))
-                for j, i in enumerate(valid_idx)
-                if pd.notna(_horse_keys[i])
-            ]
-            if len(_rf) >= 2:
-                _update_ratings_for_race(
-                    _rf, horse_rt_ratings, k, race_counts=horse_rt_counts,
-                )
-                for i in valid_idx:
-                    if pd.notna(_horse_keys[i]):
-                        horse_rt_counts[(_horse_keys[i], _rr)] += 1
-
-        if _dist_cats is not None and np.isfinite(_dist_cats[_first_valid]):
-            _rd = int(_dist_cats[_first_valid])
-            _dcf = [
-                ((_horse_keys[i], _rd), int(fp_race[valid_mask][j]))
-                for j, i in enumerate(valid_idx)
-                if pd.notna(_horse_keys[i])
-            ]
-            if len(_dcf) >= 2:
-                _update_ratings_for_race(
-                    _dcf, horse_dc_ratings, k, race_counts=horse_dc_counts,
-                )
-                for i in valid_idx:
-                    if pd.notna(_horse_keys[i]):
-                        horse_dc_counts[(_horse_keys[i], _rd)] += 1
-
-        # --- Update jockey ratings ---
-        if has_jockey:
-            jockey_finish = [
-                (_jockey_keys[i], int(_finish_pos[i]))
-                for i in valid_idx
-                if pd.notna(_jockey_keys[i])
-            ]
-            if len(jockey_finish) >= 2:
-                j_deltas = _update_ratings_for_race(
-                    jockey_finish, jockey_ratings, k,
-                    race_counts=jockey_race_counts,
-                )
-                for i in valid_idx:
-                    jname = _jockey_keys[i]
-                    if pd.notna(jname):
-                        jockey_delta_col[i] = j_deltas.get(jname, 0.0)
-                        jockey_race_counts[jname] += 1
-
-        # ── Update jockey dimensional (race type) ──
-        if has_jockey and _race_types is not None:
-            _rr_j = _race_types[_first_valid]
-            if pd.notna(_rr_j):
-                _jrf = [
-                    ((_jockey_keys[i], _rr_j), int(_finish_pos[i]))
-                    for i in valid_idx
-                    if pd.notna(_jockey_keys[i])
-                ]
-                if len(_jrf) >= 2:
-                    _update_ratings_for_race(
-                        _jrf, jockey_rt_ratings, k,
-                        race_counts=jockey_rt_counts,
-                    )
-                    for i in valid_idx:
-                        _jn = _jockey_keys[i]
-                        if pd.notna(_jn):
-                            jockey_rt_counts[(_jn, _rr_j)] += 1
-
-        # --- Update trainer ratings ---
-        if has_trainer:
-            trainer_finish = [
-                (_trainer_keys[i], int(_finish_pos[i]))
-                for i in valid_idx
-                if pd.notna(_trainer_keys[i])
-            ]
-            if len(trainer_finish) >= 2:
-                _update_ratings_for_race(
-                    trainer_finish, trainer_ratings, k,
-                    race_counts=trainer_race_counts,
-                )
-                for i in valid_idx:
-                    tname = _trainer_keys[i]
-                    if pd.notna(tname):
-                        trainer_race_counts[tname] += 1
+    for args in jockey_rt_pending:
+        jockey_rt.add(*args)
 
     race_ids = df["race_id"]
 
@@ -711,20 +664,15 @@ def compute_elo_features(
     # time. (Horses essentially never run twice a day.)
     _day_dates = pd.to_datetime(df["race_date"]).values
     if has_jockey:
-        jockey_elo_col = _day_start_gather(jockey_elo_col, [_jockey_keys], _day_dates)
+        jockey_off_col = _day_start_gather(jockey_off_col, [_jockey_keys], _day_dates)
         has_jockey_elo_col = _day_start_gather(has_jockey_elo_col, [_jockey_keys], _day_dates)
-        jockey_elo_rt_col = _day_start_gather(
-            jockey_elo_rt_col,
-            [_jockey_keys, _race_types if _race_types is not None else np.zeros(len(df))],
-            _day_dates,
-        )
     if has_trainer:
-        trainer_elo_col = _day_start_gather(trainer_elo_col, [_trainer_keys], _day_dates)
+        trainer_off_col = _day_start_gather(trainer_off_col, [_trainer_keys], _day_dates)
         has_trainer_elo_col = _day_start_gather(has_trainer_elo_col, [_trainer_keys], _day_dates)
 
     horse_elo = pd.Series(horse_elo_col, index=df.index)
-    jockey_elo = pd.Series(jockey_elo_col, index=df.index)
-    trainer_elo = pd.Series(trainer_elo_col, index=df.index)
+    jockey_elo = pd.Series(DEFAULT_RATING + jockey_off_col, index=df.index)
+    trainer_elo = pd.Series(DEFAULT_RATING + trainer_off_col, index=df.index)
 
     # Relative-to-field features (race-aware)
     race_avg_elo = horse_elo.groupby(race_ids, sort=False).transform("mean")
@@ -733,7 +681,12 @@ def compute_elo_features(
         ascending=False, method="min"
     )
 
-    combined_elo = horse_elo + 0.3 * jockey_elo if has_jockey else horse_elo.copy()
+    # Combined strength = the value-added model's own expectation input.
+    combined_elo = horse_elo.copy()
+    if has_jockey:
+        combined_elo += np.nan_to_num(jockey_off_col)
+    if has_trainer:
+        combined_elo += np.nan_to_num(trainer_off_col)
     combo_avg = combined_elo.groupby(race_ids, sort=False).transform("mean")
 
     # Momentum relative to field
@@ -742,8 +695,8 @@ def compute_elo_features(
 
     elo_cols = {
         "horse_elo": horse_elo_col,
-        "jockey_elo": jockey_elo_col,
-        "trainer_elo": trainer_elo_col,
+        "jockey_elo": jockey_elo.to_numpy(),
+        "trainer_elo": trainer_elo.to_numpy(),
         "has_horse_elo": has_horse_elo_col,
         "has_jockey_elo": has_jockey_elo_col,
         "has_trainer_elo": has_trainer_elo_col,
@@ -763,19 +716,12 @@ def compute_elo_features(
     }
 
     # ── Dimensional Elo features ──────────────────────────────────
-    _horse_elo_surf = pd.Series(horse_elo_surf_col, index=df.index)
-    _horse_elo_rtype = pd.Series(horse_elo_rt_col, index=df.index)
-    _horse_elo_dcat = pd.Series(horse_elo_dc_col, index=df.index)
-    _jockey_elo_rtype = pd.Series(jockey_elo_rt_col, index=df.index)
-
-    elo_cols["horse_elo_surface"] = horse_elo_surf_col
-    elo_cols["horse_elo_surface_edge"] = (_horse_elo_surf - horse_elo).to_numpy()
-    elo_cols["horse_elo_rt"] = horse_elo_rt_col
-    elo_cols["horse_elo_rt_edge"] = (_horse_elo_rtype - horse_elo).to_numpy()
-    elo_cols["horse_elo_dist_cat"] = horse_elo_dc_col
-    elo_cols["horse_elo_dist_cat_edge"] = (_horse_elo_dcat - horse_elo).to_numpy()
-    elo_cols["jockey_elo_rt"] = jockey_elo_rt_col
-    elo_cols["jockey_elo_rt_edge"] = (_jockey_elo_rtype - jockey_elo).to_numpy()
+    for name, out_name in [("surf", "surface"), ("rt", "rt"), ("dc", "dist_cat")]:
+        edge = dims[name][2] if name in dims else np.full(n_rows, np.nan)
+        elo_cols[f"horse_elo_{out_name}"] = horse_elo_col + edge
+        elo_cols[f"horse_elo_{out_name}_edge"] = edge
+    elo_cols["jockey_elo_rt"] = jockey_elo.to_numpy() + jockey_rt_edge_col
+    elo_cols["jockey_elo_rt_edge"] = jockey_rt_edge_col
 
     # ── Margin Elo columns ────────────────────────────────────────
     _m_elo = pd.Series(horse_margin_elo_col, index=df.index)
@@ -808,35 +754,27 @@ def compute_elo_features(
     elo_frame = pd.DataFrame(elo_cols, index=df.index)
     df = pd.concat([df.drop(columns=["_event_dt"], errors="ignore"), elo_frame], axis=1)
 
-    n_horses = len(horse_ratings)
-    n_jockeys = len(jockey_ratings) if has_jockey else 0
-    n_trainers = len(trainer_ratings) if has_trainer else 0
-    _n_dims = sum([has_surface, has_race_type, has_dist_cat])
     logger.info(
-        f"Elo complete: {n_horses} horses, {n_jockeys} jockeys, "
-        f"{n_trainers} trainers rated ({_n_dims} dimensional splits)"
+        f"Elo complete: {len(horse_ratings)} horses, {len(jockey_offsets)} jockeys, "
+        f"{len(trainer_offsets)} trainers rated ({len(dims)} dimensional splits)"
     )
 
     if return_state:
         out_state = {
-            "horse_ratings": dict(horse_ratings),
-            "jockey_ratings": dict(jockey_ratings),
-            "trainer_ratings": dict(trainer_ratings),
-            "horse_race_counts": dict(horse_race_counts),
-            "jockey_race_counts": dict(jockey_race_counts),
-            "trainer_race_counts": dict(trainer_race_counts),
-            "horse_momentum": dict(horse_momentum),
-            "horse_surf_ratings": dict(horse_surf_ratings),
-            "horse_rt_ratings": dict(horse_rt_ratings),
-            "horse_dc_ratings": dict(horse_dc_ratings),
-            "jockey_rt_ratings": dict(jockey_rt_ratings),
-            "horse_surf_counts": dict(horse_surf_counts),
-            "horse_rt_counts": dict(horse_rt_counts),
-            "horse_dc_counts": dict(horse_dc_counts),
-            "jockey_rt_counts": dict(jockey_rt_counts),
-            "horse_margin_ratings": dict(horse_margin_ratings),
-            "horse_margin_race_counts": dict(horse_margin_race_counts),
-            "horse_margin_momentum": dict(horse_margin_momentum),
+            "horse_ratings": horse_ratings,
+            "horse_race_counts": horse_race_counts,
+            "horse_momentum": horse_momentum,
+            "horse_last_dt": horse_last_dt,
+            "jockey_offsets": jockey_offsets,
+            "jockey_race_counts": jockey_race_counts,
+            "trainer_offsets": trainer_offsets,
+            "trainer_race_counts": trainer_race_counts,
+            "horse_margin_ratings": horse_margin_ratings,
+            "horse_margin_race_counts": horse_margin_race_counts,
+            "horse_margin_momentum": horse_margin_momentum,
+            "horse_margin_last_dt": horse_margin_last_dt,
+            "jockey_rt_edge": jockey_rt.state(),
+            **{f"horse_{name}_edge": tracker.state() for name, (_, tracker, _) in dims.items()},
         }
         return df, out_state
 
@@ -847,7 +785,10 @@ def compute_elo_features(
 # Glickman (1999). Adds a per-horse rating deviation (RD): uncertainty
 # that shrinks with evidence and *grows during layoffs* — something the
 # adaptive-K Elo above cannot express (K only decays with run count).
-# Each race is treated as one rating period of n-1 pairwise games.
+# Each race is one rating period of n-1 pairwise games. Those games are
+# not independent — one performance decides all of them — so their
+# evidence is discounted by (n-1)^-GLICKO_EVIDENCE_POWER; counted in full,
+# a debut winner in a 20-runner field jumped ~400 points.
 
 GLICKO_RATING_INIT = 1500.0
 GLICKO_RD_INIT = getattr(config, "GLICKO_RD_INIT", 350.0)
@@ -855,15 +796,22 @@ GLICKO_RD_MIN = getattr(config, "GLICKO_RD_MIN", 50.0)
 # RD inflation: after t months idle, RD -> sqrt(RD^2 + C^2 * t).
 # C=70 returns a fully-known horse (RD 50) to ~max uncertainty in ~2 years.
 GLICKO_C = getattr(config, "GLICKO_C", 70.0)
+GLICKO_EVIDENCE_POWER = getattr(config, "GLICKO_EVIDENCE_POWER", 0.25)
 
 _GLICKO_Q = np.log(10.0) / 400.0
+
+
+def _evidence_weight(n_opp: np.ndarray) -> np.ndarray:
+    """Weight per pairwise game so a race counts as n^(1-power) games."""
+    return np.where(n_opp > 0, np.maximum(n_opp, 1) ** (-GLICKO_EVIDENCE_POWER), 0.0)
 
 
 def _glicko_race_update(
     r: np.ndarray, rd: np.ndarray, fp: np.ndarray,
     exclude: np.ndarray | None = None,
     S_override: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray]:
+    with_residual: bool = False,
+):
     """Vectorised Glicko-1 update for one race.
 
     Args:
@@ -875,9 +823,11 @@ def _glicko_race_update(
             occasionally a jockey across re-rides) playing itself.
         S_override: optional (m, m) actual-score matrix replacing the
             binary win/tie/loss scores (margin-aware variant).
+        with_residual: also return each row's mean actual-minus-expected
+            score (NaN without opponents).
 
     Returns:
-        (new_ratings, new_rds)
+        (new_ratings, new_rds[, residuals])
     """
     m = len(r)
     q = _GLICKO_Q
@@ -887,23 +837,22 @@ def _glicko_race_update(
     diff = r[:, None] - r[None, :]
     E = 1.0 / (1.0 + 10.0 ** (-(g[None, :] * diff) / 400.0))
     # S[i, j] = actual score of i against j
-    if S_override is not None:
-        S = S_override
-    else:
-        S = np.where(fp[:, None] < fp[None, :], 1.0,
-                     np.where(fp[:, None] == fp[None, :], 0.5, 0.0))
+    S = S_override if S_override is not None else _pair_scores(np.asarray(fp, dtype=float))
 
     off_diag = ~np.eye(m, dtype=bool)
     if exclude is not None:
         off_diag &= ~exclude
+    w = _evidence_weight(off_diag.sum(axis=1))
     g_sq_E = (g[None, :] ** 2) * E * (1.0 - E)
-    d2_inv = (q ** 2) * np.where(off_diag, g_sq_E, 0.0).sum(axis=1)
-    sum_term = np.where(off_diag, g[None, :] * (S - E), 0.0).sum(axis=1)
+    d2_inv = w * (q ** 2) * np.where(off_diag, g_sq_E, 0.0).sum(axis=1)
+    sum_term = w * np.where(off_diag, g[None, :] * (S - E), 0.0).sum(axis=1)
 
     denom = 1.0 / (rd ** 2) + d2_inv
     new_r = r + (q / denom) * sum_term
-    new_rd = np.sqrt(1.0 / denom)
-    return new_r, np.clip(new_rd, GLICKO_RD_MIN, GLICKO_RD_INIT)
+    new_rd = np.clip(np.sqrt(1.0 / denom), GLICKO_RD_MIN, GLICKO_RD_INIT)
+    if with_residual:
+        return new_r, new_rd, _mean_residual(S, E, None if exclude is None else exclude)
+    return new_r, new_rd
 
 
 def _glicko_pass(
@@ -914,6 +863,8 @@ def _glicko_pass(
     race_group_indices: dict,
     margin: np.ndarray | None = None,
     *,
+    distance: np.ndarray | None = None,
+    resid_out: np.ndarray | None = None,
     state: dict | None = None,
     return_state: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
@@ -927,26 +878,24 @@ def _glicko_pass(
         fp: finish positions per row, or None (live rows — no updates).
         dates: race_date per row as datetime64.
         margin: optional per-row beaten lengths. When given, pairwise
-            game scores become sigmoid((lb_j − lb_i) / MARGIN_SCALE)
-            instead of binary win/lose — a 10-length thrashing moves
-            ratings more than a nose verdict. Pairs with missing lengths
-            fall back to the binary score.
+            game scores become sigmoid((lb_j − lb_i) / scale) instead of
+            binary win/lose — a 10-length thrashing moves ratings more than
+            a nose verdict. The scale grows with ``distance`` (furlongs)
+            as in margin Elo. Pairs with missing lengths fall back to the
+            binary score.
+        resid_out: optional per-row array receiving each updated row's mean
+            score residual (for dimensional edges).
 
     Returns:
         Per-row *pre-race* (rating, rd, has_prior_run, prior_run_count).
         When ``return_state`` is set, also returns the carried state dict so
         an incremental run can re-seed and sweep only new rows.
     """
-    if state is not None:
-        ratings: dict = dict(state.get("ratings", {}))
-        rds: dict = dict(state.get("rds", {}))
-        last_dt: dict = dict(state.get("last_dt", {}))
-        counts: dict = dict(state.get("counts", {}))
-    else:
-        ratings = {}
-        rds = {}
-        last_dt = {}
-        counts = {}
+    state = state or {}
+    ratings: dict = dict(state.get("ratings", {}))
+    rds: dict = dict(state.get("rds", {}))
+    last_dt: dict = dict(state.get("last_dt", {}))
+    counts: dict = dict(state.get("counts", {}))
 
     n = len(keys)
     r_col = np.full(n, np.nan)
@@ -962,7 +911,6 @@ def _glicko_pass(
         # change carried RD until there is an actual rating update: otherwise
         # an unrated/non-finish appearance counts the same idle days again
         # next time. Multiple runners for an entity share one pre-race RD.
-        race_rds = {}
         for i in idx:
             k = keys[i]
             if k is None:
@@ -970,35 +918,30 @@ def _glicko_pass(
             if k in ratings:
                 idle_days = (race_dt - last_dt[k]) / np.timedelta64(1, "D")
                 months = max(float(idle_days), 0.0) / 30.44
-                rd_now = min(
+                r_col[i] = ratings[k]
+                rd_col[i] = min(
                     float(np.sqrt(rds[k] ** 2 + (GLICKO_C ** 2) * months)),
                     GLICKO_RD_INIT,
                 )
-                race_rds[k] = rd_now
-                r_col[i] = ratings[k]
-                rd_col[i] = rd_now
                 has_col[i] = 1
                 cnt_col[i] = counts[k]
             else:
                 r_col[i] = GLICKO_RATING_INIT
                 rd_col[i] = GLICKO_RD_INIT
 
-        # Post-race update (finishers only)
+        # Post-race update
         if fp is None:
             continue
-        fp_race = fp[idx]
-        valid = np.isfinite(fp_race) & (fp_race > 0)
-        upd = [
-            (j, keys[idx[j]]) for j in range(len(idx))
-            if valid[j] and keys[idx[j]] is not None
-        ]
-        ukeys = [k for _, k in upd]
+        part, pos = _race_outcome(fp[idx], DNF_AS_LOSS)
+        upd =[j for j in range(len(idx)) if part[j] and keys[idx[j]] is not None]
+        ukeys = [keys[idx[j]] for j in upd]
         if len(set(ukeys)) < 2:
             continue
         m = len(upd)
-        r_arr = np.array([ratings.get(k, GLICKO_RATING_INIT) for k in ukeys])
-        rd_arr = np.array([race_rds.get(k, GLICKO_RD_INIT) for k in ukeys])
-        fp_arr = np.array([float(fp_race[j]) for j, _ in upd])
+        rows = idx[upd]
+        r_arr = r_col[rows]
+        rd_arr = rd_col[rows]
+        fp_arr = pos[upd]
         exclude = None
         if len(set(ukeys)) < m:
             karr = np.empty(m, dtype=object)
@@ -1006,17 +949,19 @@ def _glicko_pass(
             exclude = karr[:, None] == karr[None, :]
         S_override = None
         if margin is not None:
-            lb = np.array([float(margin[idx[j]]) for j, _ in upd])
+            lb = margin[rows].astype(float)
             both = np.isfinite(lb[:, None]) & np.isfinite(lb[None, :])
+            scale = (_distance_margin_scale(float(distance[idx[0]]))
+                     if distance is not None else MARGIN_SCALE)
             S_margin = 1.0 / (1.0 + np.exp(
-                -np.clip((np.nan_to_num(lb)[None, :] - np.nan_to_num(lb)[:, None]) / MARGIN_SCALE, -60, 60)
+                -np.clip((np.nan_to_num(lb)[None, :] - np.nan_to_num(lb)[:, None]) / scale, -60, 60)
             ))
-            S_fp = np.where(fp_arr[:, None] < fp_arr[None, :], 1.0,
-                            np.where(fp_arr[:, None] == fp_arr[None, :], 0.5, 0.0))
-            S_override = np.where(both, S_margin, S_fp)
-        new_r, new_rd = _glicko_race_update(
-            r_arr, rd_arr, fp_arr, exclude=exclude, S_override=S_override
+            S_override = np.where(both, S_margin, _pair_scores(fp_arr))
+        new_r, new_rd, resid = _glicko_race_update(
+            r_arr, rd_arr, fp_arr, exclude=exclude, S_override=S_override, with_residual=True
         )
+        if resid_out is not None:
+            resid_out[rows] = resid
         agg: dict = {}
         for k, nr, nrd in zip(ukeys, new_r, new_rd):
             agg.setdefault(k, []).append((nr, nrd))
@@ -1084,21 +1029,21 @@ def _glicko2_pass(
     return_state: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict]:
     """Chronological Glicko-2 sweep. Returns per-row pre-race
-    (rating, rd, volatility, has_prior_run) on the Glicko-1 scale."""
+    (rating, rd, volatility, has_prior_run) on the Glicko-1 scale.
+
+    Rating periods are months: idle time inflates φ by σ²·t once, with the
+    volatility the update itself produces (Glickman's step 6 generalised to
+    t periods) — not once before the race and again inside the update.
+    """
     tau = float(getattr(config, "GLICKO2_TAU", 0.5))
     phi_init = GLICKO_RD_INIT / _G2_SCALE
     phi_min = GLICKO_RD_MIN / _G2_SCALE
 
-    if state is not None:
-        mus: dict = dict(state.get("mus", {}))
-        phis: dict = dict(state.get("phis", {}))
-        sigmas: dict = dict(state.get("sigmas", {}))
-        last_dt: dict = dict(state.get("last_dt", {}))
-    else:
-        mus = {}
-        phis = {}
-        sigmas = {}
-        last_dt = {}
+    state = state or {}
+    mus: dict = dict(state.get("mus", {}))
+    phis: dict = dict(state.get("phis", {}))
+    sigmas: dict = dict(state.get("sigmas", {}))
+    last_dt: dict = dict(state.get("last_dt", {}))
 
     n = len(keys)
     r_col = np.full(n, np.nan)
@@ -1112,7 +1057,7 @@ def _glicko2_pass(
 
         # Keep the persisted deviation tied to last_dt until an observed
         # result updates both. Pending and non-finish rows are read-only.
-        race_phis = {}
+        race_phis, race_months = {}, {}
         for i in idx:
             k = keys[i]
             if k is None:
@@ -1124,6 +1069,7 @@ def _glicko2_pass(
                     float(np.sqrt(phis[k] ** 2 + (sigmas[k] ** 2) * t)), phi_init
                 )
                 race_phis[k] = phi_now
+                race_months[k] = t
                 r_col[i] = GLICKO_RATING_INIT + _G2_SCALE * mus[k]
                 rd_col[i] = _G2_SCALE * phi_now
                 vol_col[i] = sigmas[k]
@@ -1135,36 +1081,35 @@ def _glicko2_pass(
 
         if fp is None:
             continue
-        fp_race = fp[idx]
-        valid = np.isfinite(fp_race) & (fp_race > 0)
-        upd = [
-            (j, keys[idx[j]]) for j in range(len(idx))
-            if valid[j] and keys[idx[j]] is not None
-        ]
+        part, pos = _race_outcome(fp[idx], DNF_AS_LOSS)
+        upd = [(j, keys[idx[j]]) for j in range(len(idx))
+               if part[j] and keys[idx[j]] is not None]
         if len(upd) < 2:
             continue
         m = len(upd)
         mu = np.array([mus.get(k, 0.0) for _, k in upd])
         phi = np.array([race_phis.get(k, phi_init) for _, k in upd])
+        phi_base = np.array([phis.get(k, phi_init) for _, k in upd])
+        months = np.array([race_months.get(k, 0.0) for _, k in upd])
         sigma = np.array([sigmas.get(k, GLICKO2_SIGMA_INIT) for _, k in upd])
-        fp_arr = np.array([float(fp_race[j]) for j, _ in upd])
+        fp_arr = pos[[j for j, _ in upd]]
 
         g = 1.0 / np.sqrt(1.0 + 3.0 * phi ** 2 / (np.pi ** 2))
         diff = mu[:, None] - mu[None, :]
         E = 1.0 / (1.0 + np.exp(-np.clip(g[None, :] * diff, -60, 60)))
-        S = np.where(fp_arr[:, None] < fp_arr[None, :], 1.0,
-                     np.where(fp_arr[:, None] == fp_arr[None, :], 0.5, 0.0))
+        S = _pair_scores(fp_arr)
         off = ~np.eye(m, dtype=bool)
+        w = _evidence_weight(off.sum(axis=1))
         gE = (g[None, :] ** 2) * E * (1.0 - E)
-        v = 1.0 / np.maximum(np.where(off, gE, 0.0).sum(axis=1), 1e-12)
-        score_sum = np.where(off, g[None, :] * (S - E), 0.0).sum(axis=1)
+        v = 1.0 / np.maximum(w * np.where(off, gE, 0.0).sum(axis=1), 1e-12)
+        score_sum = w * np.where(off, g[None, :] * (S - E), 0.0).sum(axis=1)
         delta = v * score_sum
 
         new_sigma = np.array([
-            _g2_solve_sigma(delta[i] ** 2, phi[i] ** 2, v[i], sigma[i], tau)
+            _g2_solve_sigma(delta[i] ** 2, phi_base[i] ** 2, v[i], sigma[i], tau)
             for i in range(m)
         ])
-        phi_star = np.sqrt(phi ** 2 + new_sigma ** 2)
+        phi_star = np.minimum(np.sqrt(phi_base ** 2 + new_sigma ** 2 * months), phi_init)
         new_phi = np.clip(
             1.0 / np.sqrt(1.0 / phi_star ** 2 + 1.0 / v), phi_min, phi_init
         )
@@ -1183,6 +1128,20 @@ def _glicko2_pass(
 
 
 # ── TrueSkill ─────────────────────────────────────────────────────────────
+# Each race is an n-way free-for-all. The library defaults assume outcomes
+# far more deterministic than racing (performance noise beta = half the
+# initial skill spread), so the parameters come from config. Uncertainty
+# grows with time off the track, as in Glicko: without that, an established
+# horse's sigma shrank until it barely moved (~0.14 mu per race after 20
+# runs), so neither a layoff nor age-related decline could reopen it.
+
+TRUESKILL_MU = 25.0
+TRUESKILL_SIGMA = getattr(config, "TRUESKILL_SIGMA", 25.0 / 3.0)
+TRUESKILL_BETA = getattr(config, "TRUESKILL_BETA", 25.0 / 6.0)
+TRUESKILL_TAU = getattr(config, "TRUESKILL_TAU", 25.0 / 300.0)
+# sigma -> sqrt(sigma^2 + C^2 * months idle), capped at TRUESKILL_SIGMA.
+TRUESKILL_C = getattr(config, "TRUESKILL_C", 0.0)
+
 
 def _trueskill_pass(
     keys: list,
@@ -1196,13 +1155,18 @@ def _trueskill_pass(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Chronological TrueSkill sweep: each race is an n-way free-for-all.
 
-    Returns per-row pre-race (mu, sigma, has_prior_run). Time dynamics
-    come from the environment's tau (added once per update), not layoffs.
+    Returns per-row pre-race (mu, sigma, has_prior_run). The carried sigma
+    only changes on an update; idle time inflates the pre-race view.
     """
     import trueskill
 
-    env = trueskill.TrueSkill(draw_probability=0.001)
-    ts_ratings: dict = dict(state.get("ratings", {})) if state is not None else {}
+    env = trueskill.TrueSkill(
+        mu=TRUESKILL_MU, sigma=TRUESKILL_SIGMA, beta=TRUESKILL_BETA,
+        tau=TRUESKILL_TAU, draw_probability=0.001,
+    )
+    state = state or {}
+    ts_ratings: dict = dict(state.get("ratings", {}))  # key -> (mu, sigma)
+    last_dt: dict = dict(state.get("last_dt", {}))
 
     n = len(keys)
     mu_col = np.full(n, np.nan)
@@ -1211,40 +1175,41 @@ def _trueskill_pass(
 
     for race_id in race_ids_ordered:
         idx = race_group_indices[race_id]
+        race_dt = dates[idx[0]]
         for i in idx:
             k = keys[i]
             if k is None:
                 continue
             rating = ts_ratings.get(k)
             if rating is not None:
-                mu_col[i] = rating.mu
-                sigma_col[i] = rating.sigma
+                months = max(float((race_dt - last_dt[k]) / np.timedelta64(1, "D")), 0.0) / 30.44
+                mu_col[i] = rating[0]
+                sigma_col[i] = min(float(np.sqrt(rating[1] ** 2 + TRUESKILL_C ** 2 * months)),
+                                   TRUESKILL_SIGMA)
                 has_col[i] = 1
             else:
-                mu_col[i] = env.mu
-                sigma_col[i] = env.sigma
+                mu_col[i] = TRUESKILL_MU
+                sigma_col[i] = TRUESKILL_SIGMA
 
         if fp is None:
             continue
-        fp_race = fp[idx]
-        valid = np.isfinite(fp_race) & (fp_race > 0)
-        upd = [
-            (j, keys[idx[j]]) for j in range(len(idx))
-            if valid[j] and keys[idx[j]] is not None
-        ]
+        part, pos = _race_outcome(fp[idx], DNF_AS_LOSS)
+        upd = [j for j in range(len(idx)) if part[j] and keys[idx[j]] is not None]
         if len(upd) < 2:
             continue
-        groups = [(ts_ratings.get(k, env.create_rating()),) for _, k in upd]
-        ranks = [int(fp_race[j]) for j, _ in upd]
+        rows = idx[upd]
+        groups = [(env.create_rating(mu_col[i], sigma_col[i]),) for i in rows]
+        ranks = [int(pos[j]) for j in upd]
         try:
             new = env.rate(groups, ranks=ranks)
         except (FloatingPointError, ValueError):
             continue
-        for (_, k), (rating,) in zip(upd, new):
-            ts_ratings[k] = rating
+        for i, (rating,) in zip(rows, new):
+            ts_ratings[keys[i]] = (float(rating.mu), float(rating.sigma))
+            last_dt[keys[i]] = race_dt
 
     if return_state:
-        return mu_col, sigma_col, has_col, {"ratings": ts_ratings}
+        return mu_col, sigma_col, has_col, {"ratings": ts_ratings, "last_dt": last_dt}
     return mu_col, sigma_col, has_col
 
 
@@ -1271,11 +1236,9 @@ def compute_glicko_features(
     With ``config.GLICKO_JOCKEY_TRAINER``: ``{jockey,trainer}_glicko``,
     ``_rd``, ``has_``, ``_vs_field``.
 
-    With ``config.GLICKO_DIMENSIONAL``: per surface / race-type /
-    distance-category horse ratings ``horse_glicko_{surface,rt,dist_cat}``
-    plus ``_rd`` and ``_edge`` (dimensional minus global). Below
-    3 prior runs in the dimension the global rating is used (edge = 0),
-    mirroring the dimensional Elos' cold-start fallback.
+    With ``config.GLICKO_DIMENSIONAL``: ``horse_glicko_{surface,rt,dist_cat}``
+    (rating plus a shrunk dimension-specific edge, see ``_DimensionEdge``),
+    ``_rd`` (the global RD) and ``_edge``.
     """
     logger.info("Computing Glicko ratings ...")
     df["race_date"] = pd.to_datetime(df["race_date"])
@@ -1288,7 +1251,10 @@ def compute_glicko_features(
         order = np.argsort(event_dt.values, kind="stable")
         df = df.iloc[order].reset_index(drop=True)
 
-    _finish_pos = df["finish_position"].values if "finish_position" in df.columns else None
+    _finish_pos = (
+        pd.to_numeric(df["finish_position"], errors="coerce").to_numpy(dtype=float)
+        if "finish_position" in df.columns else None
+    )
     _dates = pd.to_datetime(df["race_date"]).values
     race_ids_ordered = df.drop_duplicates("race_id", keep="first")["race_id"].values
     race_group_indices = df.groupby("race_id", sort=False).indices
@@ -1315,9 +1281,11 @@ def compute_glicko_features(
     horse_keys = _clean(
         _entity_keys(df, id_col="horse_id", name_col="horse_name", prefix="horse")
     )
+    horse_resid = np.full(len(df), np.nan)
     glicko_col, rd_col, has_col, _ = _run(
         _glicko_pass, "horse",
         horse_keys, _finish_pos, _dates, race_ids_ordered, race_group_indices,
+        resid_out=horse_resid,
     )
 
     race_ids = df["race_id"]
@@ -1366,10 +1334,14 @@ def compute_glicko_features(
     if getattr(config, "GLICKO_MARGIN", False) and "lengths_behind" in df.columns:
         from src.result_margins import margin_values
         lb = pd.to_numeric(margin_values(df), errors="coerce").to_numpy(dtype=float)
+        dist = (
+            pd.to_numeric(df["distance_furlongs"], errors="coerce").to_numpy(dtype=float)
+            if "distance_furlongs" in df.columns else None
+        )
         r, rd, has, _ = _run(
             _glicko_pass, "margin",
             horse_keys, _finish_pos, _dates, race_ids_ordered,
-            race_group_indices, margin=lb,
+            race_group_indices, margin=lb, distance=dist,
         )
         r_s = pd.Series(r, index=df.index)
         cols["horse_glicko_margin"] = r
@@ -1410,31 +1382,20 @@ def compute_glicko_features(
         ).to_numpy()
 
     if getattr(config, "GLICKO_DIMENSIONAL", False):
-        MIN_DIM_RACES = 3  # below this, fall back to the global horse rating
-        dims = [
-            (suffix, df[col].values)
-            for suffix, col in [
-                ("surface", "surface"),
-                ("rt", "race_type"),
-                ("dist_cat", "dist_category"),
-            ]
-            if col in df.columns
-        ]
-        for suffix, vals in dims:
-            keys = [
-                (hk, v) if hk is not None and pd.notna(v) else None
-                for hk, v in zip(horse_keys, vals)
-            ]
-            r, rd, _, cnt = _run(
-                _glicko_pass, f"dim_{suffix}",
-                keys, _finish_pos, _dates, race_ids_ordered, race_group_indices,
+        for suffix, col in [("surface", "surface"), ("rt", "race_type"),
+                            ("dist_cat", "dist_category")]:
+            if col not in df.columns:
+                continue
+            label = f"dim_{suffix}"
+            edge, st = _dimension_edge_sweep(
+                horse_keys, df[col].values, horse_resid,
+                race_ids_ordered, race_group_indices, _in.get(label),
             )
-            use_dim = (cnt >= MIN_DIM_RACES) & np.isfinite(r)
-            r_eff = np.where(use_dim, r, glicko_col)
-            rd_eff = np.where(use_dim, rd, rd_col)
-            cols[f"horse_glicko_{suffix}"] = r_eff
-            cols[f"horse_glicko_{suffix}_rd"] = rd_eff
-            cols[f"horse_glicko_{suffix}_edge"] = r_eff - glicko_col
+            if return_state:
+                _out[label] = st
+            cols[f"horse_glicko_{suffix}"] = glicko_col + edge
+            cols[f"horse_glicko_{suffix}_rd"] = np.where(np.isfinite(edge), rd_col, np.nan)
+            cols[f"horse_glicko_{suffix}_edge"] = edge
 
     df = pd.concat([df, pd.DataFrame(cols, index=df.index)], axis=1)
     logger.info("Glicko complete: %d feature columns", len(cols))

@@ -193,9 +193,19 @@ TRUESKILL_ENABLED = True       # TrueSkill mu/sigma (sweep 2026-06-12: best cand
 COLLATERAL_FORM = False
 
 # --- Elo Settings ---
-ELO_K_BASE = 16.0   # K for horses with 0 prior runs (walk-forward swept 2026-06-11)
-ELO_K_MIN = 8.0     # K floor for experienced horses
+# Experiment 045 (scripts/screen_ratings.py, fit-period within-race log
+# loss): K applies to the mean residual over opponents, so it is far larger
+# than the old 16/8, which was swept on 2026-06-11, before the leak fixes.
+ELO_K_BASE = 512.0  # K for horses with 0 prior runs
+ELO_K_MIN = 128.0   # K floor for experienced horses
 ELO_K_DECAY = 0.05  # exponential decay rate per run
+ELO_ENTITY_K_BASE = 32.0   # value-added jockey/trainer offsets (16/2 and 64/8 worse)
+ELO_ENTITY_K_MIN = 4.0
+ELO_MOMENTUM_HALF_LIFE_DAYS = 30.0  # 365..30 improves slowly; flat below 30
+RATING_DIM_PRIOR_RUNS = 3.0  # shrinkage for surface/race-type/distance edges (1..10 flat)
+RATING_DNF_AS_LOSS = True    # non-finishers rank tied last
+GLICKO_EVIDENCE_POWER = 0.25  # d² and scores weighted by n_opponents^-p (0 worse)
+TRUESKILL_C = 2.0  # sigma inflation per month idle (0 → 2: 2.047 → 2.010 fit LL; 3+ worse)
 MARGIN_ELO_SCALE = 3.0          # base lengths at which margin score ≈ 0.82 (walk-forward swept 2026-06-11)
 MARGIN_ELO_REF_DIST = 8.0       # reference distance (furlongs) for scale normalisation
 MARGIN_ELO_DNF_PENALTY = 30.0   # virtual lb for non-finishers
