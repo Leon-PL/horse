@@ -2210,3 +2210,12 @@ fit 2.105, test 2.198, against fixed 2.023 / 2.010). Maiden fields are mostly
 recent debutants, so each cohort starts relative to the last one's start and
 the scale drifts. Do not retry it without anchoring debutants to something
 outside the debutant pool. [Method, settings and the full table](RATING_SYSTEMS_045.md).
+
+**Plackett–Luce adds nothing over TrueSkill (1 November 2026).** About 50
+settings of an online Plackett–Luce rating were swept: Weng & Lin's Bayesian
+update, and a gradient update with Elo's K schedule. The best is the gradient
+form with Benter's place discount (d 0.85): fit 2.032, test 2.022, against
+TrueSkill's 2.010 / 1.996. Added to TrueSkill it gains 0.0003 nats in the fit
+period and nothing on test; over SP +0.00006. Undamped, the back of the field
+dominates its gradient. Kept as a screen option in `scripts/screen_ratings.py`
+only.

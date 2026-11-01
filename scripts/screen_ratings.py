@@ -15,10 +15,12 @@ SP, not BSP, so this is a screen, not a verdict.
     .venv/Scripts/python.exe scripts/screen_ratings.py
     .venv/Scripts/python.exe scripts/screen_ratings.py --set K_BASE=512 --set K_MIN=256
     .venv/Scripts/python.exe scripts/screen_ratings.py --stored   # the store's columns
+    .venv/Scripts/python.exe scripts/screen_ratings.py --systems pl --set PL_TOP_K=4
 
 ``--set NAME=VALUE`` patches a ``src.ratings`` module binding (K_BASE,
 GLICKO_EVIDENCE_POWER, ...) or, failing that, a ``config`` flag
-(TRUESKILL_ENABLED, ...).
+(TRUESKILL_ENABLED, ...). ``PL_*`` names set the research-only Plackett–Luce
+sweep defined here.
 """
 from __future__ import annotations
 
@@ -63,12 +65,124 @@ GLICKO_MODELS = {
     "horse_glicko2": ["horse_glicko2"],
 }
 
+# ── Plackett–Luce (research only; not in the pipeline) ─────────────────
+# A finishing order is a sequence of choices of who finishes next among the
+# runners still unplaced. Two online fits of that likelihood:
+#   "bayes": Weng & Lin (2011), a Gaussian skill (mu, sigma²) per horse;
+#   "sgd":   one log-strength per horse, moved along the race's gradient
+#            with an experience-decayed step (Elo's K schedule).
+PL_MODE = "sgd"     # best in the 045 screen; "bayes" peaked at 2.055 fit LL
+PL_MU = 25.0
+PL_SIGMA = 25.0 / 3.0
+PL_BETA = 25.0 / 6.0
+PL_C = 2.0          # sigma growth per idle month, capped at PL_SIGMA (as TrueSkill)
+PL_SCALE = "sum"    # field scale c: "sum" of variances (Weng & Lin) or their "mean"
+PL_KAPPA = 1e-4     # floor on the per-race variance shrink factor
+PL_K_BASE = 2.0     # sgd step for a debutant, in log-strength per unit gradient
+PL_K_MIN = 0.5      # sgd step floor
+PL_K_DECAY = 0.1    # sgd step decay per run
+PL_TOP_K = 0        # places scored as choices; 0 = every finisher
+PL_DISCOUNT = 0.85  # sgd: strength scaled by DISCOUNT^(place-1) at each later choice (Benter)
+PL_MODELS = {
+    "horse_pl_mu": ["horse_pl_mu"],
+    "horse_pl_lcb": ["horse_pl_lcb"],
+    "ts_mu + pl_mu": ["horse_ts_mu", "horse_pl_mu"],
+}
+
+
+def _pl_choices(score: np.ndarray, pos: np.ndarray, chosen: np.ndarray, discount: float = 1.0):
+    """Choice probabilities ``P[s, i]`` of each runner at each scored place,
+    who was placed there, and each choice's weight (dead heats share a choice;
+    with ``discount`` < 1 later places use a damped strength and carry
+    that factor into the gradient). Runners not ``chosen`` (non-finishers,
+    places beyond top-k) only sit in the risk sets of the choices ahead."""
+    q = np.flatnonzero(chosen)
+    lam = discount ** (pos[q] - 1.0)
+    e = np.exp(lam[:, None] * (score - score.max())[None, :])
+    risk = pos[None, :] >= pos[q][:, None]           # [choice, runner] still unplaced
+    P = risk * e / (risk * e).sum(axis=1, keepdims=True)
+    picked = np.zeros_like(P)
+    picked[np.arange(len(q)), q] = 1.0
+    w = lam / (pos[q][:, None] == pos[None, :]).sum(axis=1)
+    return P, picked, w
+
+
+def _pl_bayes_update(mu, sig2, pos, chosen):
+    total = sig2 + PL_BETA ** 2
+    c = np.sqrt(total.sum() if PL_SCALE == "sum" else total.mean())
+    P, picked, w = _pl_choices(mu / c, pos, chosen)
+    omega = (sig2 / c) * (w[:, None] * (picked - P)).sum(axis=0)
+    info = (w[:, None] * P * (1.0 - P)).sum(axis=0)
+    shrink = (np.sqrt(sig2) / c) * (sig2 / c ** 2) * info
+    return mu + omega, sig2 * np.maximum(1.0 - shrink, PL_KAPPA)
+
+
+def _pl_sgd_update(theta, n_runs, pos, chosen):
+    P, picked, w = _pl_choices(theta, pos, chosen, PL_DISCOUNT)
+    k = PL_K_MIN + (PL_K_BASE - PL_K_MIN) * np.exp(-PL_K_DECAY * n_runs)
+    return theta + k * (w[:, None] * (picked - P)).sum(axis=0), n_runs + 1
+
+
+def add_plackett_luce(frame: pd.DataFrame) -> pd.DataFrame:
+    """Pre-race Plackett–Luce strength (and, for "bayes", sigma and lcb),
+    swept in event order."""
+    bayes = PL_MODE == "bayes"
+    keys = ratings._entity_keys(frame, id_col="horse_id", name_col="horse_name", prefix="horse")
+    fp = pd.to_numeric(frame["finish_position"], errors="coerce").to_numpy(dtype=float)
+    dates = pd.to_datetime(frame["race_date"]).to_numpy()
+    order = np.argsort(ratings._event_sort_key(frame).to_numpy(), kind="stable")
+    races = pd.unique(frame["race_id"].to_numpy()[order])
+    groups = frame.groupby("race_id", sort=False).indices
+
+    # key -> (mu, sigma², last race date) for "bayes"; (theta, runs, date) for "sgd"
+    state: dict = {}
+    a_col = np.full(len(frame), np.nan)
+    b_col = np.full(len(frame), np.nan)
+    one_day = np.timedelta64(1, "D")
+    for race_id in races:
+        idx = groups[race_id]
+        idx = idx[[pd.notna(keys[i]) for i in idx]]
+        if not len(idx):
+            continue
+        day = dates[idx[0]]
+        a = np.full(len(idx), PL_MU if bayes else 0.0)
+        b = np.full(len(idx), PL_SIGMA ** 2 if bayes else 0.0)
+        for j, i in enumerate(idx):
+            prior = state.get(keys[i])
+            if prior is None:
+                continue
+            a[j], b[j] = prior[0], prior[1]
+            if bayes:
+                idle = max((day - prior[2]) / one_day, 0.0) / 30.44
+                b[j] = min(b[j] + PL_C ** 2 * idle, PL_SIGMA ** 2)
+        a_col[idx], b_col[idx] = a, b
+
+        part, pos = ratings._race_outcome(fp[idx], ratings.DNF_AS_LOSS)
+        chosen = (fp[idx] > 0) & part
+        if PL_TOP_K:
+            chosen &= fp[idx] <= PL_TOP_K
+        if part.sum() < 2 or not chosen.any():
+            continue
+        update = _pl_bayes_update if bayes else _pl_sgd_update
+        new_a, new_b = update(a[part], b[part], pos[part], chosen[part])
+        for i, x, y in zip(idx[part], new_a, new_b):
+            state[keys[i]] = (float(x), float(y), day)
+
+    out = frame.copy()
+    out["horse_pl_mu"] = a_col
+    if bayes:
+        out["horse_pl_sigma"] = np.sqrt(b_col)
+        out["horse_pl_lcb"] = a_col - 3.0 * np.sqrt(b_col)
+    return out
+
 
 def apply_overrides(pairs: list[str]) -> None:
     for pair in pairs:
         name, _, raw = pair.partition("=")
         value = ast.literal_eval(raw)
-        if hasattr(ratings, name):
+        if name.startswith("PL_"):
+            globals()[name] = value
+        elif hasattr(ratings, name):
             setattr(ratings, name, value)
         else:
             setattr(config, name, value)
@@ -90,6 +204,8 @@ def compute(frame: pd.DataFrame, systems: tuple[str, ...] = ("elo", "glicko")) -
         out = ratings.compute_elo_features(out)
     if "glicko" in systems:
         out = ratings.compute_glicko_features(out)
+    if "pl" in systems:
+        out = add_plackett_luce(out)
     return out
 
 
@@ -175,7 +291,7 @@ def stored_frame(history: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE")
-    parser.add_argument("--systems", default="elo,glicko")
+    parser.add_argument("--systems", default="elo,glicko,pl")
     parser.add_argument("--stored", action="store_true", help="score the store's columns instead")
     args = parser.parse_args()
     apply_overrides(args.set)
@@ -183,7 +299,7 @@ def main() -> None:
     history = load_history()
     rated = stored_frame(history) if args.stored else compute(history, tuple(args.systems.split(",")))
     scorer = Scorer(rated)
-    table = scorer.evaluate(rated, {**ELO_MODELS, **GLICKO_MODELS})
+    table = scorer.evaluate(rated, {**ELO_MODELS, **GLICKO_MODELS, **PL_MODELS})
     print(f"{scorer.n_test} test races; uniform {table.attrs['uniform_test']:.5f}, "
           f"market (SP) {table.attrs['market_test']:.5f}")
     with pd.option_context("display.float_format", "{:.5f}".format, "display.width", 120):

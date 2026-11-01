@@ -103,11 +103,45 @@ fixed 2.0149, gap 100 2.0457, gap 200 2.0782, learned 2.0433–2.0444. Removed.
 0.0002 nats. The improvements make the ratings better descriptions of form the
 market already prices.
 
+## Plackett–Luce follow-up (1 November 2026)
+
+`scripts/screen_ratings.py --systems pl` adds a research-only online
+Plackett–Luce rating. It reads a finishing order as successive choices of
+who finishes next among the runners still unplaced, so it is the likelihood
+the screen's own conditional logit uses for the winner. Non-finishers sit in
+every risk set but are never chosen. Pre-race values are unchanged when the
+same day's results are scrambled. Two fits were swept, about 50 settings in
+all, on the same fit-period log loss:
+
+- **Weng & Lin (2011) Bayesian update**, a Gaussian skill per horse. Their own
+  field scale (c over the sum of variances) barely moves ratings: fit
+  2.119–2.120 at every layoff C. A field-size-free scale reaches 2.076 (C 4),
+  and scoring only the top five places 2.055. A larger σ cap or a smaller β
+  is worse.
+- **Gradient update**, one log-strength per horse stepped along the race's
+  log-likelihood gradient with Elo's experience-decayed K. Undamped, the best
+  is 2.054 (K 1 → 0.25, top five places). Benter's discounted rank-ordered
+  logit, which scales a horse's strength by d^(place−1) at later choices,
+  is the one change that helped: d 0.85 with K 2 → 0.5 and decay 0.1 gives
+  **2.032** (test 2.022). d 0.7 and below, top-k cuts, and leaving
+  non-finishers out are all worse.
+
+Undamped, the back of the field dominates the Plackett–Luce gradient: a horse
+is charged at every place it failed to take, so tail places and fallers move
+ratings most, yet they say least about ability.
+
+| Model | Fit LL | Test LL | Market gain |
+|---|---|---|---|
+| horse_ts_mu | 2.01048 | 1.99605 | +0.00007 |
+| horse_pl_mu (best) | 2.03222 | 2.02189 | +0.00006 |
+| ts_mu + pl_mu | 2.01018 | 1.99597 | +0.00006 |
+
+The best Plackett–Luce trails TrueSkill by 0.022 nats and pairwise Elo by
+0.009. It adds 0.0003 nats to TrueSkill in the fit period and nothing on the
+test period or over SP. Not added to the pipeline.
+
 ## Not done
 
-- **Plackett–Luce** ratings fitted to whole finishing orders. The repaired
-  pairwise systems are a sound base; this is the next model to try, judged
-  first on market gain.
 - **Value-added Glicko jockey/trainer.** `GLICKO_JOCKEY_TRAINER` still rates
   them like horses; it is off by default.
 - The off-by-default Glicko flags (jockey/trainer, dimensional, margin,

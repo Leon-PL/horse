@@ -208,7 +208,7 @@ General comparison tools and experiment-specific implementations are kept togeth
 | [screen_feature_batch.py](../scripts/screen_feature_batch.py) | Experiment 018 registered feature screen after audits. |
 | [screen_model_capacity.py](../scripts/screen_model_capacity.py) | Experiment 021 fixed capacity screen. |
 | [screen_prize_currency.py](../scripts/screen_prize_currency.py) | Experiment 020 currency-feature screen. |
-| [screen_ratings.py](../scripts/screen_ratings.py) | Experiment 045 rating-system screen: each rating as a standalone within-race logit, alone and on top of SP; `--set` overrides settings, `--stored` scores the store. |
+| [screen_ratings.py](../scripts/screen_ratings.py) | Experiment 045 rating-system screen: each rating as a standalone within-race logit, alone and on top of SP; `--set` overrides settings, `--stored` scores the store, `--systems pl` a research-only Plackett–Luce rating. |
 | [triage_features.py](../scripts/triage_features.py) | Stage-1 triage: does a candidate feature carry information the market lacks? |
 | [validate_model_capacity.py](../scripts/validate_model_capacity.py) | Experiment 022 wider validation of the selected capacity change. |
 | [wf_benter_combination.py](../scripts/wf_benter_combination.py) | Walk-forward re-validation of the Benter market-combination edge. |
