@@ -4,8 +4,9 @@ import json
 
 import pytest
 
-from src import database, source_auxiliary, source_pipeline as sources
-from src.source_storage import atomic_json
+from src.ingestion import auxiliary as source_auxiliary, pipeline as sources
+from src.ingestion import results
+from src.ingestion.storage import atomic_json
 
 
 @pytest.fixture
@@ -51,7 +52,7 @@ def test_successful_subset_does_not_erase_another_sources_failure(health, monkey
 
 def test_old_backfill_retains_newer_coverage_and_records_its_own_failure(health, monkeypatch):
     path, before, _ = health
-    monkeypatch.setattr(database, "sync_database", lambda **kw: {"state": "error", "error": "old page unavailable"})
+    monkeypatch.setattr(results, "sync_database", lambda **kw: {"state": "error", "error": "old page unavailable"})
     older = (date.today()-timedelta(days=30)).isoformat()
     result = sources.refresh_sources(1, sources=("sl",), start=older, end=older)
     saved = json.loads(path.read_text())
@@ -74,7 +75,7 @@ def test_subset_cannot_make_stale_other_sources_fresh(health, monkeypatch):
 
 def test_first_subset_leaves_unknown_required_sources_unverified(tmp_path, monkeypatch):
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(database, "sync_database", lambda **kw: {"state": "ok"})
+    monkeypatch.setattr(results, "sync_database", lambda **kw: {"state": "ok"})
     result = sources.refresh_sources(1, sources=("sl",))
     saved = json.loads((tmp_path/"source_refresh/status.json").read_text())
     assert result["state"] == "ok" and saved["state"] == "partial"

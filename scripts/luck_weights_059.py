@@ -35,7 +35,7 @@ from scripts.model_ideas import (OUT, Cache, baseline, compare, predict_producti
                                  production_inputs, run_arm, save_json, setup_logging, store_columns)
 from src import feature_selection as fs  # noqa: E402
 from src.luck_weights import SCHEMES, comment_severity, luck_weights, race_luck, stewards_severity  # noqa: E402
-from src.source_pipeline import load_matched_text  # noqa: E402
+from src.ingestion.pipeline import load_matched_text  # noqa: E402
 from src.utils import canonical_track_key, normalise_horse_key  # noqa: E402
 
 SEVERITY = OUT / "luck_severity_059.parquet"

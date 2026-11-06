@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src import rtv_text  # noqa: E402
-from src.rtv_feature_collection import refresh_text_history  # noqa: E402
+from src.ingestion.rtv_observations import refresh_text_history  # noqa: E402
 
 
 def main() -> None:

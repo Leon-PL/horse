@@ -221,7 +221,7 @@ def test_status_command_returns_failure_when_check_fails(status, monkeypatch):
 def test_source_readiness_requires_all_sources_in_a_fresh_current_report(status, tmp_path, monkeypatch, problem):
     from datetime import datetime, timedelta, timezone
     import json
-    from src.source_pipeline import DEFAULT_SOURCES
+    from src.ingestion.pipeline import DEFAULT_SOURCES
     monkeypatch.setattr(status.config, "DATA_DIR", str(tmp_path))
     now = datetime.now(timezone.utc)
     report = {"state": "ok", "checked_at": now.isoformat(),
@@ -257,12 +257,11 @@ def test_deep_probe_fingerprints_database_even_if_csv_is_stale(status, monkeypat
         def meta(self):
             return TestStoreFindings.META.copy()
 
-    def process(df=None, save=True):
+    def process(df=None):
         assert df is not None, "A default call would fingerprint the old CSV"
         assert df.race_id.tolist() == [123]  # CSV contract infers numeric IDs.
         assert df.horse_id.tolist() == [456]
         assert df.jockey.isna().all()       # Empty database strings match CSV NA.
-        assert save is False
         captured["processed"] = True
         return df
 

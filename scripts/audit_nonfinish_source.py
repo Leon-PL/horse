@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import pandas as pd
 
-from src.data_scraper import SportingLifeScraper
+from src.ingestion.sporting_life import SportingLifeScraper
 from src.deployment_validation import file_sha256
 from src.featured_dataset import fe_signature
 from src.result_status import result_labels
@@ -106,7 +106,7 @@ def main():
         "unchanged_card_values": True, "unchanged_nonfinish_counts": True,
         "fe_signature": fe_signature(),
         "parser_before_sha256": file_sha256(old_path),
-        "parser_after_sha256": file_sha256(ROOT / "src/data_scraper.py"),
+        "parser_after_sha256": file_sha256(ROOT / "src/ingestion/sporting_life.py"),
         "audit_script_sha256": file_sha256(Path(__file__)),
         "scope": "Source preservation only; no historical DB edits, rebuild, fitting or prediction-gain claim",
         "annotation_scope": "Fixed development error-review sample, not representative; dated ride_description only, no profile/commentary inference"}

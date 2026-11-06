@@ -1,7 +1,8 @@
 import pandas as pd
 
-from src import data_scraper, database
-from src.data_scraper import SportingLifeScraper, _verdict_text
+from src import database
+from src.ingestion import sporting_life as data_scraper
+from src.ingestion.sporting_life import SportingLifeScraper, _verdict_text
 
 VERDICT = "<p><b>PACHMENA</b> will find this easier &amp; is preferred to <b>Magnetic North</b>.</p>"
 

@@ -23,7 +23,6 @@ skips that.
 from __future__ import annotations
 
 import argparse
-import tempfile
 import json
 import logging
 import os
@@ -156,21 +155,8 @@ def _feature_store(deep: bool = True) -> dict:
         # Recompute from the database: catches a backfill beneath the store.
         # process_data() alone reads the exported CSV, which can still be old
         # after a DB repair or an interrupted snapshot publication.
-        from src.database import load_from_database
-        from src.data_processor import process_data
-        # Match the CSV ingest contract (numeric IDs, empty strings, NA values
-        # and float parsing) using current DB contents, never the existing CSV.
-        # Otherwise TEXT IDs in SQLite and inferred integers in the CSV hash
-        # differently even when they describe the exact same historical data.
-        import pandas as pd
-        current = load_from_database()
-        # Spool rather than retaining a second full CSV string in memory.
-        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as snapshot:
-            current.to_csv(snapshot, index=False)
-            del current
-            snapshot.seek(0)
-            canonical = pd.read_csv(snapshot)
-        live_data_sig = data_signature(process_data(df=canonical, save=False), cutoff=meta["last_date"])
+        from src.data_processor import load_database_history, process_data
+        live_data_sig = data_signature(process_data(df=load_database_history()), cutoff=meta["last_date"])
     atr = meta.get("atr_signature")
     if isinstance(atr, dict) and atr.get("cutoff"):
         from src.feature_inputs import atr_cache_signature
@@ -290,7 +276,7 @@ def _rtv_collection():
 
 
 def _source_refresh():
-    from src.source_pipeline import DEFAULT_SOURCES
+    from src.ingestion.pipeline import DEFAULT_SOURCES
     path = Path(config.DATA_DIR)/"source_refresh/status.json"
     if not path.exists():
         return {"state": WARN, "detail": "No unified source coverage report yet"}

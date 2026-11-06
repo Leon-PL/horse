@@ -83,7 +83,7 @@ def worker(args):
         setattr(store, name, timed)
     card = pd.read_parquet(args.card)
     prep = time.perf_counter()
-    processed = stable_card_indicators(process_data(df=pending_card(_match_store_id_types(card)), save=False))
+    processed = stable_card_indicators(process_data(df=pending_card(_match_store_id_types(card))))
     preparation_seconds = time.perf_counter() - prep
     gc.collect()
     started = time.perf_counter()

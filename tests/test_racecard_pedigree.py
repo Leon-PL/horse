@@ -1,7 +1,7 @@
 import json
 import pandas as pd
 
-from src.data_scraper import enrich_racecard_pedigree
+from src.ingestion.sporting_life import enrich_racecard_pedigree
 
 
 class Profiles:
@@ -79,7 +79,7 @@ def test_parallel_lookahead_cards_can_cache_the_same_horse(tmp_path):
 
 def test_windows_cache_replacement_retries_a_temporary_sharing_failure(monkeypatch, tmp_path):
     from pathlib import Path
-    import src.data_scraper as scraper_module
+    import src.ingestion.sporting_life as scraper_module
     original = Path.replace
     calls = []
     def replace(path, target):
@@ -98,7 +98,7 @@ def test_windows_cache_replacement_retries_a_temporary_sharing_failure(monkeypat
 
 def test_unavailable_optional_cache_keeps_verified_parents(monkeypatch, tmp_path):
     from pathlib import Path
-    import src.data_scraper as scraper_module
+    import src.ingestion.sporting_life as scraper_module
     def locked(path, target):
         raise PermissionError("Cache remains locked")
     monkeypatch.setattr(Path, "replace", locked)

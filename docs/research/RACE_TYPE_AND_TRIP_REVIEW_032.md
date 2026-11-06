@@ -83,7 +83,7 @@ Evidence starts with `legacy_audit.json`, `parser_validation.json`,
 
 ## Canonical rebuild and fitting
 
-`scripts/rebuild_race_type_repairs.py` preserves the previous store with
+`scripts/rebuild_race_type_repairs.py` (removed 2026-11-06, in git history) preserved the previous store with
 hardlinks and rebuilds the normal feature stages. Every Elo component is
 recomputed. Glicko/TrueSkill reuse requires identical code/config/runtime,
 all processed values identical except the reviewed race types and their

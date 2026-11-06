@@ -18,7 +18,8 @@ the first authenticated transfer. Existing public BSP collection remains active.
 [`src/ingestion`](../src/ingestion/), with `python -m src.ingestion` as the
 collection command. The fake-data generator and unused collector interface
 were removed. See the [current structure](architecture/PROJECT_STRUCTURE.md),
-[cleanup report](operations/PRE_FEATURE_CLEANUP_2026-11-05.md), and
+[cleanup report](operations/PRE_FEATURE_CLEANUP_2026-11-05.md),
+[consolidation report](operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md), and
 [documentation index](README.md). Earlier reports below describe their dated checkpoints.
 
 **ATR reconstruction, 5 November:** [qualified collector and full backfill](operations/ATR_REBUILD_2026-11-05.md).
@@ -55,7 +56,7 @@ the Data page and readiness check.
 source-response fingerprints and the original horse-identity finding. Its last
 historical review case was resolved by the 5 November migration above.
 
-**Racing TV features and repairs, 30 October:** [source pipeline](../src/source_pipeline.py)
+**Racing TV features and repairs, 30 October:** [source pipeline](../src/ingestion/pipeline.py)
 connects collection, comparison and numeric observations to training and apps. [RTV features](../src/rtv_features.py) compute 26 historical and
 four timestamped pre-race inputs; the deployed selection remains 154 after an
 uncertain fixed trial. [Repairs and current operation](research/RTV_FEATURES_REPAIRS_044.md).
@@ -140,9 +141,9 @@ All source modules present at this inventory are grouped below. This is a respon
 
 | Area | Modules | Responsibility |
 |---|---|---|
-| Collection and publication | [pipeline](../src/ingestion/pipeline.py), [auxiliary](../src/ingestion/auxiliary.py), [storage](../src/ingestion/storage.py), [RTV storage](../src/ingestion/rtv_storage.py) | Coordinated real-source collection, coverage, retained responses and atomic publication. Legacy source-module imports are compatibility aliases. |
-| Results and racecards | [Sporting Life](../src/ingestion/sporting_life.py), [database](../src/database.py), [data_processor](../src/data_processor.py) | Collect, store, export and clean source records. Sporting Life commentary and verdicts go to the append-only `runner_text_observations` table (racecard and result copies, with the time seen), never to `results`. |
-| Auxiliary sources | [pedigree_backfill](../src/pedigree_backfill.py), [attheraces_scraper](../src/attheraces_scraper.py), [rtv_scraper](../src/rtv_scraper.py), [weather](../src/weather.py) | Optional enrichment. Weather is stored as raw data and does not supply a current feature stage. The Racing TV scraper ([guide](operations/RTV_SCRAPER.md)) collects results, racecards and RaceiQ data. `src.rtv_features` reads its Timeform card and run history; `source_pipeline.load_matched_text` gives its text (Timeform comment and verdict, pace and draw notes, close-ups) per SL runner for research. [rtv_text](../src/rtv_text.py) turns the Timeform comment and verdict into the comment score (`rtv_text_logit`, `rtv_text_prob`, `rtv_verdict_rank`; production inputs since 056). Quarterly walk-forward models live in `data/rtv_cache/text_models`, history scores in `feature_text_scores.parquet`, and live cards are scored from the pre-race snapshot. `rtv_feature_collection` keeps them current with the rest of the RTV cache. |
+| Collection and publication | [pipeline](../src/ingestion/pipeline.py), [auxiliary](../src/ingestion/auxiliary.py), [storage](../src/ingestion/storage.py), [RTV storage](../src/ingestion/rtv_storage.py) | Coordinated real-source collection, coverage, retained responses and atomic publication. |
+| Results and racecards | [results ledger](../src/ingestion/results.py), [Sporting Life](../src/ingestion/sporting_life.py), [database](../src/database.py), [data_processor](../src/data_processor.py) | Collect, store, export and clean source records. Sporting Life commentary and verdicts go to the append-only `runner_text_observations` table (racecard and result copies, with the time seen), never to `results`. |
+| Auxiliary sources | [pedigree](../src/ingestion/pedigree.py), [attheraces_scraper](../src/attheraces_scraper.py), [Racing TV](../src/ingestion/racing_tv.py), [RTV observations](../src/ingestion/rtv_observations.py), [exchange rates](../src/ingestion/fx.py), [public BSP](../src/ingestion/betfair_public.py), [market streams](../src/ingestion/betfair_streams.py), [weather](../src/ingestion/weather.py) | Optional enrichment. Weather is stored as raw data and does not supply a current feature stage. The Racing TV scraper ([guide](operations/RTV_SCRAPER.md)) collects results, racecards and RaceiQ data. `src.rtv_features` reads its Timeform card and run history; `ingestion.pipeline.load_matched_text` gives its text (Timeform comment and verdict, pace and draw notes, close-ups) per SL runner for research. [rtv_text](../src/rtv_text.py) turns the Timeform comment and verdict into the comment score (`rtv_text_logit`, `rtv_text_prob`, `rtv_verdict_rank`; production inputs since 056). Quarterly walk-forward models live in `data/rtv_cache/text_models`, history scores in `feature_text_scores.parquet`, and live cards are scored from the pre-race snapshot. `ingestion.rtv_observations` keeps them current with the rest of the RTV cache. |
 | Canonical feature definitions | [feature_engineer](../src/feature_engineer.py), [feature_semantics](../src/feature_semantics.py), [result_margins](../src/result_margins.py), [result_status](../src/result_status.py), [audited_surface_features](../src/audited_surface_features.py), [prize_currency_features](../src/prize_currency_features.py), [verified_race_metadata](../src/verified_race_metadata.py), [track_config](../src/track_config.py), [atr_features](../src/atr_features.py) | Normal calculations and source corrections. Surface/currency modules also contain separate research helpers; their research origin does not make their canonical functions optional. |
 | Historical state and storage | [ratings](../src/ratings.py), [trueskill_kernel](../src/trueskill_kernel.py), [fe_incremental](../src/fe_incremental.py), [feature_store](../src/feature_store.py), [featured_dataset](../src/featured_dataset.py), [store_refresh](../src/store_refresh.py), [feature_inputs](../src/feature_inputs.py), [rating_reuse](../src/rating_reuse.py), [parquet_io](../src/parquet_io.py), [fe_taxonomy](../src/fe_taxonomy.py) | Historical state, transactional files, provenance and bounded refresh/build support. Two refresh interfaces currently coexist. |
 | Training and validation | [model](../src/model.py), [race_objectives](../src/race_objectives.py), [training](../src/training.py), [autotune](../src/autotune.py), [probability_calibration](../src/probability_calibration.py), [deployment_validation](../src/deployment_validation.py) | Shared training core, optional tuning/calibration and deployment-recipe checks. |
@@ -150,7 +151,7 @@ All source modules present at this inventory are grouped below. This is a respon
 | Scoring and shared rules | [wf_eval](../src/wf_eval.py), [feature_selection](../src/feature_selection.py), [forecast_evaluation](../src/forecast_evaluation.py), [bet_analysis](../src/bet_analysis.py), [backtester](../src/backtester.py), [clv](../src/clv.py), [bet_settlement](../src/bet_settlement.py), [each_way](../src/each_way.py), [quality_control](../src/quality_control.py), [utils](../src/utils.py) | Purged research evaluation, walk-forward input selection, complete-field scoring, settlement, identity joins and app-facing simulation. The research and app backtest interfaces have distinct jobs. |
 | Market data and analysis | [betfair](../src/betfair.py), [matchbook_client](../src/matchbook_client.py), [matchbook_signals](../src/matchbook_signals.py), [paper_trade_store](../src/paper_trade_store.py), [market_replay](../src/market_replay.py), [forecast_benchmark](../src/forecast_benchmark.py) | Historical teaching/evaluation prices, exchange connectivity, paper records, archive replay and benchmark alignment. |
 | App/support interfaces | [app_helpers](../src/app_helpers.py), [__init__](../src/__init__.py) | UI helpers. Application synthetic-data support has been removed. |
-| Research or unwired feature tools | [audited_class_features](../src/audited_class_features.py), [history_blend](../src/history_blend.py), [missing_history_snapshot](../src/missing_history_snapshot.py), [public_history_features](../src/public_history_features.py), [race_probability_model](../src/race_probability_model.py), [sibling_features](../src/sibling_features.py), [tail_calibration](../src/tail_calibration.py), [tail_smoothing](../src/tail_smoothing.py), [trainer_locations](../src/trainer_locations.py), [bha_stewards_scraper](../src/bha_stewards_scraper.py), [thurstone](../src/thurstone.py), [luck_weights](../src/luck_weights.py), [connection_profiles](../src/connection_profiles.py) | Separate experimental predictors, projections, mixtures and unwired collection tools. Presence under src does not mean inclusion in normal predictions. |
+| Research or unwired feature tools | [audited_class_features](../src/audited_class_features.py), [history_blend](../src/history_blend.py), [missing_history_snapshot](../src/missing_history_snapshot.py), [public_history_features](../src/public_history_features.py), [race_probability_model](../src/race_probability_model.py), [sibling_features](../src/sibling_features.py), [tail_calibration](../src/tail_calibration.py), [tail_smoothing](../src/tail_smoothing.py), [trainer_locations](../src/trainer_locations.py), [BHA stewards](../src/ingestion/bha_stewards.py), [thurstone](../src/thurstone.py), [luck_weights](../src/luck_weights.py), [connection_profiles](../src/connection_profiles.py) | Separate experimental predictors, projections, mixtures and unwired collection tools. Presence under src does not mean inclusion in normal predictions. |
 
 ## Operating tools
 
@@ -199,7 +200,6 @@ The031 performance and032 trip proposals remain outside normal forecasts.
 | [quick_win_feature_screen.py](../scripts/quick_win_feature_screen.py) | Small win-only screen; reuses exact numeric baseline fits and can join audited extra inputs without replacing old columns. No automatic qualification or promotion. |
 | [check_prior_market_native.py](../scripts/check_prior_market_native.py) | Completed033 native win check against frozen029 forecasts. Its original032 sources are sealed evidence; do not rerun against the changed canonical source. |
 | [prepare_prior_market_backfill.py](../scripts/prepare_prior_market_backfill.py), [install_prior_market_history.py](../scripts/install_prior_market_history.py) | Completed additive033 adoption, guarded by source proofs and exact old-column comparisons. These are one-generation migration tools. |
-| [rebuild_race_type_repairs.py](../scripts/rebuild_race_type_repairs.py) | Completed032 source repair rebuild with guarded reuse of unchanged rating components. |
 | [audit_store_input_delta.py](../scripts/audit_store_input_delta.py) | Read-only bounded comparison of ordered feature generations; writes an audit report. |
 | [integrate_canonical_repairs.py](../scripts/integrate_canonical_repairs.py) | Explicit case/parent qualification and current-data installation. Frozen manifests, exact component checkpoints and separate historical validation prevent duplicate fitting and mismatched promotion. |
 
@@ -232,9 +232,9 @@ These are deliberate maintenance actions, not commands to run as a batch. Backfi
 | [build_feature_store_batched.py](../scripts/build_feature_store_batched.py) | Explicit full history rebuild with bounded memory and a staged commit. Its _build function is also called by normal training. |
 | [compare_feature_stores.py](../scripts/compare_feature_stores.py) | Prove two feature stores match: every column, row order and carried state. Reads only. |
 | [create_validation_report.py](../scripts/create_validation_report.py) | Export an evaluated run's recipe certificate for a later deployment refit; writes a new report. |
-| [extract_betfair_bsp.py](../scripts/extract_betfair_bsp.py) | Extract win BSP and timed observations from local BASIC archives. Also exports helpers imported by src.market_replay. |
-| [extract_betfair_place_bsp.py](../scripts/extract_betfair_place_bsp.py) | Extract place BSP from local BASIC archives; writes a derived research/data artifact. |
-| [fetch_betfair_sp_public.py](../scripts/fetch_betfair_sp_public.py) | Download public daily exchange starting-price files. Refreshing the canonical teaching cache is a separate audited step. |
+| [extract_betfair_bsp.py](../scripts/extract_betfair_bsp.py) | Extract win BSP and timed observations from local BASIC archives. Parsers live in [betfair_streams](../src/ingestion/betfair_streams.py). |
+| [extract_betfair_place_bsp.py](../scripts/extract_betfair_place_bsp.py) | Extract place BSP from local BASIC archives with the same parsers; writes a derived research/data artifact. |
+| [fetch_betfair_sp_public.py](../scripts/fetch_betfair_sp_public.py) | Command for [betfair_public](../src/ingestion/betfair_public.py): download public daily exchange starting-price files. Refreshing the canonical teaching cache is a separate audited step. |
 | [fetch_bha_going.py](../scripts/fetch_bha_going.py) | Collect going, rail and stalls reports; collection does not establish that the model uses these fields. |
 | [repair_overfull_fields.py](../scripts/repair_overfull_fields.py) | Remove non-runners stored as runners (more rows than `num_runners`). Re-scrapes each race and replaces the validated field, or deletes only rows the page marks NONRUNNER/WITHDRAWN; backs up to data/backups first, then re-exports `data/raw/race_results.csv` from the DB. Dry run unless `--apply`. |
 | [verify_live_upgrade.py](../scripts/verify_live_upgrade.py) | Operational qualification of the installed artifact, including a public card; writes a new receipt, without fitting or promotion. |
@@ -428,10 +428,10 @@ The next code consolidation should address these concrete boundaries:
    Preserve full-build, append, transaction and live-feature parity while
    unifying the underlying behavior.
 2. **Shared implementations belong behind command wrappers.**
-   `src.store_refresh` imports `scripts.build_feature_store_batched._build`;
-   `src.market_replay` imports helpers from `scripts.extract_betfair_bsp`.
-   These dependencies prevent treating the whole scripts directory as an
-   archive. Extract shared implementation first and retain compatible wrappers.
+   `src.store_refresh` imports `scripts.build_feature_store_batched._build`,
+   which prevents treating the whole scripts directory as an archive. Extract
+   shared implementation first and retain compatible wrappers. The Betfair
+   parsers moved this way on 6 November.
 3. **Review research dependencies before archiving.**
    Example: `canonical_training_cache` is imported by both correction/refit
    controllers; comparison scripts also share scoring/alignment functions.

@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from src import atr_rebuild as rebuild, attheraces_scraper as atr
-from src.source_storage import read_json, writer_lock
+from src.ingestion.storage import read_json, writer_lock
 from test_attheraces_scraper import _FakeFetcher
 from test_atr_rich_collection import page
 

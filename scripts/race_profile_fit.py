@@ -44,8 +44,8 @@ from src.betfair import attach_bsp  # noqa: E402
 from src.established_form_features import _horse_keys, mark_scale  # noqa: E402
 from src.forecast_evaluation import valid_race_mask  # noqa: E402
 from src.result_status import NONSTARTER_LABELS, result_labels  # noqa: E402
-from src.rtv_feature_collection import observation_tables  # noqa: E402
-from src.source_pipeline import match_runners  # noqa: E402
+from src.ingestion.rtv_observations import observation_tables  # noqa: E402
+from src.ingestion.pipeline import match_runners  # noqa: E402
 from src.trip_suitability_research import trip_suitability_features  # noqa: E402
 from src.wf_eval import development_mask, expanding_period_folds  # noqa: E402
 

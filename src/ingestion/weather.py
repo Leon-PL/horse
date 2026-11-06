@@ -24,12 +24,13 @@ from pathlib import Path
 
 import requests
 
+import config
 from src.track_config import get_track_config
 
 logger = logging.getLogger(__name__)
 
 # ── paths ───────────────────────────────────────────────────────
-_DB_DIR = Path(__file__).resolve().parent.parent / "data"
+_DB_DIR = Path(config.DATA_DIR)
 _WEATHER_DB = _DB_DIR / "weather_cache.db"
 _RACES_DB = _DB_DIR / "races.db"
 

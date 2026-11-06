@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 
 from src.deployment_validation import file_sha256
-from src.data_scraper import _infer_race_type as infer_race_type
+from src.ingestion.sporting_life import _infer_race_type as infer_race_type
 
 OUTPUT = ROOT / "data/audit/cached_race_code_review_025"
 CODE = {"FLAT": "Flat", "AW FLAT": "Flat", "CHASE": "Chase",
@@ -87,7 +87,7 @@ def run(metadata=None):
         "race_type_interpretation": "NH Flat/bumper races are intentionally collapsed to Flat by current ingestion; this is an information-loss hypothesis, not proof of an incorrect published result",
         "local_source_path": str(source), "local_source_sha256": file_sha256(source), "profile_cache_sha256": snapshot.hexdigest(),
         "source_sha256": file_sha256(Path(__file__)), "production_changed": False}
-    report["proposed_parser_sha256"] = file_sha256(ROOT / "src/data_scraper.py")
+    report["proposed_parser_sha256"] = file_sha256(ROOT / "src/ingestion/sporting_life.py")
     report["local_metadata_projection_sha256"] = file_sha256(projection)
     fields = local.drop_duplicates("race_id").copy()
     fields["proposed_race_type"] = fields.race_name.map(infer_race_type)

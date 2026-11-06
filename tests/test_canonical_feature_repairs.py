@@ -46,7 +46,7 @@ def test_ordinary_training_rebuild_receives_corrections_without_research_flags(m
     raw = _synthetic_raw(n_days=1, races_per_day=1, field=4)
     raw = raw.assign(race_id=622145, race_date="2021-04-28", track="Punchestown", race_type="Flat",
                      going="Yielding (Good To Yielding In Places)", prize_money=10000.)
-    processed = process_data(raw, save=False)
+    processed = process_data(raw)
     captured = []
     class Store:
         def _access(self): return nullcontext()

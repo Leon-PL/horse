@@ -2,7 +2,7 @@
 
 The BHA "find a trainer" API (same api09.horseracing.software backend and
 Bearer-token scheme as the stewards reports — token extraction is reused from
-``src.bha_stewards_scraper``) lists every currently licensed GB trainer with a
+``src.ingestion.bha_stewards``) lists every currently licensed GB trainer with a
 ``county``. County centroids give a yard location good to a few tens of km,
 which is enough for a *travel-distance* signal (Fife -> Bath is ~600 km; the
 noise is the county radius).
@@ -207,7 +207,7 @@ def fetch_bha_trainer_directory(
     per_page: int | None = 100, timeout: int = 30
 ) -> pd.DataFrame:
     """Fetch every licensed trainer (name/licence/county) from the BHA API."""
-    from src.bha_stewards_scraper import (
+    from src.ingestion.bha_stewards import (
         _DEFAULT_HEADERS,
         _extract_bearer_token,
         _get_with_backoff,

@@ -20,7 +20,7 @@ from threading import Event
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import pandas as pd
-from src.data_scraper import SportingLifeScraper
+from src.ingestion.sporting_life import SportingLifeScraper
 from src.utils import normalise_horse_key
 
 OUTPUT = ROOT / "data/research/public_prior_results"

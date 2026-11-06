@@ -13,25 +13,15 @@ import pyarrow.parquet as pq
 
 import config
 from src import rtv_features as features
-from src import rtv_scraper as rtv
+from src.ingestion import racing_tv as rtv
 from src import rtv_text
-from src.source_pipeline import match_runners, canonical_rows
+from src.ingestion.pipeline import match_runners, canonical_rows
 from src.utils import canonical_track_key, normalise_horse_key
 from src.wf_eval import purge_days
-from src.rtv_storage import accepted_days, partition_paths
-from src.source_storage import atomic_json, writer_lock
+from src.ingestion.rtv_storage import accepted_days, partition_paths
+from src.ingestion.storage import atomic_json, atomic_parquet, writer_lock
 
 logger = logging.getLogger(__name__)
-
-
-def _atomic_parquet(frame, path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name+"."+uuid4().hex+".tmp")
-    try:
-        frame.to_parquet(temporary, index=False)
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _read_columns(path, columns):
@@ -110,7 +100,7 @@ def _merge_dated(output, path, start, end, key, *, previous_path=None):
     output = output.sort_values(["race_date", "race_id", "horse_id"], kind="stable").reset_index(drop=True)
     if output.duplicated(["race_id", "horse_id"]).any():
         raise ValueError(f"Duplicate materialised RTV {key}")
-    _atomic_parquet(output, path)
+    atomic_parquet(output, path)
     return output
 
 
@@ -155,7 +145,7 @@ def _refresh_run_observations(start, end, *, database=None, source_root=None, de
         files = {name: (relative/(name+".parquet")).as_posix() for name in ("runs", "cards", "text", "scores")}
         receipt["files"] = files
         if publish:
-            from src.rtv_storage import generation, history_manifest
+            from src.ingestion.rtv_storage import generation, history_manifest
             value = generation(root)
             value.update(files=files, history=manifest if manifest is not None else history_manifest(root))
             atomic_json(root/"pipeline/generation.json", value)
@@ -327,6 +317,6 @@ def refresh_pre_observations(day=None, *, raw_path=None, destination=None):
     if day and path.exists():
         previous = pd.read_parquet(path)
         output = pd.concat([previous.loc[previous.race_date.ne(day)], output], ignore_index=True)
-    _atomic_parquet(output, path)
+    atomic_parquet(output, path)
     return {"observations": len(output), "races": int(output[keys[:3]].drop_duplicates().shape[0]),
             "published_at": datetime.now(timezone.utc).isoformat()}

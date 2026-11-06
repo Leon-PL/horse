@@ -43,13 +43,13 @@ personal computer for personal, non-commercial use.
 
 Usage::
 
-    python -m src.rtv_scraper scrape --start 2023-06-10 --end 2026-10-28
-    python -m src.rtv_scraper snapshot            # today's race-day data
-    python -m src.rtv_scraper profiles --start 2026-01-01
-    python -m src.rtv_scraper learn-glyphs
-    python -m src.rtv_scraper build
-    python -m src.rtv_scraper validate --start 2025-08-01 --end 2025-08-31
-    python -m src.rtv_scraper status
+    python -m src.ingestion.racing_tv scrape --start 2023-06-10 --end 2026-10-28
+    python -m src.ingestion.racing_tv snapshot            # today's race-day data
+    python -m src.ingestion.racing_tv profiles --start 2026-01-01
+    python -m src.ingestion.racing_tv learn-glyphs
+    python -m src.ingestion.racing_tv build
+    python -m src.ingestion.racing_tv validate --start 2025-08-01 --end 2025-08-31
+    python -m src.ingestion.racing_tv status
 """
 
 from __future__ import annotations
@@ -514,7 +514,7 @@ def utc_off_time(start_time_scheduled: str) -> str | None:
 # Value parsers
 # ---------------------------------------------------------------------------
 
-# Named margins, valued as in data_scraper._parse_lengths_behind so RTV and
+# Named margins, valued as in sporting_life._parse_lengths_behind so RTV and
 # Sporting Life margins are on one scale.
 _NAMED_MARGINS = {
     "dead heat": 0.0, "dht": 0.0, "dh": 0.0,

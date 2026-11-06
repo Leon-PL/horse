@@ -12,7 +12,7 @@ from tests.test_live_parity import _synthetic_raw
 
 
 def _processed(n_days=30):
-    df = process_data(_synthetic_raw(n_days=n_days, races_per_day=2, field=6), save=False)
+    df = process_data(_synthetic_raw(n_days=n_days, races_per_day=2, field=6))
     df["race_date"] = pd.to_datetime(df["race_date"])
     df["_event_dt"] = _event_sort_key(df)
     df = df.sort_values(["_event_dt", "race_id"]).reset_index(drop=True)

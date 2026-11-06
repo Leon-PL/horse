@@ -44,7 +44,7 @@ def featured_with_fallers():
     losers = raw["finish_position"].isin([5, 6]) & jumps
     raw.loc[losers, "finish_position"] = 0
     raw.loc[losers, "lengths_behind"] = np.nan
-    return engineer_features(process_data(raw, save=False), save=False), int(losers.sum())
+    return engineer_features(process_data(raw), save=False), int(losers.sum())
 
 
 def test_training_frame_keeps_non_finishers_as_unplaced_losers(featured_with_fallers, monkeypatch):

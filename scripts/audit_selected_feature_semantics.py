@@ -32,7 +32,7 @@ def sha(path):
 def definitions(features):
     assigned={}
     functions={}
-    for relative in ("src/data_processor.py","src/feature_engineer.py","src/ratings.py","src/data_scraper.py"):
+    for relative in ("src/data_processor.py","src/feature_engineer.py","src/ratings.py","src/ingestion/sporting_life.py"):
         tree=ast.parse((ROOT/relative).read_text(encoding="utf-8"))
         for function in tree.body:
             if not isinstance(function,(ast.FunctionDef,ast.AsyncFunctionDef)):
@@ -46,7 +46,7 @@ def definitions(features):
                             and isinstance(target.slice.value,str)):
                         assigned.setdefault(target.slice.value,[]).append(f"{relative}:{node.lineno} ({function.name})")
     out={}
-    dynamic={"num_runners":"raw results/card metadata in src/data_scraper.py:_ride_to_dict",
+    dynamic={"num_runners":"raw results/card metadata in src/ingestion/sporting_life.py:_ride_to_dict",
         "race_type_Chase":functions["encode_categorical"],"sex_Female":functions["encode_categorical"],
         "horse_avg_pos_3":functions["add_horse_features"],"horse_best_pos_5":functions["add_horse_features"],
         "jockey_avg_pos_20":functions["add_jockey_features"],"trainer_freq":functions["encode_categorical"],

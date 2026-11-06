@@ -31,7 +31,7 @@ from tests.test_live_parity import _synthetic_raw
 @pytest.fixture(scope="module")
 def split_processed():
     raw = _synthetic_raw(n_days=80, races_per_day=2, field=6, seed=11)
-    proc = process_data(raw.copy(), save=False)
+    proc = process_data(raw.copy())
     proc["race_date"] = pd.to_datetime(proc["race_date"], errors="coerce")
     dates = np.sort(proc["race_date"].unique())
     boundary = dates[len(dates) * 2 // 3]  # ~2/3 history, ~1/3 appended

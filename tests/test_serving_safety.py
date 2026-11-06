@@ -118,7 +118,7 @@ def test_live_card_changes_recompute_all_race_features(cache_dir, monkeypatch):
 
     monkeypatch.setattr(feature_store, "FeatureStore", Store)
     monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "current")
-    monkeypatch.setattr(data_processor, "process_data", lambda df, save=False: df)
+    monkeypatch.setattr(data_processor, "process_data", lambda df: df)
     monkeypatch.setattr(live, "_results_db_latest", lambda: pd.Timestamp("2026-10-10"))
     cards = pd.DataFrame({"race_id": ["r1", "r1"], "horse_name": ["A", "B"], "odds": [2.0, 4.0]})
     first = live.features_for_live_cards(cards, "2026-10-11")
@@ -203,7 +203,7 @@ class _CurrentStore:
 def live_env(cache_dir, monkeypatch):
     from src import featured_dataset, data_processor
     monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "current")
-    monkeypatch.setattr(data_processor, "process_data", lambda df, save=False: df)
+    monkeypatch.setattr(data_processor, "process_data", lambda df: df)
     return pd.DataFrame({"race_id": ["r1"], "horse_name": ["A"], "odds": [2.0]})
 
 
@@ -237,7 +237,7 @@ def test_fresh_scrape_and_cache_reload_return_identical_id_types(tmp_path, monke
     """A fresh scrape held horse_id as text, the cache reload as integers; the
     store's carried history is keyed by integers (2026-10-13: 25 of 149 model
     features lost every horse's history on a freshly scraped card)."""
-    from src import data_scraper as ds
+    from src.ingestion import sporting_life as ds
     monkeypatch.setattr(ds, "_racecard_cache_path", lambda date_str=None: str(tmp_path / "cards.csv"))
     monkeypatch.setattr(ds, "scrape_todays_racecards", lambda **kw: pd.DataFrame(
         {"race_id": ["9001", "9001"], "horse_id": ["1235263", "1238030"], "horse_name": ["A", "B"]}))

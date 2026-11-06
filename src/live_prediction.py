@@ -368,7 +368,7 @@ def _require_current_history(store_last, date_str: str) -> None:
     if gap > MAX_HISTORY_GAP_DAYS:
         raise RuntimeError(
             f"Results end {newest:%Y-%m-%d}, {gap} days before {date_str}. Sync the database "
-            "(python -m src.database --sync 14) and refresh the store before pricing live cards."
+            "(python -m src.ingestion --sync 14) and refresh the store before pricing live cards."
         )
 
 
@@ -409,7 +409,7 @@ def features_for_live_cards(
     card = _match_store_id_types(card)
     from src.result_status import pending_card
     card = pending_card(card)
-    processed = stable_card_indicators(process_data(df=card, save=False))
+    processed = stable_card_indicators(process_data(df=card))
     featured = store.featurize_live(processed)
     # Never publish features from a mixture of concurrent history generations.
     if feature_store_signature(store) != history_sig:

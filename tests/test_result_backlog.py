@@ -9,7 +9,9 @@ import pandas as pd
 import pytest
 
 from test_database_sync import sync_env, runners, TODAY, YESTERDAY  # noqa: F401
-from src import database, data_scraper, source_pipeline
+from src import database
+from src.ingestion import sporting_life as data_scraper, pipeline as source_pipeline
+from src.ingestion import results
 
 OLD = "2026-08-01"
 
@@ -32,7 +34,7 @@ def test_backlog_budget_does_not_limit_current_collection(sync_env):
     fake.listings[YESTERDAY] = ["new-a", "new-b"]
     queue("old-a")
     queue("old-b")
-    result = database.sync_database(1, return_report=True, backlog_max_races=1)
+    result = results.sync_database(1, backlog_max_races=1)
     assert fake.fetched == {"new-a": 1, "new-b": 1, "old-a": 1}
     assert result["pending_races"] == 0 and result["older_pending_races"] == 1
     assert result["backlog"]["attempted"] == result["backlog"]["completed"] == 1
@@ -49,7 +51,7 @@ def test_listing_proves_many_terminal_jobs_without_race_page_requests(sync_env):
         fake.result_listing_evidence = {OLD: {"a": evidence(), "b": evidence("ABANDONED"), "c": evidence("ARABIAN")}}
         return links
     fake.get_results_urls = listing
-    report = database.sync_database(0, return_report=True, backlog_max_races=3)
+    report = results.sync_database(0, backlog_max_races=3)
     assert fake.fetched == {} and fake.listed == [OLD]
     assert report["listing_resolved_races"] == 3 and report["requests"] == 0
     assert report["backlog"]["completed"] == 3 and report["older_pending_races"] == 0
@@ -63,7 +65,7 @@ def test_listing_proves_many_terminal_jobs_without_race_page_requests(sync_env):
 def test_unproved_or_conflicting_listing_falls_back_to_the_full_page(sync_env, changes):
     queue("a")
     sync_env.scraper.result_listing_evidence = {OLD: {"a": evidence(**changes)}}
-    report = database.sync_database(0, return_report=True, backlog_max_races=1)
+    report = results.sync_database(0, backlog_max_races=1)
     assert sync_env.scraper.fetched == {"a": 1}
     assert report["listing_resolved_races"] == 0 and report["new_rows"] == 2
 
@@ -72,7 +74,7 @@ def test_listing_cannot_close_a_job_with_accepted_results(sync_env):
     queue("a")
     database.insert_results(pd.DataFrame(runners("a", OLD)))
     sync_env.scraper.result_listing_evidence = {OLD: {"a": evidence("ABANDONED")}}
-    report = database.sync_database(0, return_report=True, backlog_max_races=1)
+    report = results.sync_database(0, backlog_max_races=1)
     assert sync_env.scraper.fetched == {"a": 1} and report["listing_resolved_races"] == 0
     assert len(database.load_from_database()) == 2
 
@@ -85,7 +87,7 @@ def test_recent_dormant_listing_does_not_close_the_job(sync_env):
     fake.listings[YESTERDAY] = ["a"]
     fake.result_listing_evidence = {YESTERDAY: {"a": evidence(source_date=YESTERDAY)}}
     fake.responses["a"] = data_scraper.RaceNotRun("DORMANT")
-    report = database.sync_database(1, return_report=True)
+    report = results.sync_database(1)
     assert report["pending_races"] == 1 and fake.fetched == {"a": 1}
 
 
@@ -94,8 +96,8 @@ def test_failed_backlog_job_yields_to_other_due_jobs(sync_env):
     queue("b")
     fake = sync_env.scraper
     fake.responses["a"] = RuntimeError("temporary failure")
-    first = database.sync_database(0, return_report=True, backlog_max_races=1)
-    second = database.sync_database(0, return_report=True, backlog_max_races=1)
+    first = results.sync_database(0, backlog_max_races=1)
+    second = results.sync_database(0, backlog_max_races=1)
     assert first["backlog"]["unresolved_attempts"] == 1
     assert fake.fetched == {"a": 1, "b": 1}
     assert second["backlog"]["completed"] == 1
@@ -106,7 +108,7 @@ def test_backlog_retains_review_cases_and_recent_attempts(sync_env):
     queue("identity", error="Missing or duplicate runner names")
     queue("recent", attempted=TODAY.isoformat())
     queue("due", attempted=(TODAY-timedelta(days=2)).isoformat())
-    report = database.sync_database(0, return_report=True, backlog_max_races=10)
+    report = results.sync_database(0, backlog_max_races=10)
     assert sync_env.scraper.fetched == {"due": 1}
     assert report["backlog"]["remaining_races"] == 3
     assert report["backlog"]["review_required_races"] == 2
@@ -137,7 +139,7 @@ def test_provider_refusal_stops_historical_fallback_page_requests(sync_env):
     class ProviderError(RuntimeError):
         response = SimpleNamespace(status_code=403)
     sync_env.scraper.listings[OLD] = ProviderError("provider refused")
-    report = database.sync_database(0, return_report=True, backlog_max_races=1)
+    report = results.sync_database(0, backlog_max_races=1)
     assert report["backlog"]["aborted_blocked"]
     assert sync_env.scraper.fetched == {} and report["older_pending_races"] == 1
 

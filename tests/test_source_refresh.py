@@ -10,18 +10,21 @@ import pandas as pd
 import pytest
 
 from test_database_sync import sync_env, runners, YESTERDAY  # noqa: F401
-from src import database, source_pipeline as sources, data_scraper, pedigree_backfill as pedigree
-from src.source_storage import RawPayloadStore, atomic_json, writer_lock
-from src.source_auxiliary import merge_public_bsp
+from src import database
+from src.ingestion import pipeline as sources, sporting_life as data_scraper
+from src.ingestion import pedigree
+from src.ingestion import results
+from src.ingestion.storage import RawPayloadStore, atomic_json, writer_lock
+from src.ingestion.auxiliary import merge_public_bsp
 
 
 def test_unchanged_refresh_neither_loads_history_nor_rewrites_snapshot(sync_env, monkeypatch):
     sync_env.scraper.listings[YESTERDAY] = ["a"]
-    first = database.sync_database(1, return_report=True)
+    first = results.sync_database(1)
     before = (sync_env.root/"race_results.csv").stat().st_mtime_ns
     monkeypatch.setattr(database, "load_from_database", lambda: pytest.fail("Full history loaded on no-op"))
     monkeypatch.setattr(database, "_export_results_snapshot", lambda *a: pytest.fail("Unchanged history exported"))
-    second = database.sync_database(1, return_report=True)
+    second = results.sync_database(1)
     assert second["snapshot"]["state"] == "cached"
     assert second["snapshot"]["revision"] == first["snapshot"]["revision"]
     assert (sync_env.root/"race_results.csv").stat().st_mtime_ns == before
@@ -29,10 +32,10 @@ def test_unchanged_refresh_neither_loads_history_nor_rewrites_snapshot(sync_env,
 
 def test_direct_repair_invalidates_snapshot_even_without_new_rows(sync_env):
     sync_env.scraper.listings[YESTERDAY] = ["a"]
-    first = database.sync_database(1, return_report=True)
+    first = results.sync_database(1)
     with database._get_conn() as con:
         con.execute("UPDATE results SET odds=12 WHERE race_id='a'")
-    second = database.sync_database(0, return_report=True)
+    second = results.sync_database(0)
     assert second["snapshot"]["state"] == "published"
     assert second["snapshot"]["revision"] > first["snapshot"]["revision"]
     assert pd.read_csv(sync_env.root/"race_results.csv").odds.eq(12).all()
@@ -41,13 +44,13 @@ def test_direct_repair_invalidates_snapshot_even_without_new_rows(sync_env):
 def test_completed_race_is_revision_checked_when_due(sync_env):
     fake = sync_env.scraper
     fake.listings[YESTERDAY] = ["a"]
-    database.sync_database(1, return_report=True)
+    results.sync_database(1)
     revised = runners("a")
     revised[0].update(finish_position=2, won=0)
     revised[1].update(finish_position=1, won=1)
     fake.responses["a"] = revised
     sync_env.clock[0] += timedelta(hours=7)
-    result = database.sync_database(1, return_report=True)
+    result = results.sync_database(1)
     assert fake.fetched["a"] == 2
     assert result["changed_races"] == 1 and result["changed_from"] == YESTERDAY
     assert database.load_from_database().finish_position.tolist() == [2, 1]
@@ -56,7 +59,7 @@ def test_completed_race_is_revision_checked_when_due(sync_env):
 def test_revision_cannot_overwrite_a_reviewed_result(sync_env):
     fake = sync_env.scraper
     fake.listings[YESTERDAY] = ["a"]
-    database.sync_database(1, return_report=True)
+    results.sync_database(1)
     with database._get_conn() as con:
         con.execute("CREATE TABLE verified_result_rows(race_id TEXT)")
         con.execute("INSERT INTO verified_result_rows VALUES ('a')")
@@ -64,7 +67,7 @@ def test_revision_cannot_overwrite_a_reviewed_result(sync_env):
     revised[0].update(finish_position=2, won=0)
     revised[1].update(finish_position=1, won=1)
     fake.responses["a"] = revised
-    result = database.sync_database(1, return_report=True, recheck=True)
+    result = results.sync_database(1, recheck=True)
     assert result["state"] == "partial" and result["pending_races"] == 1
     assert database.load_from_database().finish_position.tolist() == [1, 99]
 
@@ -73,7 +76,7 @@ def test_database_refresh_lock_prevents_duplicate_publishers(sync_env):
     with writer_lock(Path(database.DB_PATH).with_suffix(".source.lock")) as acquired:
         assert acquired
         with pytest.raises(RuntimeError, match="already running"):
-            database.sync_database(0, return_report=True)
+            results.sync_database(0)
 
 
 def test_source_race_times_are_retained_outside_model_columns(sync_env):
@@ -103,8 +106,6 @@ def test_raw_source_revisions_can_be_replayed_without_http(tmp_path, monkeypatch
 
 def test_pedigree_failures_are_retryable_and_do_not_become_success_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_PATH", str(tmp_path/"races.db"))
-    monkeypatch.setattr(pedigree, "DB_PATH", str(tmp_path/"races.db"))
-    monkeypatch.setattr(pedigree, "_get_conn", database._get_conn)
     database.insert_results(pd.DataFrame([{**r, "horse_id": str(i+1)} for i, r in enumerate(runners("a"))]))
     monkeypatch.setattr(pedigree, "fetch_horse_pedigree", lambda *a: None)
     assert pedigree.backfill_pedigree() == 0
@@ -123,14 +124,6 @@ def test_non_real_sources_are_rejected_before_writing(tmp_path, monkeypatch, sou
         sources.refresh_sources(sources=(source,))
     assert canonical.read_text(encoding="utf-8") == "real history"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["race_results.csv"]
-
-
-def test_read_only_source_sample_keeps_its_explicit_race_budget(sync_env):
-    day = (data_scraper.datetime.now()-timedelta(days=1)).strftime("%Y-%m-%d")
-    sync_env.scraper.listings[day] = ["a", "b", "c"]
-    sample = data_scraper.scrape_results(days_back=1, save=False, max_races_per_day=1)
-    assert sample.race_id.nunique() == 1 and sync_env.scraper.fetched == {"a": 1}
-    assert not (sync_env.root/"race_results.csv").exists()
 
 
 def _fake_rtv(tmp_path, monkeypatch):
@@ -203,7 +196,7 @@ def test_partial_daily_manifest_preserves_complete_base_rows(tmp_path, monkeypat
 
 
 def test_old_range_parts_are_readable_and_overlap_does_not_duplicate_races(tmp_path):
-    from src.rtv_feature_collection import observation_tables
+    from src.ingestion.rtv_observations import observation_tables
     path = tmp_path/"tables/races"
     path.mkdir(parents=True)
     frame = pd.DataFrame({"race_id": [1], "race_date": ["2026-10-29"]})
@@ -213,7 +206,8 @@ def test_old_range_parts_are_readable_and_overlap_does_not_duplicate_races(tmp_p
 
 
 def test_readers_pin_one_rtv_generation(tmp_path, monkeypatch):
-    from src import rtv_storage, rtv_features
+    from src import rtv_features
+    from src.ingestion import rtv_storage
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
     pointer = tmp_path/"rtv_cache/pipeline/generation.json"
     atomic_json(pointer, {"files": {"runs": "first/runs.parquet", "cards": "first/cards.parquet"}})
@@ -246,7 +240,7 @@ def test_conflicting_public_bsp_duplicates_do_not_publish():
 
 def test_failed_source_is_returned_and_saved_as_partial(tmp_path, monkeypatch):
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(database, "sync_database", lambda **kw: {"state": "ok"})
+    monkeypatch.setattr(results, "sync_database", lambda **kw: {"state": "ok"})
     def unavailable(**kw):
         raise RuntimeError("provider unavailable")
     monkeypatch.setattr(sources, "refresh_rtv_history", unavailable)
@@ -256,7 +250,7 @@ def test_failed_source_is_returned_and_saved_as_partial(tmp_path, monkeypatch):
 
 
 def test_fixed_par_is_fitted_once_per_input_generation(tmp_path, monkeypatch):
-    from src import rtv_feature_collection as collection
+    from src.ingestion import rtv_observations as collection
     races = pd.DataFrame({"race_id": [1], "win_time_s": [90.]})
     monkeypatch.setattr(collection, "observation_tables", lambda *a, **kw: {"races": races})
     fitted = []
@@ -274,12 +268,39 @@ def test_ordinary_currency_processing_does_not_fetch_references(tmp_path, monkey
     path = tmp_path/"rates.csv"
     pd.DataFrame({"observation_date": ["2020-01-01"], "gbp_per_eur": [.8]}).to_csv(path, index=False)
     monkeypatch.setattr(currency, "_paths", lambda: (tmp_path/"units.json", path))
-    monkeypatch.setattr(currency, "urlopen", lambda *a, **kw: pytest.fail("Network in ordinary processing"))
-    assert currency._rates_for(pd.Series(pd.to_datetime(["2026-11-01"]))).gbp_per_eur.tolist() == [.8]
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: pytest.fail("Network in ordinary processing"))
+    assert currency._load_rates().gbp_per_eur.tolist() == [.8]
+    assert not hasattr(currency, "urlopen")
+
+
+def test_exchange_rate_refresh_fetches_once_a_day_and_publishes(tmp_path, monkeypatch):
+    import io
+    from src.ingestion import fx
+    path = tmp_path/"rates.csv"
+    pd.DataFrame({"observation_date": ["2020-01-01"], "gbp_per_eur": [.8]}).to_csv(path, index=False)
+    latest = (pd.Timestamp.now().normalize()-pd.Timedelta(days=1)).date().isoformat()
+    document = (f'<e xmlns="x"><Cube><Cube time="2020-01-01"><Cube currency="GBP" rate="0.8"/></Cube>'
+                f'<Cube time="{latest}"><Cube currency="USD" rate="1.1"/><Cube currency="GBP" rate="0.9"/></Cube>'
+                f'</Cube></e>').encode()
+    requests = []
+    class Reply(io.BytesIO):
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+    monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(fx, "_paths", lambda: (tmp_path/"units.json", path))
+    monkeypatch.setattr(fx, "urlopen", lambda url, timeout: requests.append(url) or Reply(document))
+    report = fx.refresh_prize_references()
+    assert report == {"state": "ok", "latest_observation": latest, "checked_today": True}
+    assert pd.read_csv(path).gbp_per_eur.tolist() == [.8, .9]
+    assert fx.refresh_prize_references()["state"] == "ok"
+    assert len(requests) == 1
 
 
 def test_partial_materialisation_never_overwrites_accepted_files(tmp_path, monkeypatch):
-    from src import rtv_feature_collection as collection, rtv_features, rtv_text
+    from src import rtv_features, rtv_text
+    from src.ingestion import rtv_observations as collection
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
     base = tmp_path/"rtv_cache"
     base.mkdir()

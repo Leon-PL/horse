@@ -1,6 +1,6 @@
 import pytest
 
-from src.data_scraper import SportingLifeScraper
+from src.ingestion.sporting_life import SportingLifeScraper
 
 
 @pytest.mark.parametrize("method", ["scrape_race_result", "scrape_racecard"])

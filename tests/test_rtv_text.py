@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src import rtv_feature_collection as collection
+from src.ingestion import rtv_observations as collection
 from src import rtv_text
 
 

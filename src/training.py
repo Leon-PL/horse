@@ -177,14 +177,14 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     # 1) Data — optional catch-up scrape, then the full processed history.
     if cfg.refresh_data:
         _tick(f"Scraping last {cfg.catchup_days}d into the DB", 0.02)
-        from src.source_pipeline import refresh_sources, refresh_summary
+        from src.ingestion.pipeline import refresh_sources, refresh_summary
         refresh_report = refresh_sources(days_back=cfg.catchup_days)
         _tick(refresh_summary(refresh_report), 0.07)
         if refresh_report["state"] != "ok":
             raise RuntimeError(refresh_summary(refresh_report) +
                 ". Complete the source catch-up before training, or explicitly choose --no-refresh to use local history.")
     _tick("Processing history", 0.08)
-    processed = process_data(save=False)
+    processed = process_data()
 
     # 2) Features — the store seam (build once / append new dates, never rebuild
     #    unless code/data signatures changed).

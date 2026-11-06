@@ -6,7 +6,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from src import source_pipeline as sources
+from src.ingestion import pipeline as sources
+from src.ingestion import results
 
 
 def frames():
@@ -49,35 +50,27 @@ def test_unsafe_identity_matches_are_rejected(change):
     assert sources.match_runners(races, runners, canonical).empty
 
 
-def test_unified_sync_preserves_canonical_frame_and_refreshes_rtv_without_weather(isolated, monkeypatch):
-    from src import database
-    expected = pd.DataFrame({"horse_id": [123], "odds": [4.5], "finish_position": [1]})
+def test_unified_refresh_runs_results_then_rtv_without_weather(isolated, monkeypatch):
     calls = []
-    monkeypatch.setattr(database, "sync_database", lambda **kw: calls.append(kw) or {"state": "ok"})
-    monkeypatch.setattr(database, "load_from_database", lambda: expected)
+    monkeypatch.setattr(results, "sync_database", lambda **kw: calls.append(kw) or {"state": "ok"})
     monkeypatch.setattr(sources, "refresh_rtv_history", lambda **kw: calls.append(kw) or {"state": "ok"})
-    actual = sources.sync_database(days_back=3, enrich=False, sources=("sl", "rtv"))
-    assert actual is expected
-    assert calls[0]["days_back"] == 3 and calls[0]["enrich"] is False and calls[0]["return_report"] is True
+    report = sources.refresh_sources(3, enrich=False, sources=("sl", "rtv"))
+    assert calls[0]["days_back"] == 3 and calls[0]["enrich"] is False
     assert calls[1] == {"days_back": 10}
-    assert actual.attrs["source_refresh"]["state"] == "ok"
+    assert report["state"] == "ok"
 
 
 def test_rtv_outage_does_not_prevent_canonical_sync(isolated, monkeypatch, caplog):
-    from src import database
-    expected = pd.DataFrame({"race_id": [1]})
-    monkeypatch.setattr(database, "sync_database", lambda **kw: {"state": "ok"})
-    monkeypatch.setattr(database, "load_from_database", lambda: expected)
+    monkeypatch.setattr(results, "sync_database", lambda **kw: {"state": "ok"})
     def broken(**kwargs):
         raise sources.rtv.RTVTransientError("rate limited")
     monkeypatch.setattr(sources, "refresh_rtv_history", broken)
-    assert sources.sync_database(1, sources=("sl", "rtv")) is expected
-    assert expected.attrs["source_refresh"]["state"] == "partial"
+    assert sources.refresh_sources(1, sources=("sl", "rtv"))["state"] == "partial"
     assert "rate limited" in caplog.text
 
 
 def test_app_card_capture_keeps_model_inputs_exact(isolated, monkeypatch):
-    from src import data_scraper
+    from src.ingestion import sporting_life as data_scraper
     expected = pd.DataFrame({"race_id": [1], "horse_id": [2]})
     calls = []
     monkeypatch.setattr(data_scraper, "get_scraped_racecards", lambda **kw: expected)
@@ -94,7 +87,7 @@ def test_collection_failure_preserves_successful_manifest_and_is_visible(isolate
     root = sources.pipeline_dir()
     previous = {"days": {"2026-10-28": {"directory": "old", "complete": True,
         "checked_at": "2026-10-29T01:00:00+00:00"}}}
-    sources._publish(root / "history.json", previous)
+    sources.atomic_json(root / "history.json", previous)
     def fail(*args, **kwargs):
         raise sources.rtv.RTVTransientError("503")
     monkeypatch.setattr(sources.rtv, "scrape_days", fail)
@@ -112,7 +105,7 @@ def test_daily_overlay_replaces_all_old_race_rows_without_duplicates(isolated):
     target = root / "history/2026-10-29/new"
     target.mkdir(parents=True)
     pd.DataFrame({"race_id": [2, 3], "race_date": ["2026-10-29"]*2, "value": [99, 30]}).to_parquet(target / "races.parquet")
-    sources._publish(root / "history.json", {"days": {"2026-10-29": {"directory": "history/2026-10-29/new"}}})
+    sources.atomic_json(root / "history.json", {"days": {"2026-10-29": {"directory": "history/2026-10-29/new"}}})
     result = sources.load_history_table("races", "2026-10-28", "2026-10-29")
     assert result[["race_id", "value"]].values.tolist() == [[1, 10], [2, 99], [3, 30]]
     assert sources.load_history_table("races", "2026-10-28", "2026-10-28").race_id.tolist() == [1]

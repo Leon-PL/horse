@@ -117,7 +117,7 @@ def run():
     store = FeatureStore().meta()
     if signatures["fe_signature"] != fe_signature() or any(signatures[k] != store[k] for k in ("fe_signature", "data_signature")):
         raise ValueError("Teacher-only refresh requires the same corrected input generation")
-    processed = process_data(save=False)
+    processed = process_data()
     if data_signature(processed, cutoff=processed.race_date.max()) != signatures["data_signature"]:
         raise ValueError("New historical information requires a complete matching refit, not place-head reuse")
     audit = json.loads((OUTPUT / "candidate_audit.json").read_text())
@@ -177,7 +177,7 @@ def run():
             checkpoint_directory=OUTPUT / "components", checkpoint_manifest=sha(manifest_path))
         # Reuse the exact normal processed frame already checked above;
         # repeat parsing/backfilling adds time without changing any inputs.
-        training.process_data = lambda save=False: processed
+        training.process_data = lambda: processed
         write(progress, {"stage": "win_refit", "parent_run": parent_id})
         try:
             run_id = training.train_run(cfg)

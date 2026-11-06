@@ -5002,7 +5002,7 @@ def engineer_features(
 if __name__ == "__main__":
     from src.data_processor import process_data
 
-    processed = process_data(save=False)
+    processed = process_data()
     featured = engineer_features(processed)
     print(f"\nFeatured dataset shape: {featured.shape}")
     print(f"\nAll features:\n{list(featured.columns)}")

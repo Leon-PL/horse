@@ -65,7 +65,7 @@ _FE_SOURCE_FILES = (
     "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
     "src/atr_features.py",
     "src/rtv_features.py", "src/rtv_text.py",
-    "src/pedigree_backfill.py", "src/track_config.py", "src/utils.py",
+    "src/track_config.py", "src/utils.py",
     # Merge/column contract consumed by an FE stage: the sectional joins feed
     # add_atr_features.
     "src/attheraces_scraper.py",
@@ -80,8 +80,6 @@ _FE_SOURCE_FILES = (
 FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "database": "raw-data access only; values covered by data_signature",
     "identity_schema": "source-table and repair-receipt migrations only; accepted values covered by data_signature",
-    "data_scraper": "raw-data access only; values covered by data_signature",
-    "rtv_scraper": "compatibility import for the raw RTV collector; published values covered by rtv_cache_signature",
     "ingestion": "collection namespace only; no feature calculations or import-time collection",
     "ingestion.pipeline": "source orchestration only; published observations covered by data and RTV signatures",
     "ingestion.auxiliary": "collects raw ATR/BSP only; accepted values covered by source-content signatures",
@@ -92,13 +90,10 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "ingestion.betfair_history": "collects historical market files; accepted prices are raw observations fingerprinted by training/evaluation",
     "ingestion.betfair_credentials": "encrypted historical-data login setup only; cannot change feature values",
     "source_storage": "source locking, raw retention and publication only; values covered by source/data signatures",
-    "source_pipeline": "source orchestration only; published observations covered by data and RTV signatures",
-    "rtv_storage": "resolves published source generations only; their values are covered by rtv_cache_signature",
-    "source_auxiliary": "collects raw ATR/BSP sources only; their values are covered by source-content signatures",
-    "rtv_feature_collection": "source-stage materialisation only; published run/card/text values are covered by rtv_cache_signature",
+    "ingestion.rtv_observations": "source-stage materialisation only; published run/card/text values are covered by rtv_cache_signature",
     "wf_eval": "evaluation and source text-fit scheduling; published comment scores are covered by rtv_cache_signature",
     "clv": "downstream evaluation metrics only; cannot change feature values",
-    "weather": "sync writes raw weather into the DB (covered by data_signature); "
+    "ingestion.weather": "sync writes raw weather into the DB (covered by data_signature); "
                "no FE stage calls it since the weather stage was removed",
     "feature_inputs": "fingerprints the ATR cache for staleness checks; reads, "
                       "never changes, a feature value",
@@ -358,7 +353,7 @@ def get_featured_dataset(
     """
     store = FeatureStore()
     if processed is None:
-        processed = process_data(save=False)
+        processed = process_data()
 
     # The decision, row/state commit, signature stamp and final load must all
     # refer to one generation. Locking individual store methods leaves gaps

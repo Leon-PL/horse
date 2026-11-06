@@ -11,7 +11,7 @@ snapshot on 2026-10-30 and does not change after the day (ledger 052). Live
 cards read the pre-race snapshot and are scored by their quarter's model, the
 same model that scored that quarter's history.
 
-Fitting and collection I/O live in ``rtv_feature_collection``; this module
+Fitting and collection I/O live in ``src.ingestion.rtv_observations``; this module
 holds the model and the feature-engineering join.
 """
 from __future__ import annotations
@@ -41,12 +41,12 @@ FEATURES = SNAPSHOT_FEATURES + ("rtv_text_prob",)
 
 
 def text_path():
-    from src.rtv_storage import materialised_path
+    from src.ingestion.rtv_storage import materialised_path
     return Path(config.RTV_FEATURE_TEXT) if hasattr(config, "RTV_FEATURE_TEXT") else materialised_path("text", Path(config.DATA_DIR)/"rtv_cache/feature_text.parquet")
 
 
 def scores_path():
-    from src.rtv_storage import materialised_path
+    from src.ingestion.rtv_storage import materialised_path
     return Path(config.RTV_FEATURE_TEXT_SCORES) if hasattr(config, "RTV_FEATURE_TEXT_SCORES") else materialised_path("scores", Path(config.DATA_DIR)/"rtv_cache/feature_text_scores.parquet")
 
 

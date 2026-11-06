@@ -233,7 +233,7 @@ def test_feature_store_build_append_and_live_keep_namesakes_separate(tmp_path, m
     raw["horse_name"] = "Sierra Nevada"
     raw["finish_position"] = [1, 2]*8
     raw["won"] = [1, 0]*8
-    proc = process_data(raw, save=False)
+    proc = process_data(raw)
     dates = sorted(proc.race_date.unique())
     store = FeatureStore(str(tmp_path/"store"))
     built = store.build(proc[proc.race_date < dates[-2]])

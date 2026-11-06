@@ -11,9 +11,9 @@ and [CONTINUATION](CONTINUATION.md) for the current handoff.
 ## Current state
 
 The synthetic race generator and sample collection interface have been removed.
-Real-source collection lives in `src/ingestion/`; existing supported collection
-commands still work through compatibility aliases.
-[Cleanup details](docs/operations/PRE_FEATURE_CLEANUP_2026-11-05.md).
+Real-source collection lives in `src/ingestion/`, with one command:
+`python -m src.ingestion`. Storage is in `src/database.py` and cleaning is in
+`src/data_processor.py`. [Consolidation report](docs/operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md).
 
 Full Betfair historical market downloads can now run during source refreshes
 after one-time account setup in **Data → Historical exchange data**. This keeps

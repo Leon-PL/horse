@@ -290,7 +290,7 @@ def _build(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processe
         os.remove(old)
 
     logger.info("Loading full processed history…")
-    processed = process_data(save=False) if processed is None else processed.copy()
+    processed = process_data() if processed is None else processed.copy()
     processed["race_date"] = pd.to_datetime(processed["race_date"], errors="coerce")
     processed = processed.sort_values("race_date", kind="stable").reset_index(drop=True)
     reused_ratings = ratings_cache.prepare(processed) if ratings_cache is not None else None

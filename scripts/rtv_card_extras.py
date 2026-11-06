@@ -45,7 +45,7 @@ from scripts.select_features import CONFIRM_QUARTERS, SELECTED, Cache, read_name
 from scripts.specialist_models import OUT as SPECIALIST_DIR, _interval, _race_frame, blended  # noqa: E402
 from scripts.text_model import (COMMENT_FIELDS, OUT as TEXT_DIR, TEXT_FEATURES, ExtraCache, fit_arm,  # noqa: E402
                                 fit_scores)
-from src.source_pipeline import canonical_rows, load_history_table, match_runners  # noqa: E402
+from src.ingestion.pipeline import canonical_rows, load_history_table, match_runners  # noqa: E402
 
 OUT = ROOT / "data/research/rtv_extras_053"
 BADGES = {

@@ -26,7 +26,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.betfair import bf_track_key  # noqa: E402
-from src.data_scraper import SportingLifeScraper  # noqa: E402
+from src.ingestion.sporting_life import SportingLifeScraper  # noqa: E402
 from src.database import ingest_results  # noqa: E402
 from src.utils import normalise_off_time_key  # noqa: E402
 

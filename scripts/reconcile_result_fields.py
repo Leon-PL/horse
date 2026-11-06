@@ -21,6 +21,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from src.betfair import bf_horse_key, bf_track_key
+from src.database import publish_after_repair
 from src.utils import normalise_off_time_key
 
 RESULT_COLUMNS = ["race_id", "race_date", "track", "off_time", "horse_name",
@@ -172,7 +173,8 @@ def main():
             apply_plan(conn, plan, folder / "original_races.json")
             plan["applied"] = True
             (folder / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
-            print("Repair committed. Export full results, then rebuild features before training.", flush=True)
+            publish_after_repair(args.db)
+            print("Repair committed and published. Rebuild features before training.", flush=True)
 
 
 if __name__ == "__main__":

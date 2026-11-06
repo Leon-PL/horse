@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
 
-from src import attheraces_scraper as atr, source_auxiliary as auxiliary
+from src import attheraces_scraper as atr
+from src.ingestion import auxiliary
 from test_attheraces_scraper import _FakeFetcher, _times_fixture, _tools_fixture, _stride_fixture
 
 
@@ -92,7 +93,7 @@ def test_challenge_is_never_saved_as_a_missing_race_or_index(tmp_path):
 
 
 def test_transport_retains_real_http_status_and_body_before_classification(tmp_path, monkeypatch):
-    from src.source_storage import RawPayloadStore
+    from src.ingestion.storage import RawPayloadStore
     client = atr._Fetcher()
     client.raw_store_path = tmp_path/'raw.sqlite'
     monkeypatch.setattr(client, '_throttle', lambda: None)

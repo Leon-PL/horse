@@ -11,7 +11,7 @@ import math
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from scripts.extract_betfair_bsp import _clean_horse, _iso_to_epoch_ms, _track_from_event
+from src.ingestion.betfair_streams import _clean_horse, _iso_to_epoch_ms, _track_from_event
 from src.betfair import bf_horse_key, bf_track_key
 from src.utils import normalise_off_time_key
 

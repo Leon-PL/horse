@@ -31,7 +31,7 @@ def evaluated(tmp_path, monkeypatch):
          "finish_position": (0 if runner == 4 else (1 if runner == day % 4 else 2 + runner)),
          "lengths_behind": float(runner), "track": "Test", "off_time": "14:30"}
         for day in range(150) for runner in range(5)])
-    monkeypatch.setattr(training, "process_data", lambda save: frame.copy())
+    monkeypatch.setattr(training, "process_data", lambda: frame.copy())
     monkeypatch.setattr(training, "get_featured_dataset", lambda processed: frame.copy())
     monkeypatch.setattr(training, "data_signature", lambda df, cutoff: "frozen-data")
     instances = []

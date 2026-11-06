@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from src import rtv_feature_collection as collection
+from src.ingestion import rtv_observations as collection
 
 
 def test_raw_sectional_position_column_is_normalised(tmp_path):

@@ -4,16 +4,17 @@ import importlib
 import pytest
 
 
-@pytest.mark.parametrize("legacy,current", [
-    ("source_pipeline", "pipeline"),
-    ("source_auxiliary", "auxiliary"),
-    ("source_storage", "storage"),
-    ("rtv_storage", "rtv_storage"),
-    ("data_scraper", "sporting_life"),
-    ("rtv_scraper", "racing_tv"),
+def test_storage_compatibility_import_shares_the_implementation():
+    assert importlib.import_module("src.source_storage") is importlib.import_module("src.ingestion.storage")
+
+
+@pytest.mark.parametrize("retired", [
+    "source_pipeline", "source_auxiliary", "rtv_storage", "data_scraper", "rtv_scraper",
+    "pedigree_backfill", "rtv_feature_collection", "weather", "bha_stewards_scraper",
 ])
-def test_compatibility_imports_share_the_implementation(legacy, current):
-    assert importlib.import_module(f"src.{legacy}") is importlib.import_module(f"src.ingestion.{current}")
+def test_retired_collection_names_stay_retired(retired):
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(f"src.{retired}")
 
 
 def test_racecard_cache_uses_configured_data_directory(tmp_path, monkeypatch):
@@ -27,11 +28,11 @@ def test_racecard_cache_uses_configured_data_directory(tmp_path, monkeypatch):
 def test_processing_does_not_create_an_unconsumed_export(tmp_path, monkeypatch):
     import config
     import pandas as pd
-    from src import pedigree_backfill
+    from src import data_processor
     from src.data_processor import process_data
 
     monkeypatch.setattr(config, "PROCESSED_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(pedigree_backfill, "apply_pedigree", lambda frame: frame)
+    monkeypatch.setattr(data_processor, "apply_pedigree", lambda frame: frame)
     raw = pd.DataFrame([{
         "race_id": "42", "horse_id": "11", "horse_name": "A",
         "race_date": "2026-11-04", "track": "York", "off_time": "14:00",

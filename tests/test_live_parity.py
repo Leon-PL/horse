@@ -102,7 +102,7 @@ def parity_frames():
     last_date = raw["race_date"].max()
 
     # ── Training path: everything processed and featured together ──
-    feat_train = engineer_features(process_data(raw.copy(), save=False), save=False)
+    feat_train = engineer_features(process_data(raw.copy()), save=False)
 
     # ── Live path: history vs cards, outcomes stripped like the app ──
     hist_raw = raw[raw["race_date"] < last_date].copy()
@@ -111,8 +111,8 @@ def parity_frames():
     cards["finish_position"] = 0
     cards["lengths_behind"] = np.nan
 
-    proc_hist = process_data(hist_raw, save=False)
-    proc_cards = process_data(cards, save=False)
+    proc_hist = process_data(hist_raw)
+    proc_cards = process_data(cards)
     feat_live = feature_engineer_with_history_core(proc_hist, proc_cards)
 
     train_day = feat_train[feat_train["race_date"] == last_date]
@@ -128,7 +128,7 @@ def test_no_dataframe_fragmentation():
     from pandas.errors import PerformanceWarning
 
     raw = _synthetic_raw(n_days=30)
-    proc = process_data(raw, save=False)
+    proc = process_data(raw)
     with warnings.catch_warnings():
         warnings.simplefilter("error", PerformanceWarning)
         engineer_features(proc, save=False)

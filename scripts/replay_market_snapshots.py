@@ -94,7 +94,7 @@ def run(args):
         "late_withdrawal_races": int(frame.loc[frame.withdrawn_after_decision, "market_id"].nunique()),
         "output": str(output.resolve()), "output_sha256": digest(output),
         "code_sha256": {p: digest(ROOT / p) for p in (
-            "src/market_replay.py", "scripts/replay_market_snapshots.py", "scripts/extract_betfair_bsp.py",
+            "src/market_replay.py", "scripts/replay_market_snapshots.py", "src/ingestion/betfair_streams.py",
             "src/betfair.py", "src/utils.py")},
         "elapsed_seconds": round(time.monotonic() - started, 2),
     }

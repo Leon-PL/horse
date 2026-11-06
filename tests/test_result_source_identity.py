@@ -1,7 +1,7 @@
 """Validate the source's own identity before accepting results or terminal states."""
 import pytest
 
-from src.data_scraper import SportingLifeScraper, RaceNotRun
+from src.ingestion.sporting_life import SportingLifeScraper, RaceNotRun
 
 URL = "https://www.sportinglife.com/racing/results/2026-11-03/kempton/123/example"
 

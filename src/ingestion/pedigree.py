@@ -1,4 +1,4 @@
-"""Pedigree backfill from Sporting Life horse profile pages.
+"""Pedigree collection from Sporting Life horse profile pages.
 
 The results/racecard APIs never include breeding, so the ``sire``/``dam``/
 ``damsire`` columns in ``results`` have always been empty and the pedigree
@@ -9,13 +9,8 @@ date and colour — one request per horse, cached forever in the
 
 Note: the profile JSON's nested ``horse_reference.id`` values for
 sire/dam are buggy (they echo the horse's own id), so pedigree is stored
-and joined by NAME strings.
-
-Usage::
-
-    from src.pedigree_backfill import backfill_pedigree, apply_pedigree
-    backfill_pedigree(limit=500)        # fetch 500 unknown horses (recent first)
-    df = apply_pedigree(df)             # fill sire/dam/damsire on a results frame
+and joined by NAME strings. ``src.database`` owns the table and
+``src.data_processor.apply_pedigree`` joins it onto a results frame.
 """
 
 import logging
@@ -24,35 +19,13 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
-
-from src.database import DB_PATH, _get_conn
+from src import database
 
 logger = logging.getLogger(__name__)
 
-_CREATE_PEDIGREE = """
-CREATE TABLE IF NOT EXISTS horse_pedigree (
-    horse_id   TEXT PRIMARY KEY,
-    horse_name TEXT,
-    sire       TEXT,
-    dam        TEXT,
-    damsire    TEXT,
-    foaled     TEXT,
-    colour     TEXT,
-    fetched_at TEXT DEFAULT (datetime('now'))
-);
-"""
-
-
-def init_pedigree_table() -> None:
-    with _get_conn() as conn:
-        conn.execute(_CREATE_PEDIGREE)
-        conn.execute("CREATE TABLE IF NOT EXISTS pedigree_fetch_state (horse_id TEXT PRIMARY KEY, "
-                     "status TEXT NOT NULL, attempts INTEGER NOT NULL, next_retry_at TEXT, last_error TEXT)")
-
 
 def _profile_url(horse_id: str) -> str:
-    from src.data_scraper import SPORTING_LIFE_BASE
+    from src.ingestion.sporting_life import SPORTING_LIFE_BASE
 
     return f"{SPORTING_LIFE_BASE}/racing/profiles/horse/{horse_id}"
 
@@ -88,7 +61,7 @@ def fetch_horse_pedigree(scraper, horse_id: str) -> dict | None:
 
 def pending_horse_ids(limit: int | None = None) -> list[tuple[str, str]]:
     """Horses in results with no pedigree row yet, most recent runners first."""
-    init_pedigree_table()
+    database.init_pedigree_table()
     query = """
         SELECT r.horse_id, MAX(r.race_date) AS last_seen
         FROM results r
@@ -103,7 +76,7 @@ def pending_horse_ids(limit: int | None = None) -> list[tuple[str, str]]:
     """
     if limit:
         query += f" LIMIT {int(limit)}"
-    with _get_conn() as conn:
+    with database._get_conn() as conn:
         return [(row[0], row[1]) for row in conn.execute(query, (datetime.now().isoformat(),))]
 
 
@@ -117,10 +90,10 @@ def backfill_pedigree(
     The scraper already enforces ``config.REQUEST_DELAY`` between requests,
     so *delay* is extra sleep on top (default none).
     """
-    from src.data_scraper import SportingLifeScraper
+    from src.ingestion.sporting_life import SportingLifeScraper
 
     scraper = SportingLifeScraper()
-    scraper.raw_store_path = Path(DB_PATH).parent/"sl_cache/raw.sqlite"
+    scraper.raw_store_path = Path(database.DB_PATH).parent/"sl_cache/raw.sqlite"
     todo = pending_horse_ids(limit)
     if not todo:
         logger.info("Pedigree backfill: nothing to do")
@@ -129,7 +102,7 @@ def backfill_pedigree(
     logger.info("Pedigree backfill: %d horses pending (extra delay %.1fs)", len(todo), _delay)
 
     stored = failures = 0
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(database.DB_PATH)
     try:
         for n, (horse_id, _last_seen) in enumerate(todo, 1):
             try:
@@ -170,35 +143,3 @@ def backfill_pedigree(
         conn.close()
     logger.info("Pedigree backfill done: %d stored, %d failures", stored, failures)
     return stored
-
-
-def load_pedigree() -> pd.DataFrame:
-    init_pedigree_table()
-    with _get_conn() as conn:
-        return pd.read_sql_query(
-            "SELECT horse_id, sire, dam, damsire, foaled FROM horse_pedigree", conn
-        )
-
-
-def apply_pedigree(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill sire/dam/damsire (and foaled) on a results frame from the cache."""
-    if "horse_id" not in df.columns:
-        return df
-    ped = load_pedigree()
-    if ped.empty:
-        return df
-    ped["horse_id"] = ped["horse_id"].astype(str)
-    # Plain mapping avoids merge suffix headaches with existing null columns.
-    idx = ped.set_index("horse_id")
-    hid = df["horse_id"].astype(str)
-    for col in ("sire", "dam", "damsire"):
-        mapped = hid.map(idx[col])
-        if col in df.columns:
-            df[col] = df[col].where(df[col].notna() & (df[col] != ""), mapped)
-        else:
-            df[col] = mapped
-    if "foaled" not in df.columns:
-        df["foaled"] = hid.map(idx["foaled"])
-    coverage = df["sire"].notna().mean()
-    logger.info("Pedigree applied: %.1f%% of rows have a sire", 100 * coverage)
-    return df

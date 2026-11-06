@@ -7,8 +7,9 @@ preserved in [the archive](docs/archive/CONTINUATION_before_cleanup_2026-11-05.m
 ## Collection cleanup
 
 Real-source collection now lives in `src/ingestion/`. The entry point is
-`python -m src.ingestion --sync 14`; existing `src.source_pipeline`,
-`src.data_scraper` and `src.rtv_scraper` commands remain compatible aliases.
+`python -m src.ingestion --sync 14`. The older collection names and commands were
+removed on 6 November; see the
+[consolidation report](docs/operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md).
 The synthetic race generator, sample collection API and unused collector shim
 are removed. Processing no longer writes an unused global Parquet by default.
 See the [cleanup report](docs/operations/PRE_FEATURE_CLEANUP_2026-11-05.md).

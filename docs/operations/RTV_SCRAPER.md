@@ -1,9 +1,9 @@
 # Racing TV (RaceiQ) scraper
 
-`src/rtv_scraper.py` collects everything Racing TV publishes about British and
+`src/ingestion/racing_tv.py` collects everything Racing TV publishes about British and
 Irish races, from the JSON API its website calls. It replaces the scraper
 deleted on 2026-10-13 (see the [audit](RTV_SCRAPER_AUDIT_2026-10-29.md)). It
-is connected to normal source refreshes through `src/source_pipeline.py`.
+is connected to normal source refreshes through `src/ingestion/pipeline.py`.
 Training, the Data app, picks and the recorder collect RTV sidecars automatically.
 The installed model has no selected RTV inputs; source collection and predictive
 adoption remain separate. See [the current comparison/integration](../research/RTV_PIPELINE_043.md).
@@ -95,7 +95,7 @@ local. A wrong guess costs one 404. `--no-discover` turns this off.
   - `days`: per-day status, with a scraper version. Days completed by an
     older version are revisited, but only missing payloads are fetched.
 - `data/rtv_cache/tables/{table}/{year}-Q{n}.parquet`: parsed tables, one part per calendar quarter (building a whole year at once peaked at about 9 GB of memory), rebuilt from
-  the raw store without network access; read with `rtv_scraper.load_table(name)`:
+  the raw store without network access; read with `racing_tv.load_table(name)`:
   - `races`, one row per race: every scalar field from results (`res_`),
     racecard (`card_`) and sectional (`sect_`), plus cleaned columns
     (`off_time_utc`, `distance_furlongs`, `win_time_s`, `going`,
@@ -123,31 +123,31 @@ Nested JSON keys join with `__` and top-level keys with `_`, so
 ## Commands
 
 ```bash
-.venv/Scripts/python.exe -m src.rtv_scraper scrape --start 2023-06-10 --end 2026-10-28
+.venv/Scripts/python.exe -m src.ingestion.racing_tv scrape --start 2023-06-10 --end 2026-10-28
 ```
 
 ```bash
-.venv/Scripts/python.exe -m src.rtv_scraper snapshot --date 2026-10-30
+.venv/Scripts/python.exe -m src.ingestion.racing_tv snapshot --date 2026-10-30
 ```
 
 ```bash
-.venv/Scripts/python.exe -m src.rtv_scraper profiles --start 2026-01-01 --end 2026-10-28
+.venv/Scripts/python.exe -m src.ingestion.racing_tv profiles --start 2026-01-01 --end 2026-10-28
 ```
 
 ```bash
-.venv/Scripts/python.exe -m src.rtv_scraper learn-glyphs
+.venv/Scripts/python.exe -m src.ingestion.racing_tv learn-glyphs
 ```
 
 ```bash
-.venv/Scripts/python.exe -m src.rtv_scraper build
+.venv/Scripts/python.exe -m src.ingestion.racing_tv build
 ```
 
 ```bash
-.venv/Scripts/python.exe -m src.rtv_scraper validate --start 2025-08-01 --end 2025-08-31
+.venv/Scripts/python.exe -m src.ingestion.racing_tv validate --start 2025-08-01 --end 2025-08-31
 ```
 
 ```bash
-.venv/Scripts/python.exe -m src.rtv_scraper status
+.venv/Scripts/python.exe -m src.ingestion.racing_tv status
 ```
 
 `scrape` defaults to the RaceiQ era, newest first, GB and IE (`--countries

@@ -5,23 +5,14 @@ current-day afternoon publications cannot enter that morning's features.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
 import json
-import logging
-import os
 from pathlib import Path
-import tempfile
-from urllib.request import urlopen
-import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
 import config
-
-logger = logging.getLogger(__name__)
-ECB_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.xml"
 
 FEATURES = ("horse_max_prize_contested", "horse_avg_prize_contested", "prize_money_change_vs_avg")
 
@@ -42,69 +33,10 @@ def _read_rates(path, modified, size):
     return pd.read_csv(path, parse_dates=["observation_date"], float_precision="round_trip")
 
 
-def _atomic_text(path, text):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".reference-", suffix=".tmp")
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
-            stream.write(text); stream.flush(); os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
-
-
-def _rates_for(dates, *, refresh=False):
+def _load_rates():
     _, path = _paths()
     stat = path.stat()
-    rates = _read_rates(str(path), stat.st_mtime_ns, stat.st_size)
-    # Historic processing never needs a live request. For newer cards/results,
-    # refresh the public reference once per day; weekends may add no observation.
-    needed = min(pd.to_datetime(dates).max().normalize()-pd.Timedelta(days=1),
-                 pd.Timestamp.now().normalize()-pd.Timedelta(days=1))
-    receipt_path = Path(config.DATA_DIR) / "reference/ecb_checked.json"
-    today = pd.Timestamp.now().date().isoformat()
-    try:
-        checked = json.loads(receipt_path.read_text(encoding="utf-8")).get("date") == today
-    except (OSError, ValueError):
-        checked = False
-    if refresh and rates.observation_date.max() < needed and not checked:
-        try:
-            with urlopen(ECB_URL, timeout=20) as response:
-                document = ET.fromstring(response.read())
-            rows = []
-            for node in document.iter():
-                if "time" in node.attrib:
-                    for quote in node:
-                        if quote.attrib.get("currency") == "GBP":
-                            rows.append((node.attrib["time"], float(quote.attrib["rate"])))
-            fresh = pd.DataFrame(rows, columns=["observation_date", "gbp_per_eur"])
-            fresh["observation_date"] = pd.to_datetime(fresh.observation_date)
-            fresh = fresh.sort_values("observation_date").reset_index(drop=True)
-            if fresh.empty or fresh.observation_date.duplicated().any() or not np.isfinite(fresh.gbp_per_eur).all() or fresh.gbp_per_eur.le(0).any():
-                raise ValueError("Invalid ECB reference response")
-            if fresh.observation_date.max() < rates.observation_date.max():
-                raise ValueError("ECB response would truncate existing reference history")
-            _atomic_text(path, fresh.to_csv(index=False, date_format="%Y-%m-%d", float_format="%.17g"))
-            _atomic_text(receipt_path, json.dumps({"date": today, "source_url": ECB_URL,
-                "checked_at_utc": datetime.now(timezone.utc).isoformat()}))
-            stat = path.stat(); rates = _read_rates(str(path), stat.st_mtime_ns, stat.st_size)
-        except Exception as error:
-            logger.warning("ECB update unavailable; retaining dated known reference rates: %s", error)
-    return rates
-
-
-def refresh_prize_references():
-    """Source-stage ECB update; ordinary processing only reads dated rates."""
-    dates = pd.Series([pd.Timestamp.now().normalize()])
-    rates = _rates_for(dates, refresh=True)
-    receipt = Path(config.DATA_DIR)/"reference/ecb_checked.json"
-    try:
-        checked = json.loads(receipt.read_text(encoding="utf-8")).get("date") == pd.Timestamp.now().date().isoformat()
-    except (OSError, ValueError):
-        checked = False
-    current = rates.observation_date.max() >= dates.max()-pd.Timedelta(days=1)
-    return {"state": "ok" if checked or current else "partial", "latest_observation": str(rates.observation_date.max().date()),
-            "checked_today": checked}
+    return _read_rates(str(path), stat.st_mtime_ns, stat.st_size)
 
 
 def reference_signature():
@@ -124,7 +56,7 @@ def prepare_prize_references(frame):
     euro = frame.track.astype("string").str.strip().str.casefold().map(units).eq("EUR")
     dates = pd.to_datetime(frame.loc[euro, "race_date"], errors="coerce").dropna()
     if len(dates):
-        _rates_for(dates)
+        _load_rates()
 
 
 def normalise_prize_money(frame):
@@ -146,7 +78,7 @@ def normalise_prize_money(frame):
     fx_dates = pd.Series(pd.NaT, index=result.index, dtype="datetime64[ns]")
     euro = currency.eq("EUR")
     if euro.any():
-        rates = _rates_for(result.loc[euro, "race_date"])
+        rates = _load_rates()
         rows = result.loc[euro].assign(track=tracks.loc[euro], prize_money=amount.loc[euro])
         result.loc[euro, "prize_money"] = convert_prizes(rows, units, rates)
         positions = np.searchsorted(rates.observation_date.to_numpy(), pd.to_datetime(rows.race_date).dt.normalize().to_numpy(), side="left")-1

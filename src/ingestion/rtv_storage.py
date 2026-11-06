@@ -56,7 +56,7 @@ def partition_paths(directory, start=None, end=None):
             lo = "0000" if lo == "first" else lo
             hi = "9999" if hi == "last" else hi
         else:
-            raise ValueError(f"Unsupported RTV partition {path.name}; rebuild with rtv_scraper build")
+            raise ValueError(f"Unsupported RTV partition {path.name}; rebuild with python -m src.ingestion.racing_tv build")
         if (not start or hi >= start) and (not end or lo <= end):
             paths.append(path)
     return sorted(paths, key=lambda p: (p.stat().st_mtime_ns, p.name), reverse=True)

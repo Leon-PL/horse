@@ -34,9 +34,9 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
-from src.data_scraper import SportingLifeScraper, _slugify  # noqa: E402
+from src.ingestion.sporting_life import SportingLifeScraper, _slugify  # noqa: E402
 from src.database import (  # noqa: E402
-    _export_results_snapshot, _get_conn, _replace_race_results, _validate_race_results, load_from_database,
+    DB_PATH, _get_conn, _replace_race_results, _validate_race_results, publish_after_repair,
 )
 
 NOT_STARTED = {"NONRUNNER", "WITHDRAWN"}
@@ -91,7 +91,7 @@ def apply(jobs: list[dict]) -> str:
             else:
                 conn.executemany("DELETE FROM results WHERE race_id = ? AND horse_id = ?",
                                  [(race_id, horse_id) for horse_id in sorted(job["ids"])])
-    _export_results_snapshot(load_from_database(), os.path.join(config.RAW_DATA_DIR, "race_results.csv"))
+    publish_after_repair(DB_PATH)
     return backup
 
 

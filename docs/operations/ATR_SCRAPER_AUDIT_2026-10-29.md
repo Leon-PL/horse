@@ -27,7 +27,7 @@ likely impact:
   score and peak stride length/frequency match the live page exactly.
 - Official position agrees with the results DB for 99.76% of runners (547
   disagreements, e.g. Ayr 2026-06-19 20:00 where the DB has a different 3rd;
-  worth a look by `audit_result_amendments.py`).
+  worth a look by `audit_result_amendments.py`, since removed; it is in git history).
 - Implied speed from final time vs distance is plausible for all but 54 rows
   (11 races with truncated or "Not Available" section markers).
 

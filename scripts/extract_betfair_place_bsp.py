@@ -19,100 +19,11 @@ Usage (mirror the win extractor):
         --tar "data/betfair/2026.tar" --out data/processed/betfair_place_bsp.parquet
 """
 from __future__ import annotations
-import argparse, bz2, json, os, sys, tarfile, time
+import argparse, bz2, os, sys, tarfile, time
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.betfair import bf_horse_key  # noqa: E402
-from src.utils import normalise_off_time_key, normalise_track_key  # noqa: E402
-# Reuse the win extractor's parsing helpers so behaviour stays identical.
-from scripts.extract_betfair_bsp import (  # noqa: E402
-    KEEP_COUNTRIES, MARKET_FILE_RE, _track_from_event, _clean_horse, _iso_to_epoch_ms,
-)
-
-
-def parse_place_market(stream: bytes) -> list[dict] | None:
-    """Parse one market's mcm stream -> place rows, or None if not a PLACE market.
-
-    Captures the place BSP (settlement price) AND the pre-off last-traded place
-    price (``place_ltp_300s`` = 5 min before the off, ``place_ltp_preoff`` = at
-    the off). The pre-off prices are what you'd actually *select* on live, so the
-    BSP-peek bias is removed by selecting on them and settling at BSP.
-    """
-    parsed = []
-    for raw in stream.split(b"\n"):
-        if not raw.strip():
-            continue
-        try:
-            parsed.append(json.loads(raw))
-        except json.JSONDecodeError:
-            continue
-
-    final_def = None
-    off_ms = None
-    for d in parsed:
-        for mc in d.get("mc", []):
-            md = mc.get("marketDefinition")
-            if md:
-                final_def = md
-                if off_ms is None:
-                    off_ms = _iso_to_epoch_ms(md.get("marketTime", ""))
-    if not final_def:
-        return None
-    if final_def.get("marketType") != "PLACE":
-        return None
-    if final_def.get("countryCode") not in KEEP_COUNTRIES:
-        return None
-    if final_def.get("eventTypeId") != "7":
-        return None
-
-    # Pre-off last-traded-price tracking (mirrors the win extractor).
-    last_ltp: dict[int, float] = {}
-    ltp_pre: dict[int, float] = {}
-    ltp_300: dict[int, float] = {}
-    cut_300 = (off_ms - 300_000) if off_ms else None
-    for d in parsed:
-        pt = d.get("pt")
-        for mc in d.get("mc", []):
-            for rc in mc.get("rc", []):
-                if "ltp" not in rc:
-                    continue
-                rid = rc["id"]; last_ltp[rid] = rc["ltp"]
-                if off_ms is not None and pt is not None and pt <= off_ms:
-                    ltp_pre[rid] = rc["ltp"]
-                if cut_300 is not None and pt is not None and pt <= cut_300:
-                    ltp_300[rid] = rc["ltp"]
-
-    places_paid = final_def.get("numberOfWinners")
-    event_name = final_def.get("eventName", "")
-    track = _track_from_event(event_name)
-    market_time = final_def.get("marketTime", "")
-    race_date = market_time[:10] if market_time else ""
-    off_hhmm = market_time[11:16] if len(market_time) >= 16 else ""
-
-    rows = []
-    for r in final_def.get("runners", []):
-        status = r.get("status")
-        if status not in ("WINNER", "LOSER"):
-            continue
-        rid = r["id"]
-        horse = _clean_horse(r.get("name", ""))
-        rows.append({
-            "race_date": race_date,
-            "off_time": off_hhmm,
-            "track": track,
-            "horse_name": horse,
-            "place_bsp": r.get("bsp"),
-            "place_ltp_300s": ltp_300.get(rid),
-            "place_ltp_preoff": ltp_pre.get(rid),
-            "place_ltp_last": last_ltp.get(rid),
-            "bf_places_paid": places_paid,
-            "placed_bf": 1 if status == "WINNER" else 0,
-            "track_key": normalise_track_key(track),
-            "off_key": normalise_off_time_key(off_hhmm),
-            "horse_key": bf_horse_key(horse),
-        })
-    return rows or None
+from src.ingestion.betfair_streams import MARKET_FILE_RE, parse_place_market  # noqa: E402
 
 
 def process_tar(path: str, limit: int | None = None) -> list[dict]:

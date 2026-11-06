@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from src import database
-from src.data_scraper import SportingLifeScraper, _parse_reported_lbs
+from src.ingestion.sporting_life import SportingLifeScraper, _parse_reported_lbs
 from src.performance_context import context_history, description_mentions
 
 

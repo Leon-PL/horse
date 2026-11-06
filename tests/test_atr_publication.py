@@ -4,7 +4,8 @@ import json
 import pandas as pd
 import pytest
 
-from src import attheraces_scraper as atr, source_storage
+from src import attheraces_scraper as atr
+from src.ingestion import storage as source_storage
 
 
 def test_failed_atr_write_keeps_previous_cache(tmp_path, monkeypatch):

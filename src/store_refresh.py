@@ -66,7 +66,7 @@ def append_current_store(processed, *, store=None):
 
 
 def get_training_dataset(*, processed=None, rebuild=False):
-    processed = process_data(save=False) if processed is None else processed
+    processed = process_data() if processed is None else processed
     if not rebuild:
         store = FeatureStore()
         with store._access():

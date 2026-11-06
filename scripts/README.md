@@ -10,7 +10,7 @@ Use `--help` before deliberate backfills, repairs or model installation.
 | Collect history | `python -m src.ingestion`; `fetch_betfair_sp_public.py`, `backfill_pedigree.py`, `backfill_rtv_text.py` for explicit specialist jobs |
 | Resume ATR backfill | `python -m src.atr_rebuild --request-delay 2`; first check its status so a second worker is not launched |
 | Automatic Betfair archives | Set up **Data → Historical exchange data**, or use `python -m src.ingestion.betfair_history --start YYYY-MM-DD`; `setup_betfair_history.ps1 -CreateCertificate` prepares the local certificate |
-| Recover or repair results | `backfill_missing_races.py`, `reconcile_result_fields.py`, `repair_overfull_fields.py`; inspect their scope and audit outputs |
+| Recover or repair results | `backfill_missing_races.py`, `reconcile_result_fields.py`, `repair_overfull_fields.py`; each publishes the CSV through `publish_after_repair`. Inspect their scope and audit outputs |
 | Build historical features | `build_feature_store_batched.py` |
 | Prepare dated live features | `build_lookahead.py` |
 | Train normal recipe | Root `train.py` or `training_app.py` |

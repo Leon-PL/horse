@@ -61,7 +61,7 @@ SECTIONAL_BAD = {"sector_count_vs_distance", "sector_glitch", "cumulative_mismat
 
 
 def runs_path():
-    from src.rtv_storage import materialised_path
+    from src.ingestion.rtv_storage import materialised_path
     return Path(config.RTV_FEATURE_RUNS) if hasattr(config, "RTV_FEATURE_RUNS") else materialised_path("runs", Path(config.DATA_DIR)/"rtv_cache/feature_runs.parquet")
 
 
@@ -70,7 +70,7 @@ def pre_path():
 
 
 def cards_path():
-    from src.rtv_storage import materialised_path
+    from src.ingestion.rtv_storage import materialised_path
     return Path(config.RTV_FEATURE_CARDS) if hasattr(config, "RTV_FEATURE_CARDS") else materialised_path("cards", Path(config.DATA_DIR)/"rtv_cache/feature_cards.parquet")
 
 
@@ -469,6 +469,6 @@ def add_card_features(frame, *, cards=None):
 
 
 def add_rtv_features(frame):
-    from src.rtv_storage import pin_generation
+    from src.ingestion.rtv_storage import pin_generation
     with pin_generation():
         return rtv_text.add_text_features(add_card_features(add_pre_race_features(add_history_features(frame))))

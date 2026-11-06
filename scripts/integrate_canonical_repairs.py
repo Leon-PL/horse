@@ -71,7 +71,7 @@ def prepare():
                for name, digest in status["source_sha256"].items() if sha(ROOT / name) != digest}
     if set(updated)-{"src/training.py"}:
         raise ValueError("Source changed after rebuilding outside the reviewed training-field safeguard")
-    sources = list(dict.fromkeys([*_FE_SOURCE_FILES, *RECIPE_SOURCES, "src/live_prediction.py", "src/data_scraper.py",
+    sources = list(dict.fromkeys([*_FE_SOURCE_FILES, *RECIPE_SOURCES, "src/live_prediction.py", "src/ingestion/sporting_life.py",
         "config.py", "feature_sets/win.txt", "scripts/integrate_canonical_repairs.py", "scripts/canonical_training_cache.py",
         *status.get("extra_source_paths", [])]))
     label = status.get("label", "026 canonical correctness")

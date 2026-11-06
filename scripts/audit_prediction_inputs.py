@@ -46,7 +46,7 @@ def derive(raw):
     def empty_merge(f):
         return f.assign(**{c: np.nan for c in ALL_ATR_COLS if c not in f})
     with patch("src.attheraces_scraper.merge_atr_sectionals", side_effect=empty_merge):
-        out = engineer_features(process_data(raw.copy(), save=False), save=False)
+        out = engineer_features(process_data(raw.copy()), save=False)
     return out.set_index(["race_id", "horse_id"])
 
 

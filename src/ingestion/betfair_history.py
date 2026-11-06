@@ -186,8 +186,7 @@ def local_path(root, remote):
 
 def parse_download(compressed, remote, start, end):
     """Require an intact single-market stream before accepting a download."""
-    from scripts.extract_betfair_bsp import parse_market
-    from scripts.extract_betfair_place_bsp import parse_place_market
+    from src.ingestion.betfair_streams import parse_market, parse_place_market
 
     try:
         stream = bz2.decompress(compressed)

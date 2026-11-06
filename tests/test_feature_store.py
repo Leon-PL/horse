@@ -27,7 +27,7 @@ def all_feature_parity(monkeypatch):
 @pytest.fixture(scope="module")
 def proc_split():
     raw = _synthetic_raw(n_days=90, races_per_day=2, field=6, seed=23)
-    proc = process_data(raw.copy(), save=False)
+    proc = process_data(raw.copy())
     proc["race_date"] = pd.to_datetime(proc["race_date"], errors="coerce")
     dates = np.sort(proc["race_date"].unique())
     boundary = dates[len(dates) * 2 // 3]

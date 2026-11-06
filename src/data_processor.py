@@ -12,6 +12,7 @@ Handles:
 
 import os
 import logging
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -67,6 +68,48 @@ def load_raw_data(filepath: str = None) -> pd.DataFrame:
 
     df = pd.read_csv(filepath)
     logger.info(f"Loaded {len(df)} records from {filepath}")
+    return df
+
+
+def load_database_history() -> pd.DataFrame:
+    """Current database rows, typed exactly as the published CSV would be.
+
+    The CSV round trip fixes numeric IDs, empty strings, NA values and float
+    parsing, and the store's history is keyed on those types. Reading SQLite
+    directly would hash differently even when the data is identical.
+    """
+    from src.database import load_from_database
+    current = load_from_database()
+    # Spool rather than retaining a second full CSV string in memory.
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as snapshot:
+        current.to_csv(snapshot, index=False)
+        del current
+        snapshot.seek(0)
+        return pd.read_csv(snapshot)
+
+
+def apply_pedigree(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill sire/dam/damsire (and foaled) on a results frame from the cache."""
+    if "horse_id" not in df.columns:
+        return df
+    from src.database import load_pedigree
+    ped = load_pedigree()
+    if ped.empty:
+        return df
+    ped["horse_id"] = ped["horse_id"].astype(str)
+    # Plain mapping avoids merge suffix headaches with existing null columns.
+    idx = ped.set_index("horse_id")
+    hid = df["horse_id"].astype(str)
+    for col in ("sire", "dam", "damsire"):
+        mapped = hid.map(idx[col])
+        if col in df.columns:
+            df[col] = df[col].where(df[col].notna() & (df[col] != ""), mapped)
+        else:
+            df[col] = mapped
+    if "foaled" not in df.columns:
+        df["foaled"] = hid.map(idx["foaled"])
+    coverage = df["sire"].notna().mean()
+    logger.info("Pedigree applied: %.1f%% of rows have a sire", 100 * coverage)
     return df
 
 
@@ -482,16 +525,12 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def process_data(
-    df: pd.DataFrame = None,
-    save: bool = False,
-) -> pd.DataFrame:
+def process_data(df: pd.DataFrame = None) -> pd.DataFrame:
     """
     Full data processing pipeline.
 
     Args:
         df: Raw DataFrame (if None, loads from file)
-        save: Explicitly write the legacy processed export (default: no extra copy)
 
     Returns:
         Processed DataFrame ready for feature engineering
@@ -502,7 +541,6 @@ def process_data(
     # Results/racecard APIs never carry breeding; fill sire/dam/damsire
     # from the horse_pedigree backfill cache (no-op when cache is empty).
     try:
-        from src.pedigree_backfill import apply_pedigree
         df = apply_pedigree(df)
     except Exception:
         logger.warning("Pedigree cache unavailable; sire/dam left as-is", exc_info=True)
@@ -524,16 +562,4 @@ def process_data(
     df = encode_categorical(df)
     df = df.drop(columns=["_event_dt"], errors="ignore")
 
-    if save:
-        output_path = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.parquet")
-        df.to_parquet(output_path, index=False, engine="pyarrow")
-        logger.info(f"Saved processed data to {output_path}")
-
     return df
-
-
-if __name__ == "__main__":
-    df = process_data()
-    print(f"\nProcessed dataset shape: {df.shape}")
-    print(f"\nColumns:\n{list(df.columns)}")
-    print(f"\nSample:\n{df.head()}")

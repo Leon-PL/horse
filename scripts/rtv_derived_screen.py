@@ -45,9 +45,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from race_profile_screen import OUT, PACE_HINT, _read, going_number, load_races, load_runners, race_labels  # noqa: E402
 from race_profile_fit import STORE, _cond_ll, _race_blocks, fit_conditional_logit  # noqa: E402
 from triage_features import _partial_corr, market_controls  # noqa: E402
-from src.rtv_feature_collection import observation_tables  # noqa: E402
+from src.ingestion.rtv_observations import observation_tables  # noqa: E402
 from src.rtv_features import HISTORY_FEATURES, SECTIONAL_BAD  # noqa: E402
-from src.source_pipeline import match_runners  # noqa: E402
+from src.ingestion.pipeline import match_runners  # noqa: E402
 from src.wf_eval import expanding_period_folds  # noqa: E402
 
 PAR_END = "2024-06-30"

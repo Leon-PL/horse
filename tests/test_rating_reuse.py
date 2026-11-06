@@ -15,7 +15,7 @@ from tests.test_live_parity import _synthetic_raw
 def legacy_store(tmp_path):
     raw = _synthetic_raw(n_days=5, field=4)
     raw.loc[raw.finish_position.eq(4), ["finish_position", "lengths_behind"]] = [0, np.nan]
-    processed = process_data(raw, save=False).drop(columns="finish_pos_label", errors="ignore")
+    processed = process_data(raw).drop(columns="finish_pos_label", errors="ignore")
     store = FeatureStore(str(tmp_path / "source"))
     store.build(processed)
     # The memory-bounded builder persists the pure processor output. The

@@ -25,7 +25,7 @@ def test_renamed_people_get_one_name_and_recleaning_is_identical():
 def test_live_card_processing_maps_names():
     card = _synthetic_raw(n_days=1, races_per_day=1, field=3)
     card["jockey"] = ["M P Sheehy", "H Cobden", "Rossa Ryan"]
-    out = process_data(df=card, save=False)
+    out = process_data(df=card)
     assert out.jockey.tolist() == ["Mikey Sheehy", "Harry Cobden", "Rossa Ryan"]
 
 

@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 import numpy as np
 import pandas as pd
 
-from src.data_scraper import SportingLifeScraper, _NEXT_DATA_RE, _parse_weight_to_lbs
+from src.ingestion.sporting_life import SportingLifeScraper, _NEXT_DATA_RE, _parse_weight_to_lbs
 from src.deployment_validation import file_sha256
 from src.established_form_features import race_discipline, mark_scale
 from src.forecast_evaluation import valid_race_mask

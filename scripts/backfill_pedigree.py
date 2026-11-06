@@ -12,7 +12,7 @@ import sys
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-from src.pedigree_backfill import backfill_pedigree
+from src.ingestion.pedigree import backfill_pedigree
 
 limit = int(sys.argv[1]) if len(sys.argv) > 1 else None
 backfill_pedigree(limit=limit)

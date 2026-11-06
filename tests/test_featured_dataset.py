@@ -227,7 +227,7 @@ def test_signature_ignores_future_only_one_hot_categories_and_numeric_promotion(
 
 @pytest.mark.parametrize("relative_path", [
     "src/data_processor.py", "src/fe_incremental.py", "src/atr_features.py",
-    "src/track_config.py", "src/pedigree_backfill.py",
+    "src/track_config.py", "src/prize_currency_features.py",
 ])
 def test_signature_tracks_feature_dependencies(tmp_path, monkeypatch, relative_path):
     monkeypatch.setattr(config, "BASE_DIR", str(tmp_path))

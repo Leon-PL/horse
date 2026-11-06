@@ -1,7 +1,7 @@
 """Does Timeform's pre-race comment make the win model stronger? (experiment 052)
 
 Racing TV cards carry Timeform's analyst comment for each runner and a race
-verdict, back to September 2020 (``source_pipeline.load_matched_text``). The
+verdict, back to September 2020 (``src.ingestion.pipeline.load_matched_text``). The
 same text is on Sporting Life racecards.
 
 1. ``build``: one row per development starter (before the golden hold-out)
@@ -46,7 +46,7 @@ from scripts.specialist_models import OUT as SPECIALIST_DIR, _interval, _predict
 from src import feature_selection as fs  # noqa: E402
 from src.feature_store import FeatureStore  # noqa: E402
 from src.rtv_text import counts, fit_softmax, idf, prepare, race_index, race_probs as _race_probs, tfidf  # noqa: E402
-from src.source_pipeline import load_matched_text  # noqa: E402
+from src.ingestion.pipeline import load_matched_text  # noqa: E402
 from src.wf_eval import expanding_period_folds, golden_holdout_start  # noqa: E402
 
 OUT = ROOT / "data/research/text_052"

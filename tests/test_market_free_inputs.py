@@ -34,7 +34,7 @@ def test_no_eligible_input_reads_the_current_race_price():
     assert not np.array_equal(raw.loc[last, "odds"], repriced.loc[last, "odds"])
 
     def final_day(frame):
-        featured = engineer_features(process_data(frame, save=False), save=False)
+        featured = engineer_features(process_data(frame), save=False)
         day = featured[featured.race_date == featured.race_date.max()]
         return day.sort_values(["race_id", "horse_id"]).reset_index(drop=True)
 

@@ -106,7 +106,7 @@ def test_second_half_state_merges_only_when_it_holds_other_entities():
 
 
 def _history():
-    processed = process_data(_synthetic_raw(n_days=24, races_per_day=3, field=6), save=False)
+    processed = process_data(_synthetic_raw(n_days=24, races_per_day=3, field=6))
     processed["race_date"] = pd.to_datetime(processed["race_date"])
     return processed.sort_values("race_date", kind="stable").reset_index(drop=True)
 

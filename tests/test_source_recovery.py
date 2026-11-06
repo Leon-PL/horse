@@ -7,9 +7,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src import attheraces_scraper as atr, source_auxiliary as auxiliary
+from src import attheraces_scraper as atr
+from src.ingestion import auxiliary
 from src.betfair import attach_bsp
-from src.source_storage import atomic_json, writer_lock
+from src.ingestion.storage import atomic_json, writer_lock
 
 
 def price(horse, **extra):
@@ -121,7 +122,7 @@ def test_normal_refresh_reports_the_active_full_backfill_without_starting_anothe
 
 
 def test_bsp_receipt_skips_unchanged_work_but_detects_content_and_canonical_repairs(tmp_path, monkeypatch):
-    from scripts import fetch_betfair_sp_public as public
+    from src.ingestion import betfair_public as public
     monkeypatch.setattr(auxiliary.config, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(auxiliary.config, "PROCESSED_DATA_DIR", str(tmp_path/"processed"))
     raw = tmp_path/"prices.csv"

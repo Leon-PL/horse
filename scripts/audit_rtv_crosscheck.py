@@ -14,8 +14,8 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 import pyarrow.parquet as pq
 
-from src import rtv_scraper as rtv
-from src.source_pipeline import canonical_rows, match_runners
+from src.ingestion import racing_tv as rtv
+from src.ingestion.pipeline import canonical_rows, match_runners
 
 
 def run(directory, destination, db_path=rtv.RESULTS_DB_PATH):

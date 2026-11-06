@@ -37,7 +37,7 @@ REFERENCE = ROOT / "data/audit/model_improvement/009_pace_family"
 STORE = OUTPUT / "candidate_store/featured.parquet"
 PERIODS = ("2025Q3", "2025Q4", "2026Q1")
 SOURCES = list(dict.fromkeys([*_FE_SOURCE_FILES, "src/model.py", "src/betfair.py", "config.py",
-    "src/data_scraper.py",
+    "src/ingestion/sporting_life.py",
     "src/forecast_evaluation.py", "src/probability_calibration.py", "src/wf_eval.py",
     "scripts/benchmark_margin_repair.py", "scripts/audit_prediction_inputs.py",
     "scripts/audit_result_integrity.py", "scripts/benchmark_independent_features.py",

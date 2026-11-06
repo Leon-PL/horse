@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from src.data_scraper import SportingLifeScraper
+from src.ingestion.sporting_life import SportingLifeScraper
 
 
 def scraper_with(monkeypatch, payload):

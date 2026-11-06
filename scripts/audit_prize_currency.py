@@ -18,7 +18,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import pandas as pd
-from src.data_scraper import SportingLifeScraper, _slugify
+from src.ingestion.sporting_life import SportingLifeScraper, _slugify
 
 OUTPUT = ROOT / "data/audit/prize_currency_020"
 

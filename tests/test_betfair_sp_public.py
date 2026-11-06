@@ -14,11 +14,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.fixture(scope="module")
 def mod():
-    spec = importlib.util.spec_from_file_location(
-        "fetch_betfair_sp_public", ROOT / "scripts" / "fetch_betfair_sp_public.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    from src.ingestion import betfair_public
+    return betfair_public
 
 
 NEW_STYLE = (

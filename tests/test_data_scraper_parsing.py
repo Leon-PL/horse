@@ -1,6 +1,6 @@
 """Regression tests for Sporting Life parsing helpers.
 
-These pin the contracts of the pure parsing helpers in ``src.data_scraper``.
+These pin the contracts of the pure parsing helpers in ``src.ingestion.sporting_life``.
 Two of these tests guard live bugs found during the data-collection audit:
 
 * ``_parse_lengths_behind`` matched named margins by substring with the wrong
@@ -14,7 +14,7 @@ import math
 
 import pytest
 
-from src.data_scraper import (
+from src.ingestion.sporting_life import (
     _is_arabian_race,
     _parse_distance_to_furlongs,
     _parse_fractional_odds,
@@ -145,7 +145,7 @@ class TestArabianGuard:
         """Sporting Life files Arabian races under a "TRP Extras" pseudo-course
         that passes the UK/IRE filter (country England). Listed, they entered
         the sync ledger as races that can never complete."""
-        from src.data_scraper import SportingLifeScraper
+        from src.ingestion.sporting_life import SportingLifeScraper
 
         def meeting(course, races):
             return {"meeting_summary": {"course": {
@@ -163,7 +163,7 @@ class TestArabianGuard:
 
     def test_not_run_races_raise_only_on_request(self, monkeypatch):
         """Abandoned/void/dormant pages have rides but no finishing positions."""
-        from src.data_scraper import RaceNotRun, SportingLifeScraper
+        from src.ingestion.sporting_life import RaceNotRun, SportingLifeScraper
 
         page = {"props": {"pageProps": {"race": {
             "race_summary": {"race_stage": "ABANDONED", "name": "Some Handicap",

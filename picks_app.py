@@ -39,7 +39,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from src.source_pipeline import get_scraped_racecards
+from src.ingestion.pipeline import get_scraped_racecards
 from src.ingestion.sporting_life import scrape_todays_results
 from src.live_prediction import (
     features_for_live_cards,

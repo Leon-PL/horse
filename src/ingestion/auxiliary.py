@@ -2,7 +2,6 @@
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 from pathlib import Path
-import sqlite3
 
 import numpy as np
 import pandas as pd
@@ -19,9 +18,7 @@ def _utc_now():
 
 
 def canonical_fields(start, end):
-    with sqlite3.connect(Path(database.DB_PATH).resolve().as_uri()+"?mode=ro", uri=True) as con:
-        return pd.read_sql_query("SELECT race_id,race_date,track,off_time,horse_name,num_runners "
-                                 "FROM results WHERE race_date BETWEEN ? AND ?", con, params=(start, end))
+    return database.result_rows(start, end, ("race_id", "race_date", "track", "off_time", "horse_name", "num_runners"))
 
 
 def _atr_race_keys(frame, atr):
@@ -161,7 +158,7 @@ def _bsp_signature(paths, cache_path, fields, start, end):
     source = Path(__file__).resolve()
     project = Path(config.BASE_DIR)
     dependencies = [source, project/"src/betfair.py", project/"src/utils.py",
-                    project/"scripts/fetch_betfair_sp_public.py"]
+                    project/"src/ingestion/betfair_public.py"]
     for path in [*dependencies, *paths, cache_path]:
         digest.update(str(path).encode())
         if path.exists():
@@ -173,7 +170,7 @@ def _bsp_signature(paths, cache_path, fields, start, end):
 
 
 def _refresh_public_bsp(start, end):
-    from scripts.fetch_betfair_sp_public import download, raw_path, parse_file
+    from src.ingestion.betfair_public import download, raw_path, parse_file
     raw_dir = Path(config.DATA_DIR)/"betfair_sp_public"
     stats = download(date.fromisoformat(start), date.fromisoformat(end), raw_dir=str(raw_dir))
     paths = []

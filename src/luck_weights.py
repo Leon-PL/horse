@@ -8,7 +8,7 @@ weight in training. Evaluation is always on the actual results, unweighted.
 A runner's trouble comes only from the race being trained on, never a later
 one:
 
-* the Racing TV close-up comment for that run (``source_pipeline.load_matched_text``);
+* the Racing TV close-up comment for that run (``src.ingestion.pipeline.load_matched_text``);
 * the BHA stewards' events for that fixture (``data/processed/stewards_events.parquet``;
   the IHRB half is mis-keyed, 055, and is not used).
 

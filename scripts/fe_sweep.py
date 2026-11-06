@@ -16,7 +16,7 @@ import sys
 import time
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-for noisy in ["src.feature_engineer", "src.ratings", "src.weather", "src.track_config", "src.database"]:
+for noisy in ["src.feature_engineer", "src.ratings", "src.ingestion.weather", "src.track_config", "src.database"]:
     logging.getLogger(noisy).setLevel(logging.WARNING)
 logger = logging.getLogger("fe_sweep")
 

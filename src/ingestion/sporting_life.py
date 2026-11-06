@@ -20,15 +20,8 @@ so no JavaScript execution is needed — a simple HTTP GET is sufficient.
 * **Individual racecard** — ``/racing/racecards/{date}/{course}/racecard/{race_id}/{slug}``
   Returns full ``rides[]`` with pre-race data (odds, form, commentary …).
 
-Usage::
-
-    from src.ingestion.sporting_life import scrape_results, scrape_todays_racecards
-
-    # Historical results for the last 14 days
-    df = scrape_results(days_back=14)
-
-    # Today's racecards with odds
-    df = scrape_todays_racecards()
+Historical results are collected through ``src.ingestion.results``, which keeps
+the resumable ledger. Today's cards come from ``scrape_todays_racecards()``.
 """
 
 import html
@@ -41,7 +34,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime
 from threading import Lock, Semaphore
 from typing import Optional
 
@@ -1228,98 +1221,6 @@ class SportingLifeScraper:
 # High-level public functions
 # =====================================================================
 
-def scrape_results(
-    days_back: int = 14,
-    uk_only: bool = True,
-    save: bool = True,
-    max_races_per_day: int | None = None,
-) -> pd.DataFrame:
-    """
-    Scrape historical UK race results from Sporting Life.
-
-    Args:
-        days_back: Number of days of history to scrape.
-        uk_only:   Only scrape UK & Ireland tracks.
-        save:      Save to CSV in ``data/raw/``.
-        max_races_per_day: Max races per day (rate limiting).
-
-    Returns:
-        DataFrame with all runner records.
-    """
-    if max_races_per_day is not None and (save or max_races_per_day < 1):
-        raise ValueError("Partial race caps are not supported for canonical collection; use an explicit date range")
-    if save:
-        if not uk_only:
-            raise ValueError("Canonical history is UK/Ireland only; use save=False for a separate source sample")
-        from src.ingestion.pipeline import sync_database
-        return sync_database(days_back=days_back)
-    scraper = SportingLifeScraper()
-    all_runners: list[dict] = []
-
-    logger.info(f"🌐 Scraping race results for the last {days_back} days...")
-
-    for day_offset in range(days_back):
-        date = datetime.now() - timedelta(days=day_offset + 1)
-        date_str = date.strftime("%Y-%m-%d")
-        logger.info(f"\n📅 {date_str} ...")
-
-        try:
-            race_links = scraper.get_results_urls(date_str, uk_only=uk_only)
-        except Exception as e:
-            logger.warning(f"  ⚠️ Failed to get listing for {date_str}: {e}")
-            continue
-
-        if not race_links:
-            logger.info(f"  No races found for {date_str}")
-            continue
-
-        if max_races_per_day is not None:
-            race_links = race_links[:max_races_per_day]
-
-        logger.info(f"  Scraping {len(race_links)} races...")
-
-        # Fetch individual race pages in parallel
-        def _fetch_one(info: dict) -> list[dict]:
-            return scraper.scrape_race_result(info["url"], date_str)
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futures = {
-                pool.submit(_fetch_one, ri): ri for ri in race_links
-            }
-            done = 0
-            for future in as_completed(futures):
-                done += 1
-                ri = futures[future]
-                try:
-                    runners = future.result()
-                    if runners:
-                        all_runners.extend(runners)
-                        logger.info(
-                            f"    [{done}/{len(race_links)}] "
-                            f"{ri.get('track', '?')} "
-                            f"- {len(runners)} runners"
-                        )
-                    else:
-                        logger.info(
-                            f"    [{done}/{len(race_links)}] No runners parsed"
-                        )
-                except Exception as e:
-                    logger.warning(f"    [{done}/{len(race_links)}] Error: {e}")
-                    continue
-
-    if not all_runners:
-        logger.warning("❌ No results scraped.")
-        return pd.DataFrame()
-
-    df = pd.DataFrame(all_runners)
-    logger.info(
-        f"\n✅ Scraped {len(df)} runner records from "
-        f"{df['race_id'].nunique()} races"
-    )
-
-    return df
-
-
 def scrape_todays_racecards(
     uk_only: bool = True,
     date_str: str = None,
@@ -1416,7 +1317,7 @@ def scrape_todays_results(
 ) -> pd.DataFrame:
     """Scrape results for today (or *date_str*) from Sporting Life.
 
-    Unlike ``scrape_results`` which iterates over past days, this
+    Unlike the historical results sync, this
     fetches only the single day requested — ideal for settling
     today's picks as races finish.
 
@@ -1520,7 +1421,8 @@ def enrich_racecard_pedigree(df, *, scraper=None, cache_dir=None, known=None):
     from pathlib import Path
     from datetime import timezone
     import tempfile
-    from src.pedigree_backfill import fetch_horse_pedigree, load_pedigree
+    from src.database import load_pedigree
+    from src.ingestion.pedigree import fetch_horse_pedigree
     from src.utils import normalise_horse_key
 
     required = {"horse_id", "horse_name", "race_date"}
@@ -1653,71 +1555,3 @@ def get_scraped_racecards(
         if reloaded is not None:
             return enrich_racecard_pedigree(reloaded)
     return enrich_racecard_pedigree(df)
-
-
-# =====================================================================
-# CLI
-# =====================================================================
-
-def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(
-        description="Scrape UK horse racing data from Sporting Life"
-    )
-    parser.add_argument(
-        "--mode",
-        choices=["results", "racecards", "both"],
-        default="both",
-        help="What to scrape",
-    )
-    parser.add_argument(
-        "--days-back",
-        type=int,
-        default=7,
-        help="Days of history (results mode)",
-    )
-    parser.add_argument(
-        "--date",
-        type=str,
-        default=None,
-        help="Specific date for racecards (YYYY-MM-DD)",
-    )
-    parser.add_argument(
-        "--all-tracks",
-        action="store_true",
-        help="Include non-UK/Ireland tracks",
-    )
-
-    args = parser.parse_args()
-    uk_only = not args.all_tracks
-
-    if args.mode in ("results", "both"):
-        print(f"\n{'='*60}")
-        print(f"  Scraping results (last {args.days_back} days)")
-        print(f"{'='*60}\n")
-        df = scrape_results(days_back=args.days_back, uk_only=uk_only)
-        if not df.empty:
-            print("\nResults summary:")
-            print(f"  Records : {len(df)}")
-            print(f"  Races   : {df['race_id'].nunique()}")
-            print(f"  Tracks  : {df['track'].nunique()}")
-            print(
-                f"  Dates   : {df['race_date'].min()} → "
-                f"{df['race_date'].max()}"
-            )
-
-    if args.mode in ("racecards", "both"):
-        print(f"\n{'='*60}")
-        print("  Scraping today's racecards")
-        print(f"{'='*60}\n")
-        df = scrape_todays_racecards(uk_only=uk_only, date_str=args.date)
-        if not df.empty:
-            print("\nRacecard summary:")
-            print(f"  Runners : {len(df)}")
-            print(f"  Races   : {df['race_id'].nunique()}")
-            print(f"  Tracks  : {', '.join(df['track'].unique())}")
-
-
-if __name__ == "__main__":
-    main()

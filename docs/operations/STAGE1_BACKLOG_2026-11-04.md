@@ -45,7 +45,7 @@ census remains a different check.
 The shared source command now supports a bounded historical queue:
 
 ```powershell
-.venv\Scripts\python.exe -m src.source_pipeline --sync 0 --sources sl --sl-backlog-max-races 300
+.venv\Scripts\python.exe -m src.ingestion --sync 0 --sources sl --sl-backlog-max-races 300
 ```
 
 The Data page also has an **Older result recovery** section. Its button calls

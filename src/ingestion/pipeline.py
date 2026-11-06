@@ -13,7 +13,6 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
-import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from uuid import uuid4
@@ -21,6 +20,7 @@ from uuid import uuid4
 import pandas as pd
 
 import config
+from src.database import result_rows
 from src.ingestion import racing_tv as rtv
 from src.utils import normalise_horse_key, normalise_off_time_key
 from src.ingestion.rtv_storage import history_manifest, generation, accepted_days, partition_paths
@@ -42,10 +42,6 @@ def _read(path):
     if path.name == "history.json":
         return history_manifest(path.parent.parent)
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-
-
-def _publish(path, value):
-    atomic_json(path, value)
 
 
 @contextmanager
@@ -84,10 +80,8 @@ def match_runners(races, runners, canonical):
 
 
 def canonical_rows(start, end, db_path=None):
-    db_path = Path(db_path or Path(config.DATA_DIR) / "races.db").resolve()
-    with sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True) as con:
-        return pd.read_sql_query("SELECT race_id, horse_id, horse_name, race_date, track, off_time "
-                                 "FROM results WHERE race_date BETWEEN ? AND ?", con, params=(start, end))
+    return result_rows(start, end, ("race_id", "horse_id", "horse_name", "race_date", "track", "off_time"),
+                       db_path=db_path or Path(config.DATA_DIR) / "races.db")
 
 
 def _save_generation(root, kind, day, tables):
@@ -97,7 +91,7 @@ def _save_generation(root, kind, day, tables):
 
 
 def _refresh_rtv_features(kind, start, end=None, *, manifest=None):
-    from src.rtv_feature_collection import refresh_run_observations, refresh_pre_observations
+    from src.ingestion.rtv_observations import refresh_run_observations, refresh_pre_observations
     if kind == "history":
         return refresh_run_observations(start, end, manifest=manifest, publish=False)
     return refresh_pre_observations(start)
@@ -154,8 +148,8 @@ def refresh_rtv_history(days_back=10, *, today=None, min_interval_seconds=21600,
                     comparison.pop("_joined", None)
                     canonical = canonical_rows(day, day)
                     tables["runner_links"] = match_runners(races, runners, canonical)
-                    generation = _save_generation(root, "history", day, tables)
-                    _publish(root / generation / "comparison.json", comparison)
+                    directory = _save_generation(root, "history", day, tables)
+                    atomic_json(root / directory / "comparison.json", comparison)
                     summary = summaries.get(day, {"races": len(races), "done": 0})
                     status = store.day_status(day)
                     complete = status == "complete" or (status == "list_404" and canonical.empty)
@@ -170,7 +164,7 @@ def refresh_rtv_history(days_back=10, *, today=None, min_interval_seconds=21600,
                     if not complete:
                         incomplete.append(day)
                         continue
-                    days[day] = {"directory": generation, "checked_at": now.isoformat(),
+                    days[day] = {"directory": directory, "checked_at": now.isoformat(),
                         "complete": True, "races": len(races),
                         "linked_runners": len(tables["runner_links"]), "collection": summary}
             finally:
@@ -179,25 +173,21 @@ def refresh_rtv_history(days_back=10, *, today=None, min_interval_seconds=21600,
             if not accepted:
                 result = {"state": "partial", "days": len(wanted), "pending_dates": incomplete,
                           "start": first.isoformat(), "end": last.isoformat(), "checked_at": _now().isoformat()}
-                _publish(root/"history_status.json", result)
+                atomic_json(root/"history_status.json", result)
                 return result
             feature_receipt = _refresh_rtv_features("history", min(accepted), max(accepted), manifest=manifest)
             for day in accepted:
                 days[day]["features_complete"] = True
-            previous = generation_for_publish(root)
+            previous = generation(root.parent)
             previous.update(history=manifest, files=feature_receipt.get("files", previous.get("files", {})))
-            _publish(root/"generation.json", previous)
+            atomic_json(root/"generation.json", previous)
             result = {"state": "partial" if incomplete else "ok", "pending_dates": incomplete,
                       "checked_at": _now().isoformat(), "days": len(accepted), "latest_date": max(days), "features": feature_receipt}
-            _publish(root / "history_status.json", result)
+            atomic_json(root / "history_status.json", result)
             return result
         except Exception as error:
-            _publish(root / "history_status.json", {"state": "error", "checked_at": _now().isoformat(), "error": str(error)})
+            atomic_json(root / "history_status.json", {"state": "error", "checked_at": _now().isoformat(), "error": str(error)})
             raise
-
-
-def generation_for_publish(root):
-    return generation(root.parent)
 
 
 def capture_rtv_snapshot(date_str=None, *, min_interval_seconds=900):
@@ -226,16 +216,16 @@ def capture_rtv_snapshot(date_str=None, *, min_interval_seconds=900):
                         tables[name] = frame.loc[pd.to_datetime(frame.fetched_at, utc=True) >= started].copy()
             finally:
                 store.close()
-            generation = _save_generation(root, "snapshots", day, tables)
+            directory = _save_generation(root, "snapshots", day, tables)
             features = _refresh_rtv_features("snapshot", day)
             value = {"state": "ok" if summary["ok"] == summary["requests"]-1 else "partial" if summary["ok"] else "empty", "checked_at": _now().isoformat(),
-                     "directory": generation, "features": features, **summary}
+                     "directory": directory, "features": features, **summary}
             manifest[day] = value
-            _publish(root / "snapshots.json", manifest)
-            _publish(root / "snapshot_status.json", value)
+            atomic_json(root / "snapshots.json", manifest)
+            atomic_json(root / "snapshot_status.json", value)
             return value
         except Exception as error:
-            _publish(root / "snapshot_status.json", {"state": "error", "checked_at": _now().isoformat(), "error": str(error)})
+            atomic_json(root / "snapshot_status.json", {"state": "error", "checked_at": _now().isoformat(), "error": str(error)})
             raise
 
 
@@ -277,8 +267,8 @@ def _publish_source_health(path, report, previous):
     health.pop("seconds", None)  # Different provider checks have no shared elapsed time.
     health["latest_run"] = {key: report[key] for key in ("state", "checked_at", "required_sources", "start", "end", "seconds")
                             if key in report}
-    _publish(path.with_name("last_run.json"), report)
-    _publish(path, health)
+    atomic_json(path.with_name("last_run.json"), report)
+    atomic_json(path, health)
 
 
 def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck=False,
@@ -286,9 +276,9 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
                     weather=False, offline=False, max_source_workers=3, progress_callback=None,
                     sl_backlog_max_races=0):
     """One bounded source plan; return coverage and failures without loading history."""
-    from src import database
+    from src.ingestion import results
     from src.ingestion.auxiliary import refresh_atr, refresh_bsp
-    from src.prize_currency_features import refresh_prize_references
+    from src.ingestion.fx import refresh_prize_references
     allowed = {"sl", "rtv", "atr", "bsp", "fx"}
     if days_back < 0 or set(sources)-allowed or not sources:
         raise ValueError("Choose nonnegative days and sources from sl, rtv, atr, bsp, fx")
@@ -315,7 +305,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
                   "end": last.isoformat(), "required_sources": list(sources),
                   "sources": {name: {"state": "pending"} for name in sources}}
         operations = {
-            "sl": lambda: database.sync_database(days_back=days_back, enrich=enrich, return_report=True,
+            "sl": lambda: results.sync_database(days_back=days_back, enrich=enrich,
                 start=start, end=end, recheck=recheck or offline, pedigree_limit=pedigree_limit, weather=weather, offline=offline,
                 backlog_max_races=sl_backlog_max_races),
             "rtv": lambda: refresh_rtv_history(days_back=max(days_back, rtv.RECENT_DAYS) if days_back else 0,
@@ -347,7 +337,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
             if status_path.name == "status.json":
                 _publish_source_health(status_path, report, previous)
             else:
-                _publish(status_path, report)
+                atomic_json(status_path, report)
 
         publish_report()
         # Canonical sporting records precede every identity join. The remaining
@@ -375,15 +365,6 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
         return report
 
 
-def sync_database(days_back=90, *, enrich=False, **kwargs):
-    """Compatibility reader; new callers use refresh_sources for a small report."""
-    from src import database
-    report = refresh_sources(days_back, enrich=enrich, **kwargs)
-    frame = database.load_from_database()
-    frame.attrs["source_refresh"] = report
-    return frame
-
-
 def refresh_summary(report):
     labels = {"sl": "Sporting Life", "rtv": "Racing TV", "atr": "ATR", "bsp": "BSP", "fx": "Exchange rates"}
     values = [f"{labels.get(name, name)}: {value.get('state', 'unknown')}" for name, value in report.get("sources", {}).items()]
@@ -391,14 +372,14 @@ def refresh_summary(report):
 
 
 def get_scraped_racecards(date_str=None, uk_only=True, progress_callback=None, force_refresh=False):
-    from src.ingestion import sporting_life as data_scraper
-    frame = data_scraper.get_scraped_racecards(date_str=date_str, uk_only=uk_only,
+    from src.ingestion import sporting_life
+    frame = sporting_life.get_scraped_racecards(date_str=date_str, uk_only=uk_only,
         progress_callback=progress_callback, force_refresh=force_refresh)
     result = _optional(capture_rtv_snapshot, date_str)
     if frame is not None:
         frame.attrs["source_refresh"] = {"rtv_snapshot": result}
         if date_str is None or date_str == date.today().isoformat():
-            from src.prize_currency_features import refresh_prize_references
+            from src.ingestion.fx import refresh_prize_references
             frame.attrs["source_refresh"]["fx"] = _optional(refresh_prize_references)
     return frame
 
@@ -439,19 +420,6 @@ def load_history_table(name, start=None, end=None):
                 df["race_date"] = day
             chunks.append(df)
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
-
-
-def load_matched_history(start, end):
-    """RTV run observations keyed to SL IDs for research; contains post-race data.
-
-    Metrics/sectionals remain separate long tables, connected by RTV runner IDs.
-    Never merge these current-run observations straight into prediction inputs.
-    """
-    races = load_history_table("races", start, end)
-    runners = load_history_table("runners", start, end)
-    links = match_runners(races, runners, canonical_rows(start, end))
-    return links.merge(runners, left_on=["rtv_race_id", "rtv_runner_id"], right_on=["race_id", "runner_id"],
-                       validate="one_to_one", suffixes=("_sl", "")) if not links.empty else links
 
 
 #: Racing TV text by when it is written: the Timeform card before the off, the

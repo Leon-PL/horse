@@ -210,7 +210,7 @@ The now-retired `install_rtv_generation_044.py`
 prepares an exact actual-source preview, preserves rollback files, locks the
 store and opens one SQLite transaction. It publishes source code, numeric
 caches, canonical CSV, rebuilt histories and the fitted model before committing
-the source batch. [verify_rtv_generation_044.py](../../scripts/verify_rtv_generation_044.py)
+the source batch. `verify_rtv_generation_044.py` (removed 2026-11-06, in git history)
 checks win/place bounds and mass, single/batch equality, current-label/price
 independence, and exact staged/installed saved-card inputs and probabilities.
 The saved-card test is operational replay, not prospective evidence.

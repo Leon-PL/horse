@@ -1,6 +1,7 @@
 # Project structure
 
-Reviewed and organized on 5 November 2026. The application is one four-stage
+Reviewed and organized on 5 November 2026; collection consolidated on 6 November.
+The application is one four-stage
 pipeline with a separate research toolkit. Stage one has a dedicated package;
 the other stages retain stable module names used by saved models and experiments.
 
@@ -12,18 +13,25 @@ horse/
     ingestion/                            collection and source publication
       __main__.py                         coordinated collection command
       pipeline.py                         source plan, coverage, identity links
-      sporting_life.py                    real results and racecards
+      results.py                          resumable Sporting Life results ledger
+      sporting_life.py                    Sporting Life pages and racecards
+      pedigree.py                         horse profile collection
       racing_tv.py                        RTV raw payloads and parsing
+      rtv_observations.py                 RTV run, card and text materialisation
       auxiliary.py                        bounded ATR/BSP refresh operations
-      storage.py                          locks, raw payloads, atomic writes
-      rtv_storage.py                      accepted RTV generations and partitions
+      betfair_public.py                   public daily BSP files
+      betfair_streams.py                  BASIC market-stream parsers
       betfair_history.py                  full historical market downloads and import
       betfair_credentials.py              Windows-encrypted account connection
       betfair_history_ui.py               Data-page connection and catch-up controls
-    database.py, identity_schema.py        canonical result store
+      fx.py                               ECB reference rates
+      weather.py, bha_stewards.py         explicit research collectors
+      storage.py                          locks, raw payloads, atomic writes
+      rtv_storage.py                      accepted RTV generations and partitions
+    database.py, identity_schema.py        canonical result store and published CSV
     attheraces_scraper.py, atr_rebuild.py   ATR collector and durable backfill
-    pedigree_backfill.py, betfair.py       shared source-specific integrations
-    data_processor.py                     clean accepted history
+    betfair.py                            shared price matching
+    data_processor.py                     load, clean and encode accepted history
     feature_*.py, fe_*.py, ratings.py       feature definitions and store
     training.py, model.py, run_store.py    fitting and saved-run registry
     live_prediction.py                    current-card prediction inputs
@@ -44,7 +52,8 @@ horse/
 | Stage | Owner | Output and rule |
 |---|---|---|
 | 1. Collect and aggregate | `ingestion.pipeline.refresh_sources` | Canonical SL records plus independently retained RTV, ATR, BSP and FX observations. No sample-data mode. |
-| Prepare for features | `data_processor.process_data` | Clean runner frame in memory; no redundant global export by default. |
+| Hand-off | `database.publish_results_snapshot` | `data/raw/race_results.csv` with a receipt naming the database revision. |
+| Prepare for features | `data_processor.process_data` | Reads that CSV, or `load_database_history` for a check of the live database, joins pedigree, cleans and encodes. Clean runner frame in memory; nothing is written. |
 | 2. Build features | `featured_dataset` / `FeatureStore` | Historical features, incremental state and signatures. Accepted source content is fingerprinted. |
 | 3. Train and evaluate | `training`, `model`, evaluation modules, `run_store` | Candidate models and measured results; explicit selected-run pointer. |
 | 4. Predict | `live_prediction`, `picks_app` | Today's cards joined to compatible historical state. |
@@ -54,19 +63,26 @@ collects canonical results before identity joins, then runs independent provider
 with bounded concurrency. It publishes coverage and failures rather than silently
 substituting generated runners or replacing successful generations with failures.
 
-ATR's existing module combines collection with the sectional join consumed by
-feature building. Its file and the resumable worker stay at their stable paths:
-the active backfill pins them. Its queue and raw response store are separate from
-the accepted feature cache. Pedigree and price integrations also have consumers
-outside collection, so they retain their shared module paths.
+The rule is one owner per step: every regular collector is in `src/ingestion/`,
+storage is in `src/database.py`, and cleaning is in `src/data_processor.py`.
+`scripts/` holds the commands that run those collectors over local archives; the
+application imports nothing from a collection script.
+
+ATR is the one exception so far. Its existing module combines collection with the
+sectional join consumed by feature building. Its file and the resumable worker stay
+at their stable paths because the active backfill pins them, and they are the only
+users of `src.source_storage`. Its queue and raw response store are separate from
+the accepted feature cache. `src/trainer_locations.py`, `scripts/fetch_bha_going.py`
+and `scripts/fetch_forecast_previous_runs.py` are one-off research collectors
+outside the normal plan.
 
 ## Compatibility
 
-The old `source_pipeline`, `source_auxiliary`, `source_storage`, `rtv_storage`,
-`data_scraper` and `rtv_scraper` modules contain only compatibility aliases to
-the implementations above. Both import paths resolve to the same module object,
-so patched globals, caches and locks are shared. Existing supported commands
-still work. New collection code should import `src.ingestion` modules.
+The old `source_pipeline`, `source_auxiliary`, `rtv_storage`, `data_scraper` and
+`rtv_scraper` names were removed on 6 November, along with the extra commands that
+reached the same refresh. `python -m src.ingestion` is the collection command and
+`python -m src.ingestion.racing_tv` holds Racing TV's own tools. `src.source_storage`
+remains an alias for `src.ingestion.storage` until the ATR files move.
 
 The feature dependency check now follows packages and `from src import ...`
 imports. Collection modules are explicitly classified as source producers;
@@ -96,7 +112,7 @@ dataset solely to rename its directory.
 The main problem was overlapping collection interfaces, scattered source
 infrastructure and current instructions mixed with old reports. The dedicated
 ingestion package, single collection command and grouped documentation resolve
-those navigation problems. Small compatibility modules carry no duplicate logic.
+those navigation problems.
 
 The flat feature/model modules and research scripts contain cross-imports and
 saved-model class paths. Bulk renaming them would add migration risk without

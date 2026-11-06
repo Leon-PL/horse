@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src import rtv_scraper as rtv
+from src.ingestion import racing_tv as rtv
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "rtv")
 

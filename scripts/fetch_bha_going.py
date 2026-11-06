@@ -35,7 +35,7 @@ import pandas as pd
 import requests
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src import bha_stewards_scraper as bha  # noqa: E402
+from src.ingestion import bha_stewards as bha  # noqa: E402
 from src.utils import canonical_track_key  # noqa: E402
 
 BASE = "https://api09.horseracing.software/bha/v1/"

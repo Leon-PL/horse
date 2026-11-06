@@ -75,7 +75,7 @@ def test_real_synthetic_surface_labels_count_in_pedigree_history():
     frame = _synthetic_raw(n_days=4, races_per_day=1, field=4)
     frame["sire"] = "One sire"
     frame["surface"] = np.tile(["Polytrack", "Allweather", "Fibresand", "Turf"], 4)
-    source = _add_result_history_flags(process_data(frame, save=False))
+    source = _add_result_history_flags(process_data(frame))
     out = add_pedigree_features(source)
     assert out.loc[out.race_date.eq(out.race_date.max()), "sire_aw_win_rate_shrunk"].nunique() == 1
     assert not out.sire_aw_win_rate_shrunk.eq(.1).all()
@@ -85,7 +85,7 @@ def test_four_runner_place_prior_matches_top_three_and_unknown_stalls_stay_missi
     raw = _synthetic_raw(n_days=2, races_per_day=1, field=4)
     raw["race_type"] = "Flat"  # Includes no-stalls bumpers under the legacy taxonomy.
     raw["draw"] = 0
-    out = add_race_context_features(_add_result_history_flags(process_data(raw, save=False)))
+    out = add_race_context_features(_add_result_history_flags(process_data(raw)))
     assert out.base_place_rate.eq(.75).all()
     out = apply_conditional_feature_masks(out)
     assert out[["draw_x_field_size", "track_draw_win_rate"]].isna().all().all()
@@ -102,7 +102,7 @@ def test_impossible_historical_weight_does_not_survive_cleaning():
 def test_single_code_single_sex_card_has_fixed_selected_categorical_inputs():
     raw = _synthetic_raw(n_days=1, races_per_day=1, field=4)
     raw["race_type"], raw["sex"] = "Flat", "G"
-    out = process_data(raw, save=False)
+    out = process_data(raw)
     assert out.race_type_Chase.eq(0).all()
     assert out.sex_Female.eq(0).all()
 
@@ -127,12 +127,12 @@ def test_missing_inputs_have_matching_historical_and_pending_card_features():
     raw.loc[raw.index % 7 == 0, "lengths_behind"] = np.nan
     raw["going"] = "Yielding (Good To Yielding In Places)"
     day = raw.race_date.max()
-    expected = engineer_features(process_data(raw, save=False), save=False)
+    expected = engineer_features(process_data(raw), save=False)
     cards = raw.loc[raw.race_date.eq(day)].copy()
     cards[["finish_position", "won"]] = 0
     cards["lengths_behind"] = np.nan
-    actual = feature_engineer_with_history_core(process_data(raw.loc[raw.race_date.lt(day)], save=False),
-        process_data(cards, save=False)).set_index(["race_id", "horse_id"])
+    actual = feature_engineer_with_history_core(process_data(raw.loc[raw.race_date.lt(day)]),
+        process_data(cards)).set_index(["race_id", "horse_id"])
     expected = expected.loc[expected.race_date.eq(day)].set_index(["race_id", "horse_id"])
     cols = ["class_change_vs_field", "dist_x_class_change", "or_change_vs_field", "speed_fig_best_5_vs_field",
             "weight_change_vs_field", "draw_x_field_size", "sire_aw_edge", "jockey_going_wr"]

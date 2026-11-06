@@ -19,7 +19,7 @@ def _history():
     raw["dam"] = "Shared dam"
     raw["damsire"] = "Shared damsire"
     # Real results are usually in finishing order, the strongest leakage case.
-    return process_data(raw, save=False).sort_values(
+    return process_data(raw).sort_values(
         ["race_date", "off_time", "finish_position"], kind="stable"
     ).reset_index(drop=True)
 
@@ -92,7 +92,7 @@ def test_missing_or_invalid_market_price_is_not_invented(odds):
 
 def test_cold_start_speed_features_stay_unknown():
     raw = _synthetic_raw(n_days=3, races_per_day=1, field=6)
-    featured = engineer_features(process_data(raw, save=False), save=False)
+    featured = engineer_features(process_data(raw), save=False)
     first_runs = featured["horse_prev_races"] == 0
     cols = ["speed_fig_avg_5", "speed_fig_avg_10", "speed_fig_best_5", "speed_fig_adj_best_5"]
     assert cols
@@ -121,8 +121,8 @@ def test_full_features_for_settled_rows_do_not_change_with_future_data():
     raw["sire"] = "Shared sire"
     raw["damsire"] = "Shared damsire"
     cutoff = sorted(raw.race_date.unique())[2]
-    prefix = engineer_features(process_data(raw[raw.race_date <= cutoff], save=False), save=False)
-    full = engineer_features(process_data(raw, save=False), save=False)
+    prefix = engineer_features(process_data(raw[raw.race_date <= cutoff]), save=False)
+    full = engineer_features(process_data(raw), save=False)
     columns = sorted(set(prefix.select_dtypes(include=np.number)) & set(full.select_dtypes(include=np.number)))
     key = ["race_id", "horse_name"]
     expected = prefix.set_index(key)[columns].sort_index()

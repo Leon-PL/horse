@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data_scraper import SportingLifeScraper
+from src.ingestion.sporting_life import SportingLifeScraper
 from src.feature_engineer import (
     add_medical_features,
     add_trainer_runner_intent_features,

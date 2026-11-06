@@ -101,7 +101,7 @@ def run():
                 os.link(source, target)
             elif sha(source) != sha(target):
                 raise ValueError("Do not replace the frozen previous generation")
-    processed = process_data(save=False)
+    processed = process_data()
     signature = fe_signature()
     hashes = {name: sha(ROOT / name) for name in _FE_SOURCE_FILES}
     manifest = {"stage": "rebuilding", "fe_signature": signature, "source_sha256": hashes,

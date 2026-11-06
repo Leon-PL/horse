@@ -43,7 +43,7 @@ def rtv_cache_signature(cutoff=None) -> dict:
     """Hash only values available to the dated history; include snapshots causally."""
     from src.rtv_features import runs_path, pre_path, cards_path
     from src.rtv_text import scores_path
-    from src.rtv_storage import pin_generation
+    from src.ingestion.rtv_storage import pin_generation
     output = {}
     with pin_generation():
         paths = (("runs", runs_path()), ("pre", pre_path()), ("cards", cards_path()), ("text", scores_path()))

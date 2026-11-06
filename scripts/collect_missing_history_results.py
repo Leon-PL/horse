@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd
 
 from scripts.collect_prior_horse_results import FIELDS, fetch_one
-from src.data_scraper import SportingLifeScraper
+from src.ingestion.sporting_life import SportingLifeScraper
 from src.feature_semantics import class_number
 
 

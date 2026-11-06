@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from src import database
-from src.data_scraper import SportingLifeScraper
+from src.ingestion.sporting_life import SportingLifeScraper
 from src.result_margins import cumulative_beaten_lengths
 
 

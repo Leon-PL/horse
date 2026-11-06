@@ -40,7 +40,7 @@ def smoke(store_root, features, output):
     card["race_id"] = -pd.to_numeric(card.race_id)
     card["race_date"] = (last + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     card = pending_card(card)
-    processed = process_data(df=card, save=False)
+    processed = process_data(df=card)
     featured = store.featurize_live(processed)
     missing = sorted(set(features) - set(featured))
     if missing or len(featured) != len(card) or store.meta() != before:

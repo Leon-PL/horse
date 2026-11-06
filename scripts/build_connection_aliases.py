@@ -10,7 +10,7 @@ for years.
 
 Racing TV publishes a numeric ID for every jockey and trainer. Runners are
 linked to Sporting Life rows with the exact date/course/off-time/horse join
-(``src.source_pipeline.match_runners``). RTV IDs are only stable within an
+(``src.ingestion.pipeline.match_runners``). RTV IDs are only stable within an
 era: they were re-issued around January 2024 ("Luke Morris" is 22, then 1773)
 and some riders had a temporary second ID in late 2025. So names and IDs are
 joined into people (connected components), with three guards:
@@ -45,7 +45,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import config  # noqa: E402
-from src.source_pipeline import match_runners  # noqa: E402
+from src.ingestion.pipeline import match_runners  # noqa: E402
 
 OUT = ROOT / "reference" / "connection_aliases.json"
 TABLES = Path(config.DATA_DIR) / "rtv_cache" / "tables"

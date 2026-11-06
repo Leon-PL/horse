@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.data_scraper import MAX_WORKERS, SportingLifeScraper  # noqa: E402
+from src.ingestion.sporting_life import MAX_WORKERS, SportingLifeScraper  # noqa: E402
 
 JUMPS_TYPES = ("Hurdle", "Chase")
 

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import numpy as np
 import pandas as pd
-from src.data_scraper import SportingLifeScraper
+from src.ingestion.sporting_life import SportingLifeScraper
 from src.database import DB_PATH, init_db, _get_conn, _insert_result_context
 from src.deployment_validation import file_sha256
 from src.performance_context import context_history, FEATURES, description_mentions
@@ -60,7 +60,7 @@ def run(collect_prior=False, persist=False):
     plan = {"scope": "Coverage/causality pilot, not prediction evidence", "sample_seed":42,
         "sampled_horses": sampled, "maximum_additional_fields":24,
         "sources_sha256": {str(p.relative_to(ROOT)):file_sha256(p) for p in sorted(CACHED.glob("*.json"))},
-        "implementation_sha256": {f:file_sha256(ROOT/f) for f in ("src/data_scraper.py", "src/performance_context.py", "scripts/collect_performance_context.py")}}
+        "implementation_sha256": {f:file_sha256(ROOT/f) for f in ("src/ingestion/sporting_life.py", "src/performance_context.py", "scripts/collect_performance_context.py")}}
     plan_path = OUTPUT/"plan.json"
     if plan_path.exists() and json.loads(plan_path.read_text()) != plan:
         raise ValueError("Preserve the fixed source pilot; definitions changed")

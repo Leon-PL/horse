@@ -1,6 +1,6 @@
 import pytest
 
-from src.data_scraper import _infer_race_type as infer_race_type
+from src.ingestion.sporting_life import _infer_race_type as infer_race_type
 
 
 @pytest.mark.parametrize("name,expected", [

@@ -8,7 +8,7 @@ bettor a price from an hour after the morning closed.
 import json
 from datetime import datetime, timezone
 
-from scripts.extract_betfair_bsp import _uk_clock_ms, parse_market
+from src.ingestion.betfair_streams import _uk_clock_ms, parse_market
 
 
 def _ms(iso: str) -> int:
@@ -67,7 +67,7 @@ def test_timing_fields_staleness_activity_and_reduction_factors():
 
 
 def test_waived_reduction_variant_skips_small_factors():
-    from scripts.extract_betfair_bsp import _timing_fields
+    from src.ingestion.betfair_streams import _timing_fields
     out = _timing_fields([(100, 5.0)], {"c": 200}, [(300, 2.0), (400, 10.0)])
     assert abs(out["rf_after_c"] - 0.98 * 0.9) < 1e-12
     assert abs(out["rf25_after_c"] - 0.9) < 1e-12

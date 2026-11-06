@@ -13,7 +13,7 @@ from tests.test_live_parity import _synthetic_raw
 
 def test_ordinary_pipeline_emits_same_history_and_carries_live_seed():
     raw = _synthetic_raw(n_days=5,races_per_day=1,field=4)
-    processed = process_data(raw,save=False)
+    processed = process_data(raw)
     state = {}
     full = engineer_features(processed.copy(),save=False,counts_state=state)
     expected = prior_market_features(processed)
