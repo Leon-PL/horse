@@ -21,13 +21,13 @@ from src.ingestion.auxiliary import merge_public_bsp
 def test_unchanged_refresh_neither_loads_history_nor_rewrites_snapshot(sync_env, monkeypatch):
     sync_env.scraper.listings[YESTERDAY] = ["a"]
     first = results.sync_database(1)
-    before = (sync_env.root/"race_results.csv").stat().st_mtime_ns
+    before = (sync_env.root/"race_results.parquet").stat().st_mtime_ns
     monkeypatch.setattr(database, "load_from_database", lambda: pytest.fail("Full history loaded on no-op"))
     monkeypatch.setattr(database, "_export_results_snapshot", lambda *a: pytest.fail("Unchanged history exported"))
     second = results.sync_database(1)
     assert second["snapshot"]["state"] == "cached"
     assert second["snapshot"]["revision"] == first["snapshot"]["revision"]
-    assert (sync_env.root/"race_results.csv").stat().st_mtime_ns == before
+    assert (sync_env.root/"race_results.parquet").stat().st_mtime_ns == before
 
 
 def test_direct_repair_invalidates_snapshot_even_without_new_rows(sync_env):
@@ -38,7 +38,7 @@ def test_direct_repair_invalidates_snapshot_even_without_new_rows(sync_env):
     second = results.sync_database(0)
     assert second["snapshot"]["state"] == "published"
     assert second["snapshot"]["revision"] > first["snapshot"]["revision"]
-    assert pd.read_csv(sync_env.root/"race_results.csv").odds.eq(12).all()
+    assert pd.read_parquet(sync_env.root/"race_results.parquet").odds.eq(12).all()
 
 
 def test_completed_race_is_revision_checked_when_due(sync_env):
@@ -118,12 +118,12 @@ def test_pedigree_failures_are_retryable_and_do_not_become_success_rows(tmp_path
 @pytest.mark.parametrize("source", ["sample", "databsae"])
 def test_non_real_sources_are_rejected_before_writing(tmp_path, monkeypatch, source):
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
-    canonical = tmp_path/"race_results.csv"
+    canonical = tmp_path/"race_results.parquet"
     canonical.write_text("real history", encoding="utf-8")
     with pytest.raises(ValueError, match="sources from"):
         sources.refresh_sources(sources=(source,))
     assert canonical.read_text(encoding="utf-8") == "real history"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["race_results.csv"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["race_results.parquet"]
 
 
 def _fake_rtv(tmp_path, monkeypatch):

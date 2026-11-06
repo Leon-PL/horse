@@ -44,8 +44,8 @@ At The Races, backfill  ingestion/atr_rebuild.py            data/atr_cache/rebui
                         + ingestion/atr_tabs.py, atr_jumps.py
 
 HAND-OFF
-races.db -> database.publish_results_snapshot -> data/raw/race_results.csv + receipt
-         -> data_processor.process_data: load CSV -> add pedigree -> clean -> sort
+races.db -> database.publish_results_snapshot -> data/raw/race_results.parquet + receipt
+         -> data_processor.process_data: load snapshot -> add pedigree -> clean -> sort
             -> time and category columns -> in-memory frame -> feature store
 
 JOINED LATER, NOT THROUGH THE HAND-OFF
@@ -264,6 +264,7 @@ one was written from their records. It and the proof files are in
 - `src/trainer_locations.py`, `scripts/fetch_bha_going.py` and
   `scripts/fetch_forecast_previous_runs.py` still sit outside `src/ingestion/`. They are
   one-off research collectors, not part of the normal plan.
-- Four tests fail on the unchanged code for reasons other than a missing database (see
-  the test section above). `test_append_matches_full_rebuild` matters most, because it
-  says an appended store can differ from a full rebuild.
+- The four tests that failed on the unchanged code are fixed, and the CSV hand-off above
+  has since been replaced by Parquet. See the
+  [follow-up report](RESULTS_SNAPSHOT_AND_TEST_FIXES_2026-11-06.md). The proof tables
+  above describe the CSV hand-off as it stood when this report was written.

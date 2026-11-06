@@ -18,7 +18,13 @@ Real-source collection now lives in `src/ingestion/`. The entry point is
 removed on 6 November; see the
 [consolidation report](docs/operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md).
 The ATR worker now runs as `python -m src.ingestion.atr_rebuild --request-delay 2`.
-`fe_signature()` is `96f8dbe1ce9de8f0`, so the store needs one rebuild before its next use.
+The production store was rebuilt on 6 November at `fe_signature()` `457c83789e6b29ab` and data
+signature `7b99cce04504a09d`. The promoted model predates it and still needs a refit.
+The published history is now `data/raw/race_results.parquet`, at the types declared in
+`RESULTS_SNAPSHOT_COLUMNS`. The old CSV is in `data/backups/race_results_csv_20261106/`. The
+rebuild moved `weather_precip_prev3` to the database's exact values and eight feature columns
+slightly, because running totals now resume exactly across chunks; see the
+[follow-up report](docs/operations/RESULTS_SNAPSHOT_AND_TEST_FIXES_2026-11-06.md).
 The synthetic race generator, sample collection API and unused collector shim
 are removed. Processing no longer writes an unused global Parquet by default.
 See the [cleanup report](docs/operations/PRE_FEATURE_CLEANUP_2026-11-05.md).
