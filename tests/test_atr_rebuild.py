@@ -71,7 +71,7 @@ def test_worker_saves_verified_rich_records_and_resume_skips_completed_field(env
     before = hashlib.sha256(Path(atr.ATR_CACHE_FILE).read_bytes()).hexdigest()
     client = client_for(monkeypatch,root)
     rebuild.run(root,max_races=1)
-    assert len(client.calls) == 3
+    assert len(client.calls) == 6  # five performance endpoints + bounded navigation audit
     with rebuild.connect(root) as con:
         row = json.loads(con.execute('SELECT payload FROM runners').fetchone()[0])
         assert row['sl_horse_id'] == 'sl-1'
@@ -80,7 +80,7 @@ def test_worker_saves_verified_rich_records_and_resume_skips_completed_field(env
     assert (root/'daily/2026-11-02.parquet').exists()
     assert hashlib.sha256(Path(atr.ATR_CACHE_FILE).read_bytes()).hexdigest() == before
     rebuild.run(root,max_races=1)
-    assert len(client.calls) == 3
+    assert len(client.calls) == 6
     assert read_json(root/'status.json')['state'] == 'complete'
 
 

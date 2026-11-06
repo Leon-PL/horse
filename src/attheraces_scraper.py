@@ -1,10 +1,8 @@
 """
 At The Races Sectionals Scraper
 ===============================
-Fetches rich per-runner sectional / stride / pace data from At The Races
-(``attheraces.com``).  ATR sources its sectionals from Total Performance
-Data (TPD), which is considerably richer than the RacingTV RACEiQ feed
-(retired 2026-10) — it provides per-furlong split times,
+Fetches per-runner sectional, stride, jumping and distance-travelled data
+from At The Races (``attheraces.com``). It retains per-furlong split times,
 running totals, pace classifications, sectional speeds (mph), finishing
 speed %, an efficiency grade/score, energy distribution and stride
 metrics, plus the in-running comment and a sectional-adjusted placing.
@@ -22,6 +20,8 @@ Challenged responses are retryable blocks and never confirmed absence.
        /ajax/sectionals-razor/{raceid}/times
        /ajax/sectionals-razor/{raceid}/tools
        /ajax/sectionals-razor/{raceid}/stride
+       /ajax/sectionals-razor/{raceid}/jumpsdata
+       /ajax/sectionals-razor/{raceid}/distanceran
 
 3. Parse one row per runner and cache to parquet, keyed (like RTV) on
    ``(race_date, track, off_time, horse_name)`` so it merges onto the
@@ -67,6 +67,8 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
+from src.ingestion.atr_tabs import (COLLECTION_VERSION, PERFORMANCE_TABS,
+                                    EXTRA_METRICS, EXTRA_TEXT, EXTRA_ARRAYS, signal_runner_count)
 from src.utils import (
     normalise_horse_key as _normalise_horse_key,
     normalise_off_time_key as _normalise_off_time_key,
@@ -116,7 +118,8 @@ _BLOCKED_STATUSES = {403, 429, 503}
 
 ATR_CACHE_DIR = os.path.join(config.DATA_DIR, "atr_cache")
 ATR_CACHE_FILE = os.path.join(ATR_CACHE_DIR, "atr_sectionals.parquet")
-ATR_NO_DATA_FILE = os.path.join(ATR_CACHE_DIR, "atr_no_data_keys.json")
+# Absence under the old three-tab contract does not establish five-tab absence.
+ATR_NO_DATA_FILE = os.path.join(ATR_CACHE_DIR, "atr_no_data_keys_v3.json")
 ATR_INDEX_DIR = os.path.join(ATR_CACHE_DIR, "results_index")
 os.makedirs(ATR_CACHE_DIR, exist_ok=True)
 
@@ -183,10 +186,14 @@ ATR_ARRAY_COLS = [
     "atr_field_missing_runners", # canonical runners absent from source tables
 ]
 
+ATR_METRIC_COLS += EXTRA_METRICS
+ATR_TEXT_COLS += EXTRA_TEXT
+ATR_ARRAY_COLS += EXTRA_ARRAYS
 ALL_ATR_COLS = ATR_METRIC_COLS + ATR_TEXT_COLS + ATR_ARRAY_COLS
 
-# The three public tabs currently advertised by ATR.
-_AJAX_KINDS = ("times", "tools", "stride")
+# Every known performance endpoint is checked, even when not advertised for a
+# particular race. The page-inventory guard separately flags unknown new tabs.
+_AJAX_KINDS = PERFORMANCE_TABS
 
 # ---------------------------------------------------------------------------
 # Track name -> ATR course slug
@@ -859,6 +866,12 @@ def _fetch_one(
             return NOT_FOUND, None
         if status != 200 or not text or "Client Challenge" in text[:4000]:
             return BLOCKED, None
+        from src.ingestion.atr_tabs import inventory
+        tab_inventory = inventory(text)
+        if tab_inventory['unknown_tabs']:
+            fetcher.last_response = {**getattr(fetcher,'last_response',{}),
+                                     'reason':'unknown_tabs', 'inventory':tab_inventory}
+            return UNRESOLVED, None
         raceid = _extract_raceid(text)
         if not raceid:
             # HTML drift must not permanently suppress a real race.
@@ -874,30 +887,42 @@ def _fetch_fragments(fetcher: "_Fetcher", raceid: str, page_path: str) -> tuple[
     referer = ATR_BASE + page_path
     parsed: dict[str, dict] = {}
     context, payloads = {}, []
+    fetcher.tab_receipts = payloads
     statuses = []
     parsers = {
         "times": _parse_times,
         "tools": _parse_tools,
         "stride": _parse_stride,
     }
-    for kind, parser in parsers.items():
+    for kind in _AJAX_KINDS:
         url = f"{ATR_BASE}/ajax/sectionals-razor/{raceid}/{kind}"
         resp = fetcher.get(url, referer=referer)
         if resp is None:
+            payloads.append({'kind':kind, 'url':url, 'state':'blocked', 'status':None,
+                             'reason':'transport_error'})
             return BLOCKED, None
         s, t = resp
         statuses.append(s)
-        payloads.append({'kind': kind, 'url': url, 'status': s,
-                         'sha256': hashlib.sha256(t.encode('utf-8')).hexdigest()})
+        receipt = {'kind': kind, 'url': url, 'status': s, 'state':'received',
+                   'sha256': hashlib.sha256(t.encode('utf-8')).hexdigest()}
+        payloads.append(receipt)
         if s == 404:
+            receipt['state'] = 'not_found'
             continue  # this fragment is simply absent for the race
         if s in _BLOCKED_STATUSES or s != 200 or not t:
+            receipt['state'] = 'blocked'
             # Do not permanently skip a race whose later tabs were blocked.
             return BLOCKED, None
         soup = BeautifulSoup(t, "html.parser")
+        providers = [x.get('alt') for x in soup.select('img.site-logo') if x.get('alt')]
+        receipt['providers'] = providers
+        if 'Client Challenge' in t[:4000]:
+            receipt['state'] = 'blocked'
+            return BLOCKED, None
         try:
             source_context = _source_card_context(soup)
         except ValueError:
+            receipt['state'] = 'unresolved'
             fetcher.last_response = {**getattr(fetcher,'last_response',{}),'reason':'source_identity_mismatch'}
             return UNRESOLVED, None
         if source_context:
@@ -906,6 +931,7 @@ def _fetch_fragments(fetcher: "_Fetcher", raceid: str, page_path: str) -> tuple[
             expected_day = f'{year}-{_MONTHS.index(month)+1:02d}-{day}'
             expected_time = f'{local_time[:2]}:{local_time[2:]}'
             if source_context['atr_source_race_date'] != expected_day or source_context['atr_source_off_time_local'] != expected_time:
+                receipt['state'] = 'unresolved'
                 fetcher.last_response = {**getattr(fetcher,'last_response',{}),'reason':'source_identity_mismatch',
                                          'source_context':source_context}
                 return UNRESOLVED, None
@@ -914,14 +940,41 @@ def _fetch_fragments(fetcher: "_Fetcher", raceid: str, page_path: str) -> tuple[
             if key in context and context[key] != value:
                 return UNRESOLVED, None
             context[key] = value
-        for name, rec in parser(soup).items():
-            parsed.setdefault(name, {}).update(rec)
+        try:
+            if kind in parsers:
+                records = parsers[kind](soup)
+                if not records and not soup.select_one('.card-body, .js-sectional, .sectional-analysis'):
+                    raise ValueError('Unrecognised performance tab layout')
+            else:
+                from src.ingestion.atr_tabs import parse_extra
+                records, extra_context = parse_extra(kind, t, raceid)
+                context.update({k:v for k,v in extra_context.items() if k in ALL_ATR_COLS})
+            for name, rec in records.items():
+                old = parsed.get(name, {})
+                if old.get('atr_horse_id') and rec.get('atr_horse_id') and old['atr_horse_id'] != rec['atr_horse_id']:
+                    raise ValueError('Native horse identity differs between tabs')
+                if kind in ('jumpsdata','distanceran') and old:
+                    # Additional tabs must not overwrite core placing/comment
+                    # metadata with the optional endpoint's empty placeholders.
+                    rec = {k:v for k,v in rec.items() if k not in old or k in EXTRA_METRICS+EXTRA_TEXT+EXTRA_ARRAYS}
+                parsed.setdefault(name, {}).update(rec)
+            signal_count = signal_runner_count(kind, records)
+            receipt.update(state='data' if signal_count else 'empty', runner_count=len(records),
+                           signal_runner_count=signal_count,
+                           horse_names=sorted(records),
+                           horse_ids=sorted(str(r['atr_horse_id']) for r in records.values() if r.get('atr_horse_id')))
+        except ValueError as exc:
+            receipt.update(state='unresolved', reason=str(exc))
+            fetcher.last_response = {**getattr(fetcher,'last_response',{}),'url':url,
+                                     'reason':'unrecognised_tab', 'detail':str(exc)}
+            return UNRESOLVED, None
 
-    def has_signal(rec):
-        return any(isinstance(x, (int, float)) and math.isfinite(x)
-                   for key in ('atr_split_times', 'atr_sectional_speeds', 'atr_stride_length', 'atr_stride_frequency')
-                   for x in (rec.get(key) or []))
-    if not any(has_signal(rec) for rec in parsed.values()):
+    native_ids = [r['atr_horse_id'] for r in parsed.values() if r.get('atr_horse_id')]
+    if len(native_ids) != len(set(native_ids)):
+        fetcher.last_response = {**getattr(fetcher,'last_response',{}),'reason':'duplicate_native_horse_identity'}
+        return UNRESOLVED, None
+
+    if not any(signal_runner_count(kind, parsed) for kind in _AJAX_KINDS):
         # A changed HTML template is not proof of no telemetry. Only explicit
         # missing fragments or actual runner rows with no signals are terminal.
         return (NOT_FOUND, None) if all(s == 404 for s in statuses) or parsed else (UNRESOLVED, None)
@@ -931,7 +984,9 @@ def _fetch_fragments(fetcher: "_Fetcher", raceid: str, page_path: str) -> tuple[
         rec.setdefault("horse_name", name)
         rec["atr_raceid"] = raceid
         rec['atr_parser_version'] = str(ATR_PARSER_VERSION)
+        rec['atr_collection_version'] = str(COLLECTION_VERSION)
         rec['atr_source_payloads'] = payloads
+        rec['atr_tab_manifest'] = payloads
         rec.update(context)
         rows.append(rec)
 
@@ -987,6 +1042,13 @@ def load_atr_cache() -> pd.DataFrame:
     if os.path.exists(ATR_CACHE_FILE):
         return pd.read_parquet(ATR_CACHE_FILE)
     return pd.DataFrame()
+
+
+def current_collection_rows(cache: pd.DataFrame) -> pd.DataFrame:
+    """A previously cached runner is not proof that newer tabs were collected."""
+    if 'atr_collection_version' not in cache:
+        return cache.iloc[:0]
+    return cache.loc[cache.atr_collection_version.astype(str).eq(str(COLLECTION_VERSION))]
 
 
 def _encode_arrays(df: pd.DataFrame) -> pd.DataFrame:
@@ -1132,7 +1194,7 @@ def backfill_atr_sectionals_for_races(
 
     # Skip races already cached (matched on normalised keys).
     if skip_existing and not cache.empty:
-        ck = cache[["race_date", "track", "off_time"]].copy()
+        ck = current_collection_rows(cache)[["race_date", "track", "off_time"]].copy()
         ck["race_date"] = pd.to_datetime(ck["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
         ck["track"] = ck["track"].map(_normalise_track_key)
         ck["off_time"] = ck["off_time"].map(_normalise_off_time_key)
@@ -1188,6 +1250,7 @@ def backfill_atr_sectionals_for_races(
         nonlocal cache, new_rows, total_new_rows
         if new_rows:
             cache = pd.concat([cache, pd.DataFrame(new_rows)], ignore_index=True)
+            cache = cache.drop_duplicates(subset=['race_date','track','off_time','horse_name'],keep='last')
             save_atr_cache(cache)
             total_new_rows += len(new_rows)
             new_rows = []

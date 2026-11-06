@@ -45,7 +45,8 @@ def refresh_atr(start, end, *, max_races=50):
                         'start':start,'end':end,'fetched_races':0,
                         'pending_races':sum(counts.get(key,0) for key in ('pending','retry','review')),
                         'backfill':{key:rebuild.get(key) for key in
-                                    ('state','checked_at','total_races','saved_rows','races','publication_deferred_races')}}
+                                    ('state','checked_at','total_races','saved_rows','races','publication_deferred_races',
+                                     'collection_version','tabs','tab_inventory')}}
     cursor_path = Path(config.DATA_DIR)/"source_refresh/atr_recovery.json"
     cursor = read_json(cursor_path)
     cache = atr.load_atr_cache()
@@ -58,7 +59,8 @@ def refresh_atr(start, end, *, max_races=50):
     fields = canonical_fields(start, end)
     races = fields[["race_date", "track", "off_time"]].drop_duplicates()
     eligible = races.loc[~races.track.map(atr._normalise_track_key).isin(atr._NO_SECTIONALS_TRACKS)]
-    existing = set(_atr_race_keys(cache[["race_date", "track", "off_time"]].drop_duplicates(), atr)) if not cache.empty else set()
+    current = atr.current_collection_rows(cache)
+    existing = set(_atr_race_keys(current[["race_date", "track", "off_time"]].drop_duplicates(), atr)) if not current.empty else set()
     absent = atr._load_no_data_race_keys()
     resolved = existing | absent
     pending = eligible.loc[~_atr_race_keys(eligible, atr).isin(resolved)]

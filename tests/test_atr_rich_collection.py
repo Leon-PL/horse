@@ -71,9 +71,9 @@ def test_native_id_path_avoids_html_discovery_and_retains_provenance():
     assert row['atr_parser_version'] == '2'
     assert row['atr_finishing_speed_pct'] == 99.67
     assert row['atr_race_finishing_speed_pct'] == 98.74
-    assert len(row['atr_source_payloads']) == 3
+    assert len(row['atr_source_payloads']) == 5
     assert all(len(p['sha256']) == 64 for p in row['atr_source_payloads'])
-    assert len(client.calls) == 3
+    assert len(client.calls) == 5
     restored = atr._encode_arrays(pd.DataFrame(rows)).iloc[0]
     assert json.loads(restored.atr_stride_frequency)[0] == 2.46
 

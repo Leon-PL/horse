@@ -19,3 +19,17 @@ the [ATR backfill guide](operations/ATR_REBUILD_2026-11-05.md), and the
 [source implementation notes](operations/STAGE1_IMPLEMENTATION_2026-11-04.md).
 Historical reports describe the state at their recorded date. Use the runtime
 status command for current data and model compatibility.
+
+New ATR candidate derivations and their measured source coverage are in
+[the rich-data feature report](research/ATR_RICH_FEATURES_2026-11-06.md).
+The [efficiency, consistency and field-usage follow-up](research/ATR_EFFICIENCY_AND_USAGE_2026-11-06.md)
+records corrected score interpretation and the full collected/used inventory.
+That inventory covers the existing sectional collector. The
+[jumps-data and source-gap audit](research/ATR_JUMPS_AND_SOURCE_GAPS_2026-11-06.md)
+corrects the missed Jumps Data tab, verifies its separate fluency/consistency
+measurements and records the tested collector's current scope.
+The [five-tab collection guide](operations/ATR_TAB_COVERAGE_2026-11-06.md) supersedes
+that prototype's collection status: both Jumps Data and Distance Ran are now
+integrated, with per-tab catch-up, empty-template checks and navigation monitoring.
+The [new-tab feature pack](research/ATR_NEW_TAB_FEATURES_2026-11-06.md) documents
+the derived jumping/path predictors, point-in-time guards and frozen export.
