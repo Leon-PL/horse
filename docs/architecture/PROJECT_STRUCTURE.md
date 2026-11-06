@@ -32,7 +32,7 @@ horse/
       weather.py, bha_stewards.py         explicit research collectors
       storage.py                          locks, raw payloads, atomic writes
       rtv_storage.py                      accepted RTV generations and partitions
-    database.py, identity_schema.py        canonical result store and published snapshot
+    database.py, identity_schema.py        canonical result store and published CSV
     betfair.py                            shared price matching
     data_processor.py                     load, clean and encode accepted history
     feature_*.py, fe_*.py, ratings.py       feature definitions and store
@@ -55,8 +55,8 @@ horse/
 | Stage | Owner | Output and rule |
 |---|---|---|
 | 1. Collect and aggregate | `ingestion.pipeline.refresh_sources` | Canonical SL records plus independently retained RTV, ATR, BSP and FX observations. No sample-data mode. |
-| Hand-off | `database.publish_results_snapshot` | `data/raw/race_results.parquet`, every column at the type declared in `RESULTS_SNAPSHOT_COLUMNS`, with a receipt naming the database revision. |
-| Prepare for features | `data_processor.process_data` | Reads that snapshot, or `load_database_history` for a check of the live database, joins pedigree, cleans and encodes. Clean runner frame in memory; nothing is written. |
+| Hand-off | `database.publish_results_snapshot` | `data/raw/race_results.csv` with a receipt naming the database revision. |
+| Prepare for features | `data_processor.process_data` | Reads that CSV, or `load_database_history` for a check of the live database, joins pedigree, cleans and encodes. Clean runner frame in memory; nothing is written. |
 | 2. Build features | `featured_dataset` / `FeatureStore` | Historical features, incremental state and signatures. Accepted source content is fingerprinted. |
 | 3. Train and evaluate | `training`, `model`, evaluation modules, `run_store` | Candidate models and measured results; explicit selected-run pointer. |
 | 4. Predict | `live_prediction`, `picks_app` | Today's cards joined to compatible historical state. |
@@ -100,7 +100,7 @@ join and its column contract remain in the feature-code signature.
 | Location | Role | Retention |
 |---|---|---|
 | `data/races.db` | Canonical results, identities, source queues and pedigree | Keep; repairs and exports flow through its writer |
-| `data/raw/race_results.parquet` + source receipt | Published processing input | Keep synchronized with the database |
+| `data/raw/race_results.csv` + source receipt | Published processing input | Keep synchronized with the database |
 | `data/sl_cache`, `data/rtv_cache`, `data/atr_cache` | Raw responses, source observations, manifests and checkpoints | Keep for replay, coverage and recovery |
 | `data/atr_cache/rebuild_v2` | Running fresh ATR backfill | Keep; never reset during ordinary cleanup |
 | `data/processed/feature_store` | Derived history and state | Keep; rebuild through the feature owner |

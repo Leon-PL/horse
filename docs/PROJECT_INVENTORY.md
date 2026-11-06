@@ -19,8 +19,7 @@ the first authenticated transfer. Existing public BSP collection remains active.
 collection command. The fake-data generator and unused collector interface
 were removed. See the [current structure](architecture/PROJECT_STRUCTURE.md),
 [cleanup report](operations/PRE_FEATURE_CLEANUP_2026-11-05.md),
-[consolidation report](operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md),
-[results snapshot report](operations/RESULTS_SNAPSHOT_AND_TEST_FIXES_2026-11-06.md), and
+[consolidation report](operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md), and
 [documentation index](README.md). Earlier reports below describe their dated checkpoints.
 
 **ATR reconstruction, 5 November:** [qualified collector and full backfill](operations/ATR_REBUILD_2026-11-05.md).
@@ -237,7 +236,7 @@ These are deliberate maintenance actions, not commands to run as a batch. Backfi
 | [extract_betfair_place_bsp.py](../scripts/extract_betfair_place_bsp.py) | Extract place BSP from local BASIC archives with the same parsers; writes a derived research/data artifact. |
 | [fetch_betfair_sp_public.py](../scripts/fetch_betfair_sp_public.py) | Command for [betfair_public](../src/ingestion/betfair_public.py): download public daily exchange starting-price files. Refreshing the canonical teaching cache is a separate audited step. |
 | [fetch_bha_going.py](../scripts/fetch_bha_going.py) | Collect going, rail and stalls reports; collection does not establish that the model uses these fields. |
-| [repair_overfull_fields.py](../scripts/repair_overfull_fields.py) | Remove non-runners stored as runners (more rows than `num_runners`). Re-scrapes each race and replaces the validated field, or deletes only rows the page marks NONRUNNER/WITHDRAWN; backs up to data/backups first, then republishes `data/raw/race_results.parquet` from the DB. Dry run unless `--apply`. |
+| [repair_overfull_fields.py](../scripts/repair_overfull_fields.py) | Remove non-runners stored as runners (more rows than `num_runners`). Re-scrapes each race and replaces the validated field, or deletes only rows the page marks NONRUNNER/WITHDRAWN; backs up to data/backups first, then re-exports `data/raw/race_results.csv` from the DB. Dry run unless `--apply`. |
 | [verify_live_upgrade.py](../scripts/verify_live_upgrade.py) | Operational qualification of the installed artifact, including a public card; writes a new receipt, without fitting or promotion. |
 
 ## Research comparisons and screens
