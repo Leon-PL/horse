@@ -1,20 +1,22 @@
 # Results snapshot and test fixes — 6 November 2026
 
-**Status: done and committed on `claude/pre-feature-consolidation-dfd05d`. It is not
-on the main checkout's branch and nothing was pushed. No production store was rebuilt
-and no model was trained or promoted. The ATR worker was not touched.**
+**Status: landed on the main checkout (`checkpoint/eval-harness-and-guards`), Parquet
+published, production store rebuilt. Seven files are held back, as explained under "How
+this landed". Nothing was pushed, and no model was trained or promoted.**
 
 This follows the [consolidation report](PRE_FEATURE_CONSOLIDATION_2026-11-06.md), which
 left four failing tests and recommended replacing the CSV hand-off. Both are finished.
 
-## What changes for the next rebuild
+## What changed in the store
 
-- **The processed data does not change.** The data signature stays `d94b262598f1663c`.
+- **One processed column changes, by design.** `weather_precip_prev3` now holds the
+  database's exact value, which moves 62,189 rows by at most 7e-15. No other processed
+  column changes, and the data signature moves because of this one column.
 - **Eight feature columns change slightly, because of the append fix.** Seven move by
   rounding error only. One, `horse_avg_position_rank_pct_in_race`, changes in 1,137 of
   757,580 rows, and no feature set uses it. Details are under "Measured on real builds".
-- `fe_signature()` is now `457c83789e6b29ab`. The store was already due one rebuild of
-  about 14 minutes, and this work adds no second one.
+- `fe_signature()` is `457c83789e6b29ab` and the data signature is `7b99cce04504a09d`.
+  The rebuild took 16 minutes 47 seconds with collection workers running.
 
 ## The four failing tests
 
@@ -113,16 +115,15 @@ purpose:
 - **Numbers kept every bit, with one exception.** `weather_precip_prev3` differs in
   62,189 rows, by at most 7e-15.
 
-That exception needs a decision. The column sums rainfall readings, so the database holds
-values like `0.30000000000000004`, and pandas' fast CSV float parser is not exact. The
-history has therefore always held the parser's slightly different result. No rounding rule
-reproduces it: 57,569 rows still differ at any precision from 2 to 12 places.
+The column sums rainfall readings, so the database holds values like
+`0.30000000000000004`, and pandas' fast CSV float parser is not exact. The history had
+therefore always held the parser's slightly different result. No rounding rule reproduces
+it: 57,569 rows still differ at any precision from 2 to 12 places.
 
-To keep every value unchanged, `_snapshot_csv_parsed_real` keeps that parser step for this
-one column. It is the only CSV parsing left in the hand-off. The alternative is to use the
-database's value, which is one word to change in `RESULTS_SNAPSHOT_COLUMNS` and is cleaner,
-but it changes the data signature. If that is wanted, do it before the next rebuild, not
-after.
+The first version of this work kept that parser step for this one column, so that nothing
+changed. It was the only CSV parsing left, and it was removed in the same round because a
+rebuild was due anyway. The column now holds the database's own value. So no CSV parsing is
+left in the hand-off, and this is the one deliberate change to the data.
 
 `opening_odds` also came to light. The real table has it, but a fresh database did not,
 because collection stopped long ago. `init_db` now adds it, which does nothing to the real
@@ -133,17 +134,21 @@ columns, because pedigree is filled in later. This does not reach the processed 
 
 ### Proof
 
-Run on frozen revision 2,314, against the fingerprint taken before any of this work:
+Run on frozen revision 2,314, against the fingerprint taken before any of this work. The
+table shows the final code, with the database's rainfall values:
 
 | Check | Result |
 |---|---|
-| Data signature, published route | `d94b262598f1663c`, identical |
-| Data signature, database route | `d94b262598f1663c`, identical |
-| Processed data: rows, columns, order, dtypes, every column hash | Identical (757,580 rows, 97 columns) |
-| SHA-256 of `processed.parquet` built from it | Identical, `5f92703406a86cad...` |
-| Raw frame against `read_csv`, value by value, including the missing marker | Identical except the three declared text columns above |
+| Data signature | `d94b262598f1663c` before, `7b99cce04504a09d` after, the same on both routes |
+| Processed data: rows, columns, order, dtypes | Identical (757,580 rows, 97 columns) |
+| Column hashes | 96 of 97 identical; only `weather_precip_prev3` differs |
+| Raw frame against `read_csv`, value by value, including the missing marker | Identical except `weather_precip_prev3` and the three declared text columns above |
 | Database route against published route, strictly | No differences |
 | Three cached racecards | Identical |
+
+Before the rainfall step, with the parser step still in place, the signature and the
+SHA-256 of `processed.parquet` were both identical to the fingerprint. So the rainfall
+values are the whole of the difference.
 
 ### Speed and size
 
@@ -153,7 +158,7 @@ Measured on a quiet machine.
 |---|---|---|
 | File size | 212 MB | 25 MB |
 | Read the file | 7.5 s | 3.7 s |
-| Publish a changed revision | Not re-measured | About 67 s, of which 52 s is reading SQLite from a cold disk |
+| Publish a changed revision | Not re-measured | About 40 s, of which 31 s is reading SQLite |
 | Refresh with nothing new | Under a second | 0.1 s, through the same receipt |
 
 ## Tests
@@ -174,29 +179,47 @@ were renamed to match what they now cover:
   writer racecards still use. `test_interrupted_publication_keeps_the_last_file` covers
   the Parquet publish.
 
+After landing, the affected test files ran on the main checkout against the real database,
+with the uncommitted Betfair work in place: 242 passed and 3 failed. Two are the held-back
+tests described under "How this landed". The third is
+`test_unique_horse_per_race`, the only one of the 11 data tests above that still fails once it
+has a real database. It is not a data fault and not caused by this work: a 2022 Gowran Park
+maiden, race 688054, really did have two different horses named Sierra Nevada, with different
+`horse_id` values and trainers. The test groups by name, so it should group by `horse_id`.
+
 New tests are in `tests/test_results_snapshot.py`, plus bit-exact resume tests in
 `tests/test_fe_incremental.py`. The sync test fixtures name races with letters, so they
 declare `race_id` as text for their own run. The real declaration is numeric, and
 `tests/test_results_snapshot.py` tests it.
 
-## Landing this
+## How this landed
 
-This branch has not been merged, because landing it has three consequences:
+The fast-forward ran while a separate job was consolidating Betfair collection on the main
+checkout. That work is uncommitted, and it changed seven files this branch also changes:
+`CONTINUATION.md`, `README.md`, `docs/PROJECT_INVENTORY.md`,
+`docs/architecture/PROJECT_STRUCTURE.md`,
+`docs/operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md`, `scripts/README.md` and
+`tests/test_source_refresh.py`. Those seven were left out of the landing, so that work stayed
+untouched. The other 20 files landed.
 
-1. **It stops the ATR worker.** `src/ingestion/attheraces.py` is a watched file, and its
-   `backfill_atr_sectionals` command read the CSV. The worker never calls that command, so
-   the change does not affect collection, but the worker stops on any edit to a watched
-   file. It needs the same audited handover as before: stop, back up, adopt the new
-   fingerprints, restart. That took about two minutes last time, with no queue change.
-2. **One publish is needed before processing can run**, because no Parquet exists yet.
-   `load_raw_data` says so if it is missed. Any refresh does this, or with no network:
+Until the Betfair work is committed, those seven files on the main checkout keep their old
+content. The guides still describe the CSV, and two tests in `tests/test_source_refresh.py`
+fail because they look for `race_results.csv`:
+`test_unchanged_refresh_neither_loads_history_nor_rewrites_snapshot` and
+`test_direct_repair_invalidates_snapshot_even_without_new_rows`. Nothing else depends on those
+files. The held-back changes are the last commit on the branch and land with one merge once
+that work is committed. `scripts/README.md` will need one table row resolved by hand, because
+both sides changed it.
 
-   ```bash
-   .venv/Scripts/python.exe -c "from src.database import publish_results_snapshot as p; print(p())"
-   ```
+| Step | Result |
+|---|---|
+| ATR handover | Stopped at 4,787 finished races, queue backed up, fingerprints adopted, one worker restarted about two minutes later. The queue digest was unchanged and no row was reset or reopened |
+| Publish | Revision 2,314, 757,580 rows, 25,046,688 bytes, 38 s |
+| Rebuild | 757,580 rows, data signature `7b99cce04504a09d`, the value the frozen proof predicted |
+| `project_status.py` | Feature store ok. Results are 2 days behind because no refresh was run. The promoted model is stale, and it was already stale before this work |
+| `data/raw/race_results.csv` | Moved to `data/backups/race_results_csv_20261106/` |
 
-3. **`data/raw/race_results.csv` is then unused and can be deleted.** Nothing removes it
-   automatically.
+The audit trail is in `data/audit/atr_parquet_landing_20261106/`.
 
 ## Reproducing
 
