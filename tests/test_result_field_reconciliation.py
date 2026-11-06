@@ -61,7 +61,7 @@ def test_two_result_races_with_same_join_key_are_not_repaired():
 
 def make_database(results):
     conn = sqlite3.connect(":memory:")
-    results.to_sql("results", conn, index=False)
+    results.assign(horse_id=range(1, len(results) + 1)).to_sql("results", conn, index=False)
     return conn
 
 

@@ -16,8 +16,11 @@ def registration():
                 if line.strip() and not line.startswith("#")]
     unsafe = [f"{name}{suffix}" for name in ("atr_speed_score", "atr_stride_x_gallop")
               for suffix in ("", "_vs_field", "_z_in_race", "_rank_pct_in_race", "_vs_best_in_race")]
-    return {"baseline_features": names("feature_sets/win.txt"),
-            "candidate_features": names("feature_sets/research_win_with_atr.txt"),
+    # The study froze its baseline as the candidate's non-ATR columns. win.txt has
+    # changed since, so it no longer describes what the study added.
+    candidate = names("feature_sets/research_win_with_atr.txt")
+    return {"baseline_features": [name for name in candidate if not name.startswith("atr_")],
+            "candidate_features": candidate,
             "unsafe_composites_requiring_exclusion_or_rebuild": unsafe}
 
 

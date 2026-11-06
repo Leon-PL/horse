@@ -9,6 +9,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import src.feature_engineer as fe
 from src.feature_engineer import _race_safe_cumsum
@@ -154,6 +155,36 @@ def test_plain_seeded_append_matches_full_recompute():
     _, state = cumulative_counts_plain(hist["trainer"], {"w": hist["won"].to_numpy()})
     new_out, _ = cumulative_counts_plain(new["trainer"], {"w": new["won"].to_numpy()}, state=state)
     assert np.allclose(new_out["w"], full[(df["race_id"] > cut).to_numpy()])
+
+
+def _fractional_history(seed):
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 5, 800).astype(str), np.repeat(np.arange(200), 4), rng.uniform(0, 1, 800)
+
+
+@pytest.mark.parametrize("split", [4, 40, 400, 796])
+def test_resumed_race_safe_sum_has_the_same_bits_as_one_pass(split):
+    keys, races, values = _fractional_history(split)
+    whole, _ = cumulative_counts(keys, races, {"m": values})
+    first, state = cumulative_counts(keys[:split], races[:split], {"m": values[:split]})
+    second, _ = cumulative_counts(keys[split:], races[split:], {"m": values[split:]}, state=state)
+    assert np.concatenate([first["m"], second["m"]]).tobytes() == whole["m"].tobytes()
+
+
+@pytest.mark.parametrize("split", [1, 40, 399, 799])
+def test_resumed_plain_sum_has_the_same_bits_as_one_pass(split):
+    keys, _, values = _fractional_history(split)
+    whole, _ = cumulative_counts_plain(keys, {"m": values})
+    first, state = cumulative_counts_plain(keys[:split], {"m": values[:split]})
+    second, _ = cumulative_counts_plain(keys[split:], {"m": values[split:]}, state=state)
+    assert np.concatenate([first["m"], second["m"]]).tobytes() == whole["m"].tobytes()
+
+
+def test_whole_number_metrics_carry_no_compensation():
+    keys, races = np.array(["a", "b"]), np.array(["r1", "r2"])
+    _, state = cumulative_counts(keys, races, {"m": np.array([1.0, 2.0])})
+    assert state["m"] == {"a": 1.0, "b": 2.0}
+    assert state["m::compensation"] == {}
 
 
 def test_rolling_seeded_append_matches_full():

@@ -33,17 +33,17 @@ import pandas as pd
 
 
 @nb.njit(cache=True)
-def _nb_group_cumsum(values, labels, n_groups):
-    """``groupby.cumsum`` for one float column, bit for bit.
+def _nb_resume_group_cumsum(values, labels, totals, compensation):
+    """``groupby.cumsum`` for one float column, bit for bit, from any start.
 
     pandas compensates with Kahan summation, so plain running totals would
     differ from it in the last bits. A NaN row and a row without a group stay
-    NaN and leave the totals alone. Returns the running and final totals.
+    NaN and leave the totals alone. ``totals`` and ``compensation`` hold where
+    each group has reached and are advanced in place, so resuming from them
+    gives the same bits as a single pass over everything.
     """
     n = len(values)
     out = np.full(n, np.nan)
-    totals = np.zeros(n_groups)
-    compensation = np.zeros(n_groups)
     for i in range(n):
         group = labels[i]
         if group < 0:
@@ -56,6 +56,13 @@ def _nb_group_cumsum(values, labels, n_groups):
         compensation[group] = total - totals[group] - adjusted
         totals[group] = total
         out[i] = total
+    return out
+
+
+def _nb_group_cumsum(values, labels, n_groups):
+    """One pass from nothing. Returns the running and final totals."""
+    totals = np.zeros(n_groups)
+    out = _nb_resume_group_cumsum(values, labels, totals, np.zeros(n_groups))
     return out, totals
 
 
@@ -86,31 +93,58 @@ def _group_totals(values: np.ndarray, labels: np.ndarray, totals: np.ndarray) ->
 
 def _carried(state: dict, entities: list) -> np.ndarray:
     """Carried totals for this frame's entities: never O(all history)."""
+    if not state:
+        return np.zeros(len(entities))
     carried = np.fromiter(map(state.get, entities, repeat(0.0)), np.float64, len(entities))
     carried[np.isnan(carried)] = 0.0
     return carried
 
 
-class CountsAccumulator:
-    """Resumable prior-only race-safe per-entity cumulative sum (one metric)."""
+class _RunningTotals:
+    """The per-entity position of a Kahan sum, kept between chunks.
 
-    def __init__(self, state: dict | None = None):
+    Each total needs its compensation to carry on exactly where it stopped: a
+    chunk that restarts from the total alone rounds differently, so two equal
+    histories can stop being equal and a tied rank comes apart. Whole-number
+    metrics have no compensation, so only non-zero ones are kept.
+    """
+
+    def __init__(self, state: dict | None = None, compensation: dict | None = None):
         # entity value -> grand total of the metric over all rows seen so far.
         self.state: dict = dict(state or {})
+        self.compensation: dict = dict(compensation or {})
 
     def to_state(self) -> dict:
         return dict(self.state)
 
+    def _running(self, entity, entities, values) -> np.ndarray:
+        """Totals after each row, which also moves the carried position on."""
+        started = _carried(self.state, entities)
+        totals = started.copy()
+        compensation = _carried(self.compensation, entities)
+        running = _nb_resume_group_cumsum(values, entity, totals, compensation)
+        stuck = ~np.isfinite(totals)
+        if stuck.any():
+            in_frame = _group_totals(values, entity, np.zeros(len(totals)))
+            totals[stuck] = started[stuck] + in_frame[stuck]
+            compensation[stuck] = 0.0
+        self.state.update(zip(entities, totals.tolist()))
+        if compensation.any() or self.compensation:
+            for key, value in zip(entities, compensation.tolist()):
+                if value:
+                    self.compensation[key] = value
+                else:
+                    self.compensation.pop(key, None)
+        return running
+
+
+class CountsAccumulator(_RunningTotals):
+    """Resumable prior-only race-safe per-entity cumulative sum (one metric)."""
+
     def _advance(self, entity, entities, pair, n_pairs, values) -> np.ndarray:
-        naive, totals = _nb_group_cumsum(values, entity, len(entities))
+        running = self._running(entity, entities, values)
         within, _ = _nb_group_cumsum(values, pair, n_pairs)
-        out = naive - within
-        if self.state and entities:
-            out = out + _carried(self.state, entities)[entity]
-        get = self.state.get
-        for key, total in zip(entities, _group_totals(values, entity, totals).tolist()):
-            self.state[key] = get(key, 0.0) + total
-        return out
+        return running - within
 
     def transform(self, keys, race_ids, values) -> np.ndarray:
         """Prior-only race-safe totals for *values*, then advance state.
@@ -127,7 +161,7 @@ class CountsAccumulator:
         return self._advance(entity, entities, pair, n_pairs, values)
 
 
-class PlainCountsAccumulator:
+class PlainCountsAccumulator(_RunningTotals):
     """Resumable prior-only **plain** per-entity cumulative sum (one metric).
 
     Unlike :class:`CountsAccumulator` this does *not* exclude same-race peers —
@@ -139,27 +173,19 @@ class PlainCountsAccumulator:
     full recompute. No ``race_ids`` needed.
     """
 
-    def __init__(self, state: dict | None = None):
-        self.state: dict = dict(state or {})
-
-    def to_state(self) -> dict:
-        return dict(self.state)
-
     def _advance(self, entity, entities, values) -> np.ndarray:
-        running, totals = _nb_group_cumsum(values, entity, len(entities))
-        out = running - values
-        if self.state and entities:
-            out = out + _carried(self.state, entities)[entity]
-        get = self.state.get
-        for key, total in zip(entities, _group_totals(values, entity, totals).tolist()):
-            self.state[key] = get(key, 0.0) + total
-        return out
+        return self._running(entity, entities, values) - values
 
     def transform(self, keys, values) -> np.ndarray:
         keys = np.asarray(pd.Series(keys).to_numpy())
         values = np.asarray(values, dtype="float64")
         entity, entities = _entity_labels(keys)
         return self._advance(entity, entities, values)
+
+
+def _compensation_key(column: str) -> str:
+    """Where a column's compensation sits in the carried state."""
+    return f"{column}::compensation"
 
 
 def cumulative_counts_plain(
@@ -181,9 +207,10 @@ def cumulative_counts_plain(
     new_state: dict = {}
     entity, entities = _entity_labels(np.asarray(pd.Series(keys).to_numpy()))
     for col, values in metrics.items():
-        acc = PlainCountsAccumulator(state.get(col))
+        kept = _compensation_key(col)
+        acc = PlainCountsAccumulator(state.get(col), state.get(kept))
         out[col] = acc._advance(entity, entities, np.asarray(values, dtype="float64"))
-        new_state[col] = acc.state
+        new_state[col], new_state[kept] = acc.state, acc.compensation
     return out, new_state
 
 
@@ -203,8 +230,9 @@ def cumulative_counts(
     ``_race_safe_cumsum`` the stages use today; with a seeded ``state`` (an
     append) it equals a full recompute for the new rows.
 
-    ``state`` / ``new_state`` are ``{out_column: accumulator_state}`` and are
-    JSON-serialisable for persistence in the FeatureStore.
+    ``state`` / ``new_state`` are ``{out_column: accumulator_state}``, plus each
+    column's ``{out_column}::compensation``, and are JSON-serialisable for
+    persistence in the FeatureStore.
     """
     state = state or {}
     out: dict[str, np.ndarray] = {}
@@ -212,7 +240,8 @@ def cumulative_counts(
     entity, entities = _entity_labels(np.asarray(pd.Series(keys).to_numpy()))
     pair, n_pairs = _entity_race_labels(entity, np.asarray(pd.Series(race_ids).to_numpy()))
     for col, values in metrics.items():
-        acc = CountsAccumulator(state.get(col))
+        kept = _compensation_key(col)
+        acc = CountsAccumulator(state.get(col), state.get(kept))
         out[col] = acc._advance(entity, entities, pair, n_pairs, np.asarray(values, dtype="float64"))
-        new_state[col] = acc.state
+        new_state[col], new_state[kept] = acc.state, acc.compensation
     return out, new_state
