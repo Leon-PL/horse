@@ -1,5 +1,8 @@
 # Pre-feature consolidation — 6 November 2026
 
+**Later Betfair update:** public/manual collection entries in this snapshot were
+superseded by the [unified full-history path](BETFAIR_CONSOLIDATION_2026-11-06.md).
+
 **Status: done, including At The Races (ATR). The work is committed and is on the
 main checkout's branch, `checkpoint/eval-harness-and-guards`. Nothing was pushed. No
 store was rebuilt and no model was trained or promoted. The ATR worker was stopped,

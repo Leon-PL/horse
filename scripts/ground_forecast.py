@@ -43,7 +43,7 @@ from src.wf_eval import development_mask
 
 TIMING = os.path.join("data", "processed", "betfair_timing.parquet")
 FORECAST_DIR = os.path.join("data", "weather_forecast")
-PUBLIC = os.path.join("data", "processed", "betfair_sp_public.parquet")
+PUBLIC = os.path.join("data", "research", "betfair_public_legacy", "prices.parquet")
 SHRINK_K = 2.0
 
 _GOING_SCALE = [

@@ -7,10 +7,12 @@ Use `--help` before deliberate backfills, repairs or model installation.
 | Workflow | Commands |
 |---|---|
 | Check installed state | `project_status.py`, `validate_data_contracts.py` |
-| Collect history | `python -m src.ingestion`; `fetch_betfair_sp_public.py`, `backfill_pedigree.py`, `backfill_rtv_text.py` for explicit specialist jobs |
+| Collect history | `python -m src.ingestion`; `backfill_pedigree.py`, `backfill_rtv_text.py` for explicit specialist jobs |
 | Resume ATR five-tab backfill | `python -m src.ingestion.atr_rebuild --request-delay 2`; first check its status so a second worker is not launched; see [tab coverage](../docs/operations/ATR_TAB_COVERAGE_2026-11-06.md) |
 | Inspect one ATR jumps result | `python -m src.ingestion.atr_jumps --help`; explicit native race ID and racecard URL; keeps its observation separate from the sectional cache |
-| Automatic Betfair archives | Set up **Data → Historical exchange data**, or use `python -m src.ingestion.betfair_history --start YYYY-MM-DD`; `setup_betfair_history.ps1 -CreateCertificate` prepares the local certificate |
+| Automatic Betfair archives | Set up **Data → Historical exchange data**, or use `python -m src.ingestion.betfair_history --start YYYY-MM-DD --drain --max-files 5000`; `setup_betfair_history.ps1 -CreateCertificate` prepares the local certificate |
+| Consolidate older Betfair downloads | `python -m src.ingestion.betfair_archives --remove-verified`; retains raw members once and removes each original only after verification |
+| Measure Betfair import speed | `benchmark_betfair_ingestion.py --markets 16 --out data/audit/betfair_ingestion_benchmark.json`; production databases are read-only, with disposable test queues and exact output comparisons |
 | Recover or repair results | `backfill_missing_races.py`, `reconcile_result_fields.py`, `repair_overfull_fields.py`; each publishes the results snapshot through `publish_after_repair`. Inspect their scope and audit outputs |
 | Build historical features | `build_feature_store_batched.py` |
 | Prepare dated live features | `build_lookahead.py` |

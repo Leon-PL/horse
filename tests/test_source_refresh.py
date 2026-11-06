@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -15,7 +14,6 @@ from src.ingestion import pipeline as sources, sporting_life as data_scraper
 from src.ingestion import pedigree
 from src.ingestion import results
 from src.ingestion.storage import RawPayloadStore, atomic_json, writer_lock
-from src.ingestion.auxiliary import merge_public_bsp
 
 
 def test_unchanged_refresh_neither_loads_history_nor_rewrites_snapshot(sync_env, monkeypatch):
@@ -216,26 +214,6 @@ def test_readers_pin_one_rtv_generation(tmp_path, monkeypatch):
         atomic_json(pointer, {"files": {"runs": "second/runs.parquet", "cards": "second/cards.parquet"}})
         assert "first" in str(rtv_features.cards_path())
     assert "second" in str(rtv_features.cards_path())
-
-
-def _price(horse, bsp, **extra):
-    return {"race_date": "2026-10-29", "track": "Kempton", "off_time": "12:00", "horse_name": horse, "bsp": bsp, **extra}
-
-
-def test_public_bsp_fills_gaps_without_replacing_archive_prices_or_times():
-    existing = pd.DataFrame([_price("A", 4., ltp_60s=5.), _price("B", np.nan, ltp_60s=8.)])
-    incoming = pd.DataFrame([_price("A", 3.), _price("B", 6.), _price("C", 9.)])
-    result, receipt = merge_public_bsp(existing, incoming)
-    indexed = result.set_index("horse_name")
-    assert indexed.loc["A", "bsp"] == 4 and indexed.loc["A", "ltp_60s"] == 5
-    assert indexed.loc["B", "bsp"] == 6 and indexed.loc["B", "ltp_60s"] == 8
-    assert np.isnan(indexed.loc["C", "ltp_60s"])
-    assert receipt == {"new_rows": 1, "filled_prices": 1, "preserved_conflicts": 1}
-
-
-def test_conflicting_public_bsp_duplicates_do_not_publish():
-    with pytest.raises(ValueError, match="Ambiguous"):
-        merge_public_bsp(pd.DataFrame([_price("A", 4.)]), pd.DataFrame([_price("B", 5.), _price("B", 8.)]))
 
 
 def test_failed_source_is_returned_and_saved_as_partial(tmp_path, monkeypatch):

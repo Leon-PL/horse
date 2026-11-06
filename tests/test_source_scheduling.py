@@ -19,8 +19,8 @@ def test_independent_sources_overlap_only_after_canonical_results(tmp_path, monk
         return {"state": "ok"}
     monkeypatch.setattr(results, "sync_database", canonical)
     monkeypatch.setattr(sources, "refresh_rtv_history", independent)
-    monkeypatch.setattr(auxiliary, "refresh_bsp", independent)
-    report = sources.refresh_sources(1, sources=("sl", "rtv", "bsp"), max_source_workers=2)
+    monkeypatch.setattr(auxiliary, "refresh_betfair", independent)
+    report = sources.refresh_sources(1, sources=("sl", "rtv", "betfair"), max_source_workers=2)
     assert report["state"] == "ok"
     assert all(value["state"] == "ok" and "seconds" in value for value in report["sources"].values())
 
@@ -48,11 +48,11 @@ def test_a_failed_collector_does_not_cancel_other_sources(tmp_path, monkeypatch)
     monkeypatch.setattr(sources, "refresh_rtv_history", lambda **kw: {"state": "ok"})
     def broken(*args):
         raise RuntimeError("price provider unavailable")
-    monkeypatch.setattr(auxiliary, "refresh_bsp", broken)
-    report = sources.refresh_sources(1, sources=("rtv", "bsp"))
+    monkeypatch.setattr(auxiliary, "refresh_betfair", broken)
+    report = sources.refresh_sources(1, sources=("rtv", "betfair"))
     assert report["state"] == "partial"
     assert report["sources"]["rtv"]["state"] == "ok"
-    assert report["sources"]["bsp"]["error"] == "price provider unavailable"
+    assert report["sources"]["betfair"]["error"] == "price provider unavailable"
 
 
 def test_short_source_finishes_before_a_long_backfill(tmp_path, monkeypatch):
@@ -69,3 +69,11 @@ def test_short_source_finishes_before_a_long_backfill(tmp_path, monkeypatch):
             release.set()
     report = sources.refresh_sources(1, sources=("fx", "atr"), max_source_workers=2, progress_callback=callback)
     assert release.is_set() and report["state"] == "partial"
+def test_command_defaults_include_the_full_betfair_provider(monkeypatch):
+    import sys
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["ingestion", "--sync", "1"])
+    monkeypatch.setattr(sources, "refresh_sources", lambda *a, **kw:
+                        calls.append(kw) or {"state": "ok", "sources": {}})
+    sources.main()
+    assert "betfair" in calls[0]["sources"] and "bsp" not in calls[0]["sources"]

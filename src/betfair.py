@@ -3,7 +3,7 @@ Betfair Exchange BSP integration
 ================================
 
 Loader + join helpers for the historical Betfair Starting Price (BSP) and
-pre-off traded prices extracted by ``scripts/extract_betfair_bsp.py`` into
+pre-off traded prices collected by ``src.ingestion.betfair_history`` into
 ``data/processed/betfair_bsp.parquet``.
 
 BSP is the sharp consensus closing price and a genuinely bettable price
@@ -11,8 +11,8 @@ BSP is the sharp consensus closing price and a genuinely bettable price
 
 * the CLV harness (``scripts/clv_report.py``) — does the model beat the close?
 * a BSP-preferred market-probability *teacher* for distillation / the market
-  anchor, with bookmaker SP as the fallback where BSP is absent (pre-2025 and
-  any unmatched race). BSP is post-race only, so it is never a live-inference
+  anchor, with bookmaker SP as the fallback where BSP is absent or unmatched.
+  BSP is post-race only, so it is never a live-inference
   feature — only a training target / settlement price.
 
 Join keys mirror ``src/utils`` (track/off-time) plus a punctuation-insensitive

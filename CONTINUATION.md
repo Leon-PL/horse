@@ -31,6 +31,39 @@ See the [cleanup report](docs/operations/PRE_FEATURE_CLEANUP_2026-11-05.md).
 
 ## Betfair historical downloads
 
+**Import speed, 6 November:** both WIN and PLACE are retained. Grouped durable
+checkpoints, bounded parallel work and lightweight progress counters replace
+per-market saves/counts. Identical real-market output was verified; the controlled
+writer comparison was 5.24 times faster. A real 256-market batch imported in
+118.263 seconds, with zero failures, and all four price caches published, bringing
+the queue to 2,179 published markets. The continuous 5,000-market worker restarted
+at 22:07 UTC with current pins; a subsequent 98-second local replay sample achieved
+7.96 markets/second with zero failures. Allow one to two days provisionally for
+the full backfill, including network gaps and archive work. Archive scans and publication remain
+batch overheads; do not use the writer benchmark as the total backfill ETA.
+See [measurements and verification](docs/operations/BETFAIR_IMPORT_SPEED_2026-11-06.md)
+and `data/audit/betfair_performance_20261106/`. Temporary test queues were removed;
+the reusable profiler is `scripts/benchmark_betfair_ingestion.py`. ATR pins match.
+
+**Consolidated main path, 6 November:** the default source plan now uses `betfair`
+for full Historical BASIC WIN/PLACE data. Public BSP fetching and both separate
+manual extraction commands are removed. Its 4,472 raw files and parsed volume/VWAP
+research dataset are frozen at `data/research/betfair_public_legacy/`; existing
+research readers were redirected. A real main-coordinator run completed all 92
+markets for 31 October with no failures. The 17 original tar files (10.10 GB) are
+being deduplicated into `data/betfair/history/archive_payloads.sqlite`; each is
+removed only after verification and a durable checkpoint. The resumable historical
+worker covers 2020-09-15–2026-10-31, reuses retained payloads while consolidation
+continues, and then downloads remaining gaps. Use the live `archive_import_status`,
+`backfill_status` and `status` JSON files under `data/betfair/history/`; do not infer
+completion from launch. See [consolidation details](docs/operations/BETFAIR_CONSOLIDATION_2026-11-06.md).
+
+The old `2020.tar` has an incomplete final member. Consolidation now preserves
+damaged originals in `data/betfair/history/quarantine/`, records the issue, and
+continues with intact archives; the API fills missing markets. Read-back hash
+checks still precede deletion of verified originals. Recovery checks cover
+truncated sources, corrupt nonzero headers and legitimate interleaved zero padding.
+
 The Historical Data API downloader is implemented in `src/ingestion/betfair_history.py`.
 It retains full BASIC WIN/PLACE files, resumes its SQLite queue and merges missing
 observations into the existing price caches. Normal source refreshes opt in once
@@ -38,11 +71,17 @@ an account is connected. **Data → Historical exchange data** supplies certific
 download, account connection and catch-up controls. Login settings use Windows
 account encryption; certificate login does not require a paid Live App Key.
 
-The local certificate/key pair is prepared at `data/betfair/auth/client.crt` and
-`client.key`. The public certificate still needs uploading to the user's Betfair
-account, followed by login through the app. No account credentials were available;
-an authenticated online transfer has not yet been verified. Local archived market
-compatibility and encryption under the normal Windows user were verified.
+**Connected and verified, 6 November:** the user uploaded the public certificate
+and connected the account. Windows-encrypted settings are saved locally; normal
+source refreshes can now fetch historical markets. Live checks confirmed BASIC
+access from July 2015 through October 2026. Fixed GET for `GetMyData` (POST returned
+405), accepted the current `/xds_nfs/edp_processed/BASIC/` file layout, and added
+specific connection diagnostics. Five real markets from 31 October downloaded,
+validated and published, with zero failures. The main refresh subsequently completed
+the remaining 87 markets from that day. Conflicting accepted BSP values were
+preserved for review. Initial setup evidence: `data/audit/betfair_connection_20261106/`;
+main-path qualification: `data/audit/betfair_consolidation_20261106/`.
+The certificate/key and encrypted connection remain in `data/betfair/auth/`.
 See [setup details](docs/operations/BETFAIR_HISTORY_AUTOMATION.md).
 
 ## ATR backfill

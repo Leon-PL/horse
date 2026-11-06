@@ -1,16 +1,12 @@
-"""Bounded ATR and public BSP refreshes using the existing source parsers."""
+"""Bounded ATR and full Betfair historical refreshes for the source coordinator."""
 from datetime import date, datetime, timedelta, timezone
-import hashlib
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 import config
 from src import database
-from src.betfair import attach_bsp, bf_track_key, bf_horse_key
-from src.utils import normalise_off_time_key
-from src.ingestion.storage import atomic_json, atomic_parquet, read_json, writer_lock
+from src.ingestion.storage import atomic_json, read_json, writer_lock
 
 
 def _utc_now():
@@ -101,127 +97,24 @@ def refresh_atr(start, end, *, max_races=50):
             "eligible_races": len(eligible), "excluded_races": len(races)-len(eligible)}
 
 
-def _price_keys(frame):
-    frame = frame.copy()
-    frame["race_date"] = pd.to_datetime(frame.race_date).dt.strftime("%Y-%m-%d")
-    frame["track_key"] = frame.track.map(bf_track_key)
-    frame["off_key"] = frame.off_time.map(normalise_off_time_key)
-    frame["horse_key"] = frame.horse_name.map(bf_horse_key)
-    return frame
-
-
-def merge_public_bsp(existing, incoming):
-    """Fill absent BSP only; preserve archive timestamps and every known price.
-
-    No public VWAP is substituted for a timed archive trade. Ambiguous source
-    identities are rejected, including conflicting duplicate public prices.
-    """
-    keys = ["race_date", "track_key", "off_key", "horse_key"]
-    left, right = _price_keys(existing), _price_keys(incoming)
-    for frame in (left, right):
-        frame.drop_duplicates(inplace=True)
-        if frame.duplicated(keys).any():
-            raise ValueError("Ambiguous BSP identities; canonical merge was not published")
-    right = right.loc[np.isfinite(right.bsp) & right.bsp.gt(1)].copy()
-    right["bsp_source"] = "public_daily"
-    if "selection_id" in right:
-        right["bf_runner_id"] = right.selection_id
-    # Archive IDs are integers, while the public CSV parser retains strings.
-    # Use nullable integers on both sides before concatenating/serialising.
-    for frame in (left, right):
-        if "bf_runner_id" in frame:
-            frame["bf_runner_id"] = pd.to_numeric(frame.bf_runner_id, errors="raise").astype("Int64")
-    right["n_runners"] = right.groupby(keys[:3]).bsp.transform("size")
-    indexed = left.set_index(keys)
-    additions = right.set_index(keys)
-    overlap = indexed.index.intersection(additions.index)
-    known = pd.to_numeric(indexed.loc[overlap, "bsp"], errors="coerce")
-    proposed = pd.to_numeric(additions.loc[overlap, "bsp"], errors="coerce")
-    conflicts = int((known.gt(1) & ~np.isclose(known, proposed)).sum())
-    missing = known.index[~np.isfinite(known) | known.le(1)]
-    indexed.loc[missing, "bsp"] = additions.loc[missing, "bsp"]
-    if "bsp_source" in indexed:
-        indexed.loc[missing, "bsp_source"] = "public_daily"
-    new = additions.loc[~additions.index.isin(indexed.index)]
-    if not indexed.empty:
-        new = new.reindex(columns=indexed.columns)
-    out = pd.concat([indexed, new], sort=False).reset_index()
-    return out, {"new_rows": len(new), "filled_prices": len(missing), "preserved_conflicts": conflicts}
-
-
-def _bsp_signature(paths, cache_path, fields, start, end):
-    """An unchanged refresh needs neither a whole-cache merge nor another join.
-
-    Hash contents rather than timestamps: external archive repairs and public
-    files replaced with preserved metadata must invalidate the receipt too.
-    """
-    digest = hashlib.sha256(f"{start}/{end}".encode())
-    digest.update(pd.util.hash_pandas_object(fields, index=False).values.tobytes())
-    source = Path(__file__).resolve()
-    project = Path(config.BASE_DIR)
-    dependencies = [source, project/"src/betfair.py", project/"src/utils.py",
-                    project/"src/ingestion/betfair_public.py"]
-    for path in [*dependencies, *paths, cache_path]:
-        digest.update(str(path).encode())
-        if path.exists():
-            with path.open("rb") as stream:
-                digest.update(hashlib.file_digest(stream, "sha256").digest())
-        else:
-            digest.update(b"missing")
-    return digest.hexdigest()
-
-
-def _refresh_public_bsp(start, end):
-    from src.ingestion.betfair_public import download, raw_path, parse_file
-    raw_dir = Path(config.DATA_DIR)/"betfair_sp_public"
-    stats = download(date.fromisoformat(start), date.fromisoformat(end), raw_dir=str(raw_dir))
-    paths = []
-    for offset in range((date.fromisoformat(end)-date.fromisoformat(start)).days+1):
-        day = date.fromisoformat(start)+timedelta(days=offset)
-        for region in ("uk", "ire"):
-            path = Path(raw_path("win", region, day, raw_dir=str(raw_dir)))
-            if path.exists():
-                paths.append((path, region))
-    path = Path(config.PROCESSED_DATA_DIR)/"betfair_bsp.parquet"
-    fields = canonical_fields(start, end)
-    receipt_path = Path(config.DATA_DIR)/"source_refresh/bsp_receipt.json"
-    signature = _bsp_signature([p for p, _ in paths], path, fields, start, end)
-    receipt = read_json(receipt_path)
-    if receipt.get("signature") == signature:
-        return {**receipt["coverage"], **stats, "state": "partial" if stats["failed"] else "cached",
-                "new_rows": 0, "filled_prices": 0, "start": start, "end": end}
-    frames = [parse_file(str(p), region) for p, region in paths]
-    existing = pd.read_parquet(path) if path.exists() else pd.DataFrame(
-        columns=["race_date", "track", "off_time", "horse_name", "bsp"])
-    merge = {"new_rows": 0, "filled_prices": 0, "preserved_conflicts": 0}
-    if frames:
-        combined, merge = merge_public_bsp(existing, pd.concat(frames, ignore_index=True))
-        if merge["new_rows"] or merge["filled_prices"]:
-            atomic_parquet(combined, path)
-            existing = combined
-    matched = attach_bsp(fields, existing, cols=("bsp",))
-    complete = matched.assign(matched=np.isfinite(matched.bsp) & matched.bsp.gt(1)).groupby("race_id").matched.all()
-    pending = int((~complete).sum())
-    coverage = {"coverage_state": "partial" if pending else "complete", "fallback_fields": pending,
-                "pending_fields": pending, "complete_fields": int(complete.sum()),
-                "preserved_conflicts": merge["preserved_conflicts"]}
-    atomic_json(receipt_path, {"signature": _bsp_signature([p for p, _ in paths], path, fields, start, end),
-                               "coverage": coverage})
-    return {**stats, **merge, **coverage, "state": "partial" if stats["failed"] else "ok",
-            "start": start, "end": end}
-
-
-def refresh_bsp(start, end):
-    """Daily BSP plus optional full historical-market downloads after setup."""
+def refresh_betfair(start, end):
+    """Refresh full market streams; publication lag remains explicit."""
     from src.ingestion.betfair_history import configured, sync_history, HistoryError
-    report = _refresh_public_bsp(start, end)
-    if configured():
-        last = min(date.fromisoformat(end), date.today()-timedelta(days=6))
-        if date.fromisoformat(start) > last:
-            report["history"] = {"state": "awaiting_publication", "available_through": str(last)}
-        else:
-            try:
-                report["history"] = sync_history(start, str(last), budget=500, _source_lock_held=True)
-            except HistoryError as error:
-                report["history"] = {"state": "needs_login", "error": str(error)}
-    return report
+    if not configured():
+        return {"state": "needs_login", "reason": "Connect Betfair under Data → Historical exchange data"}
+    first = date.fromisoformat(start)
+    last = min(date.fromisoformat(end), _utc_now().date()-timedelta(days=6))
+    if first > last:
+        return {"state": "awaiting_publication", "available_through": str(last),
+                "start": start, "end": end, "publication_lag_days": 6}
+    try:
+        report = sync_history(start, str(last), budget=500, _source_lock_held=True)
+    except HistoryError as error:
+        report = {"state": "needs_login", "error": str(error)}
+    deferred = max(0, (date.fromisoformat(end)-last).days)
+    if deferred and report["state"] in {"ok", "cached"}:
+        report["state"] = "partial"
+    if report["state"] == "busy":
+        report["backfill"] = read_json(Path(config.DATA_DIR)/"betfair/history/status.json")
+    return {**report, "available_through": str(last), "deferred_recent_days": deferred,
+            "publication_lag_days": 6}

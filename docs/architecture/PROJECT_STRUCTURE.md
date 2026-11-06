@@ -18,12 +18,12 @@ horse/
       pedigree.py                         horse profile collection
       racing_tv.py                        RTV raw payloads and parsing
       rtv_observations.py                 RTV run, card and text materialisation
-      auxiliary.py                        bounded ATR/BSP refresh operations
+      auxiliary.py                        bounded ATR/Betfair refresh operations
       attheraces.py                       ATR requests, parsing and normal backfill
       atr_rebuild.py                      durable ATR backfill worker
       atr_tabs.py                         ATR contract: tabs, columns, cache reader
       atr_jumps.py                        ATR jumps data
-      betfair_public.py                   public daily BSP files
+      betfair_archives.py                 verified deduplication and replay of existing downloads
       betfair_streams.py                  BASIC market-stream parsers
       betfair_history.py                  full historical market downloads and import
       betfair_credentials.py              Windows-encrypted account connection

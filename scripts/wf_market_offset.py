@@ -69,7 +69,7 @@ from src.wf_eval import (
 
 DIAG = ["race_id", "race_date", "won", "track", "off_time", "horse_name",
         "num_runners", "race_type"]
-PUBLIC_BSP_PATH = os.path.join("data", "processed", "betfair_sp_public.parquet")
+PUBLIC_BSP_PATH = os.path.join("data", "research", "betfair_public_legacy", "prices.parquet")
 
 #: Pre-registered. Strong regularisation: the residual is small (ledger 2:
 #: beta ~0.97 means the market carries ~20x the model's information).
@@ -100,7 +100,7 @@ def _prices(df: pd.DataFrame, protocol: str) -> pd.DataFrame:
         out["_entry"] = pd.to_numeric(out["ltp_300s"], errors="coerce")
     elif protocol == "morning":
         if not os.path.exists(PUBLIC_BSP_PATH):
-            raise SystemExit(f"{PUBLIC_BSP_PATH} missing: run scripts/fetch_betfair_sp_public.py --build")
+            raise SystemExit(f"{PUBLIC_BSP_PATH} missing: restore the frozen public research dataset")
         public = pd.read_parquet(PUBLIC_BSP_PATH)
         out = attach_bsp(df, public, cols=("bsp", "morningwap"))
         out["_entry"] = pd.to_numeric(out["morningwap"], errors="coerce")
