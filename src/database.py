@@ -19,7 +19,6 @@ Usage::
     print(db_stats())
 """
 
-import io
 import logging
 import hashlib
 import json
@@ -292,7 +291,7 @@ RESULTS_SNAPSHOT_COLUMNS = {
     "horse_places": "whole", "surface": "text", "handicap": "whole", "sire": "text",
     "dam": "text", "damsire": "text", "weather_temp_max": "real", "weather_temp_min": "real",
     "weather_precip_mm": "real", "weather_wind_kmh": "real",
-    "weather_precip_prev3": "csv_parsed_real", "opening_odds": "real",
+    "weather_precip_prev3": "real", "opening_odds": "real",
     "wind_surgery": "real", "finish_pos_label": "text",
 }
 
@@ -322,22 +321,8 @@ def _snapshot_real(series: pd.Series) -> pd.Series:
     return _snapshot_number(series).astype("float64")
 
 
-def _snapshot_csv_parsed_real(series: pd.Series) -> pd.Series:
-    """Floats as the fast CSV parser reads them back from their shortest text.
-
-    This column sums rainfall readings, so it has long decimals, and the history
-    has always held the parser's slightly inexact result. Using the database's
-    value instead would move 62,189 rows by up to 7e-15 and change the data
-    signature, so that switch belongs with a planned rebuild.
-    """
-    text = io.StringIO(_snapshot_real(series).to_csv(index=False))
-    parsed = pd.read_csv(text, dtype="float64", skip_blank_lines=False).iloc[:, 0]
-    return pd.Series(parsed.to_numpy(), index=series.index, name=series.name)
-
-
 _SNAPSHOT_KINDS = {"text": (_snapshot_text, "string"), "whole": (_snapshot_whole, "int64"),
-                   "real": (_snapshot_real, "float64"),
-                   "csv_parsed_real": (_snapshot_csv_parsed_real, "float64")}
+                   "real": (_snapshot_real, "float64")}
 
 
 def results_snapshot_frame(frame: pd.DataFrame) -> pd.DataFrame:

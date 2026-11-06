@@ -11,7 +11,7 @@ from src.database import (RESULTS_SNAPSHOT_COLUMNS, _export_results_snapshot, re
 
 
 def history(rows=2, **changes):
-    example = {"text": "x", "whole": 1, "real": 1.5, "csv_parsed_real": 1.5}
+    example = {"text": "x", "whole": 1, "real": 1.5}
     frame = pd.DataFrame({name: [example[kind]] * rows for name, kind in RESULTS_SNAPSHOT_COLUMNS.items()})
     for name, values in changes.items():
         frame[name] = values
@@ -98,8 +98,8 @@ def test_a_column_that_is_not_declared_stops_publication(change):
         results_snapshot_frame(frame)
 
 
-def test_rainfall_totals_are_read_as_the_csv_parser_read_them():
-    values = [0.30000000000000004, np.nan, 1.5]
-    typed = results_snapshot_frame(history(3, weather_precip_prev3=values)).weather_precip_prev3
-    assert typed.iloc[0] == 0.3 and np.isnan(typed.iloc[1]) and typed.iloc[2] == 1.5
-    assert results_snapshot_frame(history(3, weather_precip_mm=values)).weather_precip_mm.iloc[0] == values[0]
+def test_a_long_decimal_keeps_every_bit_of_the_database_value(tmp_path):
+    path = tmp_path / "history.parquet"
+    _export_results_snapshot(history(weather_precip_prev3=[0.30000000000000004, np.nan]), path)
+    back = read_results_snapshot(path).weather_precip_prev3
+    assert back.iloc[0] == 0.30000000000000004 and np.isnan(back.iloc[1])
