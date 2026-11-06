@@ -2520,7 +2520,7 @@ def add_atr_features(df: pd.DataFrame) -> pd.DataFrame:
     upgrade, (3) early-pace / closing run-style (feeds ``add_pace_style``),
     (4) closing speed "in hand", (5) stride biomechanics + energy efficiency.
     """
-    from src.attheraces_scraper import merge_atr_sectionals, ALL_ATR_COLS
+    from src.atr_features import merge_atr_sectionals, ALL_ATR_COLS
     from src.atr_features import compute_atr_run_features, RUN_METRICS, COMMENT_TAGS
 
     logger.info("Engineering ATR sectional features...")

@@ -29,13 +29,14 @@ Challenged responses are retryable blocks and never confirmed absence.
 
 Usage::
 
-    from src.attheraces_scraper import (
-        fetch_atr_sectionals, backfill_atr_sectionals, merge_atr_sectionals,
-    )
+    from src.ingestion.attheraces import fetch_atr_sectionals, backfill_atr_sectionals
 
     rows = fetch_atr_sectionals("2026-06-10", "Kempton", "18:10")
     backfill_atr_sectionals(max_races=50)
-    df = merge_atr_sectionals(results_df)
+
+Feature building joins the accepted cache with
+:func:`src.atr_features.merge_atr_sectionals`. The columns, the cache location and
+the cache reader are in :mod:`src.ingestion.atr_tabs`, which both sides import.
 
 ATR/TPD sectional coverage is mostly UK tracks (all-weather plus many
 turf courses from ~2021 on); Irish meetings are largely uncovered.  A
@@ -56,7 +57,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from email.utils import parsedate_to_datetime
@@ -67,10 +67,12 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
-from src.ingestion.atr_tabs import (COLLECTION_VERSION, PERFORMANCE_TABS,
-                                    EXTRA_METRICS, EXTRA_TEXT, EXTRA_ARRAYS, signal_runner_count)
+from src.ingestion.atr_tabs import (ALL_ATR_COLS, ATR_ARRAY_COLS, ATR_CACHE_DIR, ATR_CACHE_FILE,
+                                    COLLECTION_VERSION, EXTRA_ARRAYS, EXTRA_METRICS, EXTRA_TEXT,
+                                    PERFORMANCE_TABS, current_collection_rows, load_atr_cache,
+                                    signal_runner_count)
 from src.utils import (
-    normalise_horse_key as _normalise_horse_key,
+    normalise_horse_key as _normalise_horse_key,  # noqa: F401  the worker calls it through this module
     normalise_off_time_key as _normalise_off_time_key,
     normalise_track_key as _normalise_track_key,
 )
@@ -116,80 +118,11 @@ _PUBLICATION_DELAY_HOURS = 48
 # These must NOT be cached as no-data — they are transient.
 _BLOCKED_STATUSES = {403, 429, 503}
 
-ATR_CACHE_DIR = os.path.join(config.DATA_DIR, "atr_cache")
-ATR_CACHE_FILE = os.path.join(ATR_CACHE_DIR, "atr_sectionals.parquet")
 # Absence under the old three-tab contract does not establish five-tab absence.
 ATR_NO_DATA_FILE = os.path.join(ATR_CACHE_DIR, "atr_no_data_keys_v3.json")
 ATR_INDEX_DIR = os.path.join(ATR_CACHE_DIR, "results_index")
 os.makedirs(ATR_CACHE_DIR, exist_ok=True)
 
-# Scalar numeric feature columns (NaN when absent) exposed by the merge.
-ATR_METRIC_COLS = [
-    "atr_final_time",            # total race time for the runner (seconds)
-    "atr_finishing_speed_pct",   # finishing speed as % of average (TPD)
-    "atr_efficiency_score",      # TPD efficiency score
-    "atr_peak_stride_length",    # peak stride length (TPD units)
-    "atr_peak_stride_freq",      # peak stride frequency (strides/sec)
-    "atr_n_sections",            # number of furlong splits captured
-    "atr_adj_placing",           # sectional-adjusted finishing placing
-    "atr_top_speed_mph",
-    "atr_final_speed_mph",       # instantaneous finish speed, not final section
-    "atr_acceleration_0_30_seconds",
-    "atr_race_finishing_speed_pct",
-    "atr_first_section_furlongs",
-    "atr_field_expected_runners",
-    "atr_field_provided_runners",
-]
-
-# Text / identifier columns carried through the merge.
-ATR_TEXT_COLS = [
-    "atr_raceid",
-    "atr_horse_id",
-    "atr_saddle_cloth",
-    "atr_draw",
-    "atr_official_position",
-    "atr_efficiency_grade",
-    "atr_in_running_comment",
-    "atr_race_early_pace",
-    "atr_race_early_pace_flag",
-    "atr_race_finishing_pace_flag",
-    "atr_parser_version",
-    "atr_source_race_date",
-    "atr_source_off_time_local",
-    "atr_field_coverage",
-]
-
-# Variable-length per-furlong series, stored as JSON strings so the cache
-# stays a flat parquet table. Source labels/units and unknown chart series
-# are retained as well as the standard numeric arrays.
-ATR_ARRAY_COLS = [
-    "atr_section_markers",       # ["5f","4f",...,"Fin."]
-    "atr_split_times",           # per-furlong split time (s)
-    "atr_running_totals",        # cumulative time at each marker (s)
-    "atr_pace_flags",            # per-split pace class (even / fast / slow ...)
-    "atr_sectional_speeds",      # segment speeds (mph)
-    "atr_sectional_speed_labels",
-    "atr_energy_dist",           # energy distribution % per marker
-    "atr_optimum_energy",        # optimum energy distribution % per marker
-    "atr_stride_length",         # stride length per marker
-    "atr_stride_frequency",      # strides/second per marker
-    "atr_stride_markers",
-    "atr_stride_frequency_markers",
-    "atr_stride_length_reference",
-    "atr_stride_frequency_reference",
-    "atr_front_flags",
-    "atr_section_notes",
-    "atr_race_pace_profile",      # published colour stops; no inferred speeds
-    "atr_source_metrics",        # labelled values with units, including extras
-    "atr_source_charts",         # full labelled stride chart inputs
-    "atr_source_payloads",       # fragment URL/status/hash provenance
-    "atr_field_missing_runners", # canonical runners absent from source tables
-]
-
-ATR_METRIC_COLS += EXTRA_METRICS
-ATR_TEXT_COLS += EXTRA_TEXT
-ATR_ARRAY_COLS += EXTRA_ARRAYS
-ALL_ATR_COLS = ATR_METRIC_COLS + ATR_TEXT_COLS + ATR_ARRAY_COLS
 
 # Every known performance endpoint is checked, even when not advertised for a
 # particular race. The page-inventory guard separately flags unknown new tabs.
@@ -406,7 +339,7 @@ class _Fetcher:
         # Retain the exact decoded input to the parsers, including real status
         # codes. This permits diagnosis/reparse without repeating HTTP requests.
         if self._raw_store is None:
-            from src.source_storage import RawPayloadStore
+            from src.ingestion.storage import RawPayloadStore
             self._raw_store = RawPayloadStore(self.raw_store_path)
         digest = self._raw_store.put(url, status, text.encode("utf-8"))
         self.last_response = {"url": url, "status": status, "sha256": digest}
@@ -504,7 +437,7 @@ def _results_index(fetcher: "_Fetcher", atr_date: str) -> tuple[str, dict[str, s
     index_dir = getattr(fetcher, "index_dir", None)
     index_path = Path(index_dir)/f"{atr_date}.json" if index_dir is not None else None
     if index_path is not None and index_path.exists():
-        from src.source_storage import read_json
+        from src.ingestion.storage import read_json
         try:
             receipt = read_json(index_path)
             value = receipt["race_ids"]
@@ -538,7 +471,7 @@ def _results_index(fetcher: "_Fetcher", atr_date: str) -> tuple[str, dict[str, s
         return BLOCKED, {}
     indexes[atr_date] = value
     if index_path is not None:
-        from src.source_storage import atomic_json
+        from src.ingestion.storage import atomic_json
         atomic_json(index_path, {"source_url": f"{ATR_BASE}/results/{atr_date}",
                                  "retrieved_at": datetime.now().isoformat(), "race_ids": value})
     return DATA, value
@@ -1037,20 +970,6 @@ def fetch_atr_sectionals(
 # Cache management
 # ---------------------------------------------------------------------------
 
-def load_atr_cache() -> pd.DataFrame:
-    """Load cached ATR sectionals (or return empty frame)."""
-    if os.path.exists(ATR_CACHE_FILE):
-        return pd.read_parquet(ATR_CACHE_FILE)
-    return pd.DataFrame()
-
-
-def current_collection_rows(cache: pd.DataFrame) -> pd.DataFrame:
-    """A previously cached runner is not proof that newer tabs were collected."""
-    if 'atr_collection_version' not in cache:
-        return cache.iloc[:0]
-    return cache.loc[cache.atr_collection_version.astype(str).eq(str(COLLECTION_VERSION))]
-
-
 def _encode_arrays(df: pd.DataFrame) -> pd.DataFrame:
     """JSON-encode list-valued columns so the parquet stays flat/portable."""
     out = df.copy()
@@ -1064,7 +983,7 @@ def _encode_arrays(df: pd.DataFrame) -> pd.DataFrame:
 
 def save_atr_cache(df: pd.DataFrame) -> None:
     """Save the ATR sectionals cache."""
-    from src.source_storage import atomic_parquet
+    from src.ingestion.storage import atomic_parquet
     atomic_parquet(_encode_arrays(df), ATR_CACHE_FILE)
     logger.info("Saved ATR cache: %d rows -> %s", len(df), ATR_CACHE_FILE)
 
@@ -1089,7 +1008,7 @@ def _load_no_data_race_keys() -> set[str]:
 
 
 def _save_no_data_race_keys(keys: set[str]) -> None:
-    from src.source_storage import atomic_json
+    from src.ingestion.storage import atomic_json
     payload = {"updated_at": datetime.now().isoformat(), "race_keys": sorted(keys)}
     atomic_json(ATR_NO_DATA_FILE, payload)
 
@@ -1130,7 +1049,7 @@ def backfill_atr_sectionals(
 def _exclusive_collection(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
-        from src.source_storage import writer_lock
+        from src.ingestion.storage import writer_lock
         with writer_lock(Path(ATR_CACHE_FILE).parent/'.collector.lock') as acquired:
             if not acquired:
                 raise RuntimeError('An ATR collector is already running')
@@ -1334,98 +1253,6 @@ def backfill_atr_sectionals_for_races(
         "deferred_recent_races": deferred_recent,
         "aborted_blocked": aborted,
     }
-
-
-# ---------------------------------------------------------------------------
-# Merge helper (used by feature_engineer)
-# ---------------------------------------------------------------------------
-
-_ATR_MERGE_KEYS = ["_rd", "_trk", "_ot", "_hn"]
-
-
-def _atr_merge_table(cache: pd.DataFrame) -> pd.DataFrame:
-    """The cache as unique merge keys plus every ATR column."""
-    cache = cache.copy()
-    cache["_rd"] = pd.to_datetime(cache["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    cache["_trk"] = cache["track"].map(_normalise_track_key)
-    cache["_ot"] = cache["off_time"].map(_normalise_off_time_key)
-    cache["_hn"] = cache["horse_name"].map(_normalise_horse_key)
-
-    for c in ALL_ATR_COLS:
-        if c not in cache.columns:
-            cache[c] = float("nan")
-
-    merge_cols = _ATR_MERGE_KEYS + ALL_ATR_COLS
-    keys = _ATR_MERGE_KEYS
-    cache_slim = cache[merge_cols].drop_duplicates(subset=keys+["atr_horse_id"], keep="last")
-    return cache_slim.loc[~cache_slim.duplicated(keys,keep=False)]
-
-
-_merge_table_scope: list | None = None
-
-
-@contextmanager
-def atr_merge_scope():
-    """Prepare the cache once for a build that merges it chunk by chunk."""
-    global _merge_table_scope
-    _merge_table_scope = []
-    try:
-        yield
-    finally:
-        _merge_table_scope = None
-
-
-def _merge_table() -> pd.DataFrame | None:
-    """The prepared cache, or None when there is nothing to join."""
-    if _merge_table_scope:
-        return _merge_table_scope[0]
-    cache = load_atr_cache()
-    table = None if cache.empty else _atr_merge_table(cache)
-    if _merge_table_scope is not None:
-        _merge_table_scope.append(table)
-    return table
-
-
-def merge_atr_sectionals(df: pd.DataFrame) -> pd.DataFrame:
-    """Left-join cached ATR sectionals onto a race DataFrame.
-
-    Matches on ``(race_date, track, off_time, horse_name)`` using the
-    shared normalisers.  All ATR columns are added (NaN where absent);
-    per-furlong series remain JSON strings (see :data:`ATR_ARRAY_COLS`).
-    Only the keys take part in the join, so a wide frame is not copied.
-    """
-    cache_slim = _merge_table()
-    if cache_slim is None:
-        for c in ALL_ATR_COLS:
-            df[c] = float("nan")
-        return df
-
-    keys = _ATR_MERGE_KEYS
-    df["_rd"] = pd.to_datetime(df["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df["_trk"] = df["track"].map(_normalise_track_key)
-    df["_ot"] = df["off_time"].map(_normalise_off_time_key)
-    df["_hn"] = df["horse_name"].map(_normalise_horse_key)
-    ambiguous_left = df.duplicated(keys,keep=False).to_numpy()
-
-    joined = df[keys].merge(
-        cache_slim.loc[cache_slim["_rd"].isin(df["_rd"].unique())],
-        on=keys, how="left", indicator="_atr_merge", validate="many_to_one",
-    )
-    merged = pd.concat(
-        [df.drop(columns=keys).reset_index(drop=True), joined.drop(columns=keys)], axis=1,
-    )
-
-    for c in ALL_ATR_COLS:
-        if c not in merged.columns:
-            merged[c] = float("nan")
-    merged.loc[ambiguous_left,ALL_ATR_COLS] = float("nan")
-
-    matched = (merged["_atr_merge"] == "both") & ~ambiguous_left
-    logger.info(
-        "ATR merge: key matches %d / %d (%.1f%%)",
-        int(matched.sum()), len(merged), 100 * matched.sum() / max(1, len(merged)),
-    )
-    return merged.drop(columns=["_atr_merge"], errors="ignore")
 
 
 # ---------------------------------------------------------------------------

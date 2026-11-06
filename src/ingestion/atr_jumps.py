@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from bs4 import BeautifulSoup
 
-from src.attheraces_scraper import _Fetcher, _runner_meta, _sectional_entries
+from src.ingestion.attheraces import _Fetcher, _runner_meta, _sectional_entries
 from src.ingestion.storage import atomic_json
 
 PARSER_VERSION = 1

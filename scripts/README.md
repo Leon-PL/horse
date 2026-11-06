@@ -8,7 +8,7 @@ Use `--help` before deliberate backfills, repairs or model installation.
 |---|---|
 | Check installed state | `project_status.py`, `validate_data_contracts.py` |
 | Collect history | `python -m src.ingestion`; `fetch_betfair_sp_public.py`, `backfill_pedigree.py`, `backfill_rtv_text.py` for explicit specialist jobs |
-| Resume ATR five-tab backfill | `python -m src.atr_rebuild --request-delay 2`; first check its status so a second worker is not launched; see [tab coverage](../docs/operations/ATR_TAB_COVERAGE_2026-11-06.md) |
+| Resume ATR five-tab backfill | `python -m src.ingestion.atr_rebuild --request-delay 2`; first check its status so a second worker is not launched; see [tab coverage](../docs/operations/ATR_TAB_COVERAGE_2026-11-06.md) |
 | Inspect one ATR jumps result | `python -m src.ingestion.atr_jumps --help`; explicit native race ID and racecard URL; keeps its observation separate from the sectional cache |
 | Automatic Betfair archives | Set up **Data → Historical exchange data**, or use `python -m src.ingestion.betfair_history --start YYYY-MM-DD`; `setup_betfair_history.ps1 -CreateCertificate` prepares the local certificate |
 | Recover or repair results | `backfill_missing_races.py`, `reconcile_result_fields.py`, `repair_overfull_fields.py`; each publishes the CSV through `publish_after_repair`. Inspect their scope and audit outputs |

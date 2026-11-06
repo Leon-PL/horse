@@ -71,7 +71,7 @@ with distance, including the three jumps rows from the user's Chepstow example.
 Legacy receipts without signal counts are explicitly `legacy_received` until
 rechecked. Source signal detection and tab coverage share one definition.
 
-**Current raw-worker pins:** `attheraces_scraper.py`, `atr_rebuild.py`,
+**Current raw-worker pins:** `ingestion/attheraces.py`, `ingestion/atr_rebuild.py`,
 `ingestion/atr_tabs.py` and `ingestion/atr_jumps.py`. Stop and review before
 editing these four files. Earlier two-file pin lists below are superseded;
 `atr_features.py` remains outside this guard. Evidence and the consistent backup

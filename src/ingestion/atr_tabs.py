@@ -1,10 +1,18 @@
-"""ATR tab inventory and additional raw performance parsers, without features."""
+"""The ATR source contract and extra tab parsers, without features.
+
+Collection and feature building both read this module: the tabs, the accepted
+columns, the cache location and the cache reader. It imports no feature code.
+"""
 from datetime import datetime
 import math
+import os
 import re
 from urllib.parse import parse_qs, urlsplit
 
 from bs4 import BeautifulSoup
+import pandas as pd
+
+import config
 
 COLLECTION_VERSION = 3
 PERFORMANCE_TABS = ("times", "tools", "stride", "jumpsdata", "distanceran")
@@ -23,6 +31,91 @@ EXTRA_TEXT = ["atr_jump_fluency_grade", "atr_jumps_par_updated_date",
               "atr_collection_version", "atr_jumps_source_reference", "atr_distance_source_status"]
 EXTRA_ARRAYS = ["atr_jumps_source_metrics", "atr_jumps_quality_flags", "atr_jumps_help",
                 "atr_tab_manifest"]
+
+ATR_CACHE_DIR = os.path.join(config.DATA_DIR, "atr_cache")
+ATR_CACHE_FILE = os.path.join(ATR_CACHE_DIR, "atr_sectionals.parquet")
+
+# Scalar numeric feature columns (NaN when absent) exposed by the merge.
+ATR_METRIC_COLS = [
+    "atr_final_time",            # total race time for the runner (seconds)
+    "atr_finishing_speed_pct",   # finishing speed as % of average (TPD)
+    "atr_efficiency_score",      # TPD efficiency score
+    "atr_peak_stride_length",    # peak stride length (TPD units)
+    "atr_peak_stride_freq",      # peak stride frequency (strides/sec)
+    "atr_n_sections",            # number of furlong splits captured
+    "atr_adj_placing",           # sectional-adjusted finishing placing
+    "atr_top_speed_mph",
+    "atr_final_speed_mph",       # instantaneous finish speed, not final section
+    "atr_acceleration_0_30_seconds",
+    "atr_race_finishing_speed_pct",
+    "atr_first_section_furlongs",
+    "atr_field_expected_runners",
+    "atr_field_provided_runners",
+]
+
+# Text / identifier columns carried through the merge.
+ATR_TEXT_COLS = [
+    "atr_raceid",
+    "atr_horse_id",
+    "atr_saddle_cloth",
+    "atr_draw",
+    "atr_official_position",
+    "atr_efficiency_grade",
+    "atr_in_running_comment",
+    "atr_race_early_pace",
+    "atr_race_early_pace_flag",
+    "atr_race_finishing_pace_flag",
+    "atr_parser_version",
+    "atr_source_race_date",
+    "atr_source_off_time_local",
+    "atr_field_coverage",
+]
+
+# Variable-length per-furlong series, stored as JSON strings so the cache
+# stays a flat parquet table. Source labels/units and unknown chart series
+# are retained as well as the standard numeric arrays.
+ATR_ARRAY_COLS = [
+    "atr_section_markers",       # ["5f","4f",...,"Fin."]
+    "atr_split_times",           # per-furlong split time (s)
+    "atr_running_totals",        # cumulative time at each marker (s)
+    "atr_pace_flags",            # per-split pace class (even / fast / slow ...)
+    "atr_sectional_speeds",      # segment speeds (mph)
+    "atr_sectional_speed_labels",
+    "atr_energy_dist",           # energy distribution % per marker
+    "atr_optimum_energy",        # optimum energy distribution % per marker
+    "atr_stride_length",         # stride length per marker
+    "atr_stride_frequency",      # strides/second per marker
+    "atr_stride_markers",
+    "atr_stride_frequency_markers",
+    "atr_stride_length_reference",
+    "atr_stride_frequency_reference",
+    "atr_front_flags",
+    "atr_section_notes",
+    "atr_race_pace_profile",      # published colour stops; no inferred speeds
+    "atr_source_metrics",        # labelled values with units, including extras
+    "atr_source_charts",         # full labelled stride chart inputs
+    "atr_source_payloads",       # fragment URL/status/hash provenance
+    "atr_field_missing_runners", # canonical runners absent from source tables
+]
+
+ATR_METRIC_COLS += EXTRA_METRICS
+ATR_TEXT_COLS += EXTRA_TEXT
+ATR_ARRAY_COLS += EXTRA_ARRAYS
+ALL_ATR_COLS = ATR_METRIC_COLS + ATR_TEXT_COLS + ATR_ARRAY_COLS
+
+
+def load_atr_cache() -> pd.DataFrame:
+    """Load cached ATR sectionals (or return empty frame)."""
+    if os.path.exists(ATR_CACHE_FILE):
+        return pd.read_parquet(ATR_CACHE_FILE)
+    return pd.DataFrame()
+
+
+def current_collection_rows(cache: pd.DataFrame) -> pd.DataFrame:
+    """A previously cached runner is not proof that newer tabs were collected."""
+    if 'atr_collection_version' not in cache:
+        return cache.iloc[:0]
+    return cache.loc[cache.atr_collection_version.astype(str).eq(str(COLLECTION_VERSION))]
 
 
 def inventory(html):
@@ -79,7 +172,7 @@ def signal_runner_count(kind, records):
 
 
 def parse_distance(html, race_id):
-    from src.attheraces_scraper import _runner_meta, _sectional_entries
+    from src.ingestion.attheraces import _runner_meta, _sectional_entries
     soup = BeautifulSoup(html, "html.parser")
     text = soup.get_text(" ", strip=True)
     if "Distance Ran compared to Race Median Average" not in text:

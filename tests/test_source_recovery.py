@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src import attheraces_scraper as atr
+from src.ingestion import attheraces as atr
 from src.ingestion import auxiliary
 from src.betfair import attach_bsp
 from src.ingestion.storage import atomic_json, writer_lock

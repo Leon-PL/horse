@@ -51,7 +51,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
-from src.attheraces_scraper import atr_merge_scope
+from src.atr_features import atr_merge_scope
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore, _stringify_objects

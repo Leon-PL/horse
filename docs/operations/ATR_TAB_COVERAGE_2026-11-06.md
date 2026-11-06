@@ -38,7 +38,7 @@ claim that all ATR editorial content or every pre-race snapshot is collected.
 
 ## Main scraper and ordinary refreshes
 
-`src/attheraces_scraper.py` requests `times`, `tools`, `stride`, `jumpsdata` and
+`src/ingestion/attheraces.py` requests `times`, `tools`, `stride`, `jumpsdata` and
 `distanceran`. New raw fields belong to `ALL_ATR_COLS`, so the existing feature
 boundary removes them until a historical derivation is deliberately added.
 Optional tabs do not overwrite the original three tabs' placing/comment
@@ -108,8 +108,8 @@ The initial deployment resumed at **12:08 UTC**; final reporting qualification
 and resumption completed at **12:30 UTC**, with the same two-second base gap
 plus jitter. Launcher PID **6748**, worker PID **16432**. Use the live status file
 rather than treating these PIDs as permanent. Collector pins now cover
-`attheraces_scraper.py`, `atr_rebuild.py`, `ingestion/atr_tabs.py` and
-`ingestion/atr_jumps.py`. Feature derivation remains outside this raw-worker
+`ingestion/attheraces.py`, `ingestion/atr_rebuild.py`, `ingestion/atr_tabs.py` and
+`ingestion/atr_jumps.py` (paths after the 6 November move). Feature derivation remains outside this raw-worker
 guard. Review and stop the worker before editing its four collection files.
 
 The old three-tab throughput figures are historical; they should not be reused
@@ -161,7 +161,7 @@ For current progress inspect:
 - `data/atr_cache/rebuild_v2/rebuild.sqlite`: jobs, runners and tab receipts.
 - `data/atr_cache/rebuild_v2/daily/`: derived exports, refreshed in batches.
 
-After shutdown, resume the same worker with `python -m src.atr_rebuild
+After shutdown, resume the same worker with `python -m src.ingestion.atr_rebuild
 --request-delay 2`. Do not run `--prepare` on this existing queue. The explicit
 `--upgrade-tabs` command is for a reviewed collection-contract migration, not a
 routine restart or a way to bypass an unexplained fingerprint mismatch.

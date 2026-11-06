@@ -19,6 +19,10 @@ horse/
       racing_tv.py                        RTV raw payloads and parsing
       rtv_observations.py                 RTV run, card and text materialisation
       auxiliary.py                        bounded ATR/BSP refresh operations
+      attheraces.py                       ATR requests, parsing and normal backfill
+      atr_rebuild.py                      durable ATR backfill worker
+      atr_tabs.py                         ATR contract: tabs, columns, cache reader
+      atr_jumps.py                        ATR jumps data
       betfair_public.py                   public daily BSP files
       betfair_streams.py                  BASIC market-stream parsers
       betfair_history.py                  full historical market downloads and import
@@ -29,7 +33,6 @@ horse/
       storage.py                          locks, raw payloads, atomic writes
       rtv_storage.py                      accepted RTV generations and partitions
     database.py, identity_schema.py        canonical result store and published CSV
-    attheraces_scraper.py, atr_rebuild.py   ATR collector and durable backfill
     betfair.py                            shared price matching
     data_processor.py                     load, clean and encode accepted history
     feature_*.py, fe_*.py, ratings.py       feature definitions and store
@@ -68,26 +71,29 @@ storage is in `src/database.py`, and cleaning is in `src/data_processor.py`.
 `scripts/` holds the commands that run those collectors over local archives; the
 application imports nothing from a collection script.
 
-ATR is the one exception so far. Its existing module combines collection with the
-sectional join consumed by feature building. Its file and the resumable worker stay
-at their stable paths because the active backfill pins them, and they are the only
-users of `src.source_storage`. Its queue and raw response store are separate from
-the accepted feature cache. `src/trainer_locations.py`, `scripts/fetch_bha_going.py`
-and `scripts/fetch_forecast_previous_runs.py` are one-off research collectors
-outside the normal plan.
+ATR follows the same rule. `src/ingestion/atr_tabs.py` is its contract: the columns,
+the cache location and the cache reader, which collection and feature building both
+use. The join into feature building, `merge_atr_sectionals`, is in `src/atr_features.py`,
+so editing the join does not stop the worker. The worker's queue and raw response
+store are separate from the accepted feature cache.
+
+`src/trainer_locations.py`, `scripts/fetch_bha_going.py` and
+`scripts/fetch_forecast_previous_runs.py` are one-off research collectors outside the
+normal plan.
 
 ## Compatibility
 
-The old `source_pipeline`, `source_auxiliary`, `rtv_storage`, `data_scraper` and
-`rtv_scraper` names were removed on 6 November, along with the extra commands that
-reached the same refresh. `python -m src.ingestion` is the collection command and
-`python -m src.ingestion.racing_tv` holds Racing TV's own tools. `src.source_storage`
-remains an alias for `src.ingestion.storage` until the ATR files move.
+The old `source_pipeline`, `source_auxiliary`, `source_storage`, `rtv_storage`,
+`data_scraper`, `rtv_scraper`, `attheraces_scraper` and `atr_rebuild` names were removed
+on 6 November, along with the extra commands that reached the same refresh.
+`python -m src.ingestion` is the collection command, `python -m src.ingestion.racing_tv`
+holds Racing TV's own tools, and `python -m src.ingestion.atr_rebuild` runs the ATR
+backfill worker.
 
 The feature dependency check now follows packages and `from src import ...`
 imports. Collection modules are explicitly classified as source producers;
 their accepted observations are covered by source/data fingerprints. The ATR
-join remains in the feature-code signature.
+join and its column contract remain in the feature-code signature.
 
 ## Stored data
 

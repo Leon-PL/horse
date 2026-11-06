@@ -116,8 +116,8 @@ def test_registered_sources_exist():
 
 
 def test_import_walk_follows_collection_package_and_compatibility_paths():
-    assert "ingestion.storage" in _src_imports("source_storage")
-    assert "ingestion" in _src_imports("source_storage")
+    assert "ingestion.atr_tabs" in _src_imports("atr_features")
+    assert "ingestion" in _src_imports("atr_features")
     assert "ingestion.racing_tv" in _src_imports("ingestion.pipeline")
     assert "ingestion.storage" in _src_imports("ingestion.sporting_life")
 

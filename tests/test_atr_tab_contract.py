@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
 
-from src import attheraces_scraper as atr, atr_rebuild as rebuild
+from src.ingestion import attheraces as atr, atr_rebuild as rebuild
 from src.ingestion import atr_tabs as tabs
 from src.ingestion.storage import RawPayloadStore
 from test_attheraces_scraper import _FakeFetcher

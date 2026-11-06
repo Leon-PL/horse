@@ -50,7 +50,7 @@ def fixture(days=24, *, seed=42):
 
 def derive(raw):
     raw = raw.sort_values(["race_date", "off_time", "race_id", "horse_name"], kind="stable").reset_index(drop=True)
-    with patch("src.attheraces_scraper.merge_atr_sectionals", side_effect=lambda df: df), patch.object(fe, "_COUNTS_STATE", None):
+    with patch("src.atr_features.merge_atr_sectionals", side_effect=lambda df: df), patch.object(fe, "_COUNTS_STATE", None):
         out = fe.add_race_relative_signal_features(fe.add_atr_features(raw))
     return out.set_index(["race_id", "horse_id"])
 

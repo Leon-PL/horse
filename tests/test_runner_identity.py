@@ -192,7 +192,7 @@ def test_result_settlement_associates_namesakes_with_their_own_outcomes():
 
 @pytest.mark.parametrize("side",["left","right","revision"])
 def test_atr_does_not_identify_distinct_horses_by_a_shared_display_name(monkeypatch,side):
-    from src import attheraces_scraper as atr
+    from src import atr_features as atr
     left=twins().assign(track="Kempton",off_time="12:00")
     cached=left.iloc[:1].assign(atr_horse_id="atr-1",atr_final_time=100.)
     if side != "left":
@@ -221,13 +221,13 @@ def test_rtv_name_snapshot_does_not_fill_both_namesakes():
 
 def test_feature_store_build_append_and_live_keep_namesakes_separate(tmp_path, monkeypatch):
     import config
-    from src import attheraces_scraper
+    from src import atr_features
     from src.data_processor import process_data
     from src.feature_store import FeatureStore
     from tests.test_live_parity import _synthetic_raw
 
     monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(attheraces_scraper, "load_atr_cache", pd.DataFrame)
+    monkeypatch.setattr(atr_features, "load_atr_cache", pd.DataFrame)
     raw = _synthetic_raw(n_days=8, races_per_day=1, field=2)
     raw["horse_id"] = [1, 2]*8
     raw["horse_name"] = "Sierra Nevada"

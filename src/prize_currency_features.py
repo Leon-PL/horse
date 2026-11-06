@@ -48,7 +48,7 @@ def reference_signature():
 
 
 def prepare_prize_references(frame):
-    """Refresh before cache lookup, so a new rate never mixes cache generations."""
+    """Read the references before the cache lookup. Refreshing is `ingestion.fx`'s job."""
     if not {"track", "race_date"}.issubset(frame):
         return
     unit_path, _ = _paths(); stat = unit_path.stat()

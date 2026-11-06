@@ -4,13 +4,10 @@ import importlib
 import pytest
 
 
-def test_storage_compatibility_import_shares_the_implementation():
-    assert importlib.import_module("src.source_storage") is importlib.import_module("src.ingestion.storage")
-
-
 @pytest.mark.parametrize("retired", [
     "source_pipeline", "source_auxiliary", "rtv_storage", "data_scraper", "rtv_scraper",
     "pedigree_backfill", "rtv_feature_collection", "weather", "bha_stewards_scraper",
+    "source_storage", "attheraces_scraper", "atr_rebuild",
 ])
 def test_retired_collection_names_stay_retired(retired):
     with pytest.raises(ModuleNotFoundError):

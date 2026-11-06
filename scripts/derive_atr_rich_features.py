@@ -22,7 +22,7 @@ from src.research.atr_rich_features import (  # noqa: E402
 )
 from src.runner_identity import horse_ids, identity_values  # noqa: E402
 from src.research import atr_new_tabs_features  # noqa: E402
-from src.atr_rebuild import CODE_FILES  # noqa: E402
+from src.ingestion.atr_rebuild import CODE_FILES  # noqa: E402
 
 
 def read_only(path):

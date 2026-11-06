@@ -124,7 +124,7 @@ def _make_history(monkeypatch):
     df = pd.DataFrame(rows)
     monkeypatch.setattr(fe, "_COUNTS_STATE", None, raising=False)
     # identity merge (df already carries the raw atr_* cols)
-    import src.attheraces_scraper as scr
+    import src.atr_features as scr
     monkeypatch.setattr(scr, "merge_atr_sectionals", lambda d: d)
     return df
 

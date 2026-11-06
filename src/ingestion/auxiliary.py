@@ -29,7 +29,7 @@ def _atr_race_keys(frame, atr):
 
 
 def refresh_atr(start, end, *, max_races=50):
-    from src import attheraces_scraper as atr
+    from src.ingestion import attheraces as atr
     if max_races < 1:
         raise ValueError("ATR request budget must be positive")
     rebuild_root = Path(config.DATA_DIR)/'atr_cache/rebuild_v2'

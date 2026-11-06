@@ -1,7 +1,7 @@
 """Regression tests for the At The Races sectionals scraper.
 
 These pin the pure helpers and HTML parsers in
-``src.attheraces_scraper`` against fixtures mirroring the live ATR
+``src.ingestion.attheraces`` against fixtures mirroring the live ATR
 ``/ajax/sectionals/{raceid}/{kind}`` fragment structure (captured June
 2026).  No network access is required.
 """
@@ -13,7 +13,9 @@ import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
 
-from src import attheraces_scraper as atr
+from src.ingestion import attheraces as atr
+from src.ingestion import atr_tabs
+from src import atr_features
 
 
 # ── URL / time helpers ────────────────────────────────────────────────
@@ -276,6 +278,7 @@ class TestTrackExclusion:
     def test_backfill_skips_excluded_tracks(self, tmp_path, monkeypatch):
         # All-Irish race set: nothing should be fetched (no network calls).
         monkeypatch.setattr(atr, "ATR_CACHE_FILE", str(tmp_path / "c.parquet"))
+        monkeypatch.setattr(atr_tabs, 'ATR_CACHE_FILE', str(tmp_path / "c.parquet"))
         monkeypatch.setattr(atr, "ATR_NO_DATA_FILE", str(tmp_path / "n.json"))
 
         def _boom(*a, **k):
@@ -303,6 +306,7 @@ class TestMerge:
         }])
         cache_file = tmp_path / "atr.parquet"
         monkeypatch.setattr(atr, "ATR_CACHE_FILE", str(cache_file))
+        monkeypatch.setattr(atr_tabs, 'ATR_CACHE_FILE', str(cache_file))
         atr.save_atr_cache(cache)
 
         # Arrays must persist as JSON strings (flat parquet).
@@ -315,7 +319,7 @@ class TestMerge:
             {"race_date": "2026-06-10", "track": "Kempton", "off_time": "18:10",
              "horse_name": "Ghost Runner"},                    # no match -> NaN
         ])
-        merged = atr.merge_atr_sectionals(results)
+        merged = atr_features.merge_atr_sectionals(results)
         assert merged.loc[0, "atr_final_time"] == pytest.approx(72.98)
         assert merged.loc[0, "atr_efficiency_grade"] == "C"
         assert math.isnan(merged.loc[1, "atr_final_time"])
@@ -325,11 +329,12 @@ class TestMerge:
 
     def test_merge_empty_cache(self, tmp_path, monkeypatch):
         monkeypatch.setattr(atr, "ATR_CACHE_FILE", str(tmp_path / "missing.parquet"))
+        monkeypatch.setattr(atr_tabs, 'ATR_CACHE_FILE', str(tmp_path / "missing.parquet"))
         results = pd.DataFrame([
             {"race_date": "2026-06-10", "track": "Kempton", "off_time": "18:10",
              "horse_name": "Moonshine"},
         ])
-        merged = atr.merge_atr_sectionals(results)
+        merged = atr_features.merge_atr_sectionals(results)
         for col in atr.ALL_ATR_COLS:
             assert col in merged.columns
         assert math.isnan(merged.loc[0, "atr_final_time"])

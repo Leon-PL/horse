@@ -7,7 +7,8 @@ import sqlite3
 import pandas as pd
 import pytest
 
-from src import atr_rebuild as rebuild, attheraces_scraper as atr
+from src.ingestion import atr_rebuild as rebuild, attheraces as atr
+from src.ingestion import atr_tabs
 from src.ingestion.storage import read_json, writer_lock
 from test_attheraces_scraper import _FakeFetcher
 from test_atr_rich_collection import page
@@ -20,6 +21,7 @@ def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(rebuild.config,'DATA_DIR',str(tmp_path))
     monkeypatch.setattr(atr,'ATR_CACHE_DIR',str(accepted))
     monkeypatch.setattr(atr,'ATR_CACHE_FILE',str(accepted/'atr_sectionals.parquet'))
+    monkeypatch.setattr(atr_tabs, 'ATR_CACHE_FILE', str(accepted/'atr_sectionals.parquet'))
     monkeypatch.setattr(atr,'ATR_INDEX_DIR',str(accepted/'index'))
     canonical = tmp_path/'canonical.sqlite'
     monkeypatch.setattr(rebuild.database,'DB_PATH',str(canonical))

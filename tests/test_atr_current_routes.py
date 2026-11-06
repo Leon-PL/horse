@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
 
-from src import attheraces_scraper as atr
+from src.ingestion import attheraces as atr
+from src.ingestion import atr_tabs
 from src.ingestion import auxiliary
 from test_attheraces_scraper import _FakeFetcher, _times_fixture, _tools_fixture, _stride_fixture
 
@@ -153,6 +154,7 @@ def test_coordinator_defers_young_races_and_keeps_them_pending(tmp_path, monkeyp
 
 def test_direct_backfill_also_defers_young_races_before_requests(tmp_path, monkeypatch):
     monkeypatch.setattr(atr, 'ATR_CACHE_FILE', str(tmp_path/'atr.parquet'))
+    monkeypatch.setattr(atr_tabs, 'ATR_CACHE_FILE', str(tmp_path/'atr.parquet'))
     monkeypatch.setattr(atr, 'ATR_NO_DATA_FILE', str(tmp_path/'absent.json'))
     monkeypatch.setattr(atr, '_Fetcher', lambda **kw: pytest.fail('HTTP for young race'))
     races = pd.DataFrame({'race_date': [datetime.now(timezone.utc).date().isoformat()],

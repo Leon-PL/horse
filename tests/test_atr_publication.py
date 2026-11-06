@@ -4,7 +4,8 @@ import json
 import pandas as pd
 import pytest
 
-from src import attheraces_scraper as atr
+from src.ingestion import attheraces as atr
+from src.ingestion import atr_tabs
 from src.ingestion import storage as source_storage
 
 
@@ -12,6 +13,7 @@ def test_failed_atr_write_keeps_previous_cache(tmp_path, monkeypatch):
     path = tmp_path/"atr.parquet"
     pd.DataFrame({"value": [1]}).to_parquet(path, index=False)
     monkeypatch.setattr(atr, "ATR_CACHE_FILE", str(path))
+    monkeypatch.setattr(atr_tabs, 'ATR_CACHE_FILE', str(path))
     def interrupted(frame, destination, **kwargs):
         destination.write_bytes(b"incomplete parquet")
         raise RuntimeError("interrupted")
@@ -27,6 +29,7 @@ def test_silent_partial_parquet_is_rejected_before_publication(tmp_path, monkeyp
     original = pd.DataFrame.to_parquet
     pd.DataFrame({"value": [1]}).to_parquet(path, index=False)
     monkeypatch.setattr(atr, "ATR_CACHE_FILE", str(path))
+    monkeypatch.setattr(atr_tabs, 'ATR_CACHE_FILE', str(path))
     monkeypatch.setattr(pd.DataFrame, "to_parquet", lambda frame, destination, **kwargs:
                         original(frame.iloc[:0], destination, **kwargs))
     with pytest.raises(ValueError, match="row count"):

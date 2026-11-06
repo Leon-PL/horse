@@ -42,10 +42,10 @@ def fixture(days=45):
 
 
 def derive(raw):
-    from src.attheraces_scraper import ALL_ATR_COLS
+    from src.ingestion.atr_tabs import ALL_ATR_COLS
     def empty_merge(f):
         return f.assign(**{c: np.nan for c in ALL_ATR_COLS if c not in f})
-    with patch("src.attheraces_scraper.merge_atr_sectionals", side_effect=empty_merge):
+    with patch("src.atr_features.merge_atr_sectionals", side_effect=empty_merge):
         out = engineer_features(process_data(raw.copy()), save=False)
     return out.set_index(["race_id", "horse_id"])
 

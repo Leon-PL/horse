@@ -7,7 +7,8 @@ import pandas as pd
 import pytest
 from bs4 import BeautifulSoup
 
-from src import attheraces_scraper as atr, atr_features as features
+from src import atr_features as features
+from src.ingestion import attheraces as atr
 from test_attheraces_scraper import _FakeFetcher
 
 FIXTURES = Path(__file__).parent/'fixtures/atr_current'

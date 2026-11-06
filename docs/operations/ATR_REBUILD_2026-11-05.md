@@ -144,7 +144,7 @@ mix. This is a local background process: shutdown stops execution. Starting
 the worker again resumes its committed queue; it does not start over.
 
 ```powershell
-.venv\Scripts\python.exe -m src.atr_rebuild --request-delay 2
+.venv\Scripts\python.exe -m src.ingestion.atr_rebuild --request-delay 2
 Get-Content data/atr_cache/rebuild_v2/status.json
 ```
 

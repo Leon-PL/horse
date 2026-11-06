@@ -16,7 +16,7 @@ from src import feature_engineer as fe
 def derive(raw):
     raw = raw.sort_values(["race_date", "off_time", "race_id", "horse_name"], kind="stable").reset_index(drop=True)
     raw = fe._add_result_history_flags(raw)
-    with patch("src.attheraces_scraper.merge_atr_sectionals", side_effect=lambda frame: frame), patch.object(fe, "_COUNTS_STATE", None):
+    with patch("src.atr_features.merge_atr_sectionals", side_effect=lambda frame: frame), patch.object(fe, "_COUNTS_STATE", None):
         out = fe.add_atr_features(raw)
         out = fe.add_pace_style_features(out)
         out = fe.add_track_config_features(out)

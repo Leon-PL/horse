@@ -20,15 +20,16 @@ import time
 import pandas as pd
 
 import config
-from src import attheraces_scraper as atr, database
-from src.source_storage import RawPayloadStore, atomic_json, atomic_parquet, read_json, writer_lock
+from src import database
+from src.ingestion import attheraces as atr
+from src.ingestion.storage import RawPayloadStore, atomic_json, atomic_parquet, read_json, writer_lock
 from src.ingestion.atr_tabs import COLLECTION_VERSION, PERFORMANCE_TABS, TERMINAL_TAB_STATES, inventory
 
 logger = logging.getLogger(__name__)
 DEFAULT_ROOT = Path(config.DATA_DIR)/'atr_cache/rebuild_v2'
 # Only source extraction and queue acceptance govern the saved raw records.
 # Feature derivation has its own FE signature and is not executed by this worker.
-CODE_FILES = ('src/attheraces_scraper.py', 'src/atr_rebuild.py',
+CODE_FILES = ('src/ingestion/attheraces.py', 'src/ingestion/atr_rebuild.py',
               'src/ingestion/atr_tabs.py', 'src/ingestion/atr_jumps.py')
 
 

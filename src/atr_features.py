@@ -1,7 +1,7 @@
 """Pure per-run feature derivations from At The Races sectionals.
 
 These helpers turn one runner's *raw post-race* ATR sectional record (the
-columns added by :func:`src.attheraces_scraper.merge_atr_sectionals`) into a
+columns added by :func:`merge_atr_sectionals`) into a
 set of **per-run scalars and tags**.  They describe how the horse ran in
 *that* race — they are NOT model features on their own.
 
@@ -13,7 +13,9 @@ them unit-testable in isolation and keeps the leakage boundary crisp.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import logging
 import re
 from functools import lru_cache
 from itertools import chain
@@ -23,6 +25,15 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
+
+from src.ingestion.atr_tabs import ALL_ATR_COLS, load_atr_cache
+from src.utils import (
+    normalise_horse_key as _normalise_horse_key,
+    normalise_off_time_key as _normalise_off_time_key,
+    normalise_track_key as _normalise_track_key,
+)
+
+logger = logging.getLogger(__name__)
 
 # ── In-running comment tagger ──────────────────────────────────────────
 # ATR comments use a stable race-reading vocabulary.  Each tag is a 0/1
@@ -411,3 +422,95 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
             v = res[c]
             res.loc[v.notna() & ((~np.isfinite(v)) | (v < lo) | (v > hi)), c] = np.nan
     return res
+
+
+# ---------------------------------------------------------------------------
+# Join the accepted cache onto a race frame (used by feature_engineer)
+# ---------------------------------------------------------------------------
+
+_ATR_MERGE_KEYS = ["_rd", "_trk", "_ot", "_hn"]
+
+
+def _atr_merge_table(cache: pd.DataFrame) -> pd.DataFrame:
+    """The cache as unique merge keys plus every ATR column."""
+    cache = cache.copy()
+    cache["_rd"] = pd.to_datetime(cache["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    cache["_trk"] = cache["track"].map(_normalise_track_key)
+    cache["_ot"] = cache["off_time"].map(_normalise_off_time_key)
+    cache["_hn"] = cache["horse_name"].map(_normalise_horse_key)
+
+    for c in ALL_ATR_COLS:
+        if c not in cache.columns:
+            cache[c] = float("nan")
+
+    merge_cols = _ATR_MERGE_KEYS + ALL_ATR_COLS
+    keys = _ATR_MERGE_KEYS
+    cache_slim = cache[merge_cols].drop_duplicates(subset=keys+["atr_horse_id"], keep="last")
+    return cache_slim.loc[~cache_slim.duplicated(keys,keep=False)]
+
+
+_merge_table_scope: list | None = None
+
+
+@contextmanager
+def atr_merge_scope():
+    """Prepare the cache once for a build that merges it chunk by chunk."""
+    global _merge_table_scope
+    _merge_table_scope = []
+    try:
+        yield
+    finally:
+        _merge_table_scope = None
+
+
+def _merge_table() -> pd.DataFrame | None:
+    """The prepared cache, or None when there is nothing to join."""
+    if _merge_table_scope:
+        return _merge_table_scope[0]
+    cache = load_atr_cache()
+    table = None if cache.empty else _atr_merge_table(cache)
+    if _merge_table_scope is not None:
+        _merge_table_scope.append(table)
+    return table
+
+
+def merge_atr_sectionals(df: pd.DataFrame) -> pd.DataFrame:
+    """Left-join cached ATR sectionals onto a race DataFrame.
+
+    Matches on ``(race_date, track, off_time, horse_name)`` using the
+    shared normalisers.  All ATR columns are added (NaN where absent);
+    per-furlong series remain JSON strings (see :data:`ATR_ARRAY_COLS`).
+    Only the keys take part in the join, so a wide frame is not copied.
+    """
+    cache_slim = _merge_table()
+    if cache_slim is None:
+        for c in ALL_ATR_COLS:
+            df[c] = float("nan")
+        return df
+
+    keys = _ATR_MERGE_KEYS
+    df["_rd"] = pd.to_datetime(df["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    df["_trk"] = df["track"].map(_normalise_track_key)
+    df["_ot"] = df["off_time"].map(_normalise_off_time_key)
+    df["_hn"] = df["horse_name"].map(_normalise_horse_key)
+    ambiguous_left = df.duplicated(keys,keep=False).to_numpy()
+
+    joined = df[keys].merge(
+        cache_slim.loc[cache_slim["_rd"].isin(df["_rd"].unique())],
+        on=keys, how="left", indicator="_atr_merge", validate="many_to_one",
+    )
+    merged = pd.concat(
+        [df.drop(columns=keys).reset_index(drop=True), joined.drop(columns=keys)], axis=1,
+    )
+
+    for c in ALL_ATR_COLS:
+        if c not in merged.columns:
+            merged[c] = float("nan")
+    merged.loc[ambiguous_left,ALL_ATR_COLS] = float("nan")
+
+    matched = (merged["_atr_merge"] == "both") & ~ambiguous_left
+    logger.info(
+        "ATR merge: key matches %d / %d (%.1f%%)",
+        int(matched.sum()), len(merged), 100 * matched.sum() / max(1, len(merged)),
+    )
+    return merged.drop(columns=["_atr_merge"], errors="ignore")

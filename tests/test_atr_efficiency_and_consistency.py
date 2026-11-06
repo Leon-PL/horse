@@ -91,7 +91,7 @@ def test_independent_cadence_curve_does_not_need_a_stride_length_curve():
 
 def test_collection_guard_ignores_feature_edits_but_still_detects_source_edits(tmp_path, monkeypatch):
     from pathlib import Path
-    from src import atr_rebuild
+    from src.ingestion import atr_rebuild
     project = Path(atr_rebuild.config.BASE_DIR)
     for name in (*atr_rebuild.CODE_FILES, "src/atr_features.py"):
         target = tmp_path/name
@@ -102,10 +102,10 @@ def test_collection_guard_ignores_feature_edits_but_still_detects_source_edits(t
     with (tmp_path/"src/atr_features.py").open("a", encoding="utf-8") as stream:
         stream.write("\n_NEW_FEATURE = 1\n")
     assert atr_rebuild.code_hashes() == before
-    with (tmp_path/"src/attheraces_scraper.py").open("a", encoding="utf-8") as stream:
+    with (tmp_path/"src/ingestion/attheraces.py").open("a", encoding="utf-8") as stream:
         stream.write("\n_NEW_PARSER_SETTING = 1\n")
     assert atr_rebuild.code_hashes() != before
     after_parser_edit = atr_rebuild.code_hashes()
-    with (tmp_path/"src/atr_rebuild.py").open("a", encoding="utf-8") as stream:
+    with (tmp_path/"src/ingestion/atr_rebuild.py").open("a", encoding="utf-8") as stream:
         stream.write("\n_NEW_ACCEPTANCE_SETTING = 1\n")
     assert atr_rebuild.code_hashes() != after_parser_edit

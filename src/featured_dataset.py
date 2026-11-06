@@ -66,9 +66,8 @@ _FE_SOURCE_FILES = (
     "src/atr_features.py",
     "src/rtv_features.py", "src/rtv_text.py",
     "src/track_config.py", "src/utils.py",
-    # Merge/column contract consumed by an FE stage: the sectional joins feed
-    # add_atr_features.
-    "src/attheraces_scraper.py",
+    # Column and cache contract read by the sectional join in atr_features.
+    "src/ingestion/atr_tabs.py",
     # weather.py, trainer_locations.py and bha_stewards_scraper.py left this
     # list on 2026-10-13 with the weather and trainer-travel stages: nothing
     # reachable from the FE entry points imports them any more.
@@ -84,14 +83,13 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "ingestion.pipeline": "source orchestration only; published observations covered by data and RTV signatures",
     "ingestion.auxiliary": "collects raw ATR/BSP only; accepted values covered by source-content signatures",
     "ingestion.storage": "source locking, raw retention and atomic publication only",
-    "ingestion.atr_tabs": "raw source tab inventory/parsing; observations covered by ATR content signatures",
+    "ingestion.attheraces": "raw ATR collector only; observations covered by ATR content signatures",
     "ingestion.atr_jumps": "raw jumps collection only; observations covered by ATR content signatures",
     "ingestion.rtv_storage": "resolves published source generations covered by rtv_cache_signature",
     "ingestion.sporting_life": "raw-data access only; accepted observations covered by data_signature",
     "ingestion.racing_tv": "collects raw RTV payloads; published observations covered by rtv_cache_signature",
     "ingestion.betfair_history": "collects historical market files; accepted prices are raw observations fingerprinted by training/evaluation",
     "ingestion.betfair_credentials": "encrypted historical-data login setup only; cannot change feature values",
-    "source_storage": "source locking, raw retention and publication only; values covered by source/data signatures",
     "ingestion.rtv_observations": "source-stage materialisation only; published run/card/text values are covered by rtv_cache_signature",
     "wf_eval": "evaluation and source text-fit scheduling; published comment scores are covered by rtv_cache_signature",
     "clv": "downstream evaluation metrics only; cannot change feature values",
