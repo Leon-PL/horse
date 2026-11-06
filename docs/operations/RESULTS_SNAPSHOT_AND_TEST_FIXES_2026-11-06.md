@@ -1,8 +1,8 @@
 # Results snapshot and test fixes — 6 November 2026
 
 **Status: landed on the main checkout (`checkpoint/eval-harness-and-guards`), Parquet
-published, production store rebuilt. Seven files are held back, as explained under "How
-this landed". Nothing was pushed, and no model was trained or promoted.**
+published, production store rebuilt, and merged with the Betfair work. Nothing was pushed, and
+no model was trained or promoted.**
 
 This follows the [consolidation report](PRE_FEATURE_CONSOLIDATION_2026-11-06.md), which
 left four failing tests and recommended replacing the CSV hand-off. Both are finished.
@@ -180,12 +180,15 @@ were renamed to match what they now cover:
   the Parquet publish.
 
 After landing, the affected test files ran on the main checkout against the real database,
-with the uncommitted Betfair work in place: 242 passed and 3 failed. Two are the held-back
-tests described under "How this landed". The third is
-`test_unique_horse_per_race`, the only one of the 11 data tests above that still fails once it
+with the uncommitted Betfair work in place: 242 passed and 3 failed. Two looked for
+`race_results.csv` because their file was still held back, and pass since the merge. The third
+is `test_unique_horse_per_race`, the only one of the 11 data tests above that still fails once it
 has a real database. It is not a data fault and not caused by this work: a 2022 Gowran Park
 maiden, race 688054, really did have two different horses named Sierra Nevada, with different
 `horse_id` values and trainers. The test groups by name, so it should group by `horse_id`.
+
+The full suite then ran on the merged code in the worktree: 1,951 passed, 11 failed and 3
+skipped. The 11 are the same data tests, which need a real database.
 
 New tests are in `tests/test_results_snapshot.py`, plus bit-exact resume tests in
 `tests/test_fe_incremental.py`. The sync test fixtures name races with letters, so they
@@ -199,17 +202,12 @@ checkout. That work is uncommitted, and it changed seven files this branch also 
 `CONTINUATION.md`, `README.md`, `docs/PROJECT_INVENTORY.md`,
 `docs/architecture/PROJECT_STRUCTURE.md`,
 `docs/operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md`, `scripts/README.md` and
-`tests/test_source_refresh.py`. Those seven were left out of the landing, so that work stayed
+`tests/test_source_refresh.py`. Those seven were left out of the first landing, so that work stayed
 untouched. The other 20 files landed.
 
-Until the Betfair work is committed, those seven files on the main checkout keep their old
-content. The guides still describe the CSV, and two tests in `tests/test_source_refresh.py`
-fail because they look for `race_results.csv`:
-`test_unchanged_refresh_neither_loads_history_nor_rewrites_snapshot` and
-`test_direct_repair_invalidates_snapshot_even_without_new_rows`. Nothing else depends on those
-files. The held-back changes are the last commit on the branch and land with one merge once
-that work is committed. `scripts/README.md` will need one table row resolved by hand, because
-both sides changed it.
+Once the Betfair work was committed as `7879963`, the seven files were merged with it and
+landed. One `scripts/README.md` row needed resolving by hand, because both sides changed it.
+That second landing changed only documents and one test, so it stopped no worker.
 
 | Step | Result |
 |---|---|

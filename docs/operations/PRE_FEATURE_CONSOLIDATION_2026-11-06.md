@@ -1,7 +1,8 @@
 # Pre-feature consolidation — 6 November 2026
 
-**Later Betfair update:** public/manual collection entries in this snapshot were
-superseded by the [unified full-history path](BETFAIR_CONSOLIDATION_2026-11-06.md).
+**Later Betfair update:** the data flow map below is current. Public and manual collection
+entries elsewhere in this snapshot were superseded by the
+[unified full-history path](BETFAIR_CONSOLIDATION_2026-11-06.md).
 
 **Status: done, including At The Races (ATR). The work is committed and is on the
 main checkout's branch, `checkpoint/eval-harness-and-guards`. Nothing was pushed. No
@@ -36,9 +37,8 @@ Pedigree (--enrich)     ingestion/pedigree.py               races.db: horse_pedi
 Weather (--weather)     ingestion/weather.py                races.db: results.weather_*
 Racing TV               ingestion/racing_tv.py              data/rtv_cache/ (generations)
                         + ingestion/rtv_observations.py     fitted par and text models too
-Betfair public prices   ingestion/auxiliary.py              data/processed/betfair_bsp.parquet
-                        + ingestion/betfair_public.py
-Betfair full history    ingestion/betfair_history.py        data/betfair/, price caches
+Betfair full history    ingestion/auxiliary.py              data/betfair/history/
+                        + ingestion/betfair_history.py      data/processed/betfair_*.parquet
                         + ingestion/betfair_streams.py
 Exchange rates          ingestion/fx.py                     reference/ecb_gbp_per_eur.csv
 At The Races, normal    ingestion/auxiliary.py              data/atr_cache/atr_sectionals.parquet
@@ -51,10 +51,33 @@ races.db -> database.publish_results_snapshot -> data/raw/race_results.parquet +
          -> data_processor.process_data: load snapshot -> add pedigree -> clean -> sort
             -> time and category columns -> in-memory frame -> feature store
 
+BETFAIR
+Routine refresh  auxiliary.refresh_betfair, the "betfair" source. Needs the saved connection.
+                 Asks for dates up to six days ago; Betfair publishes five days after settlement.
+Catch-up         python -m src.ingestion.betfair_history --drain, or the Data page button.
+Old tar files    python -m src.ingestion.betfair_archives --remove-verified stores every
+                 member once in archive_payloads.sqlite, then removes each verified tar.
+
+Refresh and catch-up run the same path, betfair_history.sync_history:
+
+  list WIN and PLACE market files -> queue.sqlite
+  -> find each market: raw/BASIC/ file, then archive_payloads.sqlite, then download
+     (while the tar files are being consolidated, catch-up skips the download step)
+  -> betfair_streams parsers, with date, country, market type and settlement checks
+  -> parsed rows saved in queue.sqlite
+  -> publish: fills gaps and adds runners, and never replaces an accepted price
+     WIN    betfair_bsp, betfair_bsp_early, betfair_timing (.parquet)
+     PLACE  betfair_place_bsp (.parquet)
+
 JOINED LATER, NOT THROUGH THE HAND-OFF
 ATR       read inside feature building by atr_features.merge_atr_sectionals
 Racing TV read inside feature building by rtv_features and rtv_text
-Betfair   read at training and evaluation by model.py and clv.py
+Betfair   betfair_bsp.parquet read at training and evaluation by model.py and clv.py,
+          never as a feature input; research scripts read the other three caches
+
+FROZEN, NO LONGER COLLECTED
+data/research/betfair_public_legacy/  the old public files and their volume and VWAP data,
+                                      read only by research and field-repair scripts
 ```
 
 ## Before and after
