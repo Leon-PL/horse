@@ -150,7 +150,7 @@ def apply_plan(conn, plan, backup):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="data/races.db")
-    parser.add_argument("--reference", default="data/processed/betfair_sp_public.parquet")
+    parser.add_argument("--reference", default="data/research/betfair_public_legacy/prices.parquet")
     parser.add_argument("--output", default="data/audit/20261025/field_reconciliation")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()

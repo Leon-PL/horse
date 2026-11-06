@@ -15,10 +15,16 @@ Real-source collection lives in `src/ingestion/`, with one command:
 `python -m src.ingestion`. Storage is in `src/database.py` and cleaning is in
 `src/data_processor.py`. [Consolidation report](docs/operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md).
 
-Full Betfair historical market downloads can now run during source refreshes
-after one-time account setup in **Data → Historical exchange data**. This keeps
-the timed prices from the manual archives; a paid Live App Key is not required.
+Full Betfair historical market downloads are the main refresh's Betfair source
+(`--sources betfair`), including win/place BSP, timed prices and market changes.
+The account is connected under **Data → Historical exchange data**. Existing
+downloads are consolidated and replayed locally; missing markets are fetched
+automatically. Public BSP fetching and separate manual extraction commands are
+retired. The public volume/VWAP research dataset is frozen under
+`data/research/betfair_public_legacy/`. Historical markets arrive after settlement;
+the collector conservatively waits six days before requesting them.
 [Setup and access requirements](docs/operations/BETFAIR_HISTORY_AUTOMATION.md).
+[Consolidation and active catch-up](docs/operations/BETFAIR_CONSOLIDATION_2026-11-06.md).
 
 The fresh ATR historical backfill is running independently at a two-second base
 request interval plus jitter. Progress is in

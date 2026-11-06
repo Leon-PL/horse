@@ -1,9 +1,10 @@
 """The automatic path retains full streams and never changes accepted prices."""
 import bz2
 import ctypes
-from datetime import date, timedelta
+from datetime import date
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -120,15 +121,43 @@ def test_market_identity_country_date_and_type_are_checked(contents, path):
 
 
 @pytest.mark.parametrize("path", ["../../outside.bz2", "/data/xds/historic/BASIC/123/../../outside", 
-                                "https://example.test/1.1.bz2", "/data/xds/historic/BASIC/123/1.1.bz2?x=1"])
+                                "https://example.test/1.1.bz2", "/data/xds/historic/BASIC/123/1.1.bz2?x=1",
+                                "/xds_nfs/edp_processed/BASIC/../../outside.bz2",
+                                "/xds_nfs/edp_processed/PRO/2026/Oct/31/123/1.100.bz2"])
 def test_remote_paths_cannot_choose_a_local_destination(tmp_path, path):
     with pytest.raises(history.HistoryError):
         history.local_path(tmp_path, path)
 
 
-def test_dated_remote_layout_keeps_the_same_market_identity(tmp_path):
-    dated = "/data/xds/historic/BASIC/2026/Jan/10/123/1.100.bz2"
+@pytest.mark.parametrize("dated", [
+    "/data/xds/historic/BASIC/2026/Jan/10/123/1.100.bz2",
+    "/xds_nfs/edp_processed/BASIC/2026/Oct/31/123/1.100.bz2",
+])
+def test_dated_remote_layout_keeps_the_same_market_identity(tmp_path, dated):
     assert history.local_path(tmp_path, dated) == history.local_path(tmp_path, remote(100))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended path namespace")
+def test_archive_containment_accepts_mixed_windows_namespace_spellings(tmp_path, monkeypatch):
+    original = Path.resolve
+    def resolve(path, *args, **kwargs):
+        resolved = original(path, *args, **kwargs)
+        if path.name == "1.100.bz2" and not str(resolved).startswith("\\\\?\\"):
+            return Path("\\\\?\\" + str(resolved))
+        return resolved
+    monkeypatch.setattr(Path, "resolve", resolve)
+    assert history.local_path(tmp_path, remote(100)).name == "1.100.bz2"
+
+
+def test_archive_containment_still_rejects_a_resolved_target_outside_its_root(tmp_path, monkeypatch):
+    original = Path.resolve
+    def resolve(path, *args, **kwargs):
+        if path.name == "1.100.bz2":
+            return original(tmp_path.parent / "outside" / path.name)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "resolve", resolve)
+    with pytest.raises(history.HistoryError, match="outside"):
+        history.local_path(tmp_path, remote(100))
 
 
 def test_unowned_months_do_not_download_or_try_to_purchase(environment):
@@ -209,6 +238,22 @@ def test_expired_session_stops_requests_and_does_not_expose_tokens():
     assert calls == [1]
 
 
+def test_packages_and_file_downloads_use_get_without_a_json_body():
+    calls = []
+    def request(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        # The live GetMyData service rejects POST with HTTP 405.
+        if method != "GET":
+            return response(405)
+        return response(value=[], content=b"compressed-market")
+    client = history.HistoryClient("private-token", session=SimpleNamespace(request=request))
+    assert client.packages() == []
+    assert client.download(remote(100)) == b"compressed-market"
+    assert [url for _, url, _ in calls] == [history.API + "GetMyData", history.API + "DownloadFile"]
+    assert all(kwargs["json"] is None for _, _, kwargs in calls)
+    assert calls[1][2]["params"] == {"filePath": remote(100)}
+
+
 def test_certificate_login_needs_no_live_app_key(environment, monkeypatch):
     cert, key = credentials.certificate_paths()
     cert.parent.mkdir(parents=True)
@@ -217,28 +262,12 @@ def test_certificate_login_needs_no_live_app_key(environment, monkeypatch):
     calls = []
     def post(url, **kwargs):
         calls.append((url, kwargs))
-        return SimpleNamespace(raise_for_status=lambda: None,
-            json=lambda: {"loginStatus": "SUCCESS", "sessionToken": "returned-session"})
+        return response(value={"loginStatus": "SUCCESS", "sessionToken": "returned-session"})
     monkeypatch.setattr(history.requests, "post", post)
     client = history.HistoryClient.certificate_login("login", "password", str(cert), str(key))
     assert client._token == "returned-session"
     assert calls[0][1]["headers"]["X-Application"] == "horse-history-downloader"
     assert "verify" not in calls[0][1] and not calls[0][1]["allow_redirects"]
-
-
-def test_normal_bsp_refresh_includes_history_only_after_setup(monkeypatch):
-    from src.ingestion import auxiliary
-    today = date.today()
-    monkeypatch.setattr(auxiliary, "_refresh_public_bsp", lambda *a: {"state": "cached"})
-    monkeypatch.setattr(history, "configured", lambda: True)
-    calls = []
-    monkeypatch.setattr(history, "sync_history", lambda *a, **kw: calls.append((a, kw)) or {"state": "ok"})
-    report = auxiliary.refresh_bsp(str(today-timedelta(days=14)), str(today-timedelta(days=1)))
-    assert report["state"] == "cached" and report["history"]["state"] == "ok"
-    assert calls[0][0][1] == str(today-timedelta(days=6))
-    assert calls[0][1]["_source_lock_held"]
-    monkeypatch.setattr(history, "configured", lambda: False)
-    assert auxiliary.refresh_bsp(str(FIRST), str(LAST)) == {"state": "cached"}
 
 
 def test_corrupt_cached_download_is_quarantined_and_replaced(environment):
@@ -278,3 +307,279 @@ def test_connection_controls_render_without_an_account(environment):
     app.run(timeout=20)
     assert not app.exception
     assert [field.label for field in app.text_input] == ["Betfair username", "Betfair password"]
+
+
+@pytest.fixture
+def login_files(environment):
+    cert, key = credentials.certificate_paths()
+    cert.parent.mkdir(parents=True)
+    cert.write_text("test public certificate")
+    key.write_text("test private key")
+    return cert, key
+
+
+@pytest.mark.parametrize("status,action", [
+    ("CERT_AUTH_REQUIRED", "same Betfair account"),
+    ("INVALID_PASSWORD", "password"),
+    ("EMAIL_LOGIN_NOT_ALLOWED", "username rather than your email"),
+    ("CONTACT_VERIFICATION_REQUIRED", "account verification"),
+])
+def test_login_rejection_shows_a_safe_action_and_provider_code(login_files, monkeypatch, status, action):
+    monkeypatch.setattr(history.requests, "post", lambda *a, **kw: response(value={
+        "loginStatus": status, "sessionToken": "private-token", "details": "private-account-detail"}))
+    with pytest.raises(history.LoginRequired) as caught:
+        history.HistoryClient.certificate_login("private-login", "private-password", *map(str, login_files))
+    assert status in str(caught.value) and action in str(caught.value)
+    assert not any(secret in str(caught.value) for secret in
+                   ("private-token", "private-login", "private-password", "private-account-detail"))
+
+
+@pytest.mark.parametrize("value", [
+    {"loginStatus": "private-unrecognised-status", "sessionToken": "private-token"},
+    {"loginStatus": ["private-account-detail"]},
+    {"loginStatus": "SUCCESS", "sessionToken": {"private-token": 1}},
+    {"loginStatus": "SUCCESS"},
+    ["private-response"],
+])
+def test_unknown_or_malformed_login_responses_are_rejected_without_echoing_them(login_files, monkeypatch, value):
+    monkeypatch.setattr(history.requests, "post", lambda *a, **kw: response(value=value))
+    with pytest.raises(history.LoginRequired) as caught:
+        history.HistoryClient.certificate_login("private-login", "private-password", *map(str, login_files))
+    assert "private-" not in str(caught.value)
+
+
+@pytest.mark.parametrize("failure,expected", [
+    (history.requests.exceptions.SSLError("private-network-detail"), "secure certificate connection"),
+    (history.requests.Timeout("private-network-detail"), "timed out"),
+    (history.requests.ConnectionError("private-network-detail"), "Could not reach"),
+])
+def test_login_transport_failures_remain_actionable_without_raw_exception_details(login_files, monkeypatch,
+                                                                                  failure, expected):
+    def post(*args, **kwargs):
+        raise failure
+    monkeypatch.setattr(history.requests, "post", post)
+    with pytest.raises(history.LoginRequired) as caught:
+        history.HistoryClient.certificate_login("private-login", "private-password", *map(str, login_files))
+    assert expected in str(caught.value) and "private-" not in str(caught.value)
+
+
+def test_login_http_failure_is_reported_before_parsing_the_response(login_files, monkeypatch):
+    def unexpected_json():
+        pytest.fail("An HTTP refusal must not be interpreted as a login response")
+    monkeypatch.setattr(history.requests, "post", lambda *a, **kw:
+                        SimpleNamespace(status_code=403, json=unexpected_json))
+    with pytest.raises(history.LoginRequired, match="HTTP 403"):
+        history.HistoryClient.certificate_login("login", "password", *map(str, login_files))
+
+
+def test_non_json_login_response_is_safely_reported(login_files, monkeypatch):
+    def invalid_json():
+        raise ValueError("private-response")
+    monkeypatch.setattr(history.requests, "post", lambda *a, **kw:
+                        SimpleNamespace(status_code=200, json=invalid_json))
+    with pytest.raises(history.LoginRequired) as caught:
+        history.HistoryClient.certificate_login("login", "password", *map(str, login_files))
+    assert "unexpected response" in str(caught.value) and "private-response" not in str(caught.value)
+
+
+def test_missing_historical_months_are_distinct_from_a_bad_login(login_files, monkeypatch):
+    monkeypatch.setattr(history.HistoryClient, "certificate_login", lambda *a, **kw: FakeClient(packages=[]))
+    monkeypatch.setattr(history, "save_connection", lambda *a: pytest.fail("Missing access must not save credentials"))
+    report = history.connect_account("private-login", "private-password", *login_files)
+    assert report["state"] == "failed" and report["stage"] == "historical_access"
+    assert "sign-in succeeded" in report["message"] and "My Data" in report["message"]
+    retained = json.loads(credentials.connection_path().with_name("connection_status.json").read_text())
+    assert retained == report
+    assert "private-" not in json.dumps(retained)
+    assert not credentials.connection_path().exists()
+
+
+def test_historical_service_refusal_keeps_the_successful_login_distinct(login_files, monkeypatch):
+    client = history.HistoryClient("private-token", session=SimpleNamespace(request=lambda *a, **kw: response(401)))
+    monkeypatch.setattr(history.HistoryClient, "certificate_login", lambda *a, **kw: client)
+    report = history.connect_account("private-login", "private-password", *login_files)
+    assert report["stage"] == "historical_access" and report["state"] == "failed"
+    assert "declined" in report["message"] and "private-" not in json.dumps(report)
+
+
+@pytest.mark.parametrize("failure,action", [
+    (RuntimeError("private-encryption-detail"), "Windows could not encrypt"),
+    (OSError("private-filesystem-detail"), "could not save the connection"),
+])
+def test_local_save_failure_does_not_blame_betfair_login(login_files, monkeypatch, failure, action):
+    monkeypatch.setattr(history.HistoryClient, "certificate_login", lambda *a, **kw: FakeClient())
+    def fail_save(*args):
+        raise failure
+    monkeypatch.setattr(history, "save_connection", fail_save)
+    report = history.connect_account("private-login", "private-password", *login_files)
+    assert report["stage"] == "save_connection" and report["state"] == "failed"
+    assert action in report["message"] and "access succeeded" in report["message"]
+    assert "private-" not in json.dumps(report)
+
+
+def test_successful_setup_saves_only_after_access_checks(login_files, monkeypatch):
+    calls = []
+    monkeypatch.setattr(history.HistoryClient, "certificate_login", lambda *a, **kw: FakeClient())
+    monkeypatch.setattr(history, "save_connection", lambda *a: calls.append(a))
+    report = history.connect_account("private-login", "private-password", *login_files)
+    assert report["state"] == "connected" and report["stage"] == "complete"
+    assert calls == [("private-login", "private-password", *login_files)]
+    assert "private-" not in json.dumps(report)
+
+
+def test_failed_diagnostic_write_does_not_change_a_successful_setup(login_files, monkeypatch):
+    monkeypatch.setattr(history.HistoryClient, "certificate_login", lambda *a, **kw: FakeClient())
+    monkeypatch.setattr(history, "save_connection", lambda *a: None)
+    def no_diagnostic(*args):
+        raise OSError("read-only diagnostic destination")
+    monkeypatch.setattr(history, "atomic_json", no_diagnostic)
+    assert history.connect_account("login", "password", *login_files)["state"] == "connected"
+
+
+@pytest.mark.parametrize("diagnostic_write_fails", [False, True])
+def test_connection_form_displays_the_failed_access_step(login_files, monkeypatch, diagnostic_write_fails):
+    from streamlit.testing.v1 import AppTest
+    monkeypatch.delenv("BETFAIR_HISTORY_ENABLED", raising=False)
+    monkeypatch.setattr(history.HistoryClient, "certificate_login", lambda *a, **kw: FakeClient(packages=[]))
+    if diagnostic_write_fails:
+        def no_diagnostic(*args):
+            raise OSError("read-only diagnostic destination")
+        monkeypatch.setattr(history, "atomic_json", no_diagnostic)
+    app = AppTest.from_string("from src.ingestion.betfair_history_ui import render_history_controls\nrender_history_controls()")
+    app.run(timeout=20)
+    app.text_input[0].input("private-login")
+    app.text_input[1].input("private-password")
+    next(button for button in app.button if button.label == "Connect for automatic downloads").click().run(timeout=20)
+    assert not app.exception
+    assert any("Historical data access failed" in error.value and "sign-in succeeded" in error.value
+               for error in app.error)
+    assert all("private-" not in error.value for error in app.error)
+
+
+def test_main_refresh_uses_full_history_and_reports_the_publication_gap(monkeypatch):
+    from datetime import datetime, timezone
+    from src.ingestion import auxiliary
+    monkeypatch.setattr(auxiliary, "_utc_now", lambda: datetime(2026, 11, 6, tzinfo=timezone.utc))
+    monkeypatch.setattr(history, "configured", lambda: True)
+    calls = []
+    monkeypatch.setattr(history, "sync_history", lambda *a, **kw: calls.append((a, kw)) or {"state": "ok"})
+    result = auxiliary.refresh_betfair("2026-10-20", "2026-11-05")
+    assert calls[0][0] == ("2026-10-20", "2026-10-31")
+    assert calls[0][1]["_source_lock_held"]
+    assert result["state"] == "partial" and result["deferred_recent_days"] == 5
+
+
+def test_only_unpublished_dates_do_not_request_history(monkeypatch):
+    from datetime import datetime, timezone
+    from src.ingestion import auxiliary
+    monkeypatch.setattr(auxiliary, "_utc_now", lambda: datetime(2026, 11, 6, tzinfo=timezone.utc))
+    monkeypatch.setattr(history, "configured", lambda: True)
+    monkeypatch.setattr(history, "sync_history", lambda *a, **kw: pytest.fail("No published dates"))
+    assert auxiliary.refresh_betfair("2026-11-03", "2026-11-05")["state"] == "awaiting_publication"
+
+
+def test_missing_connection_is_visible_in_the_main_refresh(monkeypatch):
+    from src.ingestion import auxiliary
+    monkeypatch.setattr(history, "configured", lambda: False)
+    assert auxiliary.refresh_betfair("2026-10-20", "2026-10-31")["state"] == "needs_login"
+
+
+def test_completed_historical_listing_is_reused(environment):
+    client = FakeClient(files={remote(100): payload()})
+    assert history.sync_history(FIRST, LAST, client=client)["state"] == "ok"
+    assert history.sync_history(FIRST, LAST, client=client)["state"] == "ok"
+    assert len(client.listings) == 1 and len(client.downloads) == 1
+
+
+def test_recent_listing_is_rechecked_after_its_revision_interval(environment):
+    from datetime import timedelta
+    store = history.HistoryStore(environment / "betfair/history")
+    day = date.today()-timedelta(days=6)
+    store.discover([], day, day)
+    assert store.listing_known(day, day)
+    with store.connection() as con:
+        con.execute("UPDATE discovery SET checked_at='2020-01-01T00:00:00+00:00'")
+    assert not store.listing_known(day, day)
+
+
+def test_discovery_validates_remote_names_without_resolving_local_paths(environment, monkeypatch):
+    store = history.HistoryStore(environment / "betfair/history")
+    monkeypatch.setattr(history, "local_path", lambda *a: pytest.fail("Discovery must not inspect raw files"))
+    store.discover([remote(100)], FIRST, LAST)
+    assert store.counts() == {"pending": 1}
+    with pytest.raises(history.HistoryError):
+        store.discover(["../../outside.bz2"], FIRST, LAST)
+
+
+def test_backfill_drains_multiple_batches_without_restarting_the_job(environment, monkeypatch):
+    reports = iter([
+        {"state": "partial", "processed": 1, "reused_local": 1, "files": {"pending": 1, "published": 1}},
+        {"state": "ok", "processed": 1, "downloaded": 1, "files": {"published": 2}},
+    ])
+    monkeypatch.setattr(history, "sync_history", lambda *a, **kw: next(reports))
+    result = history.drain_history(FIRST, LAST, budget=1)
+    assert result["state"] == "ok" and result["totals"] == {"processed": 2, "downloaded": 1, "reused_local": 1}
+
+
+def test_repeated_invalid_markets_eventually_require_review_instead_of_an_infinite_loop(environment):
+    client = FakeClient(files={remote(100): b"invalid source"})
+    for _ in range(3):
+        report = history.sync_history(FIRST, LAST, client=client)
+        with history.HistoryStore(environment / "betfair/history").connection() as con:
+            con.execute("UPDATE files SET retry_after=NULL")
+    assert report["files"] == {"review": 1} and report["state"] == "partial"
+
+
+def test_checkpoint_rollback_retains_raw_files_for_an_exact_resume(environment):
+    root = environment / "betfair/history"
+    store = history.HistoryStore(root)
+    client = FakeClient()
+    store.discover(list(client.files), FIRST, LAST)
+    records = []
+    for remote_path, body in client.files.items():
+        market, rows = history.parse_download(body, remote_path, FIRST, LAST)
+        records.append({"remote": remote_path, "payload": body, "market": market, "rows": rows})
+    with store.connection() as con:
+        con.execute("CREATE TRIGGER interrupted_checkpoint BEFORE UPDATE ON files "
+                    "WHEN NEW.remote LIKE '%1.101.bz2' AND NEW.state='downloaded' "
+                    "BEGIN SELECT RAISE(ABORT,'checkpoint interrupted'); END")
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError, match="interrupted"):
+        store.save_many(records)
+    assert store.counts() == {"pending": 2}
+    assert all(history.local_path(root, name).read_bytes() == body for name, body in client.files.items())
+    with store.connection() as con:
+        con.execute("DROP TRIGGER interrupted_checkpoint")
+    result = history.sync_history(FIRST, LAST, client=client)
+    assert result["state"] == "ok" and result["files"] == {"published": 2}
+    assert result["reused_local"] == 2 and not client.downloads
+
+
+def test_duplicate_checkpoint_entries_are_rejected_before_metadata_changes(environment):
+    store = history.HistoryStore(environment / "betfair/history")
+    store.discover([remote(100)], FIRST, LAST)
+    body = payload()
+    market, rows = history.parse_download(body, remote(100), FIRST, LAST)
+    item = {"remote": remote(100), "payload": body, "market": market, "rows": rows}
+    with pytest.raises(history.HistoryError, match="Duplicate"):
+        store.save_many([item, item])
+    assert store.counts() == {"pending": 1}
+
+
+def test_authentication_failure_leaves_unscheduled_markets_pending(environment):
+    class ExpiredClient(FakeClient):
+        def download(self, path):
+            self.downloads.append(path)
+            raise history.LoginRequired("Reconnect to Betfair")
+    client = ExpiredClient(files={remote(i): payload(i) for i in range(100, 120)})
+    report = history.sync_history(FIRST, LAST, client=client, workers=1)
+    assert report["state"] == "needs_login" and report["files"]["pending"] >= 18
+    assert len(client.downloads) <= 2 and not report["processed"]
+
+
+def test_mixed_failed_and_successful_markets_keep_accurate_checkpoint_counts(environment):
+    client = FakeClient(files={remote(100): payload(), remote(101): b"invalid source"})
+    result = history.sync_history(FIRST, LAST, client=client)
+    assert result["state"] == "partial" and result["failed"] == 1
+    assert result["files"] == {"published": 1, "retry": 1}
+    assert result["processed"] == 1 and result["downloaded"] == 1

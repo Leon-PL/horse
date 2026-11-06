@@ -27,7 +27,7 @@ from src.ingestion.rtv_storage import history_manifest, generation, accepted_day
 from src.ingestion.storage import writer_lock, atomic_json
 
 logger = logging.getLogger(__name__)
-DEFAULT_SOURCES = ("sl", "rtv", "atr", "bsp", "fx")
+DEFAULT_SOURCES = ("sl", "rtv", "atr", "betfair", "fx")
 
 
 def pipeline_dir():
@@ -241,6 +241,8 @@ def _publish_source_health(path, report, previous):
     """Keep per-source coverage when a run only checks selected providers."""
     merged = {}
     for name, body in previous.get("sources", {}).items():
+        if name not in DEFAULT_SOURCES:
+            continue
         merged[name] = {**body,
             "checked_at": body.get("checked_at") or previous.get("checked_at"),
             "requested_start": body.get("requested_start", previous.get("start")),
@@ -277,11 +279,11 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
                     sl_backlog_max_races=0):
     """One bounded source plan; return coverage and failures without loading history."""
     from src.ingestion import results
-    from src.ingestion.auxiliary import refresh_atr, refresh_bsp
+    from src.ingestion.auxiliary import refresh_atr, refresh_betfair
     from src.ingestion.fx import refresh_prize_references
-    allowed = {"sl", "rtv", "atr", "bsp", "fx"}
+    allowed = {"sl", "rtv", "atr", "betfair", "fx"}
     if days_back < 0 or set(sources)-allowed or not sources:
-        raise ValueError("Choose nonnegative days and sources from sl, rtv, atr, bsp, fx")
+        raise ValueError("Choose nonnegative days and sources from sl, rtv, atr, betfair, fx")
     if atr_max_races < 1 or pedigree_limit < 1:
         raise ValueError("ATR and pedigree budgets must be positive")
     if max_source_workers < 1:
@@ -312,7 +314,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
                 **({"start": first.isoformat(), "end": last.isoformat()} if start or end else {}),
                 **({"reparse": True} if offline else {})),
             "atr": lambda: refresh_atr(first.isoformat(), last.isoformat(), max_races=atr_max_races),
-            "bsp": lambda: refresh_bsp(first.isoformat(), last.isoformat()),
+            "betfair": lambda: refresh_betfair(first.isoformat(), last.isoformat()),
             "fx": refresh_prize_references,
         }
         def execute(source):
@@ -345,7 +347,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
         if "sl" in sources:
             record("sl", {"state": "running"})
             record("sl", execute("sl"))
-        independent = [name for name in ("fx", "bsp", "rtv", "atr") if name in sources]
+        independent = [name for name in ("fx", "betfair", "rtv", "atr") if name in sources]
         if independent:
             with ThreadPoolExecutor(max_workers=min(max_source_workers, len(independent))) as pool:
                 jobs = {}
@@ -366,7 +368,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
 
 
 def refresh_summary(report):
-    labels = {"sl": "Sporting Life", "rtv": "Racing TV", "atr": "ATR", "bsp": "BSP", "fx": "Exchange rates"}
+    labels = {"sl": "Sporting Life", "rtv": "Racing TV", "atr": "ATR", "betfair": "Betfair archives", "fx": "Exchange rates"}
     values = [f"{labels.get(name, name)}: {value.get('state', 'unknown')}" for name, value in report.get("sources", {}).items()]
     return f"Source refresh {report['state']} — " + "; ".join(values)
 
@@ -460,7 +462,7 @@ def main():
     parser.add_argument("--snapshot", action="store_true")
     parser.add_argument("--start", help="Explicit first historical date")
     parser.add_argument("--end", help="Explicit last historical date")
-    parser.add_argument("--sources", default="sl,rtv,atr,bsp,fx")
+    parser.add_argument("--sources", default=",".join(DEFAULT_SOURCES))
     parser.add_argument("--atr-max-races", type=int, default=50)
     parser.add_argument("--sl-backlog-max-races", type=int, default=0,
                         help="Recover this many due historical SL jobs using their persisted URLs")
@@ -473,7 +475,7 @@ def main():
         args.sync = 14 if args.sync is None else args.sync
         result = (refresh_rtv_history(args.sync, start=args.start, end=args.end, reparse=args.replay) if args.rtv_only else
             refresh_sources(args.sync, enrich=args.enrich and not args.results_only, start=args.start, end=args.end,
-                sources=("sl",) if args.replay and args.sources == "sl,rtv,atr,bsp,fx" else tuple(args.sources.split(",")), atr_max_races=args.atr_max_races,
+                sources=("sl",) if args.replay and args.sources == ",".join(DEFAULT_SOURCES) else tuple(args.sources.split(",")), atr_max_races=args.atr_max_races,
                 weather=args.weather and not args.results_only, recheck=args.recheck, offline=args.replay,
                 sl_backlog_max_races=args.sl_backlog_max_races))
         print(json.dumps(result, indent=2, default=str))

@@ -4,7 +4,9 @@ The project can download the **same full BASIC historical market files** used
 by the manual archive workflow. This preserves timed exchange prices, market
 definitions, runner changes and settlements. The full compressed source files
 remain available for replay, including fields not yet used by the price parsers.
-Daily public BSP files continue to cover the newest dates independently.
+The public daily BSP downloader and manual win/place extraction commands are
+retired. The default main collection plan includes this feed as `betfair`.
+Recently settled markets wait for Betfair's publication window.
 
 ## Fees and access
 
@@ -38,9 +40,19 @@ Open `training_app.py`, then **Data → Historical exchange data**.
    The app checks certificate login and historical access before saving anything.
    Saved login settings use Windows account encryption and stay outside Git.
 
-After connecting, ordinary **Scrape recent days** source refreshes also fetch
-available historical markets. A successful public BSP update can coexist with
-a historical backlog or publication delay; the two statuses are reported separately.
+If connection fails, the form now identifies the failed step: Betfair sign-in,
+historical-data access, or encrypted settings storage. Recognised Betfair login
+codes are paired with a specific action. Missing Horse Racing BASIC months are
+reported as a successful sign-in with missing data access, with a link to My Data.
+The last attempt is retained in `data/betfair/auth/connection_status.json` using
+only the time, step and safe outcome message; it contains no login details or tokens.
+The live service requires GET for `GetMyData` (POST returns HTTP 405). Filtered
+file listings use POST; individual market downloads use GET. The initial live
+connection confirmed certificate sign-in before identifying this method mismatch.
+
+After connecting, ordinary **Scrape recent days** source refreshes fetch
+available full historical markets. Missing login, a catch-up backlog, and a
+publication delay are reported explicitly by the main `betfair` source.
 Use **Download and import missing markets** for a longer initial catch-up.
 It resumes saved work and skips already imported market files.
 
@@ -56,6 +68,9 @@ it is available to download.
 - `data/betfair/history/queue.sqlite`: durable download/import state, hashes,
   original request ranges and parsed observations.
 - `data/betfair/history/status.json`: progress, missing months, failures and outputs.
+- `data/betfair/history/backfill_status.json`: resumable catch-up worker, totals and code pins.
+- `data/betfair/history/archive_payloads.sqlite`: verified, deduplicated members from existing manual archives.
+- `data/betfair/history/archive_consolidation.json`: preservation and removal receipts for the original archives.
 - `data/betfair/auth/client.crt`: public login certificate.
 - `data/betfair/auth/client.key`: private login key; never upload or share this file.
 - `data/betfair/auth/connection.json`: Windows-account encrypted login settings.
@@ -74,6 +89,56 @@ so fetching both would duplicate it. Four download workers share a five-requests
 per-second limiter, below the documented 100 requests per ten seconds. Throttling
 and temporary faults retry; authentication failure stops further account requests.
 Corrupt local copies are quarantined and replaced.
+Both the older `/data/xds/historic/BASIC/` and current
+`/xds_nfs/edp_processed/BASIC/` remote layouts map to the same local market file;
+the source path cannot choose a local folder or a different data tier.
+
+## Existing archives and catch-up
+
+`python -m src.ingestion.betfair_archives --remove-verified` consolidates the
+existing top-level `data/betfair/*.tar` files. Every regular member is retained,
+including event files and different raw revisions. Compressed payloads are stored
+once by SHA-256, and original archive/member provenance is retained. Each original
+is removed only after all member bodies pass a final read-back hash check, the
+source archive still matches its initial hash, and a FULL SQLite commit and
+checkpoint have completed. An interrupted migration resumes from its member manifest.
+Incomplete tar files are preserved intact in `history/quarantine/`, recorded as
+issues, and do not block consolidation of the other archives. Complete markets
+already retained from them are replayable; missing markets are fetched via the API.
+
+The main collector looks up retained payloads by market ID before making a network
+download. Native contents must still match the requested race date, country, market
+type and settlement checks. Archived payloads are not copied into another raw file.
+
+Historical catch-up uses the same queue, parsers and publishing path as ordinary
+refreshes. `--drain` continues bounded batches; four workers share the five-request
+per-second limiter. Listing windows are checkpointed, with recent windows rechecked
+after six hours. Repeated failures receive a cooldown and enter review after three
+attempts. During consolidation it replays retained payloads without network
+downloads; afterward it fetches the remaining gaps. It checks its code pins between
+batches, and stops if `data/betfair/history/STOP` is present. It is separate from
+the ATR worker and does not alter that worker's files or locks.
+
+Import checkpoints group up to 128 parsed markets or two seconds of completed
+work in one durable transaction. Complete downloaded source files are flushed
+before their queue rows are accepted. Existing files and consolidated payloads
+are reused without rewriting them. A small number of in-flight jobs bounds memory;
+five-second progress updates use incremental counters instead of scanning the
+whole queue for every file. The final report recounts committed state and includes
+`import_seconds`, excluding price-cache publication. Interrupted uncommitted work
+can be replayed from retained raw data. WIN/PLACE coverage, parsing, the request
+limiter and SQLite durability settings are unchanged.
+
+`scripts/benchmark_betfair_ingestion.py` compares retained real markets against
+their accepted observations using read-only production connections and disposable
+queues. `--baseline-source` can compare a trusted local source snapshot. Its timing
+report distinguishes checkpoint writes, raw retention, lookup and parsing; storage
+timings alone are not an end-to-end backfill estimate.
+
+The former public data is frozen in `data/research/betfair_public_legacy/`, with
+existing research readers redirected there. Its volume and VWAP fields cannot be
+reconstructed from BASIC, which has no traded volume; see the
+[package comparison](https://historicdata.betfair.com/). No public downloads run.
 
 ## CLI and environment setup
 
@@ -82,7 +147,8 @@ configuration described in `.env.example`, using certificate paths and credentia
 A temporary `BETFAIR_SESSION_TOKEN` also works, but cannot provide lasting unattended login.
 
 ```powershell
-.venv\Scripts\python.exe -m src.ingestion.betfair_history --start 2026-10-15 --end 2026-10-30 --max-files 500
+.venv\Scripts\python.exe -m src.ingestion --sync 14
+.venv\Scripts\python.exe -m src.ingestion.betfair_history --start 2020-09-15 --end 2026-10-31 --drain --max-files 5000
 ```
 
 Repeat the command to drain saved work. An incomplete run returns a nonzero
@@ -91,11 +157,20 @@ accepted until BZ2 integrity, JSON, market identity, country, type, settlement
 and original requested dates have been checked. The code reuses the existing
 WIN/PLACE parsers. No feature build, model fit or promotion is performed.
 
-Local archive compatibility and account-encryption checks are recorded in
-`data/audit/betfair_history_20261105/`. An authenticated download still requires
-the account setup above; no Betfair credentials were present during implementation.
+Local archive compatibility and initial account-encryption checks are recorded in
+`data/audit/betfair_history_20261105/`.
 
-Verification covered 101 passing integration/regression cases, the dated-file-path
+Live verification on 6 November is recorded in `data/audit/betfair_connection_20261106/`.
+The certificate is uploaded and the account is connected, with BASIC access through
+October 2026. The initial five-market check was followed by a successful main
+refresh importing all 92 markets for 31 October with no failures. Existing
+BSP price disagreements were preserved rather than overwritten; their source
+observations remain in the raw files and history queue for review. Connection,
+transport, UI and path checks passed (54 tests); the Windows encryption case also
+passed separately under the Windows account running the app. Temporary test files
+were removed after verification.
+
+Initial implementation verification covered 101 passing integration/regression cases, the dated-file-path
 case, and a separate passing encryption test under the normal Windows user.
 The restricted test process lacked profile encryption keys and skipped that one
 case; the normal-user run verified the actual encryption round trip. The setup

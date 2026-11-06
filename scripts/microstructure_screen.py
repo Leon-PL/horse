@@ -2,7 +2,7 @@
 
 ACTION_PLAN 5a: the one live data hypothesis after gate 3 is that *where and
 when money enters* the exchange carries the private information that beats
-the model (ledger 2c/8). Betfair's public BSP files (fetch_betfair_sp_public)
+the model (ledger 2c/8). Betfair's frozen public BSP research files
 add morning and pre-play matched volume, which the BASIC tars lack, so a
 first, free version of 5a can be screened.
 
@@ -55,7 +55,7 @@ from src.betfair import attach_bsp, load_bsp
 from src.wf_eval import development_mask
 from scripts.triage_features import _bh_qvalues, _residualise, _within_race_demean, market_controls
 
-PUBLIC = os.path.join("data", "processed", "betfair_sp_public.parquet")
+PUBLIC = os.path.join("data", "research", "betfair_public_legacy", "prices.parquet")
 LIQUID_MIN = 100.0
 
 

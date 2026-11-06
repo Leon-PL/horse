@@ -1,5 +1,8 @@
 # BSP provenance and ATR repair — 5 November 2026
 
+**Betfair update, 6 November:** the public downloader and manual extraction
+commands described here are retired. See the [current consolidation and catch-up](BETFAIR_CONSOLIDATION_2026-11-06.md).
+
 **Later implementation:** the omissions and unit-mixing issue described below
 are fixed. The [qualified full rebuild](ATR_REBUILD_2026-11-05.md) is running and
 was resumed after shutdown. This document retains the earlier diagnosis.

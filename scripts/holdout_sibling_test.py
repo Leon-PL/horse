@@ -32,7 +32,7 @@ from src.betfair import attach_bsp
 from src.sibling_features import compute_sibling_features
 from src.wf_eval import holdout_mask
 
-PUBLIC = os.path.join("data", "processed", "betfair_sp_public.parquet")
+PUBLIC = os.path.join("data", "research", "betfair_public_legacy", "prices.parquet")
 
 
 def main() -> int:

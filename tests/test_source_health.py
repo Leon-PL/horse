@@ -31,7 +31,7 @@ def test_subset_retains_other_sources_and_their_original_check_times(health, mon
     saved = json.loads(path.read_text())
     assert result["required_sources"] == ["atr"] and result["state"] == "partial"
     assert saved["required_sources"] == list(sources.DEFAULT_SOURCES)
-    for name in ("sl", "rtv", "bsp", "fx"):
+    for name in ("sl", "rtv", "betfair", "fx"):
         assert saved["sources"][name]["receipt"] == name
         assert saved["sources"][name]["checked_at"] == before["checked_at"]
     assert saved["sources"]["atr"]["checked_at"] == now.isoformat()
@@ -43,9 +43,9 @@ def test_subset_retains_other_sources_and_their_original_check_times(health, mon
 def test_successful_subset_does_not_erase_another_sources_failure(health, monkeypatch):
     path, _, _ = health
     monkeypatch.setattr(source_auxiliary, "refresh_atr", lambda *a, **kw: {"state": "partial"})
-    monkeypatch.setattr(source_auxiliary, "refresh_bsp", lambda *a: {"state": "cached"})
+    monkeypatch.setattr(source_auxiliary, "refresh_betfair", lambda *a: {"state": "cached"})
     sources.refresh_sources(1, sources=("atr",))
-    assert sources.refresh_sources(1, sources=("bsp",))["state"] == "ok"
+    assert sources.refresh_sources(1, sources=("betfair",))["state"] == "ok"
     saved = json.loads(path.read_text())
     assert saved["state"] == "partial" and saved["sources"]["atr"]["state"] == "partial"
 
@@ -68,8 +68,8 @@ def test_subset_cannot_make_stale_other_sources_fresh(health, monkeypatch):
     stale = (now-timedelta(days=2)).isoformat()
     before["sources"]["fx"]["checked_at"] = stale
     atomic_json(path, before)
-    monkeypatch.setattr(source_auxiliary, "refresh_bsp", lambda *a: {"state": "cached"})
-    sources.refresh_sources(1, sources=("bsp",))
+    monkeypatch.setattr(source_auxiliary, "refresh_betfair", lambda *a: {"state": "cached"})
+    sources.refresh_sources(1, sources=("betfair",))
     assert json.loads(path.read_text())["checked_at"] == stale
 
 

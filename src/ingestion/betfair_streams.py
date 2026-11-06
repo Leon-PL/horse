@@ -3,8 +3,8 @@
 Each ``.bz2`` holds one market's JSON-lines stream, the same feed the Exchange API
 emits. A market is parsed purely from its own ``marketDefinition``
 (``eventName``/``marketTime``), never its archive path, because one folder can mix
-tracks and days. ``scripts/extract_betfair_bsp.py`` and
-``scripts/extract_betfair_place_bsp.py`` run these over the downloaded archives.
+tracks and days. The main Historical API collector replays these parsers over
+both automated downloads and consolidated existing archives.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from src.betfair import bf_horse_key
 from src.utils import normalise_off_time_key, normalise_track_key
 
 KEEP_COUNTRIES = {"GB", "IE"}
-MARKET_FILE_RE = re.compile(r"(?:^|/)1\.\d+\.bz2$")
 # "Nottingham 1st Jun" -> "Nottingham"; "Chelmsford City 1st Jun" -> "Chelmsford City".
 # Month optional (malformed "Newton Abbot 16th"); leading space optional too
 # (older data fuses them: "Cork1st Oct" -> "Cork"). No course name ends in a
