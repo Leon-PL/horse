@@ -1,5 +1,26 @@
 # ATR rich-data rebuild and shutdown recovery — 5 November 2026
 
+**Current update, 6 November, 12:08 UTC:** the main collector and worker now
+check five performance tabs, adding Jumps Data and Distance Ran. The reviewed
+upgrade preserved 33,918 runner payloads and queued 4,224 previously processed
+fields for the missing endpoints, reusing retained raw HTML. The queue now has
+per-tab coverage and a source navigation drift check. Final verification covers
+272 distinct checks. Following final reporting qualification at 12:30, current
+worker PID 16432, launcher 6748, pacing unchanged at two seconds.
+Read [the five-tab operating guide](ATR_TAB_COVERAGE_2026-11-06.md) for current
+scope, pins, missingness rules and evidence. Older three-tab coverage, pin lists
+and throughput figures below describe the earlier generation.
+
+**6 November, 10:36 UTC:** a controlled pause allowed correction of legacy
+efficiency feature semantics. The parser is byte-identical and all 31,041
+checkpointed rows were preserved; the worker resumed at two-second pacing.
+The guard now pins the **collector and worker**, excluding `atr_features.py`,
+which raw collection does not execute. A regression test confirms feature edits
+do not stop collection while parser/worker edits still do. Feature calculations
+remain guarded by the normal feature signature. All 178 relevant checks passed.
+The [efficiency/consistency usage audit](../research/ATR_EFFICIENCY_AND_USAGE_2026-11-06.md)
+and `data/audit/atr_efficiency_20261106/` record the change, queue backup and resume.
+
 **6 November recovery, 07:16 UTC:** a feature-performance edit to shared ATR
 modules triggered the code-change safeguard at 00:02. The worker had preserved
 **2,267 completed fields / 19,062 runner records**. Review confirmed source

@@ -172,7 +172,7 @@ def _speed_cells(values: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, np
     decoded = _decode_cells(values)
     if decoded is None or not all(isinstance(cell, str) or not isinstance(cell, (list, tuple, np.ndarray))
                                   for cell in labels):
-        flat, offsets = _flatten([_sectional_speeds(v, l) for v, l in zip(values, labels)])
+        flat, offsets = _flatten([_sectional_speeds(speeds, names) for speeds, names in zip(values, labels)])
         return flat, offsets, np.ones(len(flat), dtype=bool)
     flat, offsets = decoded
     keep = np.ones(len(flat), dtype=bool)
@@ -280,6 +280,27 @@ def _comment_tags(comments: list[str]) -> dict[str, np.ndarray]:
     return tags
 
 
+def efficiency_error_scores(frame: pd.DataFrame) -> np.ndarray:
+    """Native ATR efficiency error: lower is better, with no upper grade cutoff.
+
+    Unrated source rows sometimes contain a zero placeholder and no profile.
+    Such a zero is missing information, not a perfectly efficient performance.
+    Legacy inputs without a grade column retain their numeric contract.
+    """
+    source = frame.get("atr_efficiency_score", pd.Series(np.nan, index=frame.index))
+    values = pd.to_numeric(source, errors="coerce").to_numpy(dtype=float, na_value=np.nan, copy=True)
+    values[(~np.isfinite(values)) | (values < 0)] = np.nan
+    if "atr_efficiency_grade" in frame:
+        grade = frame.atr_efficiency_grade.fillna("").astype(str).str.strip().str.upper()
+        ungraded = ~grade.isin(["A++", "A+", "A", "B", "C", "D", "E", "F"]).to_numpy()
+        for row in np.flatnonzero((values == 0) & ungraded):
+            energy = frame.atr_energy_dist.iloc[row] if "atr_energy_dist" in frame else None
+            optimum = frame.atr_optimum_energy.iloc[row] if "atr_optimum_energy" in frame else None
+            if not _as_list(energy) or not _as_list(optimum):
+                values[row] = np.nan
+    return values
+
+
 # Per-run continuous metrics and whether higher is better (drives best/min,
 # field-relative sign and the composite score).
 RUN_METRICS: list[tuple[str, bool]] = [
@@ -288,7 +309,7 @@ RUN_METRICS: list[tuple[str, bool]] = [
     ("atr_max_speed", True),             # top sectional speed
     ("atr_closing_speed", True),         # last-segment speed
     ("atr_turn_of_foot", True),          # biggest segment-to-segment acceleration
-    ("atr_efficiency_score", True),      # TPD even-pace efficiency
+    ("atr_efficiency_score", False),     # deviation/error score: lower is better
     ("atr_energy_eff", True),            # -mean|energy-optimum| (closer to ideal)
     ("atr_peak_stride_length", True),    # biomechanics
     ("atr_peak_stride_freq", True),
@@ -302,7 +323,7 @@ _PLAUSIBLE: dict[str, tuple[float, float]] = {
     "atr_max_speed": (10.0, 60.0),
     "atr_closing_speed": (10.0, 60.0),
     "atr_turn_of_foot": (0.0, 30.0),
-    "atr_efficiency_score": (0.0, 40.0),
+    "atr_efficiency_score": (0.0, np.inf),  # D/E/F scores are valid observations
     "atr_peak_stride_length": (10.0, 35.0),
     "atr_peak_stride_freq": (1.0, 4.0),
     "atr_closing_in_hand": (40.0, 160.0),
@@ -328,7 +349,7 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
     energy_c = col("atr_energy_dist")
     optimum_c = col("atr_optimum_energy")
     fs_c = pd.to_numeric(df.get("atr_finishing_speed_pct", np.nan), errors="coerce").to_numpy()
-    eff_c = pd.to_numeric(df.get("atr_efficiency_score", np.nan), errors="coerce").to_numpy()
+    eff_c = efficiency_error_scores(df)
     psl_c = pd.to_numeric(df.get("atr_peak_stride_length", np.nan), errors="coerce").to_numpy()
     psf_c = pd.to_numeric(df.get("atr_peak_stride_freq", np.nan), errors="coerce").to_numpy()
     pos_c = pd.to_numeric(df.get("atr_official_position", np.nan), errors="coerce").to_numpy()
@@ -388,5 +409,5 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
     for c, (lo, hi) in _PLAUSIBLE.items():
         if c in res.columns:
             v = res[c]
-            res.loc[v.notna() & ((v < lo) | (v > hi)), c] = np.nan
+            res.loc[v.notna() & ((~np.isfinite(v)) | (v < lo) | (v > hi)), c] = np.nan
     return res

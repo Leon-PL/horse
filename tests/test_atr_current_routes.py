@@ -65,7 +65,7 @@ def test_current_workflow_uses_one_index_per_day_and_never_needs_racecard():
     for time in ("2030", "2000"):
         outcome, rows = atr._fetch_one(client, "Wolverhampton", DATE, time)
         assert outcome == atr.DATA and len(rows) == 1
-    assert len(client.calls) == 7
+    assert len(client.calls) == 11
     assert sum('/results/' in url for url in client.calls) == 1
     assert not any('/racecard/' in url for url in client.calls)
     assert all('/ajax/sectionals-razor/' in url for url in client.calls[1:])
@@ -80,7 +80,7 @@ def test_accepted_index_survives_new_session_and_challenged_index(tmp_path):
     second = _FakeFetcher({**routes(), '/results/': (429, '')})
     second.index_dir = tmp_path
     assert atr._fetch_one(second, "Wolverhampton", DATE, "2030")[0] == atr.DATA
-    assert len(second.calls) == 3 and not any('/results/' in url for url in second.calls)
+    assert len(second.calls) == 5 and not any('/results/' in url for url in second.calls)
 
 
 def test_challenge_is_never_saved_as_a_missing_race_or_index(tmp_path):

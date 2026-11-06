@@ -84,6 +84,8 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "ingestion.pipeline": "source orchestration only; published observations covered by data and RTV signatures",
     "ingestion.auxiliary": "collects raw ATR/BSP only; accepted values covered by source-content signatures",
     "ingestion.storage": "source locking, raw retention and atomic publication only",
+    "ingestion.atr_tabs": "raw source tab inventory/parsing; observations covered by ATR content signatures",
+    "ingestion.atr_jumps": "raw jumps collection only; observations covered by ATR content signatures",
     "ingestion.rtv_storage": "resolves published source generations covered by rtv_cache_signature",
     "ingestion.sporting_life": "raw-data access only; accepted observations covered by data_signature",
     "ingestion.racing_tv": "collects raw RTV payloads; published observations covered by rtv_cache_signature",

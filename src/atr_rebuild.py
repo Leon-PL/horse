@@ -22,10 +22,14 @@ import pandas as pd
 import config
 from src import attheraces_scraper as atr, database
 from src.source_storage import RawPayloadStore, atomic_json, atomic_parquet, read_json, writer_lock
+from src.ingestion.atr_tabs import COLLECTION_VERSION, PERFORMANCE_TABS, TERMINAL_TAB_STATES, inventory
 
 logger = logging.getLogger(__name__)
 DEFAULT_ROOT = Path(config.DATA_DIR)/'atr_cache/rebuild_v2'
-CODE_FILES = ('src/attheraces_scraper.py', 'src/atr_features.py', 'src/atr_rebuild.py')
+# Only source extraction and queue acceptance govern the saved raw records.
+# Feature derivation has its own FE signature and is not executed by this worker.
+CODE_FILES = ('src/attheraces_scraper.py', 'src/atr_rebuild.py',
+              'src/ingestion/atr_tabs.py', 'src/ingestion/atr_jumps.py')
 
 
 def utc_now():
@@ -60,6 +64,10 @@ def connect(root):
           race_id TEXT NOT NULL, horse_key TEXT NOT NULL, payload TEXT NOT NULL,
           PRIMARY KEY(race_id,horse_key));
         CREATE TABLE IF NOT EXISTS control (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS tab_coverage (
+          race_id TEXT NOT NULL, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+          receipt TEXT, updated_at TEXT, PRIMARY KEY(race_id,kind));
+        CREATE INDEX IF NOT EXISTS tabs_state ON tab_coverage(kind,state);
     ''')
     return con
 
@@ -72,6 +80,118 @@ def control(con, key, default=None):
 def set_control(con, key, value):
     con.execute('INSERT INTO control VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
                 (key, json.dumps(value, allow_nan=False)))
+
+
+def seed_tab_coverage(con):
+    for kind in PERFORMANCE_TABS:
+        con.execute("INSERT OR IGNORE INTO tab_coverage(race_id,kind,state) SELECT race_id,?,'pending' FROM jobs", (kind,))
+
+
+def record_tabs(con, race_id, receipts):
+    job = con.execute('SELECT expected FROM jobs WHERE race_id=?',(race_id,)).fetchone()
+    expected = {r['horse_key']:r['horse_name'] for r in json.loads(job[0])} if job else {}
+    for receipt in receipts:
+        if receipt.get('kind') not in PERFORMANCE_TABS:
+            raise ValueError('Unregistered performance endpoint')
+        receipt = dict(receipt)
+        if receipt.get('state') == 'data' and 'signal_runner_count' not in receipt:
+            receipt['state'] = 'legacy_received'
+        if 'horse_names' in receipt:
+            observed = {atr._normalise_horse_key(name) for name in receipt['horse_names']}
+            receipt['missing_canonical_runners'] = [expected[k] for k in sorted(set(expected)-observed)]
+            receipt['expected_runners'] = len(expected)
+        con.execute('INSERT INTO tab_coverage VALUES (?,?,?,?,?) ON CONFLICT(race_id,kind) DO UPDATE SET '
+                    'state=excluded.state,receipt=excluded.receipt,updated_at=excluded.updated_at',
+                    (race_id,receipt['kind'],receipt['state'],json.dumps(receipt,allow_nan=False),utc_now().isoformat()))
+
+
+def upgrade_tab_coverage(root=DEFAULT_ROOT):
+    """Explicit, resumable contract upgrade; keep every saved runner unchanged.
+
+    Invoke only after stopping and reviewing the collector. Completed three-tab
+    fields become pending additions. Retained raw fragments avoid redownloading
+    them. This is not a reset or an import of old parsed observations.
+    """
+    root = Path(root)
+    with writer_lock(root/'.worker.lock') as free, writer_lock(Path(atr.ATR_CACHE_DIR)/'.collector.lock') as collector:
+        if not free or not collector:
+            raise RuntimeError('Stop the ATR collector before upgrading its tab contract')
+        con = connect(root)
+        try:
+            old_hashes = control(con,'code_hashes')
+            if not old_hashes:
+                raise RuntimeError('No prepared queue to upgrade')
+            old_rows = con.execute('SELECT count(*) FROM runners').fetchone()[0]
+            by_race = {}
+            for race_id, payload in con.execute('SELECT race_id,payload FROM runners'):
+                row = json.loads(payload)
+                entry = by_race.setdefault(race_id, {'ids':set(),'current':True,'receipts':row.get('atr_source_payloads',[])})
+                entry['ids'].add(str(row['atr_raceid']))
+                entry['current'] &= str(row.get('atr_collection_version')) == str(COLLECTION_VERSION)
+            reopened = 0
+            with con:
+                seed_tab_coverage(con)
+                for race_id, entry in by_race.items():
+                    if len(entry['ids']) != 1:
+                        raise ValueError(f'Conflicting native IDs for {race_id}')
+                    native_id = next(iter(entry['ids']))
+                    con.execute('UPDATE jobs SET native_id=? WHERE race_id=?', (native_id,race_id))
+                    receipts = [{**r,'state':r.get('state', 'not_found' if r['status']==404 else 'data')}
+                                for r in entry['receipts']]
+                    record_tabs(con,race_id,receipts)
+                    if not entry['current']:
+                        reopened += con.execute("UPDATE jobs SET state='pending',next_retry=0,error=? "
+                                                "WHERE race_id=? AND state IN ('data','data_partial','no_data')",
+                                                ('Collect newly required jumps/distance tabs',race_id)).rowcount
+                reopened += con.execute("UPDATE jobs SET state='pending',next_retry=0,error=? WHERE state='no_data' "
+                                        "AND race_id NOT IN (SELECT race_id FROM runners)",
+                                        ('Recheck absence under five-tab contract',)).rowcount
+                set_control(con,'code_hashes',code_hashes())
+                set_control(con,'collection_version',COLLECTION_VERSION)
+            assert con.execute('SELECT count(*) FROM runners').fetchone()[0] == old_rows
+            receipt = {'upgraded_at':utc_now().isoformat(),'collection_version':COLLECTION_VERSION,
+                       'saved_rows_preserved':old_rows,'reopened_races':reopened,
+                       'old_code_hashes':old_hashes,'code_hashes':code_hashes(),
+                       'required_performance_tabs':list(PERFORMANCE_TABS)}
+            manifest = read_json(root/'manifest.json')
+            manifest.update(collection_version=COLLECTION_VERSION,code_hashes=code_hashes(),tab_upgrade=receipt)
+            atomic_json(root/'manifest.json',manifest)
+            atomic_json(root/'tab_upgrade.json',receipt)
+            publish_status(con,root,'upgraded')
+            return receipt
+        finally:
+            con.close()
+
+
+def audit_navigation(con, fetcher, job, root):
+    """Hourly page check; flag new tabs instead of silently ignoring them."""
+    now = utc_now().timestamp()
+    if control(con,'inventory_retry',0) > now:
+        return
+    if control(con,'discovery_retry',0) > now:
+        with con:
+            set_control(con,'tab_inventory',{**control(con,'tab_inventory',{}),
+                        'state':'deferred','reason':'HTML discovery cooldown',
+                        'retry_after':control(con,'discovery_retry',0)})
+        return
+    day = atr._date_to_atr(job['race_date'])
+    off = atr._off_time_to_hhmm(job['off_time'])
+    if atr._is_bst(job['race_date']):
+        off = atr._add_one_hour(off)
+    url = f"{atr.ATR_BASE}/racecard/{atr._track_to_slug(job['track'])}/{day}/{off}"
+    response = fetcher.get(url)
+    report = inventory(response[1]) if response and response[0] == 200 else {
+        'state':'unresolved' if response and response[0] == 404 else 'blocked',
+        'tabs':[],'unknown_tabs':[],'reason':'Source page unavailable'}
+    report.update(source_url=url,checked_at=utc_now().isoformat())
+    with con:
+        set_control(con,'tab_inventory',report)
+        set_control(con,'inventory_retry',now+max(3600,float(fetcher.last_response.get('retry_after_seconds') or 0)))
+        if report['state']=='blocked':
+            policy = _retry_policy(fetcher.last_response,0,control(con,'transient_streak',0))
+            key = 'discovery_retry' if policy['scope']=='discovery' else 'global_retry'
+            set_control(con,key,max(control(con,key,0),now+policy['global_delay']))
+    atomic_json(Path(root)/'tab_inventory.json',report)
 
 
 def prepare(root=DEFAULT_ROOT):
@@ -127,12 +247,15 @@ def prepare(root=DEFAULT_ROOT):
                                 'VALUES (?,?,?,?,?,?,?,?,?)', prepared)
                 set_control(con, 'code_hashes', code_hashes())
                 set_control(con, 'created_at', utc_now().isoformat())
+                seed_tab_coverage(con)
+                set_control(con, 'collection_version', COLLECTION_VERSION)
                 # The previous block was specifically on HTML ID discovery.
                 previous = read_json(Path(config.DATA_DIR)/'source_refresh/atr_recovery.json')
                 retry = previous.get('retry_after')
                 if retry:
                     set_control(con, 'discovery_retry', datetime.fromisoformat(retry).timestamp())
             manifest = {'created_at':utc_now().isoformat(),'parser_version':atr.ATR_PARSER_VERSION,
+                        'collection_version':COLLECTION_VERSION,
                         'root':str(root.resolve()), 'canonical_races':len(races), 'queued_races':len(prepared),
                         'excluded_unsupported_races':int(excluded.sum()),
                         'native_id_hints':sum(row[6] is not None for row in prepared),
@@ -198,6 +321,9 @@ def accept(con, job, outcome, rows):
     now = utc_now().isoformat()
     if outcome == atr.DATA:
         rows = validate_rows(job, rows)
+        receipts = rows[0].get('atr_tab_manifest', [])
+        if {r['kind'] for r in receipts if r.get('state') in TERMINAL_TAB_STATES} != set(PERFORMANCE_TABS):
+            raise ValueError('Incomplete performance tab manifest')
     with con:
         if outcome == atr.DATA:
             con.executemany('INSERT OR REPLACE INTO runners VALUES (?,?,?)', [
@@ -210,6 +336,8 @@ def accept(con, job, outcome, rows):
             raise ValueError('Only confirmed outcomes can be committed')
         con.execute('UPDATE jobs SET state=?,error=NULL,updated_at=? WHERE race_id=?',
                     (state,now,job['race_id']))
+        if outcome == atr.DATA:
+            con.execute('UPDATE jobs SET native_id=? WHERE race_id=?', (str(rows[0]['atr_raceid']),job['race_id']))
 
 
 def export_days(con, root, days):
@@ -227,8 +355,14 @@ def publish_status(con, root, state, **extra):
     deferred = con.execute("SELECT count(*) FROM jobs WHERE state IN ('pending','retry') AND "
                            "(race_date>? OR (race_date=? AND substr(off_time,1,5)>?))",
                            (cutoff[:10],cutoff[:10],cutoff[11:])).fetchone()[0]
+    tabs = {kind:{} for kind in PERFORMANCE_TABS}
+    for kind, tab_state, count in con.execute('SELECT kind,state,count(*) FROM tab_coverage GROUP BY kind,state'):
+        tabs.setdefault(kind,{})[tab_state] = count
     result = {'state':state, 'pid':os.getpid(), 'checked_at':utc_now().isoformat(),
               'parser_version':atr.ATR_PARSER_VERSION,'races':counts,
+              'collection_version':COLLECTION_VERSION, 'tabs':tabs,
+              'tab_inventory':control(con,'tab_inventory',{'state':'not_yet_verified'}),
+              'tab_inventory_baseline':control(con,'tab_inventory_baseline',{}),
               'total_races':sum(counts.values()), 'saved_rows':con.execute('SELECT count(*) FROM runners').fetchone()[0],
               'publication_deferred_races':deferred,
               'global_retry_after':control(con,'global_retry',0),
@@ -240,15 +374,23 @@ def publish_status(con, root, state, **extra):
 
 class ReplayFetcher:
     """Source response reuse, never reuse of old parsed telemetry."""
-    def __init__(self, store):
+    def __init__(self, store, fallback=None):
         self.store = store
+        self.fallback = fallback
         self.last_response = {}
+        self.rejected_urls = set()
+        self.reused = 0
 
     def get(self, url, **kwargs):
         body = self.store.latest(url)
-        if body is None or b'Client Challenge' in body[:4000]:
-            return None
+        if body is None or b'Client Challenge' in body[:4000] or url in self.rejected_urls:
+            if self.fallback is None:
+                return None
+            result = self.fallback.get(url, **kwargs)
+            self.last_response = self.fallback.last_response
+            return result
         self.last_response = {'url':url,'status':200,'sha256':hashlib.sha256(body).hexdigest()}
+        self.reused += 1
         return 200,body.decode('utf-8')
 
 
@@ -285,12 +427,13 @@ def run(root=DEFAULT_ROOT, *, request_delay=3.0, max_races=None, retry_seconds=3
         con = connect(root)
         fetcher = atr._Fetcher(request_delay=request_delay)
         store = RawPayloadStore(fetcher.raw_store_path)
-        replay = ReplayFetcher(store)
-        available_raw_ids = _raw_ids(store)
+        replay = ReplayFetcher(store, fallback=fetcher)
         dirty, attempted = set(), 0
         try:
             if not control(con,'code_hashes'):
                 raise RuntimeError('Run --prepare before starting the worker')
+            if control(con,'collection_version') != COLLECTION_VERSION:
+                raise RuntimeError('Run --upgrade-tabs after review; existing progress must not be reset')
             while not (root/'STOP').exists():
                 if max_races is not None and attempted >= max_races:
                     break
@@ -320,15 +463,20 @@ def run(root=DEFAULT_ROOT, *, request_delay=3.0, max_races=None, retry_seconds=3
                 publish_status(con,root,'running',current={k:job[k] for k in ('race_id','race_date','track','off_time')})
                 with con:
                     con.execute('UPDATE jobs SET attempts=attempts+1 WHERE race_id=?',(job['race_id'],))
-                used_raw = job['native_id'] in available_raw_ids
-                client = replay if used_raw else fetcher
+                client = replay
+                before_reuse = replay.reused
+                client.tab_receipts = []
                 outcome, rows = atr.fetch_atr_sectionals_outcome(job['race_date'],job['track'],job['off_time'],
                     client, raceid=job['native_id'])
-                if used_raw and outcome not in (atr.DATA,atr.NOT_FOUND):
-                    available_raw_ids.discard(job['native_id'])
+                used_raw = replay.reused > before_reuse
+                if used_raw and outcome == atr.UNRESOLVED and client.last_response.get('reason') == 'unrecognised_tab':
+                    # Recheck only the changed/invalid fragment, not the three
+                    # already retained good tabs.
+                    replay.rejected_urls.add(client.last_response['url'])
                     outcome, rows = atr.fetch_atr_sectionals_outcome(job['race_date'],job['track'],job['off_time'],
-                        fetcher,raceid=job['native_id'])
-                    client = fetcher
+                        client,raceid=job['native_id'])
+                with con:
+                    record_tabs(con,job['race_id'],getattr(client,'tab_receipts',[]))
                 attempted += 1
                 if outcome in (atr.DATA,atr.NOT_FOUND):
                     with con:
@@ -339,6 +487,9 @@ def run(root=DEFAULT_ROOT, *, request_delay=3.0, max_races=None, retry_seconds=3
                             dirty.add(job['race_date'])
                     except ValueError as error:
                         with con:
+                            record_tabs(con,job['race_id'],[
+                                {**r,'state':'review','reason':str(error)} if r.get('state')=='data' else r
+                                for r in getattr(client,'tab_receipts',[])])
                             con.execute("UPDATE jobs SET state='review',error=?,updated_at=? WHERE race_id=?",
                                         (str(error),utc_now().isoformat(),job['race_id']))
                         logger.warning('Rejected %s: %s',job['race_id'],error)
@@ -369,6 +520,11 @@ def run(root=DEFAULT_ROOT, *, request_delay=3.0, max_races=None, retry_seconds=3
                     dirty.clear()
                 publish_status(con,root,'running',last_outcome=outcome,attempted_this_session=attempted,
                                last_used_retained_html=used_raw)
+                if outcome in (atr.DATA,atr.NOT_FOUND):
+                    audit_navigation(con,fetcher,job,root)
+                    if control(con,'tab_inventory',{}).get('unknown_tabs'):
+                        publish_status(con,root,'needs_tab_review',reason='ATR advertises unhandled tabs')
+                        return
                 logger.info('Field %s %s %s: %s',job['race_date'],job['track'],job['off_time'],outcome)
             publish_status(con,root,'stopped' if (root/'STOP').exists() else 'batch_complete')
         except BaseException as error:
@@ -384,11 +540,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root',type=Path,default=DEFAULT_ROOT)
     parser.add_argument('--prepare',action='store_true')
+    parser.add_argument('--upgrade-tabs',action='store_true',help='Reviewed tab-contract upgrade; preserves saved rows')
     parser.add_argument('--request-delay',type=float,default=3.0)
     parser.add_argument('--max-races',type=int)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
-    if args.prepare:
+    if args.upgrade_tabs:
+        print(json.dumps(upgrade_tab_coverage(args.root),indent=2))
+    elif args.prepare:
         print(json.dumps(prepare(args.root),indent=2))
     else:
         run(args.root,request_delay=args.request_delay,max_races=args.max_races)
