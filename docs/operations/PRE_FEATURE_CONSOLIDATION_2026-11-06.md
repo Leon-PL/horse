@@ -1,8 +1,9 @@
 # Pre-feature consolidation — 6 November 2026
 
-**Status: done except for the At The Races (ATR) files, which wait on other work
-being committed. Nothing is committed yet. No store was rebuilt and no model was
-trained or promoted.**
+**Status: done, including At The Races (ATR). The work is committed and is on the
+main checkout's branch, `checkpoint/eval-harness-and-guards`. Nothing was pushed. No
+store was rebuilt and no model was trained or promoted. The ATR worker was stopped,
+moved and restarted, with its queue unchanged.**
 
 This covers everything that runs before feature building: collecting from each
 source, storing and cleaning the data, and handing it to the feature store. It
@@ -16,8 +17,8 @@ column types the store is keyed on.
 ## The rule now
 
 **Every regular collector is in `src/ingestion/`, storage is in `src/database.py`,
-and cleaning is in `src/data_processor.py`.** ATR is the one exception until its
-files move.
+and cleaning is in `src/data_processor.py`.** There are no exceptions and no
+compatibility aliases left.
 
 ## How data flows now
 
@@ -38,8 +39,9 @@ Betfair full history    ingestion/betfair_history.py        data/betfair/, price
                         + ingestion/betfair_streams.py
 Exchange rates          ingestion/fx.py                     reference/ecb_gbp_per_eur.csv
 At The Races, normal    ingestion/auxiliary.py              data/atr_cache/atr_sectionals.parquet
-                        + attheraces_scraper.py (not moved)
-At The Races, backfill  atr_rebuild.py (not moved)          data/atr_cache/rebuild_v2/
+                        + ingestion/attheraces.py
+At The Races, backfill  ingestion/atr_rebuild.py            data/atr_cache/rebuild_v2/
+                        + ingestion/atr_tabs.py, atr_jumps.py
 
 HAND-OFF
 races.db -> database.publish_results_snapshot -> data/raw/race_results.csv + receipt
@@ -47,7 +49,7 @@ races.db -> database.publish_results_snapshot -> data/raw/race_results.csv + rec
             -> time and category columns -> in-memory frame -> feature store
 
 JOINED LATER, NOT THROUGH THE HAND-OFF
-ATR       read inside feature building by attheraces_scraper.merge_atr_sectionals
+ATR       read inside feature building by atr_features.merge_atr_sectionals
 Racing TV read inside feature building by rtv_features and rtv_text
 Betfair   read at training and evaluation by model.py and clv.py
 ```
@@ -57,12 +59,13 @@ Betfair   read at training and evaluation by model.py and clv.py
 | | Before | After |
 |---|---|---|
 | Sporting Life sync loop | Inside `src/database.py` (1,181 lines) | `src/ingestion/results.py` (366 lines); `database.py` is now 841 lines |
-| Places holding collectors | Five: `src/ingestion/`, `src/`, a feature module, `scripts/`, the database module | One, plus ATR |
+| Places holding collectors | Five: `src/ingestion/`, `src/`, a feature module, `scripts/`, the database module | One |
 | Production code importing collection scripts | `auxiliary.py`, `betfair_history.py`, `market_replay.py` | None |
-| Compatibility aliases | Six | One, `src.source_storage`, for the ATR files only |
+| Compatibility aliases | Six | None |
 | Commands for the same refresh | Four | One: `python -m src.ingestion` |
 | Ways to read history for processing | CSV reader plus a hand-built copy in `project_status.py` | `load_raw_data`, or `load_database_history` for the live database |
 | Repair tools | Three ways to publish | All through `publish_after_repair` |
+| Editing the ATR join | Stops the worker, because it shared a file with the collector | Does not stop the worker |
 
 | Moved | From | To |
 |---|---|---|
@@ -76,6 +79,10 @@ Betfair   read at training and evaluation by model.py and clv.py
 | BHA stewards | `src/bha_stewards_scraper.py` | `src/ingestion/bha_stewards.py` |
 | Win and place stream parsers | `scripts/extract_betfair_*.py` | `src/ingestion/betfair_streams.py` |
 | Public BSP download and parsing | `scripts/fetch_betfair_sp_public.py` | `src/ingestion/betfair_public.py` |
+| ATR collector | `src/attheraces_scraper.py` | `src/ingestion/attheraces.py` |
+| ATR backfill worker | `src/atr_rebuild.py` | `src/ingestion/atr_rebuild.py` |
+| ATR columns, cache location and cache reader | `src/attheraces_scraper.py` | `src/ingestion/atr_tabs.py` |
+| ATR join | `src/attheraces_scraper.py` | `src/atr_features.py` |
 
 The three Betfair scripts remain as thin commands. Racing TV's own tools are now
 `python -m src.ingestion.racing_tv`.
@@ -86,8 +93,8 @@ The three Betfair scripts remain as thin commands. Racing TV's own tools are now
   repairs and the race-type rebuild. The user's "Yes" to that question was read as
   approval to delete them. They stay in git history once this is committed, and can be
   restored until then with `git checkout HEAD -- <file>`.
-- **Aliases:** `source_pipeline`, `source_auxiliary`, `rtv_storage`, `data_scraper`,
-  `rtv_scraper`.
+- **Aliases:** `source_pipeline`, `source_auxiliary`, `source_storage`, `rtv_storage`,
+  `data_scraper`, `rtv_scraper`.
 - **Unused code:** `load_matched_history`, the `sync_database` wrapper in the
   pipeline, `generation_for_publish`, `_publish`, `scrape_results`, the Sporting Life
   command line, the `return_report` argument, and the `save` argument of
@@ -117,11 +124,14 @@ Nothing below changes a feature value. These are the changes someone could notic
 7. `weather.py` found its folder from its own file location, which would have been
    wrong after the move. It now uses `config.DATA_DIR`, the same place in practice.
 8. Log lines from the sync now appear under `src.ingestion.results`.
+9. The ATR commands are now `python -m src.ingestion.atr_rebuild` and
+   `python -m src.ingestion.attheraces`. The old module paths no longer exist.
+10. ATR join log lines now appear under `src.atr_features`.
 
 ## Proof that nothing changed
 
-All comparisons ran on one frozen copy: database revision 2,314, its CSV and three
-cached racecards. Unchanged code ran twice first, to show each check gives the same
+The non-ATR comparisons ran on one frozen copy: database revision 2,314, its CSV and
+three cached racecards. Unchanged code ran twice first, to show each check gives the same
 answer every time. Both runs matched exactly.
 
 | Check | Compared | Result |
@@ -134,6 +144,8 @@ answer every time. Both runs matched exactly.
 | Exchange rates, offline | Output file, number of requests, report | Identical |
 | Betfair parsers on the `2026-06.tar` sample | Win 225 rows, place 1,357 rows | Identical |
 | Racing TV time par | Old code and new code on 14,572 races, plus both cached pars | Identical, largest difference 0.0 |
+| ATR parsing | 2,732 stored races replayed through old and new code with no network: outcomes, 22,718 rows and tab receipts | Identical, no race differs |
+| ATR join | 69 columns on 757,580 rows, 232,283 of them with ATR data, year by year | Identical |
 | Commands | 15 commands run with `--help` | All exit 0 |
 | Imports | 1,330 `src` and `scripts` imports, read statically | None unresolved |
 
@@ -153,6 +165,10 @@ prefixes needed after a move, removal of the `save` and `return_report` argument
 the behaviour changes listed above. The file paths rewritten in research scripts name
 files whose current code those scripts hash, so the new paths are correct.
 
+The ATR move was compared separately: 2,492 definitions unchanged in place, 83 moved
+unchanged, 6 moved and edited, 7 edited in place, none removed and none added. Every
+ATR collection edit is an import path, plus the worker's list of pinned files.
+
 **Tests.** The final run was on the finished code and started from the same state as
 the baseline.
 
@@ -165,6 +181,11 @@ the baseline.
 - The same 15 tests fail in both runs, with the same error message.
 - The extra passes come from test changes: 9 tests were retired or renamed, and 13
   were added.
+
+The ATR move had its own before-and-after run, because the merged ATR work added
+tests. It went from 1,881 passed, 15 failed and 3 skipped to 1,883, 15 and 3. The same
+15 tests fail with the same messages, and no test that exists in both runs changed
+result. One retired test and three new ones account for the difference.
 
 The 15 failures already existed:
 
@@ -189,58 +210,57 @@ That file was removed before the final run, and the table above is the true comp
 - Weather, BHA stewards and `scripts/backfill_pedigree.py` were not run. The first two
   were moved with only the path and import edits shown in the comparison. The third has
   no help option, and running it would change data.
-- ATR files were not touched, so they were not tested beyond the existing test suite.
+- The ATR replay covers races the worker has already finished, so it proves the parsers
+  on stored responses, not ATR's live requests. The restarted worker covers those.
 
 Golden hold-out races were only hashed by these checks. Nothing was measured on them.
 
 ## Feature signature
 
-`fe_signature()` changes from `e411196de4871a7d` to `2870d125d10da827` because hashed
-modules changed, though the processed data is identical. The store on disk was built
-by `1355eccb0838ad9b`, so it is already out of date for other reasons, and the
-promoted model already needs a refit. If this lands before the next rebuild it costs
-nothing extra. If a rebuild happens first, it forces one more of about 14 minutes.
+`fe_signature()` changes from `e411196de4871a7d` to `96f8dbe1ce9de8f0` because hashed
+modules changed, though the processed data and the ATR join are identical. The store
+on disk was built by `1355eccb0838ad9b`, so it was already out of date for other
+reasons, and the promoted model already needed a refit. The next rebuild takes about
+14 minutes, and this work adds no second one.
 
-## ATR: what is left
+`src/ingestion/atr_tabs.py` now counts towards the signature, because it holds the
+columns the join uses. `src/attheraces_scraper.py` no longer does, so an edit to the ATR
+collector no longer forces a rebuild.
 
-The user agreed that the ATR worker may stop as long as it is resumed. The files have
-not moved yet for a different reason: the main checkout has uncommitted ATR work,
-including `src/ingestion/atr_tabs.py` and `atr_jumps.py`, and this branch does not
-contain it. Moving the committed versions here would collide with that work.
+## How the ATR move was done
 
-So the work is in two steps.
+The main checkout had uncommitted ATR work, so that was committed first, as `3474f1b`,
+and merged into this branch. The move itself is `9f7daf0`. The worker kept collecting
+through the replay and both test runs, and was only stopped once they had passed.
 
-**Step 1, this branch, can land with the worker running.** It touches none of the four
-files the worker watches. A preview merge of the seven files both sides changed gave
-no conflicts: `CONTINUATION.md`, `docs/README.md`, `scripts/README.md`,
-`src/featured_dataset.py`, `src/ingestion/auxiliary.py`,
-`tests/test_atr_current_routes.py` and `tests/test_atr_rebuild.py`.
+1. `data/atr_cache/rebuild_v2/STOP` was created at 16:28:35 UTC. The worker finished its
+   race and exited in about seven seconds, with state `stopped`.
+2. The queue was backed up to `data/audit/atr_consolidation_20261106/queue_before_move.sqlite`,
+   and the backup passed its integrity check.
+3. The branch was fast-forwarded onto `checkpoint/eval-harness-and-guards` in the main
+   checkout.
+4. The new file fingerprints were adopted in the queue and the manifest. Every other
+   queue value was hashed before and after, and the digest did not change
+   (`a6f85557ff2e7a5c`). No row was reset or reopened: 62,432 jobs, 33,932 runners and
+   312,160 tab records.
+5. The stop marker was removed and one worker was started with
+   `python -m src.ingestion.atr_rebuild --request-delay 2`. Launcher PID 13356, worker
+   PID 14328. Use the live status file, not these PIDs, once they go stale.
 
-**Step 2, the ATR move, needs the main checkout's ATR work committed first.**
+The worker was collecting again about a minute and a half after it stopped. Finished
+races rose from 3,048 to 3,059 in its first minute, with state `running`, and exactly
+one worker is running.
 
-1. Commit that work and bring it into this branch.
-2. Split `src/attheraces_scraper.py`. The collector goes to `src/ingestion/attheraces.py`.
-   The cache reader, `merge_atr_sectionals`, `atr_merge_scope` and the column lists stay
-   on the feature side, because feature building needs them.
-3. Move `src/atr_rebuild.py` to `src/ingestion/` and remove `src.source_storage`.
-4. Stop the worker in an orderly way with `data/atr_cache/rebuild_v2/STOP`, and let it
-   finish its current race.
-5. Land the change, then resume by the recorded procedure: back up the queue, adopt the
-   new code fingerprints in an audited step, restart with
-   `python -m src.ingestion.atr_rebuild --request-delay 2`, and confirm saved rows rise.
-   The queue is never reset. Fingerprint adoption is justified only by showing the
-   collection code is unchanged, as this report does for the other collectors.
+Saved rows are not the measure of progress at the moment. The worker is re-collecting
+races it already holds, under the five-tab contract, so saved rows stay at 33,932 while
+finished races rise.
 
-The one-off helper scripts used for the earlier resumes were removed from `data/audit/`
-by a separate cleanup at 14:04 on 6 November (`session_cleanup_20261106/`). Their
-records remain, including `atr_resume_20261106/adoption.json`, `review.json` and
-`launch.json`, which show what each step did. Step 2 needs a new adoption helper
-written from those records. This does not affect step 1.
+The one-off helpers from earlier resumes were removed by the cleanup at 14:04, so a new
+one was written from their records. It and the proof files are in
+`data/audit/atr_consolidation_20261106/`.
 
 ## Follow-ups outside this work
 
-- `prepare_prize_references` says it refreshes rates, but it has only read them since
-  the stage-one audit. It is harmless, and the docstring is wrong.
 - `src/trainer_locations.py`, `scripts/fetch_bha_going.py` and
   `scripts/fetch_forecast_previous_runs.py` still sit outside `src/ingestion/`. They are
   one-off research collectors, not part of the normal plan.

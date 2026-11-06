@@ -17,6 +17,8 @@ Real-source collection now lives in `src/ingestion/`. The entry point is
 `python -m src.ingestion --sync 14`. The older collection names and commands were
 removed on 6 November; see the
 [consolidation report](docs/operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md).
+The ATR worker now runs as `python -m src.ingestion.atr_rebuild --request-delay 2`.
+`fe_signature()` is `96f8dbe1ce9de8f0`, so the store needs one rebuild before its next use.
 The synthetic race generator, sample collection API and unused collector shim
 are removed. Processing no longer writes an unused global Parquet by default.
 See the [cleanup report](docs/operations/PRE_FEATURE_CLEANUP_2026-11-05.md).
