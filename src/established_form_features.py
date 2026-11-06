@@ -6,6 +6,8 @@ substitutes. These are historical descriptors, not estimated performance ratings
 """
 from __future__ import annotations
 
+from math import inf, isfinite, nan
+
 import numpy as np
 import pandas as pd
 
@@ -55,6 +57,14 @@ def mark_scale(frame):
     flat = code.eq("Flat").fillna(False)
     scale.loc[flat] = surface.loc[flat].map({0.: "Flat|0", 1.: "Flat|1"}).astype("string")
     return scale
+
+
+# np.log1p of the whole numbers this loop meets, looked up per cell.
+_LOG1P = np.log1p(np.arange(1 << 15)).tolist()
+
+
+def _log1p(value):
+    return _LOG1P[value] if 0 <= value < len(_LOG1P) else float(np.log1p(value))
 
 
 def _horse_keys(frame):
@@ -113,43 +123,62 @@ def established_form_features(frame, *, state=None, return_state=False):
     totals = dict(state.get("totals", {}))
     copied_d, copied_m = set(), set()
     boundaries = np.r_[0, np.flatnonzero(np.diff(days[order]))+1, n]
-    for lo, hi in zip(boundaries[:-1], boundaries[1:]):
-        rows = order[lo:hi]
-        if not len(rows):
+    # This loop reads and writes one cell at a time, which is far cheaper on
+    # Python lists than on arrays.
+    keys, code, scales = keys.tolist(), code.tolist(), scales.tolist()
+    marks, weights, handicap = marks.tolist(), weights.tolist(), handicap.tolist()
+    finish, fields, starts_at = finish.tolist(), fields.tolist(), starts.tolist()
+    day_of, order_of = days.tolist(), order.tolist()
+    missing = [nan]*n
+    runs_log, exposure, win_rate, place_rate, dnf_rate, form = (list(missing) for _ in range(6))
+    days_since, mark_runs, mark_support, vs_win, vs_place, vs_high = (list(missing) for _ in range(6))
+    vs_recent_high, vs_win_weight, below_win, above_high = (list(missing) for _ in range(4))
+    for lo, hi in zip(boundaries[:-1].tolist(), boundaries[1:].tolist()):
+        rows = order_of[lo:hi]
+        if not rows:
             continue
-        day = days[rows[0]]
+        day = day_of[rows[0]]
         for i in rows:
             horse, kind, scale = keys[i], code[i], scales[i]
             if horse is None or kind is None:
                 continue
             d = discipline.get((horse, kind), {})
             runs = d.get("runs", 0)
-            outputs["horse_discipline_runs_log"][i] = np.log1p(runs)
-            outputs["horse_discipline_exposure_share"][i] = runs/totals[horse] if totals.get(horse, 0) else np.nan
-            outputs["horse_discipline_win_rate_shrunk"][i] = (d.get("wins", 0)+.6)/(runs+6.)
-            outputs["horse_discipline_place_rate_shrunk"][i] = (d.get("places", 0)+1.8)/(runs+6.)
-            outputs["horse_discipline_dnf_rate_shrunk"][i] = (d.get("dnfs", 0)+.5)/(runs+10.)
-            quality = [v for v in d.get("quality", []) if np.isfinite(v)]
-            outputs["horse_discipline_form_3"][i] = np.mean(quality) if quality else np.nan
+            runs_log[i] = _log1p(runs)
+            exposure[i] = runs/totals[horse] if totals.get(horse, 0) else nan
+            win_rate[i] = (d.get("wins", 0)+.6)/(runs+6.)
+            place_rate[i] = (d.get("places", 0)+1.8)/(runs+6.)
+            dnf_rate[i] = (d.get("dnfs", 0)+.5)/(runs+10.)
+            quality = 0.
+            seen = 0
+            for value in d.get("quality", ()):
+                if isfinite(value):
+                    quality += value
+                    seen += 1
+            if seen:
+                form[i] = quality/seen
             if "day" in d:
-                outputs["days_since_discipline_race_log"][i] = np.log1p(day-d["day"])
+                days_since[i] = _log1p(day-d["day"])
             if not handicap[i] or scale is None:
                 continue
             m = mark_history.get((horse, scale), {})
-            outputs["handicap_discipline_runs_log"][i] = np.log1p(m.get("runs", 0))
-            tail = [v for v in m.get("tail", []) if np.isfinite(v)]
-            outputs["handicap_mark_support_5"][i] = len(tail)
-            for column, prior in (("or_vs_last_win_mark", "win"), ("or_vs_last_place_mark", "place"), ("or_vs_career_high_prev", "high")):
-                outputs[column][i] = marks[i]-m.get(prior, np.nan)
-            outputs["handicap_mark_vs_high_5"][i] = marks[i]-max(tail) if tail else np.nan
-            outputs["handicap_weight_vs_last_win"][i] = weights[i]-m.get("win_weight", np.nan)
-            if np.isfinite(outputs["or_vs_last_win_mark"][i]):
-                outputs["below_last_win_mark"][i] = float(outputs["or_vs_last_win_mark"][i] < 0)
-            if np.isfinite(outputs["or_vs_career_high_prev"][i]):
-                outputs["above_career_high_or"][i] = float(outputs["or_vs_career_high_prev"][i] > 0)
+            mark = marks[i]
+            mark_runs[i] = _log1p(m.get("runs", 0))
+            tail = [v for v in m.get("tail", ()) if isfinite(v)]
+            mark_support[i] = len(tail)
+            margin_win = vs_win[i] = mark-m.get("win", nan)
+            vs_place[i] = mark-m.get("place", nan)
+            margin_high = vs_high[i] = mark-m.get("high", nan)
+            if tail:
+                vs_recent_high[i] = mark-max(tail)
+            vs_win_weight[i] = weights[i]-m.get("win_weight", nan)
+            if isfinite(margin_win):
+                below_win[i] = float(margin_win < 0)
+            if isfinite(margin_high):
+                above_high[i] = float(margin_high > 0)
         for i in rows:
             horse, kind, scale = keys[i], code[i], scales[i]
-            if not starts[i] or horse is None or kind is None:
+            if not starts_at[i] or horse is None or kind is None:
                 continue
             key = (horse, kind)
             if key not in copied_d:
@@ -157,13 +186,14 @@ def established_form_features(frame, *, state=None, return_state=False):
                 discipline[key]["quality"] = list(discipline[key].get("quality", []))
                 copied_d.add(key)
             d = discipline[key]
+            place, field = finish[i], fields[i]
             d["runs"] = d.get("runs", 0)+1
-            d["wins"] = d.get("wins", 0)+int(finish[i] == 1)
-            d["places"] = d.get("places", 0)+int(1 <= finish[i] <= 3)
-            d["dnfs"] = d.get("dnfs", 0)+int(not finish[i] > 0)
-            quality = 1-(finish[i]-1)/(fields[i]-1) if fields[i] >= 2 and 1 <= finish[i] <= fields[i] else np.nan
+            d["wins"] = d.get("wins", 0)+int(place == 1)
+            d["places"] = d.get("places", 0)+int(1 <= place <= 3)
+            d["dnfs"] = d.get("dnfs", 0)+int(not place > 0)
+            quality = 1-(place-1)/(field-1) if field >= 2 and 1 <= place <= field else nan
             d["quality"] = (d["quality"]+[quality])[-3:]
-            d["day"] = int(day)
+            d["day"] = day
             totals[horse] = totals.get(horse, 0)+1
             if scale is None:
                 continue
@@ -173,15 +203,27 @@ def established_form_features(frame, *, state=None, return_state=False):
                 mark_history[key]["tail"] = list(mark_history[key].get("tail", []))
                 copied_m.add(key)
             m = mark_history[key]
-            if np.isfinite(marks[i]):
-                m["high"] = max(m.get("high", -np.inf), marks[i])
+            mark = marks[i]
+            if isfinite(mark):
+                m["high"] = max(m.get("high", -inf), mark)
             if handicap[i]:
                 m["runs"] = m.get("runs", 0)+1
-                m["tail"] = (m["tail"]+[marks[i]])[-5:]
-                if finish[i] == 1:
-                    m["win"], m["win_weight"] = marks[i], weights[i]
-                if 1 <= finish[i] <= 3:
-                    m["place"] = marks[i]
+                m["tail"] = (m["tail"]+[mark])[-5:]
+                if place == 1:
+                    m["win"], m["win_weight"] = mark, weights[i]
+                if 1 <= place <= 3:
+                    m["place"] = mark
+    filled = {
+        "horse_discipline_runs_log": runs_log, "horse_discipline_exposure_share": exposure,
+        "horse_discipline_win_rate_shrunk": win_rate, "horse_discipline_place_rate_shrunk": place_rate,
+        "horse_discipline_dnf_rate_shrunk": dnf_rate, "horse_discipline_form_3": form,
+        "days_since_discipline_race_log": days_since, "handicap_discipline_runs_log": mark_runs,
+        "handicap_mark_support_5": mark_support, "or_vs_last_win_mark": vs_win,
+        "or_vs_last_place_mark": vs_place, "or_vs_career_high_prev": vs_high,
+        "handicap_mark_vs_high_5": vs_recent_high, "handicap_weight_vs_last_win": vs_win_weight,
+        "below_last_win_mark": below_win, "above_career_high_or": above_high,
+    }
+    outputs.update({name: np.array(values, dtype="float64") for name, values in filled.items()})
     out = pd.DataFrame(outputs, index=frame.index)
     advanced = {"discipline": discipline, "marks": mark_history, "totals": totals,
                 "last_date": str(dates.loc[starts].max().date()) if starts.any() else state.get("last_date")}

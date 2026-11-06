@@ -4,6 +4,12 @@ Raw current-run telemetry is never returned. Prior-run observations mature
 after two calendar days; historical backfill remains retrospective development
 data because original publication/revision times were not captured. Pre-race
 context requires an actual snapshot before the forecast decision cutoff.
+
+The Timeform card (``CARD_FEATURES``) is the one exception: it describes the
+current race. Live rows read it from a pre-decision snapshot; stored history
+falls back to the backfilled card, whose published values matched the
+evening-before snapshot (1 change in 490 runners, 2026-10-30) and carried no
+information beyond the T-5 market (ledger 046).
 """
 from __future__ import annotations
 
@@ -15,16 +21,37 @@ import pandas as pd
 import numba as nb
 
 import config
+from src import rtv_text
 from src.utils import canonical_track_key, normalise_horse_key, normalise_off_time_key
 
 RUN_METRICS = ("fsp", "top_speed", "acceleration", "avg_length", "avg_frequency", "stride_range",
     "jump_index", "lengths_gained_jumping", "speed_lost", "recovery_time", "positive_jump_percentage",
     "fsp_relative", "top_speed_relative", "late_speed_ratio", "early_position", "late_gain", "pace_variability")
 LAST_METRICS = ("fsp_relative", "top_speed_relative", "jump_index", "late_speed_ratio", "late_gain")
+# Measures normalised within each race, so trip and going cancel out of the
+# stride and jumping values; exit_entry is jump exit speed over entry speed.
+REL_METRICS = ("acceleration", "avg_length", "avg_frequency", "max_frequency", "stride_length",
+    "exit_speed", "time_in_envelope", "speed_lost", "recovery_time", "exit_entry")
+DERIVED_METRICS = ("time_fig",) + tuple(m+"_rel" for m in REL_METRICS)
+DERIVED_FEATURES = ("rtv_time_fig_mean3", "rtv_time_fig_best3", "rtv_time_fig_last") + tuple(
+    "rtv_"+m+"_rel_mean3" for m in REL_METRICS)
 HISTORY_FEATURES = tuple("rtv_"+m+"_mean3" for m in RUN_METRICS) + tuple("rtv_"+m+"_last" for m in LAST_METRICS) + (
-    "rtv_history_count3", "rtv_jumps_count3", "rtv_sectional_count3", "rtv_days_since_observation")
+    "rtv_history_count3", "rtv_jumps_count3", "rtv_sectional_count3", "rtv_days_since_observation") + DERIVED_FEATURES
 PRE_FEATURES = ("rtv_pre_timeform_rating", "rtv_pre_timeform_stars", "rtv_pre_pace_position", "rtv_pre_draw_advantage")
-FEATURES = HISTORY_FEATURES + PRE_FEATURES
+CARD_FEATURES = ("rtv_card_tf_rating", "rtv_card_tf_stars", "rtv_card_tf_tipped", "rtv_card_tf_improver",
+    "rtv_card_tf_doubtful", "rtv_card_tf_focus")
+# The Timeform comment score (src/rtv_text.py) is snapshot-first like the card.
+SNAPSHOT_FEATURES = PRE_FEATURES + CARD_FEATURES + rtv_text.SNAPSHOT_FEATURES
+FEATURES = HISTORY_FEATURES + SNAPSHOT_FEATURES + ("rtv_text_prob",)
+# Time-figure pars are fitted once, on RaceIQ-era races (the first RaceIQ day
+# onwards) up to PAR_END, so backfilling older results cannot move the par.
+PAR_START = "2023-06-10"
+PAR_END = "2024-06-30"
+AW_SURFACES = {"AllWeather", "Polytrack", "Sand", "Tapeta"}
+_GOING = {"hard": 0., "firm": 1., "good to firm": 2., "good": 3., "good to yielding": 3.5,
+    "good to soft": 4., "yielding": 4., "yielding to soft": 4.5, "soft": 5., "soft to heavy": 5.5,
+    "heavy": 6., "fast": 2., "standard to fast": 2.5, "standard/fast": 2.5, "standard": 3.,
+    "standard to slow": 3.5, "standard/slow": 3.5, "slow": 4.}
 BOUNDS = {"fsp": (60., 140.), "top_speed": (15., 50.), "acceleration": (1., 8.),
     "avg_length": (4., 10.), "avg_frequency": (1.5, 3.5), "min_length": (3., 10.), "max_length": (4., 11.),
     "jump_index": (0., 10.), "lengths_gained_jumping": (-40., 40.), "speed_lost": (-25., 5.),
@@ -34,25 +61,135 @@ SECTIONAL_BAD = {"sector_count_vs_distance", "sector_glitch", "cumulative_mismat
 
 
 def runs_path():
-    return Path(getattr(config, "RTV_FEATURE_RUNS", Path(config.DATA_DIR)/"rtv_cache/feature_runs.parquet"))
+    from src.rtv_storage import materialised_path
+    return Path(config.RTV_FEATURE_RUNS) if hasattr(config, "RTV_FEATURE_RUNS") else materialised_path("runs", Path(config.DATA_DIR)/"rtv_cache/feature_runs.parquet")
 
 
 def pre_path():
     return Path(getattr(config, "RTV_FEATURE_PRE", Path(config.DATA_DIR)/"rtv_cache/feature_pre.parquet"))
 
 
+def cards_path():
+    from src.rtv_storage import materialised_path
+    return Path(config.RTV_FEATURE_CARDS) if hasattr(config, "RTV_FEATURE_CARDS") else materialised_path("cards", Path(config.DATA_DIR)/"rtv_cache/feature_cards.parquet")
+
+
 def _number(frame, name):
     return pd.to_numeric(frame.get(name, pd.Series(np.nan, index=frame.index)), errors="coerce").astype("float64")
 
 
-def build_run_observations(races, runners, metrics, sectionals, flags, links):
+def going_number(text):
+    """Ordinal going; '(X in places)' moves a quarter step toward X."""
+    if text is None or pd.isna(text):
+        return np.nan
+    main, _, rest = str(text).strip().casefold().replace(" / ", "/").partition("(")
+    value = _GOING.get(main.strip())
+    if value is None:
+        return np.nan
+    other = _GOING.get(rest.replace("in places", "").replace(")", "").strip())
+    return value if other is None else value+.25*np.sign(other-value)
+
+
+def _text(frame, name):
+    return frame[name] if name in frame else pd.Series(pd.NA, index=frame.index, dtype=object)
+
+
+def _par_inputs(races):
+    return pd.DataFrame({"distance_yards": _number(races, "distance_yards"),
+        "going_num": _text(races, "going").map(going_number).astype("float64"),
+        "aw": _text(races, "surface").isin(AW_SURFACES).astype("float64"),
+        "race_type": _text(races, "race_type").astype("category"),
+        "track_name": _text(races, "track_name").astype("category")}, index=races.index)
+
+
+def _log_win_time(races):
+    seconds = _number(races, "win_time_s")
+    return np.log(seconds.where((_number(races, "distance_yards")/seconds).between(10, 20)))
+
+
+def fit_time_par(races):
+    """Log winning time expected from trip, going, surface, race type and course.
+
+    Fitted on races from ``PAR_START`` to ``PAR_END`` only, so every later
+    refresh reproduces the same par. Returns None without enough timed races.
+    """
+    import lightgbm as lgb
+    if races.empty or "win_time_s" not in races:
+        return None
+    races = races.loc[pd.to_datetime(races.race_date).between(PAR_START, PAR_END)
+        & ~_text(races, "is_abandoned").fillna(False).astype(bool)
+        & ~_text(races, "is_arab_race").fillna(False).astype(bool) & _text(races, "race_type").notna()]
+    races = races.sort_values("race_id", kind="stable")
+    target = _log_win_time(races)
+    fit = target.notna()
+    if fit.sum() < 500:
+        return None
+    return lgb.LGBMRegressor(n_estimators=400, learning_rate=.05, num_leaves=31, min_child_samples=40,
+        deterministic=True, force_row_wise=True, n_jobs=1, random_state=0, verbose=-1).fit(
+        _par_inputs(races)[fit], target[fit])
+
+
+def _expected_log_time(races, par):
+    """Par plus the meeting's leave-one-race-out time variant, by RTV race."""
+    if par is None or races.empty or "win_time_s" not in races:
+        return pd.Series(dtype="float64")
+    expected = pd.Series(par.predict(_par_inputs(races)), index=races.index)
+    deviation = _log_win_time(races)-expected
+    meeting = [races.race_date.astype(str), _text(races, "track_name").astype(str), _text(races, "surface").isin(AW_SURFACES)]
+    total = deviation.groupby(meeting).transform("sum")
+    others = deviation.groupby(meeting).transform("count")-deviation.notna().astype(int)
+    variant = ((total-deviation.fillna(0))/others.where(others.gt(0))).where(others.ge(2), 0.)
+    return pd.Series((expected+variant).to_numpy(), index=races.race_id.to_numpy())
+
+
+def _relative_metrics(runners, metrics):
+    """Within-race z of stride and jumping measures over every RTV starter."""
+    columns = ["race_id", "runner_id", *(m+"_rel" for m in REL_METRICS)]
+    if metrics.empty:
+        return pd.DataFrame(columns=columns)
+    names = {m for m in REL_METRICS if m != "exit_entry"} | {"entry_speed"}
+    values = metrics.loc[metrics.metric.isin(names), ["race_id", "runner_id", "metric", "value"]].copy()
+    if values.duplicated(["race_id", "runner_id", "metric"]).any():
+        raise ValueError("Duplicate RTV metric")
+    values["value"] = pd.to_numeric(values.value, errors="coerce")
+    for name, (lo, hi) in BOUNDS.items():
+        values.loc[values.metric.eq(name) & ~values.value.between(lo, hi), "value"] = np.nan
+    wide = values.pivot(index=["race_id", "runner_id"], columns="metric", values="value").reset_index()
+    starters = runners.loc[~runners.is_nonrunner.fillna(False).astype(bool), ["race_id", "runner_id"]]
+    wide = starters.merge(wide, on=["race_id", "runner_id"], how="left", validate="one_to_one")
+    entry = _number(wide, "entry_speed")
+    wide["exit_entry"] = _number(wide, "exit_speed")/entry.where(entry.gt(0))
+    for name in REL_METRICS:
+        value = _number(wide, name)
+        group = value.groupby(wide.race_id)
+        z = (value-group.transform("mean"))/group.transform("std").clip(lower=1e-9)
+        wide[name+"_rel"] = z.where(group.transform("count").ge(4)).clip(-4, 4)
+    return wide[columns]
+
+
+def _time_figures(races, sector, par):
+    """100 x (expected log time - own log time) at the final sector: + is faster."""
+    expected = _expected_log_time(races, par)
+    if expected.empty or "cumulative_sector_time" not in sector:
+        return pd.DataFrame(columns=["race_id", "runner_id", "time_fig"])
+    final = sector.loc[sector.sector_number.eq(sector.groupby("race_id").sector_number.transform("max"))]
+    final = final.loc[~final.duplicated(["race_id", "runner_id"], keep=False)].copy()
+    elapsed = _number(final, "cumulative_sector_time")
+    yards = pd.to_numeric(final.race_id.map(races.drop_duplicates("race_id").set_index("race_id").distance_yards), errors="coerce")
+    elapsed = elapsed.where((yards/elapsed).between(10, 20))
+    final["time_fig"] = 100*(final.race_id.map(expected)-np.log(elapsed))
+    return final[["race_id", "runner_id", "time_fig"]]
+
+
+def build_run_observations(races, runners, metrics, sectionals, flags, links, *, par=None):
     """Build one numeric observation per exact SL/RTV starter identity.
 
     Uses measured values, never provider ranks/percentages/averages or prices.
     Bad sectional races/runners are masked before summaries are calculated.
     FSP and completed-race sectional summaries require a physical finisher.
+    ``par`` (from :func:`fit_time_par`) enables sectional time figures.
     """
-    columns = ["race_id", "horse_id", "race_date", "available_date", *RUN_METRICS]
+    columns = ["race_id", "horse_id", "race_date", "available_date", *RUN_METRICS, *DERIVED_METRICS]
     if links.empty:
         return pd.DataFrame(columns=columns)
     base = links.merge(runners[["race_id", "runner_id", "is_finisher"]],
@@ -69,6 +206,7 @@ def build_run_observations(races, runners, metrics, sectionals, flags, links):
             values.loc[bad, "value"] = np.nan
         wide = values.pivot(index=["race_id", "runner_id"], columns="metric", values="value").reset_index()
         base = base.merge(wide, on=["race_id", "runner_id"], how="left", validate="one_to_one")
+    base = base.merge(_relative_metrics(runners, metrics), on=["race_id", "runner_id"], how="left", validate="one_to_one")
     base["fsp"] = _number(base, "fsp").where(base.is_finisher.fillna(False))
     base["stride_range"] = (_number(base, "max_length")-_number(base, "min_length")).where(
         _number(base, "max_length").ge(_number(base, "min_length")))
@@ -84,6 +222,7 @@ def build_run_observations(races, runners, metrics, sectionals, flags, links):
             bad_keys = pd.MultiIndex.from_frame(bad_flags.dropna(subset=["runner_id"])[["race_id", "runner_id"]])
             sector = sector.loc[~sector.race_id.isin(bad_races)
                 & ~pd.MultiIndex.from_frame(sector[["race_id", "runner_id"]]).isin(bad_keys)]
+        base = base.merge(_time_figures(races, sector, par), on=["race_id", "runner_id"], how="left", validate="one_to_one")
         sector["_time"] = _number(sector, "sector_time")
         sector["_yards"] = _number(sector, "sector_length_yards")
         sector["_speed"] = sector._yards/sector._time
@@ -119,17 +258,53 @@ def build_run_observations(races, runners, metrics, sectionals, flags, links):
             on=keys, how="left", validate="one_to_one")
         for name in ("late_speed_ratio", "early_position", "late_gain", "pace_variability"):
             base[name] = base[name].where(base.is_finisher.fillna(False))
+    base["time_fig"] = _number(base, "time_fig").where(base.is_finisher.fillna(False))
     output = pd.DataFrame({"race_id": base.sl_race_id.astype(str), "horse_id": pd.to_numeric(base.sl_horse_id),
         "race_date": pd.to_datetime(base.race_date).dt.normalize()})
     output["available_date"] = output.race_date+pd.Timedelta(days=2)
-    for name in RUN_METRICS:
+    for name in RUN_METRICS+DERIVED_METRICS:
         output[name] = _number(base, name).to_numpy()
     return output[columns]
 
 
-@nb.njit(cache=False)
+def card_values(frame):
+    """Numeric Timeform card fields: one parser for backfilled and snapshot cards.
+
+    The rating text carries Timeform's symbols ('111p', '94?'); '-' and '0'
+    mean unrated. Flags are defined only where a card was published.
+    """
+    text = _text(frame, "card_timeform_rating").astype("string").str.strip()
+    stars = pd.to_numeric(_text(frame, "card_timeform_star_rating"), errors="coerce")
+    symbol = text.str.replace(r"^\d+", "", regex=True).fillna("")
+    rating = pd.to_numeric(text.str.extract(r"^(\d+)", expand=False), errors="coerce")
+    output = pd.DataFrame({
+        "rtv_card_tf_rating": rating.where(rating.gt(0)),
+        "rtv_card_tf_stars": stars,
+        "rtv_card_tf_tipped": pd.to_numeric(_text(frame, "card_timeform_tipped_place"), errors="coerce").map({1: 3., 2: 2., 3: 1.}).fillna(0.),
+        "rtv_card_tf_improver": symbol.str.contains("p", case=False).astype("float64"),
+        "rtv_card_tf_doubtful": symbol.str.contains("?", regex=False).astype("float64"),
+        "rtv_card_tf_focus": _text(frame, "card_focus_horse").astype("string").str.lower().eq("true").fillna(False).astype("float64"),
+    }, index=frame.index).astype("float64")
+    output.loc[text.isna().to_numpy() & stars.isna().to_numpy()] = np.nan
+    return output
+
+
+def build_card_observations(runners, links):
+    """The published Timeform card for each exact SL/RTV starter identity."""
+    columns = ["race_id", "horse_id", "race_date", *CARD_FEATURES]
+    if links.empty:
+        return pd.DataFrame(columns=columns)
+    base = links.merge(runners.drop(columns=["race_date"], errors="ignore"),
+        left_on=["rtv_race_id", "rtv_runner_id"], right_on=["race_id", "runner_id"], validate="one_to_one")
+    output = pd.concat([pd.DataFrame({"race_id": base.sl_race_id.astype(str), "horse_id": pd.to_numeric(base.sl_horse_id),
+        "race_date": pd.to_datetime(base.race_date).dt.normalize()}), card_values(base)], axis=1)
+    return output.loc[output[list(CARD_FEATURES)].notna().any(axis=1), columns].reset_index(drop=True)
+
+
+@nb.njit(cache=True)
 def _rolling_three(values, horse_ids):
     means = np.full(values.shape, np.nan)
+    maxima = np.full(values.shape, np.nan)
     counts = np.zeros(values.shape)
     start = 0
     for i in range(len(values)):
@@ -137,40 +312,46 @@ def _rolling_three(values, horse_ids):
             start = i
         lo = max(start, i-2)
         for column in range(values.shape[1]):
-            total, count = 0., 0
+            total, count, largest = 0., 0, -np.inf
             for row in range(lo, i+1):
                 value = values[row, column]
                 if not np.isnan(value):
                     total += value
                     count += 1
+                    largest = max(largest, value)
             counts[i, column] = count
             if count:
                 means[i, column] = total/count
-    return means, counts
+                maxima[i, column] = largest
+    return means, counts, maxima
 
 
 def _history_observations(runs):
     if runs.empty:
         return pd.DataFrame()
     runs = runs.copy()
-    for name in RUN_METRICS:
+    measured = RUN_METRICS+DERIVED_METRICS
+    for name in measured:
         runs[name] = _number(runs, name)
     runs["_horse"] = pd.to_numeric(runs.horse_id, errors="coerce")
     runs = runs.loc[runs._horse.notna() & runs._horse.gt(0)]
     runs = runs.loc[~runs.duplicated(["_horse", "race_date"], keep=False)]
     runs = runs.sort_values(["_horse", "race_date", "race_id"], kind="stable")
     # No telemetry means no observation, rather than a fictitious zero run.
-    runs = runs.loc[runs[list(RUN_METRICS)].notna().any(axis=1)].reset_index(drop=True)
+    runs = runs.loc[runs[list(measured)].notna().any(axis=1)].reset_index(drop=True)
     group = runs.groupby("_horse", sort=False)
     result = runs[["_horse", "race_date", "available_date"]].copy()
-    rolled, support = _rolling_three(runs[list(RUN_METRICS)].to_numpy(dtype="float64"), runs._horse.to_numpy(dtype="int64"))
-    for column, name in enumerate(RUN_METRICS):
+    rolled, support, best = _rolling_three(runs[list(measured)].to_numpy(dtype="float64"), runs._horse.to_numpy(dtype="int64"))
+    for column, name in enumerate(measured):
         result["rtv_"+name+"_mean3"] = rolled[:, column]
+    result["rtv_time_fig_best3"] = best[:, measured.index("time_fig")]
+    # The latest figure the horse has, however many untimed runs followed it.
+    result["rtv_time_fig_last"] = group.time_fig.ffill()
     for name in LAST_METRICS:
         result["rtv_"+name+"_last"] = runs[name]
     result["rtv_history_count3"] = (group.cumcount()+1).clip(upper=3)
     for short, name in (("jumps", "jump_index"), ("sectional", "late_speed_ratio")):
-        result["rtv_"+short+"_count3"] = support[:, RUN_METRICS.index(name)]
+        result["rtv_"+short+"_count3"] = support[:, measured.index(name)]
     result["_horse"] = result._horse.astype("int64")
     result["available_date"] = pd.to_datetime(result.available_date)
     result["race_date"] = pd.to_datetime(result.race_date)
@@ -205,13 +386,24 @@ def add_history_features(frame, *, runs=None):
         output.loc[joined._row, list(HISTORY_FEATURES)] = joined[list(HISTORY_FEATURES)].to_numpy(dtype="float64", na_value=np.nan)
         output[counts] = output[counts].fillna(0.)
     output.index = frame.index
-    return pd.concat([frame.drop(columns=list(FEATURES), errors="ignore"), output], axis=1)
+    return rtv_text.replaced_columns(frame, FEATURES, output)
+
+
+@lru_cache(maxsize=2)
+def _cached_snapshots(path, modified, size):
+    return pd.read_parquet(path)
 
 
 def add_pre_race_features(frame, *, observations=None, as_of=None):
-    output = pd.DataFrame(np.nan, index=pd.RangeIndex(len(frame)), columns=PRE_FEATURES)
+    output = pd.DataFrame(np.nan, index=pd.RangeIndex(len(frame)), columns=SNAPSHOT_FEATURES)
     path = pre_path()
-    observations = (pd.read_parquet(path) if path.exists() else pd.DataFrame()) if observations is None else observations.copy()
+    if observations is not None:
+        observations = observations.copy()
+    elif path.exists():
+        stat = path.stat()
+        observations = _cached_snapshots(str(path.resolve()), stat.st_mtime_ns, stat.st_size).copy(deep=False)
+    else:
+        observations = pd.DataFrame()
     required = {"track", "off_time", "horse_name", "race_date"}
     if not observations.empty and required.issubset(frame):
         target = pd.DataFrame({"_row": np.arange(len(frame))})
@@ -230,13 +422,53 @@ def add_pre_race_features(frame, *, observations=None, as_of=None):
         observations["observed_at"] = pd.to_datetime(observations.observed_at, utc=True, errors="raise")
         keys = ["race_date", "track_key", "off_key", "horse_key"]
         observations = observations.loc[~observations.duplicated(keys+["observed_at"], keep=False)]
-        target = target.loc[target._cutoff.notna()]
+        target = target.loc[target._cutoff.notna() & ~target.duplicated(keys,keep=False)]
         joined = pd.merge_asof(target.sort_values("_cutoff"), observations.sort_values("observed_at"),
             left_on="_cutoff", right_on="observed_at", by=keys, direction="backward")
-        output.loc[joined._row, list(PRE_FEATURES)] = joined[list(PRE_FEATURES)].to_numpy()
+        # Files written before the card family existed simply lack its columns.
+        output.loc[joined._row, list(SNAPSHOT_FEATURES)] = joined.reindex(columns=list(SNAPSHOT_FEATURES)).to_numpy(
+            dtype="float64", na_value=np.nan)
     output.index = frame.index
-    return pd.concat([frame.drop(columns=list(PRE_FEATURES), errors="ignore"), output], axis=1)
+    return rtv_text.replaced_columns(frame, SNAPSHOT_FEATURES, output)
+
+
+def _card_table(cards):
+    cards = cards.assign(race_id=cards.race_id.astype(str), horse_id=pd.to_numeric(cards.horse_id, errors="coerce"))
+    return cards.loc[~cards.duplicated(["race_id", "horse_id"], keep=False)]
+
+
+@lru_cache(maxsize=2)
+def _cached_cards(path, modified, size):
+    return _card_table(pd.read_parquet(path))
+
+
+def add_card_features(frame, *, cards=None):
+    """Fill rows without a pre-decision card snapshot from the backfilled card.
+
+    Snapshot values win: they are what a live forecast sees. Upcoming races
+    have no backfilled card, so live rows can only use the snapshot.
+    """
+    path = cards_path()
+    if cards is not None:
+        cards = _card_table(cards)
+    elif path.exists():
+        stat = path.stat()
+        cards = _cached_cards(str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+    if cards is None or cards.empty or not {"race_id", "horse_id"}.issubset(frame):
+        return frame
+    target = pd.DataFrame({"race_id": frame.race_id.astype(str).to_numpy(),
+        "horse_id": pd.to_numeric(frame.horse_id, errors="coerce").to_numpy()})
+    joined = target.merge(cards[["race_id", "horse_id", *CARD_FEATURES]], on=["race_id", "horse_id"], how="left")
+    current = frame.reindex(columns=list(CARD_FEATURES)).to_numpy(dtype="float64", na_value=np.nan)
+    missing = np.isnan(current).all(axis=1)
+    if not missing.any():
+        return frame
+    current[missing] = joined.loc[missing, list(CARD_FEATURES)].to_numpy(dtype="float64", na_value=np.nan)
+    output = pd.DataFrame(current, index=frame.index, columns=list(CARD_FEATURES))
+    return rtv_text.replaced_columns(frame, CARD_FEATURES, output)
 
 
 def add_rtv_features(frame):
-    return add_pre_race_features(add_history_features(frame))
+    from src.rtv_storage import pin_generation
+    with pin_generation():
+        return rtv_text.add_text_features(add_card_features(add_pre_race_features(add_history_features(frame))))

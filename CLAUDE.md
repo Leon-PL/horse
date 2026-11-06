@@ -5,10 +5,10 @@ Start with **[README.md](README.md)**, the current operating guide, then use
 maintenance and research tools. Run `scripts/project_status.py` for actual
 readiness; dated prose is not a substitute for that check.
 
-**[CONTINUATION.md](CONTINUATION.md)** holds session handoff detail.
+**[CONTINUATION.md](CONTINUATION.md)** holds the current session handoff.
 **[Implementation progress](docs/MARKET_PERFORMANCE_PROGRESS.md)** and the
 **[negative-results ledger](docs/NEGATIVE_RESULTS.md)** index measured evidence.
-`PROJECT_OUTLINE.md`, older plans and `NEXT_AGENT_BRIEF.md` retain historical
+`docs/archive/PROJECT_OUTLINE_before_cleanup_2026-11-05.md`, older plans and `docs/archive/NEXT_AGENT_BRIEF.md` retain historical
 architecture and research context; their old work queues and model IDs do not
 define the current task or installation.
 
@@ -34,7 +34,7 @@ The rules below are the ones that cause real damage when violated.
    silently — this is what produced the phantom "+15% place edge".
    `tests/test_fe_signature_coverage.py` enforces it. The signature hashes
    each source's AST, so comments, docstrings and formatting do not force the
-   ~1 hour rebuild; any code, constant or config change still does.
+   ~15 minute rebuild; any code, constant or config change still does.
 5. **Never trust a number without checking the instrument first:**
    `.venv/Scripts/python.exe scripts/project_status.py`. It verifies that
    results → store → model → promoted model all agree, and exits non-zero
@@ -82,7 +82,7 @@ prices; `scripts/audit_selection_rule.py` reports both.
   rebuild that kind of source pinning, which made every edit a new study.
 - Run `scripts/tooling.ps1 test` for pilot checks or
   `scripts/tooling.ps1 test -TestPath tests` for the full suite. See
-  [development tools](docs/DEVELOPMENT_TOOLS.md) for compatibility limits.
+  [development tools](docs/operations/DEVELOPMENT_TOOLS.md) for compatibility limits.
 - **LightGBM** is the only model framework. XGBoost and CatBoost were
   removed on 2026-10-30; `RacePredictor` rejects any other framework.
 - `data/` and `models/` are gitignored and large; run snapshots are

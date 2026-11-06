@@ -11,22 +11,17 @@ metrics, plus the in-running comment and a sectional-adjusted placing.
 
 How it works
 ------------
-ATR sits behind a Fastly JavaScript "Client Challenge".  A plain
-``requests`` GET returns a ~3 KB challenge stub, **but** sending a full
-set of browser headers (``Sec-Fetch-*``, ``sec-ch-ua`` …) passes the
-edge check and returns the real page.  No headless browser is required.
+ATR can return a JavaScript "Client Challenge" even with browser headers.
+Challenged responses are retryable blocks and never confirmed absence.
 
-The flow mirrors the (now archived) ``smkirwan77/web_scraper`` project:
+1. GET ``/results/{DD-Month-YYYY}`` once per day/session. Each result article
+   pairs its exact racecard URL with ATR's native race ID. Fall back to the
+   racecard only when the index is genuinely unavailable or lacks that race.
+2. GET the public fragments advertised by the current sectional tabs::
 
-1. GET the racecard page
-   ``/racecard/{Course-Slug}/{DD-Month-YYYY}/{HHMM}`` and read the
-   ``RaceID`` from an HTML comment.
-2. GET the four sectional AJAX fragments, which require that ``RaceID``::
-
-       /ajax/sectionals/{raceid}/times?page=...&raceid=...
-       /ajax/sectionals/{raceid}/tools?page=...&raceid=...
-       /ajax/sectionals/{raceid}/stride?page=...&raceid=...
-       /ajax/sectionals/{raceid}/distanceran?page=...&raceid=...
+       /ajax/sectionals-razor/{raceid}/times
+       /ajax/sectionals-razor/{raceid}/tools
+       /ajax/sectionals-razor/{raceid}/stride
 
 3. Parse one row per runner and cache to parquet, keyed (like RTV) on
    ``(race_date, track, off_time, horse_name)`` so it merges onto the
@@ -50,8 +45,10 @@ missing race returns HTTP 404 and is recorded in the no-data skip-list.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -59,7 +56,11 @@ import shutil
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timedelta
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from functools import wraps
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -79,9 +80,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 ATR_BASE = "https://www.attheraces.com"
+ATR_PARSER_VERSION = 2
 
-# A full browser header set is *required* to pass the Fastly JS challenge;
-# a bare User-Agent gets the ~3 KB "Client Challenge" stub instead.
+# Browser headers improve compatibility but do not guarantee access.
 _BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -105,8 +106,9 @@ _BROWSER_HEADERS = {
 # Minimum gap between requests (seconds).  ATR's Fastly edge rate-limits
 # aggressively: sustained fast crawling earns 429s and JS challenges, so be
 # deliberately gentle.  Tunable via the CLI / the ``request_delay`` arg.
-# Each race costs up to 4 requests (1 racecard + 3 AJAX fragments).
+# Usually one results-index request per day plus three fragments per race.
 _REQUEST_DELAY = 1.5
+_PUBLICATION_DELAY_HOURS = 48
 
 # Status codes that mean "backed off / blocked" rather than "no such race".
 # These must NOT be cached as no-data — they are transient.
@@ -115,6 +117,7 @@ _BLOCKED_STATUSES = {403, 429, 503}
 ATR_CACHE_DIR = os.path.join(config.DATA_DIR, "atr_cache")
 ATR_CACHE_FILE = os.path.join(ATR_CACHE_DIR, "atr_sectionals.parquet")
 ATR_NO_DATA_FILE = os.path.join(ATR_CACHE_DIR, "atr_no_data_keys.json")
+ATR_INDEX_DIR = os.path.join(ATR_CACHE_DIR, "results_index")
 os.makedirs(ATR_CACHE_DIR, exist_ok=True)
 
 # Scalar numeric feature columns (NaN when absent) exposed by the merge.
@@ -126,6 +129,13 @@ ATR_METRIC_COLS = [
     "atr_peak_stride_freq",      # peak stride frequency (strides/sec)
     "atr_n_sections",            # number of furlong splits captured
     "atr_adj_placing",           # sectional-adjusted finishing placing
+    "atr_top_speed_mph",
+    "atr_final_speed_mph",       # instantaneous finish speed, not final section
+    "atr_acceleration_0_30_seconds",
+    "atr_race_finishing_speed_pct",
+    "atr_first_section_furlongs",
+    "atr_field_expected_runners",
+    "atr_field_provided_runners",
 ]
 
 # Text / identifier columns carried through the merge.
@@ -137,11 +147,18 @@ ATR_TEXT_COLS = [
     "atr_official_position",
     "atr_efficiency_grade",
     "atr_in_running_comment",
+    "atr_race_early_pace",
+    "atr_race_early_pace_flag",
+    "atr_race_finishing_pace_flag",
+    "atr_parser_version",
+    "atr_source_race_date",
+    "atr_source_off_time_local",
+    "atr_field_coverage",
 ]
 
 # Variable-length per-furlong series, stored as JSON strings so the cache
-# stays a flat parquet table.  Nothing is discarded — downstream code can
-# ``json.loads`` these to recover the full sectional profile.
+# stays a flat parquet table. Source labels/units and unknown chart series
+# are retained as well as the standard numeric arrays.
 ATR_ARRAY_COLS = [
     "atr_section_markers",       # ["5f","4f",...,"Fin."]
     "atr_split_times",           # per-furlong split time (s)
@@ -152,12 +169,24 @@ ATR_ARRAY_COLS = [
     "atr_energy_dist",           # energy distribution % per marker
     "atr_optimum_energy",        # optimum energy distribution % per marker
     "atr_stride_length",         # stride length per marker
+    "atr_stride_frequency",      # strides/second per marker
+    "atr_stride_markers",
+    "atr_stride_frequency_markers",
+    "atr_stride_length_reference",
+    "atr_stride_frequency_reference",
+    "atr_front_flags",
+    "atr_section_notes",
+    "atr_race_pace_profile",      # published colour stops; no inferred speeds
+    "atr_source_metrics",        # labelled values with units, including extras
+    "atr_source_charts",         # full labelled stride chart inputs
+    "atr_source_payloads",       # fragment URL/status/hash provenance
+    "atr_field_missing_runners", # canonical runners absent from source tables
 ]
 
 ALL_ATR_COLS = ATR_METRIC_COLS + ATR_TEXT_COLS + ATR_ARRAY_COLS
 
-# The four AJAX sectional fragments.
-_AJAX_KINDS = ("times", "tools", "stride", "distanceran")
+# The three public tabs currently advertised by ATR.
+_AJAX_KINDS = ("times", "tools", "stride")
 
 # ---------------------------------------------------------------------------
 # Track name -> ATR course slug
@@ -248,6 +277,15 @@ def _add_one_hour(hhmm: str) -> str:
     return f"{h:02d}{m:02d}"
 
 
+def _publication_ready(races: pd.DataFrame, now=None) -> pd.Series:
+    """ATR advises allowing about 48 hours; stored race times are UTC."""
+    now = pd.Timestamp(now if now is not None else datetime.now(timezone.utc))
+    days = pd.to_datetime(races.race_date, errors="coerce").dt.strftime("%Y-%m-%d")
+    times = races.off_time.map(_normalise_off_time_key)
+    scheduled = pd.to_datetime(days + " " + times, errors="coerce", utc=True)
+    return scheduled.le(now - pd.Timedelta(hours=_PUBLICATION_DELAY_HOURS))
+
+
 # ---------------------------------------------------------------------------
 # HTTP transport
 # ---------------------------------------------------------------------------
@@ -280,8 +318,24 @@ def _ajax_headers(referer: str) -> dict:
     }
 
 
+def _retry_after_seconds(value, now=None):
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (ValueError, TypeError):
+        try:
+            deadline = parsedate_to_datetime(str(value))
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            seconds = deadline.timestamp() - (time.time() if now is None else now)
+        except (ValueError, TypeError, OverflowError):
+            return None
+    return max(0.0,seconds) if math.isfinite(seconds) else None
+
+
 class _Fetcher:
-    """A small HTTP client that can clear the ATR JS/TLS challenge."""
+    """Throttled public HTTP client; challenges remain retryable blocks."""
 
     def __init__(self, request_delay: float | None = None) -> None:
         self._delay = _REQUEST_DELAY if request_delay is None else float(request_delay)
@@ -289,6 +343,11 @@ class _Fetcher:
         self._cookie_jar: str | None = None
         self._cffi = None
         self._req = None
+        self._results_indexes: dict[str, dict[str, str] | None] = {}
+        self.index_dir = Path(ATR_INDEX_DIR)
+        self.raw_store_path = Path(ATR_CACHE_DIR)/"raw.sqlite"
+        self._raw_store = None
+        self.last_response = {}
 
         if _curl_cffi_requests is not None:
             self.mode = "curl_cffi"
@@ -319,6 +378,8 @@ class _Fetcher:
         treat it as a transient block, never as genuine absence of data.
         """
         self._throttle()
+        self.last_response = {"url": url, "reason": "transport_error"}
+        response_headers = {}
         headers = _ajax_headers(referer) if referer else {}
         try:
             if self.mode == "curl_bin":
@@ -326,15 +387,28 @@ class _Fetcher:
             elif self.mode == "curl_cffi":
                 r = self._cffi.get(url, headers=headers, timeout=25)
                 status, text = r.status_code, r.text
+                response_headers = getattr(r, 'headers', {})
             else:
                 r = self._req.get(url, headers=headers, timeout=25, allow_redirects=True)
                 status, text = r.status_code, r.text
+                response_headers = getattr(r, 'headers', {})
         except Exception as exc:  # pragma: no cover - network drift
             logger.warning("ATR request failed (%s): %s", self.mode, exc)
             return None
 
-        if status == 200 and "Client Challenge" in text[:4000]:
-            logger.debug("ATR served the JS challenge for %s (treating as blocked)", url)
+        # Retain the exact decoded input to the parsers, including real status
+        # codes. This permits diagnosis/reparse without repeating HTTP requests.
+        if self._raw_store is None:
+            from src.source_storage import RawPayloadStore
+            self._raw_store = RawPayloadStore(self.raw_store_path)
+        digest = self._raw_store.put(url, status, text.encode("utf-8"))
+        self.last_response = {"url": url, "status": status, "sha256": digest}
+        retry_after = _retry_after_seconds(response_headers.get('Retry-After'))
+        if retry_after is not None:
+            self.last_response['retry_after_seconds'] = retry_after
+        if "Client Challenge" in text[:4000]:
+            self.last_response["reason"] = "client_challenge"
+            logger.warning("ATR returned HTTP %s Client Challenge for %s (retryable block)", status, url)
             return 429, ""
         return status, text
 
@@ -374,13 +448,93 @@ class _Fetcher:
 
 
 def _extract_raceid(html_text: str) -> str | None:
-    """Read the ATR RaceID embedded in an HTML comment on the racecard."""
+    """Read the active sectional-tab ID, with legacy racecard fallbacks."""
+    ids = set(re.findall(r"/ajax/sectionals-razor/(\d+)/(?:times|tools|stride)\b", html_text))
+    if ids:
+        return ids.pop() if len(ids) == 1 else None
     m = re.search(r"RaceID:\s*(\d+)", html_text)
     if m:
         return m.group(1)
     # Fallback: the raceid query param attached to sectional/form links.
-    m = re.search(r"raceid=(\d+)", html_text)
-    return m.group(1) if m else None
+    ids = set(re.findall(r"[?&]raceid=(\d+)(?:[&\"'\s<>]|$)", html_text))
+    return ids.pop() if len(ids) == 1 else None
+
+
+def _parse_results_index(html_text: str) -> dict[str, str]:
+    """Pair each result article's exact card path with its own native ID.
+
+    Scope IDs to their article: the page also contains unrelated navigation,
+    horse forms and other meetings. Never infer IDs from numeric sequences.
+    """
+    soup = BeautifulSoup(html_text, "html.parser")
+    result: dict[str, str] = {}
+    for article in soup.select('article.panel-content--medium'):
+        card = article.select_one('h3 a[href^="/racecard/"]')
+        if card is None:
+            continue
+        path = card["href"].split("?", 1)[0].rstrip("/")
+        ids = {match.group(1) for link in article.select('a[href]')
+               if (match := re.search(r"[?&]raceid=(\d+)(?:&|$)", link["href"]))}
+        if len(ids) > 1:
+            raise ValueError(f"Conflicting ATR race IDs in result article: {path}")
+        if not ids:
+            continue
+        raceid = ids.pop()
+        if path in result and result[path] != raceid:
+            raise ValueError(f"Conflicting ATR result articles: {path}")
+        result[path] = raceid
+    return result
+
+
+def _results_index(fetcher: "_Fetcher", atr_date: str) -> tuple[str, dict[str, str]]:
+    """Load each day's index once; do not memoise transient challenges."""
+    if not hasattr(fetcher, "_results_indexes"):
+        fetcher._results_indexes = {}
+    indexes = fetcher._results_indexes
+    if atr_date in indexes:
+        value = indexes[atr_date]
+        return (DATA, value) if value is not None else (NOT_FOUND, {})
+    index_dir = getattr(fetcher, "index_dir", None)
+    index_path = Path(index_dir)/f"{atr_date}.json" if index_dir is not None else None
+    if index_path is not None and index_path.exists():
+        from src.source_storage import read_json
+        try:
+            receipt = read_json(index_path)
+            value = receipt["race_ids"]
+            if not value or not isinstance(value, dict) or any(
+                not re.fullmatch(rf"/racecard/[^/]+/{re.escape(atr_date)}/\d{{4}}", path)
+                or not re.fullmatch(r"\d+", str(raceid)) for path, raceid in value.items()
+            ):
+                raise ValueError("Invalid saved ATR results index")
+            indexes[atr_date] = value
+            return DATA, value
+        except (KeyError, ValueError, TypeError) as exc:
+            logger.warning("Ignoring invalid ATR index %s: %s", index_path, exc)
+    response = fetcher.get(f"{ATR_BASE}/results/{atr_date}")
+    if response is None:
+        return BLOCKED, {}
+    status, text = response
+    if status == 404:
+        indexes[atr_date] = None
+        return NOT_FOUND, {}
+    if status != 200 or not text or "Client Challenge" in text[:4000]:
+        return BLOCKED, {}
+    try:
+        value = _parse_results_index(text)
+    except ValueError as exc:
+        logger.warning("ATR index rejected: %s", exc)
+        return BLOCKED, {}
+    value = {path: raceid for path, raceid in value.items()
+             if re.fullmatch(rf"/racecard/[^/]+/{re.escape(atr_date)}/\d{{4}}", path)}
+    if not value:
+        # An unrecognised page is not evidence that its races lack sectionals.
+        return BLOCKED, {}
+    indexes[atr_date] = value
+    if index_path is not None:
+        from src.source_storage import atomic_json
+        atomic_json(index_path, {"source_url": f"{ATR_BASE}/results/{atr_date}",
+                                 "retrieved_at": datetime.now().isoformat(), "race_ids": value})
+    return DATA, value
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +570,7 @@ def _runner_meta(entry) -> dict:
     name = link.get_text(" ", strip=True) if link else ""
     meta["horse_name"] = name
     href = (link.get("href") or link.get("data-url") or "") if link else ""
-    m = re.search(r"/horse/[^/]+/(\d+)", href)
+    m = re.search(r"/horse/[^/]+/(?:[A-Za-z]{2,3}/)?(\d+)(?:[/?#]|$)", href)
     meta["atr_horse_id"] = m.group(1) if m else None
 
     cloth = entry.find("span", class_="p--small visible--inline-block")
@@ -440,6 +594,60 @@ def _runner_meta(entry) -> dict:
     return meta
 
 
+def _class_flag(element, prefix: str) -> str | None:
+    if element is None:
+        return None
+    return next((c[len(prefix):] for c in element.get("class", [])
+                 if c.startswith(prefix) and c != prefix + "has-icon"), None)
+
+
+def _parse_race_analysis(soup: BeautifulSoup) -> dict:
+    """Race context is separate from the individual horse's finishing speed."""
+    root = soup.select_one('.sectional-analysis')
+    if root is None:
+        return {}
+    out = {}
+    pace = root.select_one('.sectional-analysis__pace .sectional-text-highlight')
+    if pace is not None:
+        # Exclude the nested help icon's question mark.
+        out['atr_race_early_pace'] = ' '.join(pace.find_all(string=True, recursive=False)).strip()
+        out['atr_race_early_pace_flag'] = _class_flag(pace, 'sectional-text-highlight--')
+    finish = root.select_one('.sectional-analysis__finish .value')
+    if finish is not None:
+        out['atr_race_finishing_speed_pct'] = _to_float(finish.get_text(' ', strip=True))
+        out['atr_race_finishing_pace_flag'] = _class_flag(
+            finish.select_one('.sectional-text-highlight'), 'sectional-text-highlight--')
+    first = root.select_one('.sectional-pacebar__first-text')
+    if first is not None:
+        out['atr_first_section_furlongs'] = _to_float(first.get_text(' ', strip=True))
+    stops = root.select('.sectional-pacebar stop')
+    if stops:
+        out['atr_race_pace_profile'] = [{'offset': x.get('offset'), 'colour': x.get('stop-color'),
+                                       'opacity': x.get('stop-opacity')} for x in stops]
+    return out
+
+
+def _finish_seconds(text: str) -> float | None:
+    match = re.fullmatch(r'\s*(?:(\d+)m\s*)?(\d+(?:\.\d+)?)s\s*', text)
+    return (60 * int(match[1] or 0) + float(match[2])) if match else None
+
+
+def _source_card_context(soup: BeautifulSoup) -> dict:
+    """Use dated race-silk filenames as an additional identity cross-check."""
+    found = set()
+    for image in soup.select('.card-entry img[src]'):
+        match = re.search(r'/images/silks/(\d{8})/\d{8}[A-Za-z]{2,8}(\d{4})\d{2,3}\.(?:png|gif)', image['src'])
+        if match:
+            day, off = match.groups()
+            found.add((f'{day[:4]}-{day[4:6]}-{day[6:]}',f'{off[:2]}:{off[2:]}'))
+    if len(found) > 1:
+        raise ValueError('Mixed source race dates/off-times')
+    if not found:
+        return {}
+    day, off = found.pop()
+    return {'atr_source_race_date':day,'atr_source_off_time_local':off}
+
+
 def _parse_times(soup: BeautifulSoup) -> dict[str, dict]:
     """Parse the ``times`` fragment: split times, running totals, pace flags."""
     out: dict[str, dict] = {}
@@ -450,21 +658,22 @@ def _parse_times(soup: BeautifulSoup) -> dict[str, dict]:
             continue
 
         splits: list[float] = []
-        running: list[float] = []
+        running: list[float | None] = []
         flags: list[str] = []
+        front, notes = [], []
         for cell in entry.find_all("div", class_="card-cell--sectional-time"):
             sec = cell.find("div", class_=lambda c: c and "card-sectional" in c)
             vis = cell.find("span", class_="visible")
             if vis is None:
                 continue  # finish marker cell carries no value
             val = _to_float(vis.get_text(strip=True))
-            if val is None:
-                continue
             splits.append(val)
             inner = cell.find("div", class_="card-sectional__inner")
             rt = _to_float(inner.get("title")) if inner and inner.get("title") else None
-            if rt is not None:
-                running.append(rt)
+            running.append(rt)  # Preserve alignment when a tooltip is absent.
+            labels = [p.get_text(' ', strip=True) for p in cell.select('.text-pill')]
+            notes.append(labels)
+            front.append(any(label.casefold() == 'front' for label in labels))
             # pace flag = class suffix after "card-sectional--"
             flag = ""
             for cls in (sec.get("class") or []) if sec else []:
@@ -477,8 +686,12 @@ def _parse_times(soup: BeautifulSoup) -> dict[str, dict]:
         rec["atr_split_times"] = splits
         rec["atr_running_totals"] = running
         rec["atr_pace_flags"] = flags
+        rec['atr_front_flags'] = front
+        rec['atr_section_notes'] = notes
         rec["atr_n_sections"] = float(len(splits)) if splits else None
-        rec["atr_final_time"] = running[-1] if running else None
+        finish = entry.select_one('.card-sectional--finish .card-sectional__inner')
+        final = _finish_seconds(finish.get_text(' ', strip=True)) if finish else None
+        rec["atr_final_time"] = final if final is not None else (running[-1] if running else None)
         out[name] = rec
     return out
 
@@ -491,10 +704,11 @@ def _parse_tools(soup: BeautifulSoup) -> dict[str, dict]:
         name = name.get_text(" ", strip=True) if hasattr(name, "get_text") else ""
         if not name:
             continue
-        rec: dict = {}
+        rec: dict = _runner_meta(entry)
 
         speeds: list[float] = []
         labels: list[str] = []
+        source_metrics = []
         for pill in entry.find_all("span", class_=lambda c: c and "text-pill" in c):
             classes = pill.get("class") or []
             if "text-pill--grey" in classes:
@@ -504,11 +718,28 @@ def _parse_tools(soup: BeautifulSoup) -> dict[str, dict]:
                 continue
             v = _to_float(pill.get_text(strip=True))
             if v is not None:
-                speeds.append(v)
-                labels.append((pill.get("title") or "").strip())
+                label = (pill.get('title') or '').strip()
+                compact = re.sub(r'\s+', '', label.casefold()).replace('–', '-').replace('−', '-')
+                unit = 'mph'
+                if compact == 'topspeed':
+                    rec['atr_top_speed_mph'] = v
+                elif compact == 'finalspeed':
+                    rec['atr_final_speed_mph'] = v
+                elif compact in {'0-30mph', '0to30mph'}:
+                    rec['atr_acceleration_0_30_seconds'] = v
+                    unit = 'seconds'
+                elif re.search(r'\bto\b', label, re.IGNORECASE):
+                    speeds.append(v)
+                    labels.append(label)
+                else:
+                    # Retain unknown source columns without treating them as speeds.
+                    unit = None
+                source_metrics.append({'label': label, 'value': v, 'unit': unit,
+                                       'display': pill.get_text(' ', strip=True)})
         if speeds:
             rec["atr_sectional_speeds"] = speeds
             rec["atr_sectional_speed_labels"] = labels
+        rec['atr_source_metrics'] = source_metrics
 
         # Per-runner finishing speed %: the width--24 p--medium block.
         fs = entry.find("div", class_="width--24 p--medium")
@@ -535,14 +766,23 @@ def _parse_stride(soup: BeautifulSoup) -> dict[str, dict]:
         name = link.get_text(" ", strip=True) if link else ""
         if not name:
             continue
-        rec: dict = {}
+        rec: dict = _runner_meta(entry)
 
-        chart = entry.find("div", class_="chart-energy-distribution")
-        markers, length, _peak_line = _parse_chart(chart)
-        if length:
-            rec["atr_stride_length"] = length
-            if markers and "atr_section_markers" not in rec:
-                rec["atr_section_markers"] = markers
+        charts = entry.select('.chart-energy-distribution')
+        source_charts = []
+        for index, chart in enumerate(charts):
+            markers, values, reference = _parse_chart(chart)
+            title = chart.get('data-line1-title') or ('Stride Length (Feet)' if index == 0 else '')
+            source_charts.append({'title': title, 'attributes': {
+                key: value for key, value in chart.attrs.items() if key.startswith('data-')},
+                'markers': markers, 'values': values, 'reference': reference})
+            if 'length' in title.casefold():
+                rec['atr_stride_length'], rec['atr_stride_markers'] = values, markers
+                rec['atr_stride_length_reference'] = reference
+            elif 'frequency' in title.casefold():
+                rec['atr_stride_frequency'], rec['atr_stride_frequency_markers'] = values, markers
+                rec['atr_stride_frequency_reference'] = reference
+        rec['atr_source_charts'] = source_charts
 
         # Peak stride length / frequency: "26.94 / 2.28" in a width--24 block.
         for w in entry.find_all("div", class_="width--24"):
@@ -594,6 +834,7 @@ DATA = "data"
 NOT_FOUND = "not_found"   # racecard 404, or 200 with genuinely no sectionals
 BLOCKED = "blocked"       # 403/429/503/challenge/transport error — transient
 INVALID = "invalid"       # unparseable inputs (bad date)
+UNRESOLVED = "unresolved" # unexpected layout / unconfirmed absence, retryable
 
 
 def _fetch_one(
@@ -605,94 +846,124 @@ def _fetch_one(
     :data:`NOT_FOUND` or :data:`BLOCKED`.
     """
     page_path = f"/racecard/{slug}/{atr_date}/{hhmm}"
-    card = fetcher.get(ATR_BASE + page_path)
-    if card is None:
+    index_outcome, index = _results_index(fetcher, atr_date)
+    if index_outcome == BLOCKED:
         return BLOCKED, None
-    status, text = card
-    if status == 404:
-        return NOT_FOUND, None
-    if status in _BLOCKED_STATUSES or status != 200 or not text:
-        return BLOCKED, None
-
-    raceid = _extract_raceid(text)
+    raceid = index.get(page_path)
     if not raceid:
-        # A real racecard with no RaceID comment carries no sectionals.
-        return NOT_FOUND, None
+        card = fetcher.get(ATR_BASE + page_path)
+        if card is None:
+            return BLOCKED, None
+        status, text = card
+        if status == 404:
+            return NOT_FOUND, None
+        if status != 200 or not text or "Client Challenge" in text[:4000]:
+            return BLOCKED, None
+        raceid = _extract_raceid(text)
+        if not raceid:
+            # HTML drift must not permanently suppress a real race.
+            return BLOCKED, None
 
+    return _fetch_fragments(fetcher, raceid, page_path)
+
+
+def _fetch_fragments(fetcher: "_Fetcher", raceid: str, page_path: str) -> tuple[str, list[dict] | None]:
+    """Fetch every public tab for a known native ID, retaining provenance."""
+    if not re.fullmatch(r'\d+', str(raceid)):
+        return INVALID, None
     referer = ATR_BASE + page_path
     parsed: dict[str, dict] = {}
-    any_blocked = False
+    context, payloads = {}, []
+    statuses = []
     parsers = {
         "times": _parse_times,
         "tools": _parse_tools,
         "stride": _parse_stride,
     }
     for kind, parser in parsers.items():
-        url = (
-            f"{ATR_BASE}/ajax/sectionals/{raceid}/{kind}"
-            f"?page={page_path}&raceid={raceid}"
-        )
+        url = f"{ATR_BASE}/ajax/sectionals-razor/{raceid}/{kind}"
         resp = fetcher.get(url, referer=referer)
         if resp is None:
-            any_blocked = True
-            continue
+            return BLOCKED, None
         s, t = resp
+        statuses.append(s)
+        payloads.append({'kind': kind, 'url': url, 'status': s,
+                         'sha256': hashlib.sha256(t.encode('utf-8')).hexdigest()})
         if s == 404:
             continue  # this fragment is simply absent for the race
         if s in _BLOCKED_STATUSES or s != 200 or not t:
-            any_blocked = True
-            continue
+            # Do not permanently skip a race whose later tabs were blocked.
+            return BLOCKED, None
         soup = BeautifulSoup(t, "html.parser")
+        try:
+            source_context = _source_card_context(soup)
+        except ValueError:
+            fetcher.last_response = {**getattr(fetcher,'last_response',{}),'reason':'source_identity_mismatch'}
+            return UNRESOLVED, None
+        if source_context:
+            _, _, _, day_text, local_time = page_path.split('/')
+            day, month, year = day_text.split('-')
+            expected_day = f'{year}-{_MONTHS.index(month)+1:02d}-{day}'
+            expected_time = f'{local_time[:2]}:{local_time[2:]}'
+            if source_context['atr_source_race_date'] != expected_day or source_context['atr_source_off_time_local'] != expected_time:
+                fetcher.last_response = {**getattr(fetcher,'last_response',{}),'reason':'source_identity_mismatch',
+                                         'source_context':source_context}
+                return UNRESOLVED, None
+            context.update(source_context)
+        for key, value in _parse_race_analysis(soup).items():
+            if key in context and context[key] != value:
+                return UNRESOLVED, None
+            context[key] = value
         for name, rec in parser(soup).items():
             parsed.setdefault(name, {}).update(rec)
 
+    def has_signal(rec):
+        return any(isinstance(x, (int, float)) and math.isfinite(x)
+                   for key in ('atr_split_times', 'atr_sectional_speeds', 'atr_stride_length', 'atr_stride_frequency')
+                   for x in (rec.get(key) or []))
+    if not any(has_signal(rec) for rec in parsed.values()):
+        # A changed HTML template is not proof of no telemetry. Only explicit
+        # missing fragments or actual runner rows with no signals are terminal.
+        return (NOT_FOUND, None) if all(s == 404 for s in statuses) or parsed else (UNRESOLVED, None)
     rows: list[dict] = []
     for name, rec in parsed.items():
-        # Require at least one real sectional signal to count as data.
-        if not (rec.get("atr_split_times") or rec.get("atr_sectional_speeds")
-                or rec.get("atr_stride_length")):
-            continue
+        # Keep untracked runners' identities when other runners have telemetry.
         rec.setdefault("horse_name", name)
         rec["atr_raceid"] = raceid
+        rec['atr_parser_version'] = str(ATR_PARSER_VERSION)
+        rec['atr_source_payloads'] = payloads
+        rec.update(context)
         rows.append(rec)
 
     if rows:
         return DATA, rows
-    # No usable rows: if a fragment was blocked we can't be sure there is no
-    # data, so report BLOCKED (retryable) rather than NOT_FOUND.
-    return (BLOCKED, None) if any_blocked else (NOT_FOUND, None)
+    return NOT_FOUND, None
 
 
 def fetch_atr_sectionals_outcome(
     date: str, track_name: str, off_time: str,
     fetcher: "_Fetcher | None" = None,
+    *, raceid: str | None = None,
 ) -> tuple[str, list[dict] | None]:
     """Fetch ATR sectionals, returning ``(outcome, rows)``.
 
-    Off-times are stored in UTC; the ATR URL uses UK local time, so during
-    BST we try the +1 h time first and fall back to the unadjusted time.
+    Off-times are stored in UTC; the ATR URL uses UK local time. Use exactly
+    that conversion: an unadjusted summer time can identify a different race.
     """
     slug = _track_to_slug(track_name)
     atr_date = _date_to_atr(date)
     if not atr_date:
         return INVALID, None
     hhmm = _off_time_to_hhmm(off_time)
+    if _is_bst(date):
+        hhmm = _add_one_hour(hhmm)
 
     owns_fetcher = fetcher is None
     f = fetcher or _Fetcher()
     try:
-        candidates = [hhmm]
-        if _is_bst(date):
-            candidates.insert(0, _add_one_hour(hhmm))
-        saw_blocked = False
-        for cand in candidates:
-            outcome, rows = _fetch_one(f, slug, atr_date, cand)
-            if outcome == DATA:
-                return DATA, rows
-            if outcome == BLOCKED:
-                saw_blocked = True
-        # If any candidate was blocked we cannot conclude "no data".
-        return (BLOCKED, None) if saw_blocked else (NOT_FOUND, None)
+        if raceid is not None:
+            return _fetch_fragments(f, str(raceid), f'/racecard/{slug}/{atr_date}/{hhmm}')
+        return _fetch_one(f, slug, atr_date, hhmm)
     finally:
         if owns_fetcher:
             f.close()
@@ -731,7 +1002,8 @@ def _encode_arrays(df: pd.DataFrame) -> pd.DataFrame:
 
 def save_atr_cache(df: pd.DataFrame) -> None:
     """Save the ATR sectionals cache."""
-    _encode_arrays(df).to_parquet(ATR_CACHE_FILE, index=False, engine="pyarrow")
+    from src.source_storage import atomic_parquet
+    atomic_parquet(_encode_arrays(df), ATR_CACHE_FILE)
     logger.info("Saved ATR cache: %d rows -> %s", len(df), ATR_CACHE_FILE)
 
 
@@ -755,9 +1027,9 @@ def _load_no_data_race_keys() -> set[str]:
 
 
 def _save_no_data_race_keys(keys: set[str]) -> None:
+    from src.source_storage import atomic_json
     payload = {"updated_at": datetime.now().isoformat(), "race_keys": sorted(keys)}
-    with open(ATR_NO_DATA_FILE, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2)
+    atomic_json(ATR_NO_DATA_FILE, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -793,6 +1065,18 @@ def backfill_atr_sectionals(
     return load_atr_cache()
 
 
+def _exclusive_collection(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        from src.source_storage import writer_lock
+        with writer_lock(Path(ATR_CACHE_FILE).parent/'.collector.lock') as acquired:
+            if not acquired:
+                raise RuntimeError('An ATR collector is already running')
+            return function(*args, **kwargs)
+    return wrapped
+
+
+@_exclusive_collection
 def backfill_atr_sectionals_for_races(
     races_df: pd.DataFrame,
     max_races: int | None = None,
@@ -870,6 +1154,11 @@ def backfill_atr_sectionals_for_races(
         skipped_known_missing = int(mask.sum())
         races = races.loc[~mask].reset_index(drop=True)
 
+    # Fresh absence is not terminal: allow time for TPD's delayed publication.
+    ready = _publication_ready(races)
+    deferred_recent = int((~ready).sum())
+    races = races.loc[ready].reset_index(drop=True)
+
     if max_races is not None:
         races = races.head(max_races)
 
@@ -879,6 +1168,7 @@ def backfill_atr_sectionals_for_races(
             "missing_races": 0, "fetched_races": 0,
             "new_rows": 0, "cache_rows": int(len(cache)),
             "skipped_known_missing": skipped_known_missing,
+            "deferred_recent_races": deferred_recent,
         }
 
     logger.info("ATR backfill: fetching %d races (request_delay=%.2fs)",
@@ -893,7 +1183,6 @@ def backfill_atr_sectionals_for_races(
     batch_size = 50
     newly_no_data = 0
     aborted = False
-    today = datetime.now().date()
 
     def _flush() -> None:
         nonlocal cache, new_rows, total_new_rows
@@ -950,12 +1239,10 @@ def backfill_atr_sectionals_for_races(
             elif outcome == NOT_FOUND:
                 logger.info("NO DATA  %s  %-18s  %s", date_str, track, off_time)
                 n_no_data += 1
-                _rd = pd.to_datetime(date_str, errors="coerce")
-                if pd.notna(_rd) and _rd.date() < today:
-                    k = _race_key(date_str, track, off_time)
-                    if k not in known_no_data:
-                        known_no_data.add(k)
-                        newly_no_data += 1
+                k = _race_key(date_str, track, off_time)
+                if k not in known_no_data:
+                    known_no_data.add(k)
+                    newly_no_data += 1
             fetched += 1
 
             if fetched % 25 == 0:
@@ -980,6 +1267,8 @@ def backfill_atr_sectionals_for_races(
         "cache_rows": int(len(cache)),
         "skipped_known_missing": skipped_known_missing,
         "new_known_missing": int(newly_no_data),
+        "resolved_races": int(n_data + newly_no_data),
+        "deferred_recent_races": deferred_recent,
         "aborted_blocked": aborted,
     }
 
@@ -988,19 +1277,11 @@ def backfill_atr_sectionals_for_races(
 # Merge helper (used by feature_engineer)
 # ---------------------------------------------------------------------------
 
-def merge_atr_sectionals(df: pd.DataFrame) -> pd.DataFrame:
-    """Left-join cached ATR sectionals onto a race DataFrame.
+_ATR_MERGE_KEYS = ["_rd", "_trk", "_ot", "_hn"]
 
-    Matches on ``(race_date, track, off_time, horse_name)`` using the
-    shared normalisers.  All ATR columns are added (NaN where absent);
-    per-furlong series remain JSON strings (see :data:`ATR_ARRAY_COLS`).
-    """
-    cache = load_atr_cache()
-    if cache.empty:
-        for c in ALL_ATR_COLS:
-            df[c] = float("nan")
-        return df
 
+def _atr_merge_table(cache: pd.DataFrame) -> pd.DataFrame:
+    """The cache as unique merge keys plus every ATR column."""
     cache = cache.copy()
     cache["_rd"] = pd.to_datetime(cache["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     cache["_trk"] = cache["track"].map(_normalise_track_key)
@@ -1011,26 +1292,72 @@ def merge_atr_sectionals(df: pd.DataFrame) -> pd.DataFrame:
         if c not in cache.columns:
             cache[c] = float("nan")
 
-    merge_cols = ["_rd", "_trk", "_ot", "_hn"] + ALL_ATR_COLS
-    cache_slim = cache[merge_cols].drop_duplicates(
-        subset=["_rd", "_trk", "_ot", "_hn"], keep="last",
-    )
+    merge_cols = _ATR_MERGE_KEYS + ALL_ATR_COLS
+    keys = _ATR_MERGE_KEYS
+    cache_slim = cache[merge_cols].drop_duplicates(subset=keys+["atr_horse_id"], keep="last")
+    return cache_slim.loc[~cache_slim.duplicated(keys,keep=False)]
 
+
+_merge_table_scope: list | None = None
+
+
+@contextmanager
+def atr_merge_scope():
+    """Prepare the cache once for a build that merges it chunk by chunk."""
+    global _merge_table_scope
+    _merge_table_scope = []
+    try:
+        yield
+    finally:
+        _merge_table_scope = None
+
+
+def _merge_table() -> pd.DataFrame | None:
+    """The prepared cache, or None when there is nothing to join."""
+    if _merge_table_scope:
+        return _merge_table_scope[0]
+    cache = load_atr_cache()
+    table = None if cache.empty else _atr_merge_table(cache)
+    if _merge_table_scope is not None:
+        _merge_table_scope.append(table)
+    return table
+
+
+def merge_atr_sectionals(df: pd.DataFrame) -> pd.DataFrame:
+    """Left-join cached ATR sectionals onto a race DataFrame.
+
+    Matches on ``(race_date, track, off_time, horse_name)`` using the
+    shared normalisers.  All ATR columns are added (NaN where absent);
+    per-furlong series remain JSON strings (see :data:`ATR_ARRAY_COLS`).
+    Only the keys take part in the join, so a wide frame is not copied.
+    """
+    cache_slim = _merge_table()
+    if cache_slim is None:
+        for c in ALL_ATR_COLS:
+            df[c] = float("nan")
+        return df
+
+    keys = _ATR_MERGE_KEYS
     df["_rd"] = pd.to_datetime(df["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     df["_trk"] = df["track"].map(_normalise_track_key)
     df["_ot"] = df["off_time"].map(_normalise_off_time_key)
     df["_hn"] = df["horse_name"].map(_normalise_horse_key)
+    ambiguous_left = df.duplicated(keys,keep=False).to_numpy()
 
-    merged = df.merge(
-        cache_slim, on=["_rd", "_trk", "_ot", "_hn"], how="left", indicator="_atr_merge",
+    joined = df[keys].merge(
+        cache_slim.loc[cache_slim["_rd"].isin(df["_rd"].unique())],
+        on=keys, how="left", indicator="_atr_merge", validate="many_to_one",
     )
-    merged = merged.drop(columns=["_rd", "_trk", "_ot", "_hn"], errors="ignore")
+    merged = pd.concat(
+        [df.drop(columns=keys).reset_index(drop=True), joined.drop(columns=keys)], axis=1,
+    )
 
     for c in ALL_ATR_COLS:
         if c not in merged.columns:
             merged[c] = float("nan")
+    merged.loc[ambiguous_left,ALL_ATR_COLS] = float("nan")
 
-    matched = (merged["_atr_merge"] == "both") if "_atr_merge" in merged.columns else pd.Series(False, index=merged.index)
+    matched = (merged["_atr_merge"] == "both") & ~ambiguous_left
     logger.info(
         "ATR merge: key matches %d / %d (%.1f%%)",
         int(matched.sum()), len(merged), 100 * matched.sum() / max(1, len(merged)),

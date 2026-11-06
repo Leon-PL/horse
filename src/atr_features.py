@@ -15,9 +15,14 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
+from itertools import chain
 
+import numba as nb
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 
 # ── In-running comment tagger ──────────────────────────────────────────
 # ATR comments use a stable race-reading vocabulary.  Each tag is a 0/1
@@ -95,6 +100,186 @@ def _as_list(v) -> list[float]:
     return out
 
 
+def _sequence(value) -> list:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return []
+    return list(value) if isinstance(value, (list, tuple, np.ndarray)) else []
+
+
+def _speed_sections(names: list) -> tuple[bool, ...]:
+    """Which labelled sections hold a speed over a stretch of the course."""
+    return tuple(
+        bool(re.search(r'\bto\b', str(name), re.IGNORECASE)) and 'mph' not in str(name).casefold()
+        for name in names
+    )
+
+
+@lru_cache(maxsize=4096)
+def _speed_sections_of(labels: str) -> tuple[bool, ...]:
+    return _speed_sections(_sequence(labels))
+
+
+def _sectional_speeds(values, labels) -> list[float]:
+    """Older caches may mix instantaneous speeds and acceleration seconds in.
+
+    Respect source labels when present; never interpret a 0–30 mph time as
+    a section's closing speed. Unlabelled legacy three-section inputs retain
+    their existing contract.
+    """
+    names = _sequence(labels)
+    raw = _sequence(values)
+    if names:
+        if len(names) != len(raw):
+            return []
+        raw = [value for value, keep in zip(raw, _speed_sections(names)) if keep]
+    return _as_list(raw)
+
+
+def _decode_cells(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    """All JSON array cells as one float array plus row offsets.
+
+    Joining the cells has the decoder read every row in one call. Items keep
+    their positions, with nulls as NaN. Returns None when some cell needs the
+    row-by-row handling of :func:`_as_list`.
+    """
+    texts = []
+    for cell in cells:
+        if isinstance(cell, (list, tuple, np.ndarray)):
+            return None
+        texts.append(cell if isinstance(cell, str) and cell.strip() else "[]")
+    try:
+        rows = json.loads("[" + ",".join(texts) + "]")
+        if len(rows) != len(texts) or not all(type(row) is list for row in rows):
+            return None
+        offsets = np.zeros(len(rows) + 1, dtype=np.int64)
+        offsets[1:] = np.cumsum(np.fromiter(map(len, rows), dtype=np.int64, count=len(rows)))
+        return np.fromiter(chain.from_iterable(rows), dtype=np.float64, count=offsets[-1]), offsets
+    except (TypeError, ValueError):
+        return None
+
+
+def _flatten(rows: list[list[float]]) -> tuple[np.ndarray, np.ndarray]:
+    offsets = np.zeros(len(rows) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum(np.fromiter(map(len, rows), dtype=np.int64, count=len(rows)))
+    return np.fromiter(chain.from_iterable(rows), dtype=np.float64, count=offsets[-1]), offsets
+
+
+def _speed_cells(values: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(speeds, offsets, keep): every section, and which of them are speeds."""
+    decoded = _decode_cells(values)
+    if decoded is None or not all(isinstance(cell, str) or not isinstance(cell, (list, tuple, np.ndarray))
+                                  for cell in labels):
+        flat, offsets = _flatten([_sectional_speeds(v, l) for v, l in zip(values, labels)])
+        return flat, offsets, np.ones(len(flat), dtype=bool)
+    flat, offsets = decoded
+    keep = np.ones(len(flat), dtype=bool)
+    for row, cell in enumerate(labels):
+        sections = _speed_sections_of(cell) if isinstance(cell, str) else ()
+        if sections:
+            start, stop = offsets[row], offsets[row + 1]
+            keep[start:stop] = sections if len(sections) == stop - start else False
+    return flat, offsets, keep
+
+
+@nb.njit(cache=True)
+def _nb_speed_metrics(values, keep, offsets, early, top, closing, surge):
+    """First, highest and last speed, and the largest rise between sections."""
+    for row in range(len(offsets) - 1):
+        count, first, last, peak, jump = 0, 0.0, 0.0, 0.0, 0.0
+        for at in range(offsets[row], offsets[row + 1]):
+            value = values[at]
+            if not keep[at] or value != value:
+                continue
+            if count == 0:
+                first, peak = value, value
+            else:
+                if value > peak:
+                    peak = value
+                step = value - last
+                if count == 1 or step > jump:
+                    jump = step
+            last = value
+            count += 1
+        if count > 0:
+            early[row], top[row], closing[row] = first, peak, last
+        if count >= 2:
+            surge[row] = jump if jump > 0.0 else 0.0
+
+
+@nb.njit
+def _numpy_sum(values, n):
+    """``numpy.sum`` of a short array: the same block order, so the same bits."""
+    if n < 8:
+        total = -0.0
+        for i in range(n):
+            total += values[i]
+        return 0.0 + total
+    blocks = values[:8].copy()
+    i = 8
+    while i < n - n % 8:
+        for j in range(8):
+            blocks[j] += values[i + j]
+        i += 8
+    total = ((blocks[0] + blocks[1]) + (blocks[2] + blocks[3])) + ((blocks[4] + blocks[5]) + (blocks[6] + blocks[7]))
+    while i < n:
+        total += values[i]
+        i += 1
+    return 0.0 + total
+
+
+@nb.njit(cache=True)
+def _nb_energy_gap(energy, energy_offsets, optimum, optimum_offsets, out):
+    """Minus the mean distance from the optimum over the shared sections."""
+    gaps = np.empty(128)
+    for row in range(len(energy_offsets) - 1):
+        e, e_stop = energy_offsets[row], energy_offsets[row + 1]
+        o, o_stop = optimum_offsets[row], optimum_offsets[row + 1]
+        count = 0
+        while True:
+            while e < e_stop and energy[e] != energy[e]:
+                e += 1
+            while o < o_stop and optimum[o] != optimum[o]:
+                o += 1
+            if e == e_stop or o == o_stop:
+                break
+            if count == len(gaps):
+                gaps = np.concatenate((gaps, gaps))
+            gaps[count] = abs(energy[e] - optimum[o])
+            count += 1
+            e += 1
+            o += 1
+        if count > 0:
+            out[row] = -(_numpy_sum(gaps, count) / count)
+
+
+def _energy_gap(energy_cells: np.ndarray, optimum_cells: np.ndarray) -> np.ndarray:
+    energy = _decode_cells(energy_cells) or _flatten([_as_list(cell) for cell in energy_cells])
+    optimum = _decode_cells(optimum_cells) or _flatten([_as_list(cell) for cell in optimum_cells])
+    out = np.full(len(energy_cells), np.nan)
+    _nb_energy_gap(energy[0], energy[1], optimum[0], optimum[1], out)
+    return out
+
+
+def _comment_tags(comments: list[str]) -> dict[str, np.ndarray]:
+    """0/1 tag columns. RE2 reads ASCII comments far faster than ``re``.
+
+    The two engines agree on ASCII text. They can differ on word boundaries and
+    case folding beyond it, so any other comment stays with ``re``.
+    """
+    text = pa.array(comments, type=pa.string())
+    other = np.flatnonzero(~pc.string_is_ascii(text).to_numpy(zero_copy_only=False))
+    tags = {}
+    for tag, pattern in _COMMENT_PATTERNS.items():
+        flags = pc.match_substring_regex(text, pattern, ignore_case=True)
+        tags[tag] = flags.to_numpy(zero_copy_only=False).astype(np.float64)
+        for row in other:
+            tags[tag][row] = float(_COMMENT_RES[tag].search(comments[row]) is not None)
+    return tags
+
+
 # Per-run continuous metrics and whether higher is better (drives best/min,
 # field-relative sign and the composite score).
 RUN_METRICS: list[tuple[str, bool]] = [
@@ -139,6 +324,7 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
         return df[name].to_numpy() if name in df.columns else np.full(n, np.nan, dtype=object)
 
     speeds_c = col("atr_sectional_speeds")
+    speed_labels_c = col('atr_sectional_speed_labels')
     energy_c = col("atr_energy_dist")
     optimum_c = col("atr_optimum_energy")
     fs_c = pd.to_numeric(df.get("atr_finishing_speed_pct", np.nan), errors="coerce").to_numpy()
@@ -150,57 +336,37 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
     won_c = pd.to_numeric(df.get("won", np.nan), errors="coerce").to_numpy()
     lb_c = pd.to_numeric(df.get("lengths_behind", np.nan), errors="coerce").to_numpy()
 
-    # Comment tags — vectorised regex (much faster than per-row on 500k+ rows).
+    # Comment tags.
     cmt_series = df.get("atr_in_running_comment", pd.Series([""] * n, index=df.index)).fillna("").astype(str)
-    tags = {
-        t: cmt_series.str.contains(rx).to_numpy(dtype=np.float64)
-        for t, rx in _COMMENT_RES.items()
-    }
+    tags = _comment_tags(cmt_series.tolist())
 
     early = np.full(n, np.nan)
     mx = np.full(n, np.nan)
     closing = np.full(n, np.nan)
     tof = np.full(n, np.nan)
-    energy_eff = np.full(n, np.nan)
-    upgrade = np.full(n, np.nan)
-    in_hand = np.full(n, np.nan)
 
-    eased_a = tags["atr_cmt_eased"]
-    stayed_a = tags["atr_cmt_stayed_on"]
-    comf_a = tags["atr_cmt_comfortable"]
+    eased_a = tags["atr_cmt_eased"] == 1
+    stayed_a = tags["atr_cmt_stayed_on"] == 1
+    comf_a = tags["atr_cmt_comfortable"] == 1
 
-    for i in range(n):
-        sp = _as_list(speeds_c[i])
-        if sp:
-            early[i] = sp[0]
-            mx[i] = max(sp)
-            closing[i] = sp[-1]
-            if len(sp) >= 2:
-                tof[i] = max(0.0, max(b - a for a, b in zip(sp[:-1], sp[1:])))
-        e, o = _as_list(energy_c[i]), _as_list(optimum_c[i])
-        if e and o:
-            m = min(len(e), len(o))
-            energy_eff[i] = -float(np.mean([abs(e[j] - o[j]) for j in range(m)]))
+    speeds, speed_offsets, speed_keep = _speed_cells(speeds_c, speed_labels_c)
+    _nb_speed_metrics(speeds, speed_keep, speed_offsets, early, mx, closing, tof)
+    energy_eff = _energy_gap(energy_c, optimum_c)
 
-        # Sectional upgrade (finished worse than sectionals imply), CLEANED:
-        # discard when the horse was eased while beaten (its fast finishing
-        # sectional is an artefact of not being asked), or tailed off.
-        if not np.isnan(pos_c[i]) and not np.isnan(adj_c[i]):
-            raw_up = pos_c[i] - adj_c[i]
-            beaten = (won_c[i] == 0) if not np.isnan(won_c[i]) else True
-            tailed_off = (not np.isnan(lb_c[i])) and lb_c[i] > 12 and beaten
-            if (eased_a[i] == 1 and beaten) or tailed_off:
-                upgrade[i] = 0.0   # no reliable signal → ran to form
-            else:
-                upgrade[i] = float(np.clip(raw_up, -6.0, 6.0))
+    # Sectional upgrade (finished worse than sectionals imply), CLEANED:
+    # discard when the horse was eased while beaten (its fast finishing
+    # sectional is an artefact of not being asked), or tailed off. No reliable
+    # signal means the horse ran to form.
+    beaten = np.isnan(won_c) | (won_c == 0)
+    unreliable_up = (eased_a & beaten) | ((lb_c > 12) & beaten)
+    upgrade = np.where(unreliable_up, 0.0, np.clip(pos_c - adj_c, -6.0, 6.0))
+    upgrade[np.isnan(pos_c) | np.isnan(adj_c)] = np.nan
 
-        # Closing speed "in hand": credit a strong finishing % only when the
-        # finish was genuine (won/ran-on) and not eased-when-beaten.
-        if not np.isnan(fs_c[i]):
-            genuine = (won_c[i] == 1) or stayed_a[i] == 1 or comf_a[i] == 1
-            unreliable = (eased_a[i] == 1) and (won_c[i] == 0)
-            if genuine and not unreliable:
-                in_hand[i] = fs_c[i]
+    # Closing speed "in hand": credit a strong finishing % only when the
+    # finish was genuine (won/ran-on) and not eased-when-beaten.
+    genuine = (won_c == 1) | stayed_a | comf_a
+    unreliable = eased_a & (won_c == 0)
+    in_hand = np.where(genuine & ~unreliable, fs_c, np.nan)
 
     out["atr_finishing_speed_pct"] = fs_c.astype(float)
     out["atr_early_pace"] = early

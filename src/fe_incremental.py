@@ -1,5 +1,5 @@
 """Incremental state primitives for build-once / append-forever feature
-engineering (taxonomy class **C**; see docs/FE_TAXONOMY.md).
+engineering (taxonomy class **C**; see docs/architecture/FE_TAXONOMY.md).
 
 `CountsAccumulator` generalises the Elo/Glicko `return_state` pattern to the
 ~15 cumulative stages. For each row it produces the prior-only, **race-safe**
@@ -25,8 +25,70 @@ and no race spans the boundary (a race lives on one date).
 
 from __future__ import annotations
 
+from itertools import repeat
+
+import numba as nb
 import numpy as np
 import pandas as pd
+
+
+@nb.njit(cache=True)
+def _nb_group_cumsum(values, labels, n_groups):
+    """``groupby.cumsum`` for one float column, bit for bit.
+
+    pandas compensates with Kahan summation, so plain running totals would
+    differ from it in the last bits. A NaN row and a row without a group stay
+    NaN and leave the totals alone. Returns the running and final totals.
+    """
+    n = len(values)
+    out = np.full(n, np.nan)
+    totals = np.zeros(n_groups)
+    compensation = np.zeros(n_groups)
+    for i in range(n):
+        group = labels[i]
+        if group < 0:
+            continue
+        value = values[i]
+        if value != value:
+            continue
+        adjusted = value - compensation[group]
+        total = totals[group] + adjusted
+        compensation[group] = total - totals[group] - adjusted
+        totals[group] = total
+        out[i] = total
+    return out, totals
+
+
+def _entity_labels(keys: np.ndarray) -> tuple[np.ndarray, list]:
+    """Integer group labels in first-seen order; a missing key has no group."""
+    labels, uniques = pd.factorize(keys)
+    return labels.astype(np.int64), uniques.tolist()
+
+
+def _entity_race_labels(entity: np.ndarray, race_ids: np.ndarray) -> tuple[np.ndarray, int]:
+    """Labels of ``groupby([entity, race])`` built from the entity labels."""
+    races, unique_races = pd.factorize(race_ids)
+    pairs = entity * (len(unique_races) + 1) + races
+    labels, uniques = pd.factorize(pairs)
+    labels = labels.astype(np.int64)
+    labels[(entity < 0) | (races < 0)] = -1
+    return labels, len(uniques)
+
+
+def _group_totals(values: np.ndarray, labels: np.ndarray, totals: np.ndarray) -> np.ndarray:
+    """Group totals; pandas guards ``sum`` against infinity but not ``cumsum``."""
+    if not np.isinf(values).any():
+        return totals
+    known = labels >= 0
+    summed = pd.Series(values[known]).groupby(labels[known]).sum()
+    return summed.reindex(range(len(totals)), fill_value=0.0).to_numpy()
+
+
+def _carried(state: dict, entities: list) -> np.ndarray:
+    """Carried totals for this frame's entities: never O(all history)."""
+    carried = np.fromiter(map(state.get, entities, repeat(0.0)), np.float64, len(entities))
+    carried[np.isnan(carried)] = 0.0
+    return carried
 
 
 class CountsAccumulator:
@@ -39,17 +101,16 @@ class CountsAccumulator:
     def to_state(self) -> dict:
         return dict(self.state)
 
-    @staticmethod
-    def _prior_to_race(keys: np.ndarray, race_ids: np.ndarray, values: np.ndarray) -> np.ndarray:
-        """In-frame race-safe cumulative sum (total before each row's race).
-
-        Identical maths to ``feature_engineer._race_safe_cumsum``:
-        ``cumsum(entity) - cumsum(entity, race)``.
-        """
-        frame = pd.DataFrame({"k": keys, "r": race_ids, "v": values})
-        naive = frame.groupby("k", sort=False)["v"].cumsum()
-        within = frame.groupby(["k", "r"], sort=False)["v"].cumsum()
-        return (naive - within).to_numpy()
+    def _advance(self, entity, entities, pair, n_pairs, values) -> np.ndarray:
+        naive, totals = _nb_group_cumsum(values, entity, len(entities))
+        within, _ = _nb_group_cumsum(values, pair, n_pairs)
+        out = naive - within
+        if self.state and entities:
+            out = out + _carried(self.state, entities)[entity]
+        get = self.state.get
+        for key, total in zip(entities, _group_totals(values, entity, totals).tolist()):
+            self.state[key] = get(key, 0.0) + total
+        return out
 
     def transform(self, keys, race_ids, values) -> np.ndarray:
         """Prior-only race-safe totals for *values*, then advance state.
@@ -61,19 +122,9 @@ class CountsAccumulator:
         keys = np.asarray(pd.Series(keys).to_numpy())
         race_ids = np.asarray(pd.Series(race_ids).to_numpy())
         values = np.asarray(values, dtype="float64")
-
-        base = self._prior_to_race(keys, race_ids, values)
-        if self.state:
-            seed = pd.Series(keys).map(self.state).fillna(0.0).to_numpy()
-        else:
-            seed = 0.0
-        out = base + seed
-
-        # advance: add each entity's grand total over this frame
-        totals = pd.Series(values).groupby(keys, sort=False).sum()
-        for k, t in totals.items():
-            self.state[k] = self.state.get(k, 0.0) + float(t)
-        return out
+        entity, entities = _entity_labels(keys)
+        pair, n_pairs = _entity_race_labels(entity, race_ids)
+        return self._advance(entity, entities, pair, n_pairs, values)
 
 
 class PlainCountsAccumulator:
@@ -94,20 +145,21 @@ class PlainCountsAccumulator:
     def to_state(self) -> dict:
         return dict(self.state)
 
+    def _advance(self, entity, entities, values) -> np.ndarray:
+        running, totals = _nb_group_cumsum(values, entity, len(entities))
+        out = running - values
+        if self.state and entities:
+            out = out + _carried(self.state, entities)[entity]
+        get = self.state.get
+        for key, total in zip(entities, _group_totals(values, entity, totals).tolist()):
+            self.state[key] = get(key, 0.0) + total
+        return out
+
     def transform(self, keys, values) -> np.ndarray:
         keys = np.asarray(pd.Series(keys).to_numpy())
         values = np.asarray(values, dtype="float64")
-        frame = pd.DataFrame({"k": keys, "v": values})
-        base = (frame.groupby("k", sort=False)["v"].cumsum() - frame["v"]).to_numpy()
-        if self.state:
-            seed = pd.Series(keys).map(self.state).fillna(0.0).to_numpy()
-        else:
-            seed = 0.0
-        out = base + seed
-        totals = pd.Series(values).groupby(keys, sort=False).sum()
-        for k, t in totals.items():
-            self.state[k] = self.state.get(k, 0.0) + float(t)
-        return out
+        entity, entities = _entity_labels(keys)
+        return self._advance(entity, entities, values)
 
 
 def cumulative_counts_plain(
@@ -127,10 +179,11 @@ def cumulative_counts_plain(
     state = state or {}
     out: dict[str, np.ndarray] = {}
     new_state: dict = {}
+    entity, entities = _entity_labels(np.asarray(pd.Series(keys).to_numpy()))
     for col, values in metrics.items():
         acc = PlainCountsAccumulator(state.get(col))
-        out[col] = acc.transform(keys, values)
-        new_state[col] = acc.to_state()
+        out[col] = acc._advance(entity, entities, np.asarray(values, dtype="float64"))
+        new_state[col] = acc.state
     return out, new_state
 
 
@@ -156,8 +209,10 @@ def cumulative_counts(
     state = state or {}
     out: dict[str, np.ndarray] = {}
     new_state: dict = {}
+    entity, entities = _entity_labels(np.asarray(pd.Series(keys).to_numpy()))
+    pair, n_pairs = _entity_race_labels(entity, np.asarray(pd.Series(race_ids).to_numpy()))
     for col, values in metrics.items():
         acc = CountsAccumulator(state.get(col))
-        out[col] = acc.transform(keys, race_ids, values)
-        new_state[col] = acc.to_state()
+        out[col] = acc._advance(entity, entities, pair, n_pairs, np.asarray(values, dtype="float64"))
+        new_state[col] = acc.state
     return out, new_state

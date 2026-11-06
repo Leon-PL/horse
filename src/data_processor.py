@@ -62,7 +62,7 @@ def load_raw_data(filepath: str = None) -> pd.DataFrame:
     if not os.path.exists(filepath):
         raise FileNotFoundError(
             f"No data file found at {filepath}. "
-            "Run data collection first: python -m src.data_collector"
+            "Run data collection first: python -m src.ingestion --sync 14"
         )
 
     df = pd.read_csv(filepath)
@@ -71,23 +71,37 @@ def load_raw_data(filepath: str = None) -> pd.DataFrame:
 
 
 # ── Going normalisation map ──────────────────────────────────────────────
-# Sporting Life uses 20+ going descriptions.  We collapse them into five
-# broad groups so one-hot encoding creates dense, meaningful columns.
+# Sporting Life uses 20+ going descriptions.  We collapse them into five turf
+# groups and two all-weather groups so one-hot encoding creates dense,
+# meaningful columns. All-weather "Standard" is not turf Good to Firm, and a
+# horse's record on one says nothing about the other. Irish Yielding is the
+# official counterpart of British Good to Soft, so both share "Yielding".
 _GOING_MAP: dict[str, str] = {}
 for _g in [
-    "Standard", "Good To Firm", "Good (Good To Firm In Places)",
+    "Good To Firm", "Good (Good To Firm In Places)",
     "Good To Firm (Good In Places)", "Good To Firm (Firm In Places)",
     "Firm", "Firm (Good To Firm In Places)",
 ]:
     _GOING_MAP[_g.lower()] = "Fast"
 for _g in [
-    "Good", "Standard / Slow",
+    "Good",
 ]:
     _GOING_MAP[_g.lower()] = "Good"
 for _g in [
-    "Good To Soft", "Soft", "Good (Good To Soft In Places)",
+    "Standard", "Standard / Fast",
+]:
+    _GOING_MAP[_g.lower()] = "Standard"
+for _g in [
+    "Standard / Slow", "Slow",
+]:
+    _GOING_MAP[_g.lower()] = "Slow"
+for _g in [
+    "Good To Soft", "Good (Good To Soft In Places)",
     "Good To Soft (Good In Places)", "Good To Soft (Soft In Places)",
-    "Soft (Good To Soft In Places)",
+]:
+    _GOING_MAP[_g.lower()] = "Yielding"
+for _g in [
+    "Soft", "Soft (Good To Soft In Places)", "Soft (Yielding To Soft In Places)",
 ]:
     _GOING_MAP[_g.lower()] = "Soft"
 for _g in [
@@ -98,13 +112,22 @@ for _g in [
 for _g in [
     "Good To Yielding", "Yielding", "Good (Good To Yielding In Places)",
     "Yielding (Soft In Places)", "Yielding To Soft",
-    "Soft (Yielding To Soft In Places)",
 ]:
     _GOING_MAP[_g.lower()] = "Yielding"
 
 
+def _on_distinct(values: pd.Series, compute) -> pd.Series:
+    """Run a Series transform once per distinct value and spread the result.
+
+    All missing values count as one, so ``compute`` must treat them alike.
+    """
+    codes, distinct = pd.factorize(values, use_na_sentinel=False)
+    result = compute(pd.Series(distinct, dtype=values.dtype))
+    return pd.Series(result.to_numpy()[codes], index=values.index, name=values.name)
+
+
 def _normalise_going(going: str) -> str:
-    """Map a detailed going description to one of five groups."""
+    """Map a detailed going description to one of the going groups."""
     from src.feature_semantics import normalise_going
     return normalise_going(going, _GOING_MAP)
 
@@ -173,6 +196,22 @@ def _parse_form_trend(form_str: str) -> float:
         return 0.0
 
 
+def _normalise_person_names(names: pd.Series) -> pd.Series:
+    """Canonical form of jockey/trainer names ("j.p. spencer" → "J P Spencer").
+
+    Initials-only names are kept as they are; full first names are never
+    manufactured. Idempotent, so cleaned frames can be cleaned again.
+    """
+    return _on_distinct(names.astype(str), lambda distinct: (
+        distinct.str.strip().str.title()
+        .str.replace(r'\.(?=[A-Z])', ' ', regex=True)   # "J.P" → "J P"
+        .str.replace(r'\.\s*', ' ', regex=True)          # trailing dots
+        .str.replace(r'\s{2,}', ' ', regex=True)         # collapse spaces
+        .str.strip()
+        .str.title()
+    ))
+
+
 def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Clean and validate raw race data.
@@ -189,7 +228,8 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Parse dates ---
     df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
-    df = df.dropna(subset=["race_date"])
+    if df["race_date"].isna().any():
+        df = df[df["race_date"].notna()]
 
     # --- Standardize string fields ---
     string_cols = [
@@ -198,7 +238,7 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     ]
     for col in string_cols:
         if col in df.columns:
-            df[col] = df[col].astype(str).str.strip().str.title()
+            df[col] = _on_distinct(df[col].astype(str), lambda distinct: distinct.str.strip().str.title())
 
     from src.verified_race_metadata import apply_verified_race_types, apply_verified_runner_ratings
     df = apply_verified_race_types(df)
@@ -225,23 +265,13 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     #      (single letter followed by space) to keep the longer form when
     #      both exist — but since we don't have a lookup table this is a
     #      structural pass only; the scraper provides .title() already.
-    import re as _re
-    _INITIAL_PREFIX = _re.compile(r'^([A-Z](?:\s[A-Z])*\s)(.+)$')
     for _nc in ("jockey", "trainer"):
-        if _nc not in df.columns:
-            continue
-        # Remove stray internal dots/hyphens used in initials ("J.P." → "J P")
-        df[_nc] = (
-            df[_nc]
-            .str.replace(r'\.(?=[A-Z])', ' ', regex=True)   # "J.P" → "J P"
-            .str.replace(r'\.\s*', ' ', regex=True)          # trailing dots
-            .str.replace(r'\s{2,}', ' ', regex=True)         # collapse spaces
-            .str.strip()
-        )
-        # Where a name is just initials + surname ("J P Spencer") keep it as-is
-        # — we don't manufacture full first names.  But ensure consistent
-        # title-casing so "j p spencer" == "J P Spencer".
-        df[_nc] = df[_nc].str.title()
+        if _nc in df.columns:
+            df[_nc] = _normalise_person_names(df[_nc])
+    # Sporting Life also renames people outright ("M P Sheehy" → "Mikey
+    # Sheehy"); the Racing TV-derived alias table gives each one name.
+    from src.verified_race_metadata import apply_connection_aliases
+    df = apply_connection_aliases(df, _normalise_person_names)
 
     # --- Ensure numeric types ---
     numeric_cols = {
@@ -275,17 +305,23 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     # --- Parse form string into numeric features ---
     if "form" in df.columns:
         df["form_str"] = df["form"].astype(str).str.strip()
-        df["form_last_pos"] = df["form_str"].apply(_parse_form_last)
-        df["form_avg"] = df["form_str"].apply(_parse_form_avg)
-        df["form_wins_count"] = df["form_str"].apply(_parse_form_wins)
-        df["form_length"] = df["form_str"].apply(lambda x: len([c for c in str(x) if c.isdigit()]))
-        df["form_dnf_count"] = df["form_str"].apply(_parse_form_dnf)
-        df["form_has_break"] = df["form_str"].apply(_parse_form_has_break)
-        df["form_trend"] = df["form_str"].apply(_parse_form_trend)
+        parsers = {
+            "form_last_pos": _parse_form_last,
+            "form_avg": _parse_form_avg,
+            "form_wins_count": _parse_form_wins,
+            "form_length": lambda x: len([c for c in str(x) if c.isdigit()]),
+            "form_dnf_count": _parse_form_dnf,
+            "form_has_break": _parse_form_has_break,
+            "form_trend": _parse_form_trend,
+        }
+        codes, distinct = pd.factorize(df["form_str"], use_na_sentinel=False)
+        distinct = pd.Series(distinct, dtype=df["form_str"].dtype)
+        for name, parse in parsers.items():
+            df[name] = distinct.apply(parse).to_numpy()[codes]
 
     # --- Normalise going descriptions (20+ -> 5 groups) ---
     if "going" in df.columns:
-        df["going"] = df["going"].apply(_normalise_going)
+        df["going"] = _on_distinct(df["going"], lambda distinct: distinct.apply(_normalise_going))
 
     # --- Ensure surface column exists ---
     if "surface" in df.columns:
@@ -320,7 +356,9 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
     initial_len = len(df)
 
     # Must have key fields
-    df = df.dropna(subset=["horse_name", "race_id"])
+    keep = df["horse_name"].notna() & df["race_id"].notna()
+    if not keep.all():
+        df = df[keep]
 
     # For results data: finish_position must be positive
     # For racecard data (predictions): finish_position may be 0
@@ -446,14 +484,14 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def process_data(
     df: pd.DataFrame = None,
-    save: bool = True,
+    save: bool = False,
 ) -> pd.DataFrame:
     """
     Full data processing pipeline.
 
     Args:
         df: Raw DataFrame (if None, loads from file)
-        save: Whether to save the processed data
+        save: Explicitly write the legacy processed export (default: no extra copy)
 
     Returns:
         Processed DataFrame ready for feature engineering

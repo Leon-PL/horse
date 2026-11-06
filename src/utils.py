@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 from datetime import datetime, timedelta
+from functools import lru_cache
 
 import pandas as pd
 
@@ -69,6 +70,7 @@ def cleanup_stale_caches(max_age_days: int | None = None) -> int:
 # Shared by the RTV scraper, Matchbook signal builder and paper-trade
 # store so that horse/track/off-time joins behave identically everywhere.
 
+@lru_cache(maxsize=1 << 16)
 def normalise_off_time_key(off_time) -> str:
     """Normalise off-time values to a stable ``HH:MM`` merge key."""
     s = str(off_time).strip()
@@ -88,11 +90,13 @@ def normalise_off_time_key(off_time) -> str:
     return s
 
 
+@lru_cache(maxsize=1 << 12)
 def normalise_track_key(track) -> str:
     """Normalise track names for robust joins."""
     return re.sub(r"\s+", " ", str(track).strip().lower())
 
 
+@lru_cache(maxsize=1 << 18)
 def normalise_horse_key(name) -> str:
     """Normalise horse names for robust joins."""
     return re.sub(r"\s+", " ", str(name).strip().title())
@@ -112,6 +116,7 @@ _TRACK_ALIAS: dict[str, str] = {
 _TRACK_SUFFIX_RE = re.compile(r"\s+(park|bridge|racecourse|races|races\.)$")
 
 
+@lru_cache(maxsize=1 << 12)
 def canonical_track_key(track) -> str:
     """Aggressively canonicalise a track name for cross-feed fixture joins.
 

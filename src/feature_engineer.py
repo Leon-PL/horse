@@ -17,6 +17,8 @@ import logging
 import ast
 import os
 from contextlib import contextmanager
+from itertools import chain, repeat
+from typing import NamedTuple
 
 import numba as nb
 import numpy as np
@@ -73,7 +75,32 @@ def _horse_key(df: pd.DataFrame) -> str:
     return "horse_name"
 
 
-def _defrag(df: pd.DataFrame, max_blocks: int = 16) -> pd.DataFrame:
+# pandas warns past 100 blocks. Each consolidation copies the whole frame, so
+# inside a stage it waits until only this much room is left.
+_MID_STAGE_BLOCKS = 90
+
+
+def _without(df: pd.DataFrame, columns) -> pd.DataFrame:
+    """``df.drop(columns=columns, errors="ignore")`` without a whole-frame copy.
+
+    ``drop`` rewrites every block, which costs real time at over a thousand
+    columns. A working column sits in its own block, so deleting it in place
+    leaves the rest of the frame alone. ``drop`` also consolidated the frame,
+    which held long stages under pandas' block limit, so ``_defrag`` does that
+    here, only when the frame is close to it.
+    """
+    for column in columns:
+        if column in df.columns:
+            del df[column]
+    return _defrag(df, max_blocks=_MID_STAGE_BLOCKS)
+
+
+def _with_columns(df: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    """Add ``new`` beside ``df`` sharing their blocks instead of copying them."""
+    return pd.concat([df, new], axis=1, copy=False)
+
+
+def _defrag(df: pd.DataFrame, max_blocks: int = 48) -> pd.DataFrame:
     """Consolidate a fragmented DataFrame when needed.
 
     Each ``df[col] = ...`` adds one block to the BlockManager; the
@@ -81,8 +108,7 @@ def _defrag(df: pd.DataFrame, max_blocks: int = 16) -> pd.DataFrame:
     pandas raises PerformanceWarning and every further insert degrades to
     O(n_blocks). Called between stages, this keeps the base block count
     low so no single stage's inserts can run the total up to the warning
-    threshold mid-stage. Stages that already return a consolidated frame
-    (built via ``pd.concat``) fall under *max_blocks* and skip the copy.
+    threshold mid-stage. Below *max_blocks* the whole-frame copy is skipped.
     """
     try:
         n_blocks = len(df._mgr.blocks)
@@ -106,6 +132,15 @@ def _add_result_history_flags(df: pd.DataFrame) -> pd.DataFrame:
     df["_non_finisher_result"] = non_finisher_mask.astype(np.int8)
     df["_result_start"] = result_start_mask.astype(np.int8)
     df["_finish_pos_for_history"] = finish_pos.where(finished_mask)
+    # Position as a share of the field (0 = winner, 1 = last), with a
+    # non-finish counted as last. Raw positions scale with field size and
+    # dropped non-finishes, so a faller looked like a horse with no run.
+    field = (pd.to_numeric(df["num_runners"], errors="coerce") if "num_runners" in df
+             else pd.Series(np.nan, index=df.index))
+    field_share = ((finish_pos - 1) / (field - 1).clip(lower=1)).clip(0.0, 1.0)
+    df["_norm_pos_for_history"] = field_share.where(
+        finished_mask, pd.Series(np.where(non_finisher_mask, 1.0, np.nan), index=df.index)
+    )
     df["_won_for_history"] = pd.to_numeric(df.get("won", 0), errors="coerce").where(result_start_mask)
     df["_placed_for_history"] = finish_pos.between(1, 3).astype(np.float32).where(result_start_mask)
     df["_result_start_for_history"] = pd.Series(
@@ -264,29 +299,6 @@ def _nb_ewma(shifted, group_ids, alpha):
     return out
 
 
-@nb.njit(cache=True)
-def _nb_runs_since_win(won, group_ids):
-    """Count consecutive non-winning runs since last win, per group."""
-    n = len(won)
-    out = np.empty(n, dtype=np.float64)
-    counter = 0.0
-    prev_gid = -9999999
-    for i in range(n):
-        gid = group_ids[i]
-        if gid != prev_gid:
-            # New group
-            out[i] = 0.0
-            counter = 0.0 if won[i] == 1 else 1.0
-            prev_gid = gid
-        else:
-            out[i] = counter
-            if won[i] == 1:
-                counter = 0.0
-            else:
-                counter += 1.0
-    return out
-
-
 def _encode_groups(df: pd.DataFrame, key) -> np.ndarray:
     """Encode a groupby key into contiguous sorted integer IDs.
 
@@ -314,7 +326,9 @@ def _nb_time_window(dates_i8, values, group_ids, window_ns):
         window_ns: int64 window width in nanoseconds.
 
     Returns:
-        (val_sum, count) — both float64 arrays of same length.
+        (val_sum, count) — both float64 arrays of same length. Missing values
+        are skipped in the sum (a non-start must not blank the whole window);
+        count is every earlier row in the window.
     """
     n = len(dates_i8)
     val_sum = np.empty(n, dtype=np.float64)
@@ -337,10 +351,28 @@ def _nb_time_window(dates_i8, values, group_ids, window_ns):
         # Sum values in [lo, i)
         s = 0.0
         for j in range(lo, i):
-            s += values[j]
+            if not np.isnan(values[j]):
+                s += values[j]
         val_sum[i] = s
         cnt[i] = float(i - lo)
     return val_sum, cnt
+
+
+def _rolling_kernel(shifted, group_ids, op, param):
+    """Run one rolling kernel over pre-shifted, group-sorted values."""
+    if op == "mean":
+        return _nb_rolling_mean(shifted, group_ids, int(param))
+    if op == "sum":
+        return _nb_rolling_sum(shifted, group_ids, int(param))
+    if op == "min":
+        return _nb_rolling_min(shifted, group_ids, int(param))
+    if op == "max":
+        return _nb_rolling_max(shifted, group_ids, int(param))
+    if op == "std":
+        return _nb_rolling_std(shifted, group_ids, int(param))
+    if op == "ewma":
+        return _nb_ewma(shifted, group_ids, float(param))
+    raise ValueError(f"Unknown rolling op: {op}")
 
 
 def _fast_grouped_rolling_core(
@@ -409,20 +441,7 @@ def _fast_grouped_rolling_core(
 
     results = {}
     for out_name, op, param in operations:
-        if op == "mean":
-            arr = _nb_rolling_mean(shifted, gids, int(param))
-        elif op == "sum":
-            arr = _nb_rolling_sum(shifted, gids, int(param))
-        elif op == "min":
-            arr = _nb_rolling_min(shifted, gids, int(param))
-        elif op == "max":
-            arr = _nb_rolling_max(shifted, gids, int(param))
-        elif op == "std":
-            arr = _nb_rolling_std(shifted, gids, int(param))
-        elif op == "ewma":
-            arr = _nb_ewma(shifted, gids, float(param))
-        else:
-            raise ValueError(f"Unknown rolling op: {op}")
+        arr = _rolling_kernel(shifted, gids, op, param)
         results[out_name] = arr[_block_first][_inv]   # race-safe broadcast, then back to row order
     return results
 
@@ -444,11 +463,38 @@ def _bayesian_shrink(
     Args:
         observed_rate: Raw observed rate (e.g. wins / runs).
         n_samples: Number of observations backing the rate.
-        prior_rate: Population base-rate (≈0.10 for win, ≈0.30 for place).
+        prior_rate: Population base-rate (≈0.10 for win, ≈0.30 for place),
+            or a per-row Series such as the entity's own overall rate.
         prior_strength: Pseudo-count for the prior (higher = more shrinkage).
     """
     n = n_samples.clip(lower=0)
-    return (n * observed_rate + prior_strength * prior_rate) / (n + prior_strength)
+    # A rate over no observations is undefined (NaN, see ``_rate``); it
+    # carries no weight, so the estimate is the prior alone.
+    observed = np.where(n > 0, observed_rate, 0.0)
+    return (n * observed + prior_strength * prior_rate) / (n + prior_strength)
+
+
+def _rate(numerator, denominator) -> np.ndarray:
+    """``numerator / denominator``, missing where there is nothing to divide.
+
+    A rate over zero runs is undefined, not 0: a zero reads as "never wins"
+    for an entity that simply has no history yet.
+    """
+    return np.where(denominator > 0, numerator / denominator, np.nan)
+
+
+def _shrink_to_entity(df: pd.DataFrame, rate_col: str, runs_col: str, entity: str) -> pd.Series:
+    """Shrink a jockey/trainer × context win rate toward the entity's own rate.
+
+    These context rates were raw and set to 0 below a few runs, so a thin
+    context read as "never wins there". With 10 pseudo-runs at the entity's
+    shrunk career rate, a thin context reads as the entity's usual rate and
+    moves away from it only as runs in that context accumulate. Call after
+    ``_entity_day_start_view`` so runs, rate and prior share the day start.
+    """
+    prior_col = f"{entity}_win_rate_shrunk"
+    prior = df[prior_col] if prior_col in df.columns else 0.10
+    return _bayesian_shrink(df[rate_col], df[runs_col], prior_rate=prior, prior_strength=10.0)
 
 
 def _race_safe_cumcount(df: pd.DataFrame, entity_col) -> pd.Series:
@@ -528,62 +574,62 @@ def _time_window_stats_core(
 _DAY_NS = np.int64(86_400_000_000_000)
 
 
+_NAT_I8 = np.iinfo(np.int64).min
+_LATEST_I8 = np.iinfo(np.int64).max
+
+
+def _nat_last(dates_i8: np.ndarray) -> np.ndarray:
+    """Sort key putting missing dates last, as ``sort_values`` does."""
+    return np.where(dates_i8 == _NAT_I8, _LATEST_I8, dates_i8)
+
+
 def _time_window_with_seed(df, entity_col, date_col, value_col, window_days, seed):
-    """Seed-aware ``_time_window_stats``: prepend each entity's carried recent
-    history rows (their REAL dates + values, within ``window_days``) so the
-    calendar-window kernel runs unchanged on a new-only frame.
+    """Seed-aware ``_time_window_stats``: put each entity's carried recent rows
+    (their REAL dates + values, within ``window_days``) ahead of its new rows so
+    the calendar-window kernel runs unchanged on a new-only frame.
 
     ``seed``/``new_seed`` map entity -> list of ``(date_i8, value)`` within the
     last ``window_days`` of history — exactly what any later row's window can
-    reach, so the append equals a full recompute."""
-    seed = dict(seed or {})
-    ent = df[entity_col].astype(str).to_numpy()
+    reach, so the append equals a full recompute. All work here is sized by the
+    frame's entities, never by the whole carried state."""
+    seed = seed or {}
+    labels, uniques = pd.factorize(df[entity_col].astype(str).to_numpy())
+    entities = uniques.tolist()
     dates_i8 = pd.to_datetime(df[date_col], errors="coerce").values.astype("int64")
     vals = df[value_col].to_numpy().astype(np.float64)
-    n = len(df)
 
-    s_ent: list = []
-    s_date: list = []
-    s_val: list = []
-    for e in set(ent.tolist()):
-        for d_i8, v in seed.get(e, []):
-            s_ent.append(e)
-            s_date.append(d_i8)
-            s_val.append(v)
+    tails = [seed.get(entity, ()) for entity in entities]
+    sizes = np.fromiter(map(len, tails), np.int64, len(tails))
+    carried = list(chain.from_iterable(tails))
+    n_carried = len(carried)
+    aug_label = np.concatenate([np.repeat(np.arange(len(tails)), sizes), labels])
+    aug_date = np.concatenate(
+        [np.fromiter((row[0] for row in carried), np.int64, n_carried), dates_i8])
+    aug_val = np.concatenate(
+        [np.fromiter((row[1] for row in carried), np.float64, n_carried), vals])
 
-    if s_ent:
-        aug_ent = np.concatenate([np.array(s_ent, dtype=object), ent])
-        aug_date = np.concatenate([np.array(s_date, dtype="int64"), dates_i8])
-        aug_val = np.concatenate([np.array(s_val, dtype=np.float64), vals])
-        synth_mask = np.concatenate(
-            [np.ones(len(s_ent), bool), np.zeros(n, bool)]
-        )
-    else:
-        aug_ent, aug_date, aug_val = ent, dates_i8, vals
-        synth_mask = np.zeros(n, bool)
-
-    aug = pd.DataFrame({
-        entity_col: aug_ent,
-        date_col: pd.to_datetime(aug_date),
-        value_col: aug_val,
-    })
-    v_sum, v_cnt = _time_window_stats_core(aug, entity_col, date_col, value_col, window_days)
-    real = ~synth_mask
-    out = (v_sum[real], v_cnt[real])
+    # Stable, so ties keep carried rows first and new rows in frame order.
+    order = np.lexsort((_nat_last(aug_date), aug_label))
+    window_ns = np.int64(window_days) * _DAY_NS
+    sorted_sum, sorted_count = _nb_time_window(
+        aug_date[order], aug_val[order], aug_label[order], window_ns)
+    v_sum = np.empty(len(order), dtype=np.float64)
+    v_cnt = np.empty(len(order), dtype=np.float64)
+    v_sum[order] = sorted_sum
+    v_cnt[order] = sorted_count
+    out = (v_sum[n_carried:], v_cnt[n_carried:])
 
     # Advance: keep each entity's rows within window_days of the frame's max date.
-    window_ns = np.int64(window_days) * _DAY_NS
-    maxd = aug_date.max() if len(aug_date) else np.int64(0)
-    cutoff = maxd - window_ns
+    cutoff = (aug_date.max() if len(aug_date) else np.int64(0)) - window_ns
+    kept = np.flatnonzero(aug_date >= cutoff)
+    kept = kept[np.argsort(aug_label[kept], kind="stable")]
+    rows = list(zip(aug_date[kept].tolist(), aug_val[kept].tolist()))
     new_state = dict(seed)
-    keep = aug_date >= cutoff
-    from collections import defaultdict
-    buf: dict = defaultdict(list)
-    for e, d_i8, v, k in zip(aug_ent.tolist(), aug_date.tolist(), aug_val.tolist(), keep.tolist()):
-        if k:
-            buf[e].append((int(d_i8), float(v)))
-    for e in buf:
-        new_state[e] = buf[e]
+    start = 0
+    for entity, size in zip(entities, np.bincount(aug_label[kept], minlength=len(tails)).tolist()):
+        if size:
+            new_state[entity] = rows[start:start + size]
+            start += size
     return out, new_state
 
 
@@ -644,7 +690,7 @@ def _entity_day_start_view(
 # dict here; class-C stages seed their cumulative_counts from it and write back
 # their advanced state, so an append never recomputes history. A full build
 # leaves it None -> stages compute from scratch (byte-identical). See
-# docs/FE_REFACTOR_PLAN.md.
+# docs/architecture/FE_REFACTOR_PLAN.md.
 _COUNTS_STATE: dict | None = None
 
 
@@ -658,6 +704,7 @@ def counts_state_scope(state: dict | None):
         yield
     finally:
         _COUNTS_STATE = prev
+        _TIMELINES.clear()
 
 
 def _cumulative(keys, race_ids, metrics: dict) -> dict:
@@ -732,125 +779,175 @@ def _nb_seeded_ewma_prior(values, group_ids, initial, alpha):
     return prior, after
 
 
-def _exact_seeded_ewmas(real_df, group_key, value_col, operations, seed):
-    keys = [group_key] if isinstance(group_key, str) else list(group_key)
-    sort = keys + ["_event_dt" if "_event_dt" in real_df else "race_date", "race_id"]
-    order = real_df[sort].sort_values(sort, kind="stable").index.to_numpy()
-    n = len(real_df)
-    inverse = np.empty(n, dtype=np.intp); inverse[order] = np.arange(n)
-    groups = _encode_groups(real_df, group_key)[order]
-    entities = _entity_str(real_df, keys)[order]
-    values = real_df[value_col].to_numpy(dtype=float)[order]
-    race = real_df.race_id.to_numpy()[order]
-    first_block = np.arange(n)
+class _Timeline(NamedTuple):
+    """One entity grouping of a frame's rows, in history order."""
+    sources: tuple            # the key, date and race arrays this was built from
+    entities: list            # entity text by label
+    labels: np.ndarray        # label of each row
+    counts: np.ndarray        # rows per label
+    order: np.ndarray         # rows by (entity, date, race id as text), stable
+    history: np.ndarray       # the same with a missing date first: tail advance order
+    sorted_labels: np.ndarray  # labels[order]
+    opens_race: np.ndarray    # sorted row starts a new (entity, race) block
+
+
+# Stages call ``_rolling`` dozens of times per frame on the same entity. The
+# grouping is a pure function of ``sources``, which are compared by value, so
+# this can only save work. It lives for one ``counts_state_scope``.
+_TIMELINES: dict = {}
+
+
+def _same_arrays(left: tuple, right: tuple) -> bool:
+    return all(np.array_equal(a, b) for a, b in zip(left, right))
+
+
+def _text_ranks(race_ids: np.ndarray) -> np.ndarray:
+    """Rank of each id's string form: sort order of ``astype(str)``, unsorted rows."""
+    labels, uniques = pd.factorize(race_ids, use_na_sentinel=False)
+    text = np.array([str(value) for value in uniques.tolist()], dtype=object)
+    ranks = np.empty(len(text), dtype=np.int64)
+    ranks[np.argsort(text, kind="stable")] = np.arange(len(text))
+    return ranks[labels]
+
+
+def _timeline(df: pd.DataFrame, keys: list, date_col: str) -> _Timeline:
+    key_arrays = [df[key].to_numpy() for key in keys]
+    dates = pd.to_datetime(df[date_col], errors="coerce").to_numpy()
+    n = len(df)
+    races = df["race_id"].to_numpy() if "race_id" in df.columns else np.arange(n)
+    sources = (*key_arrays, dates, races)
+    slot = (tuple(keys), date_col)
+    known = _TIMELINES.get(slot)
+    if known is not None and _same_arrays(known.sources, sources):
+        return known
+
+    labels, uniques = pd.factorize(_entity_str(df, keys))
+    labels = labels.astype(np.int64)
+    instants = dates.astype("datetime64[ns]").astype(np.int64)
+    ranks = _text_ranks(races)
+    order = np.lexsort((ranks, _nat_last(instants), labels))
+    history = np.lexsort((ranks, instants, labels)) if (instants == _NAT_I8).any() else order
+    sorted_labels = labels[order]
+    sorted_ranks = ranks[order]
+    opens_race = np.ones(n, dtype=bool)
+    opens_race[1:] = (sorted_labels[1:] != sorted_labels[:-1]) | (sorted_ranks[1:] != sorted_ranks[:-1])
+    line = _Timeline(tuple(np.array(source, copy=True) for source in sources), uniques.tolist(),
+                     labels, np.bincount(labels, minlength=len(uniques)), order, history,
+                     sorted_labels, opens_race)
+    _TIMELINES[slot] = line
+    return line
+
+
+def _exact_seeded_ewmas(line, values, operations, seed):
+    n = len(values)
+    groups = line.sorted_labels
+    first_block = np.maximum.accumulate(np.where(line.opens_race, np.arange(n), 0))
     last = np.ones(n, dtype=bool)
-    if n:
-        new_block = np.r_[True, (groups[1:] != groups[:-1]) | (race[1:] != race[:-1])]
-        first_block = np.maximum.accumulate(np.where(new_block, np.arange(n), 0))
-        last[:-1] = groups[1:] != groups[:-1]
+    last[:-1] = groups[1:] != groups[:-1]
     results, states = {}, {}
     for name, _, alpha in operations:
         alpha = float(alpha)
         if not 0 < alpha <= 1:
             raise ValueError("EWMA alpha must be in (0,1]")
         key = ("__exact_ewma__", name, alpha)
-        if key not in seed and any(e in seed for e in set(entities)):
+        if key not in seed and any(entity in seed for entity in line.entities):
             raise ValueError("Legacy truncated EWMA state cannot resume exactly; rebuild histories")
         carry = dict(seed.get(key, {}))
-        initial = pd.Series(entities).map(carry).to_numpy(dtype=float)
-        prior, after = _nb_seeded_ewma_prior(values, groups, initial, alpha)
-        results[name] = prior[first_block][inverse]
-        carry.update({e: float(v) for e, v in zip(entities[last], after[last])})
+        start = np.fromiter(map(carry.get, line.entities, repeat(np.nan)), np.float64, len(line.entities))
+        prior, after = _nb_seeded_ewma_prior(values, groups, start[groups], alpha)
+        result = np.empty(n, dtype=np.float64)
+        result[line.order] = prior[first_block]
+        results[name] = result
+        carry.update(zip(line.entities, after[last].tolist()))
         states[key] = carry
     return results, states
 
 
+def _bounded_rolling(line, values, operations, seed):
+    """Bounded windows over each entity's carried tail plus its new rows.
+
+    Kernels re-read their window at every row, so a tail as long as the widest
+    window gives the same bits as any longer one. Carried values sit directly
+    ahead of the entity's rows, each its own race, as earlier history would.
+    """
+    n = len(values)
+    depth = max(int(param) for _, _, param in operations)
+    tails = [seed.get(entity) for entity in line.entities]
+    taken = np.fromiter((min(len(tail), depth) if tail else 0 for tail in tails), np.int64, len(tails))
+    carried = np.array(
+        list(chain.from_iterable(tail[-size:] for tail, size in zip(tails, taken.tolist()) if size)),
+        dtype=np.float64,
+    )
+    positions = np.arange(n) + np.cumsum(taken)[line.sorted_labels]
+    total = n + carried.size
+    is_row = np.zeros(total, dtype=bool)
+    is_row[positions] = True
+    aug_values = np.empty(total, dtype=np.float64)
+    aug_values[positions] = values
+    aug_values[~is_row] = carried
+    groups = np.repeat(np.arange(len(tails)), taken + line.counts)
+    opens = np.ones(total, dtype=bool)
+    opens[positions] = line.opens_race
+    first_block = np.maximum.accumulate(np.where(opens, np.arange(total), 0))[positions]
+    shifted = _nb_grouped_shift1(aug_values, groups)
+    results = {}
+    for name, op, param in operations:
+        result = np.empty(n, dtype=np.float64)
+        result[line.order] = _rolling_kernel(shifted, groups, op, param)[first_block]
+        results[name] = result
+    return results
+
+
 def _rolling_with_seed(df, group_key, value_col, operations, seed):
-    """Seed-aware ``_fast_grouped_rolling``: prepend each entity's stored raw-value
-    tail (from *seed*) as synthetic earlier rows, run the unchanged kernel, drop
-    the synthetic rows, and return ``(results_in_df_order, new_seed)``.
+    """Seed-aware ``_fast_grouped_rolling``: resume each entity from its stored
+    raw-value tail and return ``(results_in_df_order, new_seed)``.
 
     Exact across an append: new rows are strictly after history; a tail of
     ``_ROLL_SEED_CAP`` covers bounded windows. EWMA operations instead resume
     their exact per-entity accumulator, including across missing-result runs.
     ``seed`` maps entity strings to raw tails and reserved tuple keys to exact
     EWMA states; these are persisted in the existing counts-state pickle."""
-    from collections import defaultdict
-
     keys = [group_key] if isinstance(group_key, str) else list(group_key)
-    seed = dict(seed or {})
+    seed = seed or {}
+    if not len(df):
+        return {name: np.empty(0, dtype=np.float64) for name, _, _ in operations}, dict(seed)
     date_col = "_event_dt" if "_event_dt" in df.columns else "race_date"
-
-    ent = _entity_str(df, keys)
-    n = len(df)
-    # Key columns MUST be strings here: the synthetic seed rows below build
-    # their keys from ``e.split("||")`` (strings), so if the real rows kept a
-    # numeric key (e.g. horse_id) the concat would mix str/int and
-    # ``_encode_groups`` would treat '920554' and 920554 as different groups —
-    # orphaning each entity's carried tail and silently dropping the seed on
-    # the first appended row. Casting to str keeps synth and real in one group.
-    cols = {kc: df[kc].astype(str).to_numpy() for kc in keys}
-    cols[date_col] = pd.to_datetime(df[date_col], errors="coerce").to_numpy()
-    cols["race_id"] = (
-        df["race_id"].astype(str).to_numpy() if "race_id" in df.columns
-        else np.arange(n).astype(str)
-    )
-    cols[value_col] = df[value_col].to_numpy()
-    real_df = pd.DataFrame(cols)
-    real_df["_synth"] = 0
-
-    base_min = pd.to_datetime(df[date_col], errors="coerce").min()
-    base = (pd.Timestamp("2000-01-01") if pd.isna(base_min) else pd.Timestamp(base_min)) \
-        - pd.Timedelta(days=_ROLL_SEED_CAP + 5)
-
-    s_keys: dict = {kc: [] for kc in keys}
-    s_date: list = []
-    s_rid: list = []
-    s_val: list = []
-    for e in set(ent.tolist()):
-        tail = seed.get(e)
-        if not tail:
-            continue
-        parts = e.split("||")
-        for j, v in enumerate(tail):
-            for ki, kc in enumerate(keys):
-                s_keys[kc].append(parts[ki])
-            s_date.append(base + pd.Timedelta(days=j))
-            s_rid.append(f"__seed__{j}__{e}")
-            s_val.append(v)
-
-    if s_val:
-        synth = {kc: s_keys[kc] for kc in keys}
-        synth[date_col] = s_date
-        synth["race_id"] = s_rid
-        synth[value_col] = s_val
-        synth_df = pd.DataFrame(synth)
-        synth_df["_synth"] = 1
-        aug = pd.concat([synth_df, real_df], ignore_index=True)
-    else:
-        aug = real_df
+    line = _timeline(df, keys, date_col)
+    raw = df[value_col].to_numpy()
+    values = raw[line.order].astype(np.float64)
 
     bounded = [op for op in operations if op[1] != "ewma"]
     ewmas = [op for op in operations if op[1] == "ewma"]
-    res_aug = _fast_grouped_rolling_core(aug, group_key, value_col, bounded) if bounded else {}
-    real_mask = aug["_synth"].to_numpy() == 0
-    results = {k: v[real_mask] for k, v in res_aug.items()}
+    results = _bounded_rolling(line, values, bounded, seed) if bounded else {}
 
     # Advance state: last CAP raw values per entity, in chronological order.
-    order = np.lexsort((cols["race_id"], cols[date_col].astype("datetime64[ns]").astype("int64")))
-    ent_sorted = ent[order]
-    val_sorted = cols[value_col][order]
-    buf: dict = defaultdict(list)
-    for e, v in zip(ent_sorted.tolist(), val_sorted.tolist()):
-        buf[e].append(v)
+    newest = raw[line.history].tolist()
     new_state = dict(seed)
-    for e, newvals in buf.items():
-        new_state[e] = (list(seed.get(e, [])) + newvals)[-_ROLL_SEED_CAP:]
+    start = 0
+    for entity, size in zip(line.entities, line.counts.tolist()):
+        tail = seed.get(entity)
+        recent = newest[start:start + size]
+        new_state[entity] = (tail + recent if tail else recent)[-_ROLL_SEED_CAP:]
+        start += size
     if ewmas:
-        exact, states = _exact_seeded_ewmas(real_df, group_key, value_col, ewmas, seed)
+        exact, states = _exact_seeded_ewmas(line, values, ewmas, seed)
         results.update(exact)
         new_state.update(states)
     return results, new_state
+
+
+def _in_frame(seed: dict, keys: np.ndarray) -> dict:
+    """The carried entries of this frame's entities.
+
+    ``Series.map(dict)`` converts the whole dict on every call, which is what
+    made each chunk slower than the last; only these entries can match.
+    """
+    return {key: seed[key] for key in pd.unique(keys).tolist() if key in seed}
+
+
+def _last_rows(group, keys: np.ndarray) -> np.ndarray:
+    """Mask of ``group.tail(1)``, without taking every column of a wide frame."""
+    return (group.cumcount(ascending=False).to_numpy() == 0) & pd.notna(keys)
 
 
 def _lag(df, entity_col, col):
@@ -865,13 +962,15 @@ def _lag(df, entity_col, col):
         return shifted
     key = f"lag::{entity_col}::{col}"
     seed = _COUNTS_STATE.get(key, {})
-    if seed:
-        ent = pd.Series(df[entity_col].to_numpy(), index=df.index)
+    entities = df[entity_col].to_numpy()
+    carried = _in_frame(seed, entities)
+    if carried:
+        ent = pd.Series(entities, index=df.index)
         first_mask = pd.Series((g.cumcount() == 0).to_numpy(), index=df.index)
-        shifted = shifted.where(~first_mask, ent.map(seed))
+        shifted = shifted.where(~first_mask, ent.map(carried))
+    last = _last_rows(g, entities)
     new_state = dict(seed)
-    _tail = df.groupby(entity_col, sort=False).tail(1)
-    new_state.update(dict(zip(_tail[entity_col].to_numpy(), _tail[col].to_numpy())))
+    new_state.update(zip(entities[last], df[col].to_numpy()[last]))
     _COUNTS_STATE[key] = new_state
     return shifted
 
@@ -903,7 +1002,8 @@ def _running_extreme(df, entity_col, col, *, kind="max", prev=False):
     ent = df[entity_col]
     vals = df[col].to_numpy(dtype="float64")
     local = (g[col].cummax() if kind == "max" else g[col].cummin()).to_numpy(dtype="float64")
-    R_row = ent.map({e: rl[0] for e, rl in state.items()}).to_numpy(dtype="float64")
+    carried = _in_frame(state, ent.to_numpy())
+    R_row = ent.map({e: rl[0] for e, rl in carried.items()}).to_numpy(dtype="float64")
     # combined = full cummax restricted to this frame (NaN kept at NaN inputs).
     combined = np.where(np.isnan(vals), np.nan, npf(local, R_row))
     combined = pd.Series(combined, index=df.index)
@@ -911,7 +1011,7 @@ def _running_extreme(df, entity_col, col, *, kind="max", prev=False):
     if prev:
         result = combined.groupby(df[entity_col].to_numpy()).shift(1)
         first = pd.Series((g.cumcount() == 0).to_numpy(), index=df.index)
-        result = result.where(~first, ent.map({e: rl[1] for e, rl in state.items()}))
+        result = result.where(~first, ent.map({e: rl[1] for e, rl in carried.items()}))
     else:
         result = combined
 
@@ -921,9 +1021,11 @@ def _running_extreme(df, entity_col, col, *, kind="max", prev=False):
     is_last = (g.cumcount(ascending=False) == 0).to_numpy()
     last_combined = dict(zip(ent.to_numpy()[is_last], combined.to_numpy()[is_last]))
     new_state = dict(state)
-    for e, v in zip(frame_ext.index.to_numpy(), frame_ext.to_numpy()):
-        R_old = state.get(e, (np.nan, np.nan))[0]
-        new_state[e] = (float(npf(R_old, v)), last_combined.get(e, np.nan))
+    extremes = frame_ext.to_numpy(dtype="float64")
+    frame_entities = frame_ext.index.tolist()
+    prior = np.fromiter((carried.get(e, (np.nan,))[0] for e in frame_entities), np.float64, len(frame_entities))
+    for e, extreme in zip(frame_entities, npf(prior, extremes).tolist()):
+        new_state[e] = (extreme, last_combined.get(e, np.nan))
     _COUNTS_STATE[state_key] = new_state
     return result
 
@@ -934,21 +1036,105 @@ def _ffill_prev(df, entity_col, col):
     dtype)."""
     g = df.groupby(entity_col, sort=False)
     filled = g[col].ffill()
-    filled_prev = filled.groupby(df[entity_col].to_numpy()).shift(1)
+    entities = df[entity_col].to_numpy()
+    filled_prev = filled.groupby(entities).shift(1)
     if _COUNTS_STATE is None:
         return filled_prev
     state_key = f"ffill::{entity_col}::{col}"
     seed = _COUNTS_STATE.get(state_key, {})
-    if seed:
-        seed_vals = pd.Series(df[entity_col].to_numpy(), index=df.index).map(seed)
+    carried = _in_frame(seed, entities)
+    if carried:
+        seed_vals = pd.Series(entities, index=df.index).map(carried)
         filled_prev = filled_prev.where(filled_prev.notna(), seed_vals)
-    tailrows = df.assign(_ff=filled).groupby(entity_col, sort=False).tail(1)
+    last = _last_rows(g, entities)
     new_state = dict(seed)
-    for e, v in zip(tailrows[entity_col].to_numpy(), tailrows["_ff"].to_numpy()):
+    for e, v in zip(entities[last], filled.to_numpy()[last]):
         if pd.notna(v):
             new_state[e] = v
     _COUNTS_STATE[state_key] = new_state
     return filled_prev
+
+
+@nb.njit(cache=True)
+def _nb_expanding_prior(history, values):
+    """Median and standard deviation of everything before each of ``values``.
+
+    Reproduces ``x.shift(1).expanding()`` from the row after ``history``,
+    bit for bit: infinities count as missing, the median is taken over the
+    sorted values, and the deviation replays pandas' online Welford update
+    with its Kahan term and its repeated-value rule. Cost is O(n log n) in
+    history plus values, so a chunk never re-runs the history row by row.
+    """
+    n_history = len(history)
+    n = len(values)
+    pool = np.empty(n_history + n, dtype=np.float64)
+    size = 0
+    for source in (history, values):
+        for value in source:
+            if not (np.isnan(value) or np.isinf(value)):
+                pool[size] = value
+                size += 1
+    ordered = np.sort(pool[:size])
+    tree = np.zeros(size + 1, dtype=np.int64)
+    top = 1
+    while top * 2 <= size:
+        top *= 2
+
+    nobs = 0.0
+    mean = 0.0
+    squares = 0.0
+    compensation = 0.0
+    repeats = 0
+    previous = np.nan
+    medians = np.full(n, np.nan)
+    deviations = np.full(n, np.nan)
+    for i in range(n_history + n):
+        at_row = i >= n_history
+        value = values[i - n_history] if at_row else history[i]
+        if at_row:
+            row = i - n_history
+            count = int(nobs)
+            if count >= 1:
+                wanted = count // 2 + 1
+                found = 0
+                for rank in (wanted, wanted - 1):
+                    if rank < 1 or (count % 2 == 1 and rank != wanted):
+                        continue
+                    position = 0
+                    remaining = rank
+                    step = top
+                    while step > 0:
+                        probe = position + step
+                        if probe <= size and tree[probe] < remaining:
+                            position = probe
+                            remaining -= tree[probe]
+                        step >>= 1
+                    if count % 2 == 1:
+                        medians[row] = ordered[position]
+                    elif found == 0:
+                        medians[row] = ordered[position]
+                        found = 1
+                    else:
+                        medians[row] = (medians[row] + ordered[position]) / 2
+            if count > 1:
+                variance = 0.0 if repeats >= count else squares / (nobs - 1.0)
+                deviations[row] = np.sqrt(variance) if variance > 0.0 else 0.0
+        if np.isnan(value) or np.isinf(value):
+            continue
+        nobs += 1.0
+        repeats = repeats + 1 if value == previous else 1
+        previous = value
+        prior_mean = mean - compensation
+        adjusted = value - compensation
+        delta = adjusted - mean
+        compensation = delta + mean - adjusted
+        mean = mean + delta / nobs
+        squares += (value - prior_mean) * (value - mean)
+        index = int(np.searchsorted(ordered, value, side="left")) + 1
+        while index <= size:
+            tree[index] += 1
+            index += index & (-index)
+    return medians, deviations
 
 
 def _expanding_prev(df, key_col, col, stats):
@@ -969,36 +1155,25 @@ def _expanding_prev(df, key_col, col, stats):
 
     state_key = f"exp::{key_col}::{col}"
     seed = _COUNTS_STATE.get(state_key, {})  # key -> chronological list of values
-    keyvals = df[key_col].to_numpy()
+    labels, uniques = pd.factorize(df[key_col].to_numpy(), use_na_sentinel=False)
     vals = df[col].to_numpy().astype("float64")
-
-    s_key: list = []
-    s_val: list = []
-    for k in set(keyvals.tolist()):
-        for v in seed.get(k, []):
-            s_key.append(k)
-            s_val.append(v)
-    if s_key:
-        aug_key = np.concatenate([np.array(s_key, dtype=object), keyvals])
-        aug_val = np.concatenate([np.array(s_val, dtype="float64"), vals])
-        real = np.concatenate([np.zeros(len(s_key), bool), np.ones(len(df), bool)])
-    else:
-        aug_key, aug_val, real = keyvals, vals, np.ones(len(df), bool)
-
-    aug = pd.DataFrame({"_k": aug_key, "_v": aug_val})
-    res = _compute(aug.groupby("_k", sort=False)["_v"])
-    out = {st: pd.Series(arr.to_numpy()[real], index=df.index) for st, arr in res.items()}
-
-    from collections import defaultdict
-    buf: dict = defaultdict(list)
-    for k, v in zip(keyvals.tolist(), vals.tolist()):
-        buf[k].append(float(v))
+    medians = np.empty(len(df), dtype=np.float64)
+    deviations = np.empty(len(df), dtype=np.float64)
+    by_key = np.argsort(labels, kind="stable")
+    ends = np.cumsum(np.bincount(labels, minlength=len(uniques))).tolist()
     # Unchanged histories can be shared: each touched list is replaced below.
     new_state = dict(seed)
-    for k, nv in buf.items():
-        new_state[k] = list(seed.get(k, [])) + nv
+    start = 0
+    for key, end in zip(uniques.tolist(), ends):
+        rows = by_key[start:end]
+        start = end
+        carried = seed.get(key, [])
+        medians[rows], deviations[rows] = _nb_expanding_prior(
+            np.array(carried, dtype=np.float64), vals[rows])
+        new_state[key] = list(carried) + vals[rows].tolist()
     _COUNTS_STATE[state_key] = new_state
-    return out
+    computed = {"median": medians, "std": deviations}
+    return {st: pd.Series(computed[st], index=df.index) for st in stats}
 
 
 def _distinct_count(df, entity_col, col):
@@ -1040,12 +1215,13 @@ def _distinct_count(df, entity_col, col):
 
     if seed:
         # A first-in-frame value only increments if not already carried.
-        carried_pairs = [(e, v) for e, vs in seed.items() for v in vs]
-        carried_idx = pd.MultiIndex.from_tuples(carried_pairs)
-        not_carried = ~pd.MultiIndex.from_arrays([ent_s, val_s]).isin(carried_idx)
-        inc_s = (first_s & not_carried).astype(np.int64)
+        inc_s = first_s.copy()
+        for row in np.flatnonzero(first_s).tolist():
+            if val_s[row] in seed.get(ent_s[row], ()):
+                inc_s[row] = False
+        inc_s = inc_s.astype(np.int64)
         base = pd.Series(ent_s).map(
-            {e: len(vs) for e, vs in seed.items()}
+            {e: len(vs) for e, vs in _in_frame(seed, ent_s).items()}
         ).fillna(0).to_numpy()
     else:
         inc_s = first_s.astype(np.int64)
@@ -1057,9 +1233,14 @@ def _distinct_count(df, entity_col, col):
     if _COUNTS_STATE is not None:
         # Set union replaces touched entries without mutating the seed's sets.
         new_state = dict(seed)
-        seen = pd.DataFrame({"e": ent_s[notna_s], "v": val_s[notna_s]})
-        for e, grp in seen.groupby("e")["v"]:
-            new_state[e] = new_state.get(e, set()) | set(grp.unique())
+        seen = pd.DataFrame({"e": ent_s[notna_s], "v": val_s[notna_s]}).drop_duplicates()
+        grown: dict = {}
+        for entity, value in zip(seen["e"].tolist(), seen["v"].tolist()):
+            values = grown.get(entity)
+            if values is None:
+                values = grown[entity] = set(seed.get(entity, ()))
+            values.add(value)
+        new_state.update(grown)
         _COUNTS_STATE[state_key] = new_state
     return out
 
@@ -1098,13 +1279,13 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     finished_flag = df["_finished_result"]
     non_finisher_flag = df["_non_finisher_result"]
     placed_hist = df["_placed_for_history"].fillna(0.0)
-    finish_pos_hist = df["_finish_pos_for_history"].fillna(0.0)
+    norm_pos_hist = df["_norm_pos_for_history"].fillna(0.0)
 
     # Cumulative (prior-only, race-safe) career counts via the incremental
     # primitive. With state=None (a full build) this is identical to the
     # historical ``groupby(hkey)[v].cumsum() - v`` formula; the FeatureStore
     # append path can seed it from carried state so it never recomputes
-    # history. Class C — see docs/FE_TAXONOMY.md. (Horses run once per race, so
+    # history. Class C — see docs/architecture/FE_TAXONOMY.md. (Horses run once per race, so
     # race-safe == plain cumsum-minus-current here.)
     _counts = _cumulative(
         df[hkey].to_numpy(), df["race_id"].to_numpy(),
@@ -1114,7 +1295,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
             "horse_cum_wins": df["won"].to_numpy(),
             "horse_cum_places": placed_hist.to_numpy(),
             "horse_cum_non_finishes": non_finisher_flag.to_numpy(),
-            "horse_cum_pos_sum": finish_pos_hist.to_numpy(),
+            "horse_cum_npos_sum": norm_pos_hist.to_numpy(),
         },
     )
     df["horse_prev_races"] = _counts["horse_prev_races"].astype(np.int64)
@@ -1122,11 +1303,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Cumulative win rate (vectorised — avoids lambda overhead)
     df["horse_cum_wins"] = _counts["horse_cum_wins"].astype(np.int64)
-    df["horse_win_rate"] = np.where(
-        df["horse_prev_races"] > 0,
-        df["horse_cum_wins"] / df["horse_prev_races"],
-        0,
-    )
+    df["horse_win_rate"] = _rate(df["horse_cum_wins"], df["horse_prev_races"])
     # Bayesian-shrunk win rate (reliable even with few runs)
     df["horse_win_rate_shrunk"] = _bayesian_shrink(
         df["horse_win_rate"], df["horse_prev_races"],
@@ -1135,11 +1312,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Cumulative place rate (top 3)
     df["horse_cum_places"] = _counts["horse_cum_places"].astype(np.float32)
-    df["horse_place_rate"] = np.where(
-        df["horse_prev_races"] > 0,
-        df["horse_cum_places"] / df["horse_prev_races"],
-        0,
-    )
+    df["horse_place_rate"] = _rate(df["horse_cum_places"], df["horse_prev_races"])
     # Bayesian-shrunk place rate
     df["horse_place_rate_shrunk"] = _bayesian_shrink(
         df["horse_place_rate"], df["horse_prev_races"],
@@ -1147,11 +1320,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     df["horse_cum_non_finishes"] = _counts["horse_cum_non_finishes"].astype(np.int64)
-    df["horse_non_finish_rate"] = np.where(
-        df["horse_prev_races"] > 0,
-        df["horse_cum_non_finishes"] / df["horse_prev_races"],
-        0,
-    )
+    df["horse_non_finish_rate"] = _rate(df["horse_cum_non_finishes"], df["horse_prev_races"])
     df["horse_non_finish_rate_shrunk"] = _bayesian_shrink(
         df["horse_non_finish_rate"], df["horse_prev_races"],
         prior_rate=0.05, prior_strength=10.0,
@@ -1167,13 +1336,10 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     df["horse_wins"] = df["horse_cum_wins"].astype(int)
     df["horse_places"] = df["horse_cum_places"].astype(int)
 
-    # Cumulative average finishing position
-    df["horse_cum_pos_sum"] = _counts["horse_cum_pos_sum"].astype(np.float64)
-    df["horse_avg_position"] = np.where(
-        df["horse_prev_finishes"] > 0,
-        df["horse_cum_pos_sum"] / df["horse_prev_finishes"],
-        df["num_runners"] / 2,  # Default to middle for new horses
-    )
+    # Career average position as a share of the field (0 = won, 1 = last,
+    # non-finish = last); missing for a debutant.
+    df["horse_cum_npos_sum"] = _counts["horse_cum_npos_sum"].astype(np.float64)
+    df["horse_avg_position"] = _rate(df["horse_cum_npos_sum"], df["horse_prev_races"])
 
     # --- Rolling form (Numba-accelerated) ---
     # Build all rolling operations on finish_position and won in one batch
@@ -1183,7 +1349,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         _pos_ops.append((f"horse_avg_pos_{w}", "mean", w))
         _won_ops.append((f"horse_wins_{w}", "sum", w))
 
-    # Best/worst/consistency (all on finish_position)
+    # Best/worst/consistency (all on the field-share position)
     _pos_ops.append(("horse_best_pos_5", "min", 5))
     _pos_ops.append(("horse_worst_pos_5", "max", 5))
     _pos_ops.append(("horse_pos_consistency", "std", 5))
@@ -1201,8 +1367,8 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         ("horse_non_finish_rate_10", "mean", 10),
     ]
 
-    # Execute batched rolling on finish_position
-    for name, arr in _rolling(df,hkey, "_finish_pos_for_history", _pos_ops).items():
+    # Execute batched rolling on the field-share position
+    for name, arr in _rolling(df,hkey, "_norm_pos_for_history", _pos_ops).items():
         df[name] = arr
     # Execute batched rolling on won
     for name, arr in _rolling(df,hkey, "_won_for_history", _won_ops).items():
@@ -1210,17 +1376,13 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     for name, arr in _rolling(df,hkey, "_non_finisher_for_history", _dnf_ops).items():
         df[name] = arr
 
-    # Fill consistency NaN with default
-    df["horse_pos_consistency"] = df["horse_pos_consistency"].fillna(3.0)
-    # Fill win pct NaN with 0
-    df["horse_win_pct_last3"] = df["horse_win_pct_last3"].fillna(0)
-    df["horse_non_finish_rate_5"] = df["horse_non_finish_rate_5"].fillna(0)
-    df["horse_non_finish_rate_10"] = df["horse_non_finish_rate_10"].fillna(0)
+    # Rolling form over no prior runs stays missing: a placeholder (std 3.0,
+    # win share 0) is indistinguishable from a real record.
 
-    # --- Days since last race ---
+    # --- Days since last race (missing for a debutant, not 60) ---
     df["horse_last_race_date"] = _lag(df, hkey, "race_date")
     df["days_since_last_race"] = (
-        (df["race_date"] - df["horse_last_race_date"]).dt.days.fillna(60)
+        (df["race_date"] - df["horse_last_race_date"]).dt.days
     )
 
     # --- Days since last run — non-linear buckets ---
@@ -1239,11 +1401,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["horse_rt_runs"] = _rt["horse_rt_runs"]
         df["horse_rt_wins"] = _rt["horse_rt_wins"]
-        df["horse_rt_win_rate"] = np.where(
-            df["horse_rt_runs"] > 0,
-            df["horse_rt_wins"] / df["horse_rt_runs"],
-            0,
-        )
+        df["horse_rt_win_rate"] = _rate(df["horse_rt_wins"], df["horse_rt_runs"])
         df["horse_rt_wr_shrunk"] = _bayesian_shrink(
             df["horse_rt_win_rate"], df["horse_rt_runs"],
             prior_rate=0.10, prior_strength=6.0,
@@ -1251,7 +1409,7 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         df["horse_rt_specialist_edge"] = (
             df["horse_rt_wr_shrunk"] - df["horse_win_rate_shrunk"]
         )
-        df = df.drop(columns=["horse_rt_wins"], errors="ignore")
+        df = _without(df, ["horse_rt_wins"])
 
     # --- Weight change from previous run ---
     if "weight_lbs" in df.columns:
@@ -1263,10 +1421,10 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         # more or less than the race average?  Captures apprentice allowances
         # and handicapping adjustments that narrow/widen vs the competition.
         race_mean_wc = df.groupby("race_id")["weight_change"].transform("mean")
-        df["weight_change_vs_field"] = (df["weight_change"] - race_mean_wc).fillna(0)
+        df["weight_change_vs_field"] = df["weight_change"] - race_mean_wc
         # Binary flag: a drop of 3+ lbs is considered a meaningful relief.
         df["is_big_weight_drop"] = (df["weight_change"] < -3).astype(np.int8)
-        df = df.drop(columns="_observed_weight")
+        df = _without(df, ["_observed_weight"])
 
     # --- Age × form-trend interaction ---
     # Young horses (≤3yo) that are *improving* on recent form represent one
@@ -1279,8 +1437,8 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         # *worse* (larger) than over last 3 → horse is finishing better recently
         if "horse_avg_pos_3" in df.columns and "horse_avg_pos_10" in df.columns:
             _slope = (
-                df["horse_avg_pos_10"].fillna(0).values.astype(np.float32)
-                - df["horse_avg_pos_3"].fillna(0).values.astype(np.float32)
+                df["horse_avg_pos_10"].values.astype(np.float32)
+                - df["horse_avg_pos_3"].values.astype(np.float32)
             )
             df["form_slope"] = _slope
             df["age_x_form_slope"] = _is_young * _slope
@@ -1298,17 +1456,18 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Is maiden (has never won) ---
     df["is_maiden"] = (df["horse_cum_wins"] == 0).astype(int)
 
-    # --- Runs since last win (Numba-accelerated) ---
-    _gids = _encode_groups(df, hkey)
-    df["runs_since_last_win"] = _nb_runs_since_win(
-        df["won"].values.astype(np.float64), _gids,
+    # --- Runs since last win (missing for a horse that has never won) ---
+    # Starts up to and including each win, carried forward to later runs.
+    df["_starts_through_win"] = (df["horse_prev_races"] + 1).where(df["_won_for_history"].eq(1))
+    df["runs_since_last_win"] = (
+        df["horse_prev_races"] - _ffill_prev(df, hkey, "_starts_through_win")
     )
 
-    # --- Days since last win ---
+    # --- Days since last win (missing for a maiden, not 365) ---
     df["_last_win_date"] = df["race_date"].where(df["won"] == 1)
     df["_last_win_date"] = _ffill_prev(df, hkey, "_last_win_date")
     df["days_since_last_win"] = (
-        (df["race_date"] - df["_last_win_date"]).dt.days.fillna(365)
+        (df["race_date"] - df["_last_win_date"]).dt.days
     )
 
     # --- Average lengths behind (Numba-accelerated) ---
@@ -1342,22 +1501,18 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         for name, arr in _rolling(df,hkey, "_close_finish", _cf_ops).items():
             df[name] = arr
 
-        df["horse_avg_lb_behind"] = df["horse_avg_lb_behind"].fillna(3.0)
-        df["close_finish_rate"] = df["close_finish_rate"].fillna(0)
-        df = df.drop(columns=["_close_finish", "_lb_finished"], errors="ignore")
+        df = _without(df, ["_close_finish", "_lb_finished"])
 
     # Clean up intermediate columns
-    df = df.drop(
-        columns=[
+    df = _without(df, [
             "horse_cum_wins",
             "horse_cum_places",
             "horse_cum_non_finishes",
-            "horse_cum_pos_sum",
+            "horse_cum_npos_sum",
             "horse_last_race_date",
             "_last_win_date",
-        ],
-        errors="ignore",
-    )
+            "_starts_through_win",
+        ])
 
     return df
 
@@ -1418,11 +1573,7 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Cumulative win rate (vectorised)
     df["jockey_cum_wins"] = _counts["jockey_cum_wins"].astype(np.int64)
-    df["jockey_win_rate"] = np.where(
-        df["jockey_prev_rides"] > 0,
-        df["jockey_cum_wins"] / df["jockey_prev_rides"],
-        0,
-    )
+    df["jockey_win_rate"] = _rate(df["jockey_cum_wins"], df["jockey_prev_rides"])
     df["jockey_win_rate_shrunk"] = _bayesian_shrink(
         df["jockey_win_rate"], df["jockey_prev_rides"],
         prior_rate=0.10, prior_strength=10.0,
@@ -1435,18 +1586,14 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
         _jock_won_ops.append((f"jockey_wins_{w}", "sum", w))
         _jock_pos_ops.append((f"jockey_avg_pos_{w}", "mean", w))
 
-    for col, ops in [("_won_for_history", _jock_won_ops), ("_finish_pos_for_history", _jock_pos_ops)]:
+    for col, ops in [("_won_for_history", _jock_won_ops), ("_norm_pos_for_history", _jock_pos_ops)]:
         results = _rolling(df,"jockey", col, ops)
         for name, arr in results.items():
             df[name] = arr
 
     # Place rate (top 3)
     df["jockey_cum_places"] = _counts["jockey_cum_places"].astype(np.float32)
-    df["jockey_place_rate"] = np.where(
-        df["jockey_prev_rides"] > 0,
-        df["jockey_cum_places"] / df["jockey_prev_rides"],
-        0,
-    )
+    df["jockey_place_rate"] = _rate(df["jockey_cum_places"], df["jockey_prev_rides"])
     df["jockey_place_rate_shrunk"] = _bayesian_shrink(
         df["jockey_place_rate"], df["jockey_prev_rides"],
         prior_rate=0.30, prior_strength=10.0,
@@ -1482,7 +1629,7 @@ def add_jockey_features(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     df["jockey_hot_vs_30d"] = df["jockey_wr_14d"] - df["jockey_wr_30d"]
-    df = df.drop(columns=["jockey_cum_wins", "jockey_cum_places"], errors="ignore")
+    df = _without(df, ["jockey_cum_wins", "jockey_cum_places"])
     df = _entity_day_start_view(df, ["jockey"], [
         "jockey_prev_rides", "jockey_win_rate", "jockey_win_rate_shrunk",
         "jockey_wins_10", "jockey_wins_20", "jockey_avg_pos_10", "jockey_avg_pos_20",
@@ -1506,7 +1653,7 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Race-safe: trainers often have multiple runners in the same race.
     # All same-race runners must see identical prior-race stats. Routed through
-    # the seed-aware cumulative primitive (class C; see docs/FE_TAXONOMY.md) so
+    # the seed-aware cumulative primitive (class C; see docs/architecture/FE_TAXONOMY.md) so
     # the FeatureStore append can carry state instead of recomputing history.
     _tc = _cumulative(
         df["trainer"].to_numpy(), df["race_id"].to_numpy(),
@@ -1518,11 +1665,7 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["trainer_prev_runs"] = _tc["trainer_prev_runs"]
     df["trainer_cum_wins"] = _tc["trainer_cum_wins"]
-    df["trainer_win_rate"] = np.where(
-        df["trainer_prev_runs"] > 0,
-        df["trainer_cum_wins"] / df["trainer_prev_runs"],
-        0,
-    )
+    df["trainer_win_rate"] = _rate(df["trainer_cum_wins"], df["trainer_prev_runs"])
     df["trainer_win_rate_shrunk"] = _bayesian_shrink(
         df["trainer_win_rate"], df["trainer_prev_runs"],
         prior_rate=0.10, prior_strength=10.0,
@@ -1538,11 +1681,7 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Place rate
     df["trainer_cum_places"] = _tc["trainer_cum_places"]
-    df["trainer_place_rate"] = np.where(
-        df["trainer_prev_runs"] > 0,
-        df["trainer_cum_places"] / df["trainer_prev_runs"],
-        0,
-    )
+    df["trainer_place_rate"] = _rate(df["trainer_cum_places"], df["trainer_prev_runs"])
     df["trainer_place_rate_shrunk"] = _bayesian_shrink(
         df["trainer_place_rate"], df["trainer_prev_runs"],
         prior_rate=0.30, prior_strength=10.0,
@@ -1577,7 +1716,7 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["trainer_hot_vs_30d"] = df["trainer_wr_14d"] - df["trainer_wr_30d"]
 
-    df = df.drop(columns=["trainer_cum_wins", "trainer_cum_places"], errors="ignore")
+    df = _without(df, ["trainer_cum_wins", "trainer_cum_places"])
     df = _entity_day_start_view(df, ["trainer"], [
         "trainer_prev_runs", "trainer_win_rate", "trainer_win_rate_shrunk",
         "trainer_wins_10", "trainer_wins_20",
@@ -1600,15 +1739,14 @@ def add_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["trainer_track_runs"] = _ttc["trainer_track_runs"]
         df["trainer_track_wins"] = _ttc["trainer_track_wins"]
-        df["trainer_track_win_rate"] = np.where(
-            df["trainer_track_runs"] > 0,
-            df["trainer_track_wins"] / df["trainer_track_runs"],
-            0,
-        )
+        df["trainer_track_win_rate"] = _rate(df["trainer_track_wins"], df["trainer_track_runs"])
         df = _entity_day_start_view(
             df, ["_tt_key"], ["trainer_track_runs", "trainer_track_win_rate"]
         )
-        df = df.drop(columns=["trainer_track_wins", "_tt_key"], errors="ignore")
+        df["trainer_track_win_rate"] = _shrink_to_entity(
+            df, "trainer_track_win_rate", "trainer_track_runs", "trainer"
+        )
+        df = _without(df, ["trainer_track_wins", "_tt_key"])
 
     return df
 
@@ -1626,15 +1764,14 @@ def add_jockey_track_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["jockey_track_runs"] = _jtkc["jockey_track_runs"]
     df["jockey_track_wins"] = _jtkc["jockey_track_wins"]
-    df["jockey_track_win_rate"] = np.where(
-        df["jockey_track_runs"] > 0,
-        df["jockey_track_wins"] / df["jockey_track_runs"],
-        0,
-    )
+    df["jockey_track_win_rate"] = _rate(df["jockey_track_wins"], df["jockey_track_runs"])
     df = _entity_day_start_view(
         df, ["_jt_key"], ["jockey_track_runs", "jockey_track_win_rate"]
     )
-    df = df.drop(columns=["jockey_track_wins", "_jt_key"], errors="ignore")
+    df["jockey_track_win_rate"] = _shrink_to_entity(
+        df, "jockey_track_win_rate", "jockey_track_runs", "jockey"
+    )
+    df = _without(df, ["jockey_track_wins", "_jt_key"])
     return df
 
 
@@ -1694,7 +1831,7 @@ def add_track_features(df: pd.DataFrame) -> pd.DataFrame:
     hkey = _horse_key(df)
 
     # Horse's track / distance / going records — class C, seed-aware so the
-    # FeatureStore append carries state (see docs/FE_TAXONOMY.md). One row per
+    # FeatureStore append carries state (see docs/architecture/FE_TAXONOMY.md). One row per
     # (horse, dim, race), so race-safe == plain cumsum-minus-current.
     result_start_hist = df["_result_start"].fillna(0.0)
     won_hist = df["_won_for_history"].fillna(0.0)
@@ -1706,25 +1843,20 @@ def add_track_features(df: pd.DataFrame) -> pd.DataFrame:
         {"horse_track_runs": _rs, "horse_track_wins": _wh})
     df["horse_track_runs"] = _trk["horse_track_runs"]
     df["horse_track_wins"] = _trk["horse_track_wins"]
-    df["horse_track_win_rate"] = np.where(
-        df["horse_track_runs"] > 0,
-        df["horse_track_wins"] / df["horse_track_runs"],
-        0,
-    )
+    df["horse_track_win_rate"] = _rate(df["horse_track_wins"], df["horse_track_runs"])
     df["horse_track_wr_shrunk"] = _bayesian_shrink(
         df["horse_track_win_rate"], df["horse_track_runs"],
         prior_rate=0.10, prior_strength=5.0,
     )
 
-    _dst = _cumulative(_composite_key(df, hkey, "distance_furlongs"), _race,
+    # Distances carry yards (7f, 7.06f, 7.16f), so group on the nearest half
+    # furlong, as the course-and-distance record does.
+    df["_dist_half_f"] = (df["distance_furlongs"] * 2).round() / 2
+    _dst = _cumulative(_composite_key(df, hkey, "_dist_half_f"), _race,
         {"horse_dist_runs": _rs, "horse_dist_wins": _wh})
     df["horse_dist_runs"] = _dst["horse_dist_runs"]
     df["horse_dist_wins"] = _dst["horse_dist_wins"]
-    df["horse_dist_win_rate"] = np.where(
-        df["horse_dist_runs"] > 0,
-        df["horse_dist_wins"] / df["horse_dist_runs"],
-        0,
-    )
+    df["horse_dist_win_rate"] = _rate(df["horse_dist_wins"], df["horse_dist_runs"])
     df["horse_dist_wr_shrunk"] = _bayesian_shrink(
         df["horse_dist_win_rate"], df["horse_dist_runs"],
         prior_rate=0.10, prior_strength=5.0,
@@ -1734,24 +1866,18 @@ def add_track_features(df: pd.DataFrame) -> pd.DataFrame:
         {"horse_going_runs": _rs, "horse_going_wins": _wh})
     df["horse_going_runs"] = _gng["horse_going_runs"]
     df["horse_going_wins"] = _gng["horse_going_wins"]
-    df["horse_going_win_rate"] = np.where(
-        df["horse_going_runs"] > 0,
-        df["horse_going_wins"] / df["horse_going_runs"],
-        0,
-    )
+    df["horse_going_win_rate"] = _rate(df["horse_going_wins"], df["horse_going_runs"])
     df["horse_going_wr_shrunk"] = _bayesian_shrink(
         df["horse_going_win_rate"], df["horse_going_runs"],
         prior_rate=0.10, prior_strength=5.0,
     )
 
-    df = df.drop(
-        columns=[
+    df = _without(df, [
             "horse_track_wins",
             "horse_dist_wins",
             "horse_going_wins",
-        ],
-        errors="ignore",
-    )
+            "_dist_half_f",
+        ])
     return df
 
 
@@ -1769,7 +1895,7 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     # Race-safe: a jockey-trainer combo can (rarely) have multiple
     # runners in the same race (different jockeys for same trainer,
     # but the *combo* key makes this less frequent).  Stay consistent.
-    # Seed-aware cumulative primitive (class C; see docs/FE_TAXONOMY.md).
+    # Seed-aware cumulative primitive (class C; see docs/architecture/FE_TAXONOMY.md).
     _jtc = _cumulative(
         df["_jt_combo"].to_numpy(), df["race_id"].to_numpy(),
         {
@@ -1780,11 +1906,7 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["jt_prev_runs"] = _jtc["jt_prev_runs"]
     df["jt_cum_wins"] = _jtc["jt_cum_wins"]
-    df["jt_win_rate"] = np.where(
-        df["jt_prev_runs"] > 0,
-        df["jt_cum_wins"] / df["jt_prev_runs"],
-        0,
-    )
+    df["jt_win_rate"] = _rate(df["jt_cum_wins"], df["jt_prev_runs"])
     df["jt_win_rate_shrunk"] = _bayesian_shrink(
         df["jt_win_rate"], df["jt_prev_runs"],
         prior_rate=0.10, prior_strength=5.0,
@@ -1792,11 +1914,7 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Combo place rate (top 3)
     df["jt_cum_places"] = _jtc["jt_cum_places"]
-    df["jt_place_rate"] = np.where(
-        df["jt_prev_runs"] > 0,
-        df["jt_cum_places"] / df["jt_prev_runs"],
-        0,
-    )
+    df["jt_place_rate"] = _rate(df["jt_cum_places"], df["jt_prev_runs"])
     df["jt_place_rate_shrunk"] = _bayesian_shrink(
         df["jt_place_rate"], df["jt_prev_runs"],
         prior_rate=0.30, prior_strength=5.0,
@@ -1806,10 +1924,7 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
         "jt_prev_runs", "jt_win_rate", "jt_win_rate_shrunk",
         "jt_place_rate", "jt_place_rate_shrunk",
     ])
-    df = df.drop(
-        columns=["_jt_combo", "jt_cum_wins", "jt_cum_places"],
-        errors="ignore",
-    )
+    df = _without(df, ["_jt_combo", "jt_cum_wins", "jt_cum_places"])
 
     # --- Is‑stable‑jockey booking signal ---
     # Trainers have a preferred jockey — the one they book most often.
@@ -1839,7 +1954,7 @@ def add_jockey_trainer_features(df: pd.DataFrame) -> pd.DataFrame:
             (df["_tj_prior_rides"] == trainer_max_tj) & (df["_tj_prior_rides"] > 0)
         ).astype(np.int8)
 
-        df = df.drop(columns=["_tjkey", "_tj_prior_rides"], errors="ignore")
+        df = _without(df, ["_tjkey", "_tj_prior_rides"])
 
     return df
 
@@ -1887,7 +2002,7 @@ def add_class_change_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["or_change"] = np.nan
 
-    df = df.drop(columns=["_class_num", "_prev_class", "_observed_mark", "_observed_mark_scale"], errors="ignore")
+    df = _without(df, ["_class_num", "_prev_class", "_observed_mark", "_observed_mark_scale"])
     return df
 
 
@@ -1915,11 +2030,7 @@ def add_course_distance_features(df: pd.DataFrame) -> pd.DataFrame:
     df["horse_cd_runs"] = _cd["horse_cd_runs"]
     df["horse_cd_wins"] = _cd["horse_cd_wins"]
     df["horse_cd_winner"] = (df["horse_cd_wins"] > 0).astype(int)
-    df["horse_cd_win_rate"] = np.where(
-        df["horse_cd_runs"] > 0,
-        df["horse_cd_wins"] / df["horse_cd_runs"],
-        0,
-    )
+    df["horse_cd_win_rate"] = _rate(df["horse_cd_wins"], df["horse_cd_runs"])
 
     # --- Course only (already partially in add_track_features, but
     #     add a "has won at course before" binary for clarity) ---
@@ -1929,10 +2040,7 @@ def add_course_distance_features(df: pd.DataFrame) -> pd.DataFrame:
     )["horse_course_wins"]
     df["horse_course_winner"] = (df["horse_course_wins"] > 0).astype(int)
 
-    df = df.drop(
-        columns=["_dist_rounded", "horse_cd_wins", "horse_course_wins"],
-        errors="ignore",
-    )
+    df = _without(df, ["_dist_rounded", "horse_cd_wins", "horse_course_wins"])
     return df
 
 
@@ -1949,7 +2057,8 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Distance change from previous race ---
     horse_groups = df.groupby(hkey)
     df["_prev_dist"] = _lag(df, hkey, "distance_furlongs")
-    df["distance_change"] = (df["distance_furlongs"] - df["_prev_dist"]).fillna(0)
+    # Missing for a debutant: 0 would read as "same trip as last time".
+    df["distance_change"] = df["distance_furlongs"] - df["_prev_dist"]
     df["stepping_up"] = (df["distance_change"] > 0.5).astype(int)
     df["stepping_down"] = (df["distance_change"] < -0.5).astype(int)
 
@@ -1971,11 +2080,7 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["horse_dist_cat_runs"] = _dc["horse_dist_cat_runs"]
     df["_dc_wins"] = _dc["_dc_wins"]
-    df["horse_dist_cat_wr"] = np.where(
-        df["horse_dist_cat_runs"] > 0,
-        df["_dc_wins"] / df["horse_dist_cat_runs"],
-        0,
-    )
+    df["horse_dist_cat_wr"] = _rate(df["_dc_wins"], df["horse_dist_cat_runs"])
     df["horse_dist_cat_wr_shrunk"] = _bayesian_shrink(
         df["horse_dist_cat_wr"], df["horse_dist_cat_runs"],
         prior_rate=0.10, prior_strength=5.0,
@@ -1994,11 +2099,7 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["horse_surface_dist_cat_runs"] = _sdc["horse_surface_dist_cat_runs"]
         df["_sdc_wins"] = _sdc["_sdc_wins"]
-        df["horse_surface_dist_cat_wr"] = np.where(
-            df["horse_surface_dist_cat_runs"] > 0,
-            df["_sdc_wins"] / df["horse_surface_dist_cat_runs"],
-            0,
-        )
+        df["horse_surface_dist_cat_wr"] = _rate(df["_sdc_wins"], df["horse_surface_dist_cat_runs"])
         df["horse_surface_dist_cat_wr_shrunk"] = _bayesian_shrink(
             df["horse_surface_dist_cat_wr"], df["horse_surface_dist_cat_runs"],
             prior_rate=0.10, prior_strength=8.0,
@@ -2020,16 +2121,13 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
     df["_dc_running_max"] = _running_extreme(df, "_hdc_key", "_cum_dist_cat_wins", kind="max", prev=False)
     # Running max across ALL distance categories for each horse
     df["_best_dc"] = _running_extreme(df, hkey, "_dc_running_max", kind="max", prev=False)
-    df = df.drop(columns=["_hdc_key"], errors="ignore")
+    df = _without(df, ["_hdc_key"])
     df["at_preferred_dist"] = (
         (df["_cum_dist_cat_wins"] == df["_best_dc"]) & (df["_best_dc"] > 0)
     ).astype(int)
 
-    df = df.drop(
-        columns=["_prev_dist", "_dist_cat_str", "_dc_wins",
-                 "_cum_dist_cat_wins", "_dc_running_max", "_best_dc", "_sdc_wins"],
-        errors="ignore",
-    )
+    df = _without(df, ["_prev_dist", "_dist_cat_str", "_dc_wins",
+                 "_cum_dist_cat_wins", "_dc_running_max", "_best_dc", "_sdc_wins"])
     return df
 
 
@@ -2074,7 +2172,7 @@ def add_headgear_features(df: pd.DataFrame) -> pd.DataFrame:
         (df["has_headgear"] == 0) & (df["_prev_hg"] == 1)
     ).astype(int)
 
-    df = df.drop(columns=["_prev_hg", "_ever_had_hg"], errors="ignore")
+    df = _without(df, ["_prev_hg", "_ever_had_hg"])
     return df
 
 
@@ -2095,11 +2193,7 @@ def add_surface_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["horse_surface_runs"] = _sf["horse_surface_runs"]
     df["horse_surface_wins"] = _sf["horse_surface_wins"]
-    df["horse_surface_win_rate"] = np.where(
-        df["horse_surface_runs"] > 0,
-        df["horse_surface_wins"] / df["horse_surface_runs"],
-        0,
-    )
+    df["horse_surface_win_rate"] = _rate(df["horse_surface_wins"], df["horse_surface_runs"])
     df["horse_surface_wr_shrunk"] = _bayesian_shrink(
         df["horse_surface_win_rate"], df["horse_surface_runs"],
         prior_rate=0.10, prior_strength=6.0,
@@ -2127,11 +2221,7 @@ def add_surface_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["horse_surface_rt_runs"] = _srt["horse_surface_rt_runs"]
         df["_surface_rt_wins"] = _srt["_surface_rt_wins"]
-        df["horse_surface_rt_wr"] = np.where(
-            df["horse_surface_rt_runs"] > 0,
-            df["_surface_rt_wins"] / df["horse_surface_rt_runs"],
-            0,
-        )
+        df["horse_surface_rt_wr"] = _rate(df["_surface_rt_wins"], df["horse_surface_rt_runs"])
         df["horse_surface_rt_wr_shrunk"] = _bayesian_shrink(
             df["horse_surface_rt_wr"], df["horse_surface_rt_runs"],
             prior_rate=0.10, prior_strength=8.0,
@@ -2140,7 +2230,7 @@ def add_surface_features(df: pd.DataFrame) -> pd.DataFrame:
             df["horse_surface_rt_edge"] = (
                 df["horse_surface_rt_wr_shrunk"] - df["horse_win_rate_shrunk"]
             )
-    df = df.drop(columns=["_prev_surface", "horse_surface_wins", "_surface_rt_wins"], errors="ignore")
+    df = _without(df, ["_prev_surface", "horse_surface_wins", "_surface_rt_wins"])
     return df
 
 
@@ -2172,7 +2262,7 @@ def add_jockey_intent_features(df: pd.DataFrame) -> pd.DataFrame:
         df["jockey_upgrade"] = (
             (df["jockey_switch"] == 1) & (df["jockey_elo_change"] > 50)
         ).astype(int)
-        df = df.drop(columns=["_prev_jockey_elo"], errors="ignore")
+        df = _without(df, ["_prev_jockey_elo"])
 
     # --- Beaten favourite last time (bounce-back angle) ---
     if "is_favourite" in df.columns:
@@ -2181,7 +2271,7 @@ def add_jockey_intent_features(df: pd.DataFrame) -> pd.DataFrame:
         df["beaten_fav_last"] = (
             (df["_prev_fav"] == 1) & (df["_prev_won"] == 0)
         ).astype(int)
-        df = df.drop(columns=["_prev_fav", "_prev_won"], errors="ignore")
+        df = _without(df, ["_prev_fav", "_prev_won"])
 
     # ── Granular equipment signals ───────────────────────────────
     # The headgear column is stored as a JSON-like list of dicts:
@@ -2252,7 +2342,7 @@ def add_jockey_intent_features(df: pd.DataFrame) -> pd.DataFrame:
         df["weight_dropped"] = (df["weight_change"] < 0).astype(int)
         df["weight_raised"] = (df["weight_change"] > 0).astype(int)
 
-    df = df.drop(columns=["_prev_jockey"], errors="ignore")
+    df = _without(df, ["_prev_jockey"])
     return df
 
 
@@ -2274,15 +2364,14 @@ def add_trainer_specialisation_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["trainer_dist_cat_runs"] = _tdcc["trainer_dist_cat_runs"]
         df["_tdc_wins"] = _tdcc["_tdc_wins"]
-        df["trainer_dist_cat_wr"] = np.where(
-            df["trainer_dist_cat_runs"] > 2,
-            df["_tdc_wins"] / df["trainer_dist_cat_runs"],
-            0,
-        )
+        df["trainer_dist_cat_wr"] = _rate(df["_tdc_wins"], df["trainer_dist_cat_runs"])
         df = _entity_day_start_view(
             df, ["_tdc_key"], ["trainer_dist_cat_runs", "trainer_dist_cat_wr"]
         )
-        df = df.drop(columns=["_dc_str", "_tdc_wins", "_tdc_key"], errors="ignore")
+        df["trainer_dist_cat_wr"] = _shrink_to_entity(
+            df, "trainer_dist_cat_wr", "trainer_dist_cat_runs", "trainer"
+        )
+        df = _without(df, ["_dc_str", "_tdc_wins", "_tdc_key"])
 
     # --- Trainer × going (race-safe) ---
     if "going" in df.columns:
@@ -2293,15 +2382,14 @@ def add_trainer_specialisation_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["trainer_going_runs"] = _tgc["trainer_going_runs"]
         df["_tg_wins"] = _tgc["_tg_wins"]
-        df["trainer_going_wr"] = np.where(
-            df["trainer_going_runs"] > 2,
-            df["_tg_wins"] / df["trainer_going_runs"],
-            0,
-        )
+        df["trainer_going_wr"] = _rate(df["_tg_wins"], df["trainer_going_runs"])
         df = _entity_day_start_view(
             df, ["_tg_key"], ["trainer_going_runs", "trainer_going_wr"]
         )
-        df = df.drop(columns=["_tg_wins", "_tg_key"], errors="ignore")
+        df["trainer_going_wr"] = _shrink_to_entity(
+            df, "trainer_going_wr", "trainer_going_runs", "trainer"
+        )
+        df = _without(df, ["_tg_wins", "_tg_key"])
 
     return df
 
@@ -2376,7 +2464,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
         ]
         for name, arr in _rolling(df,hkey, "_adj_lpf", _adj_ops).items():
             df[name] = arr
-        df = df.drop(columns=["_adj_lpf"], errors="ignore")
+        df = _without(df, ["_adj_lpf"])
 
         # ── Class-relative Z-score speed figures ─────────────────
         # shift(1) so each row's own lb_per_furlong is excluded from the class
@@ -2395,7 +2483,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
         _class_median = pd.Series(_exp["median"].to_numpy()[_first], index=df.index)
         _class_std = pd.Series(_exp["std"].to_numpy()[_first], index=df.index).replace(0, np.nan).fillna(1.0)
         df["_speed_z_class"] = ((df["_lb_per_furlong"] - _class_median) / _class_std).where(_class_num.notna())
-        df = df.drop(columns=["_class_key"], errors="ignore")
+        df = _without(df, ["_class_key"])
 
         # Rolling Z-score averages (Numba-accelerated)
         _z_ops = [
@@ -2408,9 +2496,9 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
         df["speed_z_class_trend"] = (
             df["speed_z_class_avg_5"] - df["speed_z_class_avg_10"]
         )
-        df = df.drop(columns=["_speed_z_class"], errors="ignore")
+        df = _without(df, ["_speed_z_class"])
 
-    df = df.drop(columns=["_lb_per_furlong", "_rel_perf"], errors="ignore")
+    df = _without(df, ["_lb_per_furlong", "_rel_perf"])
     return df
 
 
@@ -2444,8 +2532,8 @@ def add_atr_features(df: pd.DataFrame) -> pd.DataFrame:
     # compute_atr_run_features re-emits (avoids duplicate columns and the
     # block-fragmentation that many single-column inserts would cause).
     run = compute_atr_run_features(df)
-    df = df.drop(columns=[c for c in run.columns if c in df.columns], errors="ignore")
-    df = pd.concat([df, run], axis=1)
+    df = _without(df, [c for c in run.columns if c in df.columns])
+    df = _with_columns(df, run)
 
     hkey = _horse_key(df)
     race_ids = df["race_id"] if "race_id" in df.columns else None
@@ -2526,11 +2614,11 @@ def add_atr_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Attach all new columns in one block, then drop raw/per-run (leakage).
     if new:
-        df = pd.concat([df, pd.DataFrame(new, index=df.index)], axis=1)
+        df = _with_columns(df, pd.DataFrame(new, index=df.index))
     drop = [c for c in ALL_ATR_COLS if c in df.columns]
     drop += [m for m, _ in RUN_METRICS if m in df.columns]
     drop += [c for c in ("atr_closing_in_hand", *COMMENT_TAGS) if c in df.columns]
-    df = df.drop(columns=list(dict.fromkeys(drop)), errors="ignore")
+    df = _without(df, list(dict.fromkeys(drop)))
 
     return df
 
@@ -2847,7 +2935,7 @@ def add_course_dynamics_features(df: pd.DataFrame) -> pd.DataFrame:
         prev_lat.to_numpy(), prev_lon.to_numpy(),
         df["track_lat"].to_numpy(), df["track_lon"].to_numpy())
     df["is_long_haul"] = (df["travel_from_last_km"] > 200.0).astype(np.int8)
-    df = df.drop(columns=["track_lat", "track_lon"], errors="ignore")
+    df = _without(df, ["track_lat", "track_lon"])
 
     # ── #7 Going at this specific course ─────────────────────────
     if "going" in df.columns:
@@ -2915,17 +3003,22 @@ def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # 5) speed_fig × distance match
     #    Good speed figure is more predictive at the proven distance.
+    # speed_fig_avg_5 is lengths behind (0 = always won, median ~2), so a
+    # clip at 2 gave half the field the same speed; 1/(1+x) keeps the order.
+    if "speed_fig_avg_5" in df.columns:
+        _speed_quality = 1.0 / (1.0 + df["speed_fig_avg_5"])
     if "speed_fig_avg_5" in df.columns and "horse_dist_win_rate" in df.columns:
-        interaction_cols["speed_x_dist_wr"] = (
-            (1.0 - df["speed_fig_avg_5"].clip(0, 2))  # invert: lower = better
-            * df["horse_dist_win_rate"]
-        )
+        interaction_cols["speed_x_dist_wr"] = _speed_quality * df["horse_dist_win_rate"]
 
-    # 6) OR × handicap — official rating matters most in handicaps
+    # 6) OR × handicap — official rating matters most in handicaps.
+    # Observed marks only: an unrated runner's race-median stand-in is not a
+    # mark, and averaging it in pulls the field mean toward the median.
     if "official_rating" in df.columns and "handicap" in df.columns:
-        race_avg_or = df.groupby("race_id")["official_rating"].transform("mean")
+        from src.feature_semantics import observed_rating
+        _mark = observed_rating(df)
+        race_avg_or = _mark.groupby(df["race_id"]).transform("mean")
         interaction_cols["or_vs_field_x_hcap"] = (
-            (df["official_rating"] - race_avg_or) * df["handicap"]
+            ((_mark - race_avg_or) * df["handicap"]).where(df["handicap"].ne(0), 0.0)
         )
 
     # 7) age × distance — young horses prefer sprints, older handle distance
@@ -2971,9 +3064,7 @@ def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # 14) close_finish_rate × speed_fig_avg_5 — competitive + fast
     if "close_finish_rate" in df.columns and "speed_fig_avg_5" in df.columns:
-        interaction_cols["close_x_speed"] = (
-            df["close_finish_rate"] * (1.0 - df["speed_fig_avg_5"].clip(0, 2))
-        )
+        interaction_cols["close_x_speed"] = df["close_finish_rate"] * _speed_quality
 
     # ── Market-residual interactions ─────────────────────────────
     # These help the model learn *when* the market misprices a horse
@@ -2993,7 +3084,7 @@ def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # 18) norm_implied_prob × speed_fig_avg_5 — market vs recent speed
     if "norm_implied_prob" in df.columns and "speed_fig_avg_5" in df.columns:
-        interaction_cols["mkt_x_speed"] = df["norm_implied_prob"] - (1.0 - df["speed_fig_avg_5"].clip(0, 2))
+        interaction_cols["mkt_x_speed"] = df["norm_implied_prob"] - _speed_quality
 
     # 19) odds_vs_field × jockey_elo — price vs rider quality
     if "odds_vs_field" in df.columns and "jockey_elo" in df.columns:
@@ -3019,18 +3110,20 @@ def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
     # 21) Elo × recent form — high-rated horse currently in good form
     if "horse_elo" in df.columns and "horse_avg_pos_3" in df.columns:
         _elo_c = (df["horse_elo"] - 1500) / 400
-        # Lower avg_pos_3 = better recent form → invert so positive = good
-        _form_quality = 1.0 - df["horse_avg_pos_3"].clip(1, 8) / 8.0
+        # avg_pos_3 is a field share (0 = won, 1 = last) → invert so positive = good
+        _form_quality = 1.0 - df["horse_avg_pos_3"]
         interaction_cols["elo_x_recent_form"] = _elo_c * _form_quality
 
     # 22) Jockey-trainer synergy — both connections in hot form
     if "jockey_wr_14d" in df.columns and "trainer_wr_14d" in df.columns:
         interaction_cols["jockey_trainer_synergy"] = df["jockey_wr_14d"] * df["trainer_wr_14d"]
 
-    # 23) Going specialist edge — performs better on this going than usual
-    if "horse_going_win_rate" in df.columns and "horse_win_rate_shrunk" in df.columns:
+    # 23) Going specialist edge — performs better on this going than usual.
+    # Shrunk minus shrunk, like the other specialist edges: a raw going rate
+    # gave a one-from-one horse +0.9.
+    if "horse_going_wr_shrunk" in df.columns and "horse_win_rate_shrunk" in df.columns:
         interaction_cols["going_specialist_edge"] = (
-            df["horse_going_win_rate"] - df["horse_win_rate_shrunk"]
+            df["horse_going_wr_shrunk"] - df["horse_win_rate_shrunk"]
         )
 
     # 24) Form slope × post-break — freshened horses with improving trend
@@ -3054,8 +3147,8 @@ def add_interaction_features(df: pd.DataFrame) -> pd.DataFrame:
         interaction_frame = pd.DataFrame(interaction_cols, index=df.index)
         overlapping_cols = [col for col in interaction_frame.columns if col in df.columns]
         if overlapping_cols:
-            df = df.drop(columns=overlapping_cols)
-        df = pd.concat([df, interaction_frame], axis=1)
+            df = _without(df, overlapping_cols)
+        df = _with_columns(df, interaction_frame)
 
     return df
 
@@ -3150,22 +3243,14 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
         df[f"_safe_{col}_wins"] = _ped[f"_safe_{col}_wins"]
         df[f"_safe_{col}_places"] = _ped[f"_safe_{col}_places"]
 
-        df[f"{col}_win_rate"] = np.where(
-            df[f"_safe_{col}_runs"] > 0,
-            df[f"_safe_{col}_wins"] / df[f"_safe_{col}_runs"],
-            0.0,
-        )
+        df[f"{col}_win_rate"] = _rate(df[f"_safe_{col}_wins"], df[f"_safe_{col}_runs"])
         # Bayesian shrink towards typical population prior
         df[f"{col}_win_rate_shrunk"] = _bayesian_shrink(
             df[f"{col}_win_rate"], df[f"_safe_{col}_runs"],
             prior_rate=0.10, prior_strength=20.0,
         )
 
-        df[f"{col}_place_rate"] = np.where(
-            df[f"_safe_{col}_runs"] > 0,
-            df[f"_safe_{col}_places"] / df[f"_safe_{col}_runs"],
-            0.0,
-        )
+        df[f"{col}_place_rate"] = _rate(df[f"_safe_{col}_places"], df[f"_safe_{col}_runs"])
         df[f"{col}_place_rate_shrunk"] = _bayesian_shrink(
             df[f"{col}_place_rate"], df[f"_safe_{col}_runs"],
             prior_rate=0.30, prior_strength=20.0,
@@ -3221,11 +3306,12 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
                 )
 
                 temp_cols.extend([temp_runs, temp_wins, temp_places])
+                df = _defrag(df, max_blocks=_MID_STAGE_BLOCKS)
 
             # Drop temporary conditional indicator columns
-            df = df.drop(columns=["_temp_runs_cond", "_temp_wins_cond", "_temp_places_cond"], errors="ignore")
+            df = _without(df, ["_temp_runs_cond", "_temp_wins_cond", "_temp_places_cond"])
 
-        df = df.drop(columns=temp_cols, errors="ignore")
+        df = _without(df, temp_cols)
         # All cards for a day are predicted before any of that day's results
         # exist. Progeny in later races must share the day's opening history.
         pedigree_cols = [c for c in df.columns if c.startswith(f"{col}_")
@@ -3286,13 +3372,14 @@ def add_prize_money_features(df: pd.DataFrame) -> pd.DataFrame:
     df["prize_money"] = df["prize_money"].fillna(0)
     horse_groups = df.groupby(hkey)
 
-    # Maximum purse the horse has CONTESTED, excluding the current race.
+    # Maximum purse the horse has CONTESTED, excluding the current race;
+    # missing for a debutant.
     # NB: the shift MUST be inside transform — a bare
     # groupby().cummax().shift(1) shifts globally across horses and, with
     # raw rows in finish order, leaks finish position (CLAUDE.md rule 1).
     df["horse_max_prize_contested"] = _running_extreme(
         df, hkey, "prize_money", kind="max", prev=True
-    ).fillna(0)
+    )
     
     # Cumsum / count to avoid expanding().mean() issues:
     df["_safe_cum_prize"] = _cumulative(
@@ -3300,14 +3387,14 @@ def add_prize_money_features(df: pd.DataFrame) -> pd.DataFrame:
         {"_safe_cum_prize": df["prize_money"].to_numpy()},
     )["_safe_cum_prize"]
     hp_races = df.get("horse_prev_races", pd.Series(0, index=df.index))
-    df["horse_avg_prize_contested"] = np.where(
-        hp_races > 0,
-        df["_safe_cum_prize"] / hp_races,
-        0.0
-    )
-    
-    # Difference vs typical class
-    df["prize_money_change_vs_avg"] = df["prize_money"] - df["horse_avg_prize_contested"]
+    df["horse_avg_prize_contested"] = _rate(df["_safe_cum_prize"], hp_races)
+
+    # Change vs typical class on a log scale. Purses are heavily skewed
+    # (median about £5k, 99th percentile about £94k), so a £ difference is
+    # dominated by the few big races. An unknown purse (0) leaves it missing.
+    current = df["prize_money"].where(df["prize_money"] > 0)
+    typical = df["horse_avg_prize_contested"].where(df["horse_avg_prize_contested"] > 0)
+    df["prize_money_change_vs_avg"] = np.log1p(current) - np.log1p(typical)
     
     # Flag for severe class jumps based on money
     df["stepping_up_in_purse"] = (
@@ -3315,7 +3402,7 @@ def add_prize_money_features(df: pd.DataFrame) -> pd.DataFrame:
         (df["prize_money"] > df["horse_max_prize_contested"] * 1.5)
     ).astype(np.int8)
     
-    df = df.drop(columns=["_safe_cum_prize"], errors="ignore")
+    df = _without(df, ["_safe_cum_prize"])
     return df
 
 
@@ -3407,7 +3494,11 @@ def add_trainer_runner_intent_features(df: pd.DataFrame) -> pd.DataFrame:
     df["trainer_has_multiple_runners"] = (trainer_runners > 1).astype(np.int8)
 
     if "official_rating" in df.columns:
-        df["trainer_runner_rank_by_or"] = df.groupby(["race_id", "trainer"])["official_rating"].rank(
+        # Observed marks only (an unrated runner has no place in the OR order).
+        from src.feature_semantics import observed_rating
+        _mark = observed_rating(df)
+        _stable = [df["race_id"], df["trainer"]]
+        df["trainer_runner_rank_by_or"] = _mark.groupby(_stable).rank(
             ascending=False,
             method="min",
         )
@@ -3415,8 +3506,8 @@ def add_trainer_runner_intent_features(df: pd.DataFrame) -> pd.DataFrame:
             (df["trainer_has_multiple_runners"] == 1)
             & (df["trainer_runner_rank_by_or"] == 1)
         ).astype(np.int8)
-        stable_best_or = df.groupby(["race_id", "trainer"])["official_rating"].transform("max")
-        df["trainer_or_vs_best_stablemate"] = df["official_rating"] - stable_best_or
+        stable_best_or = _mark.groupby(_stable).transform("max")
+        df["trainer_or_vs_best_stablemate"] = _mark - stable_best_or
 
     if "horse_elo" in df.columns:
         df["trainer_runner_rank_by_elo"] = df.groupby(["race_id", "trainer"])["horse_elo"].rank(
@@ -3517,14 +3608,16 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
     _rs = (df["_result_start"] if "_result_start" in df
            else _add_result_history_flags(df.copy())["_result_start"]).to_numpy()
 
-    # Draw advantage (normalized by field size)
-    df["draw_pct"] = df["draw"] / df["num_runners"]
+    # Draw advantage as a share of the highest stall drawn in the race.
     # Jumps/bumpers have no starting stalls, so draw == 0 is "no draw", NOT the
     # innermost stall (real flat draws are >= 1). Mark these missing so the
     # model isn't told every jumps horse is best-drawn, and so the per-track
     # draw-third stats below are computed over stalls races only (NaN draw_pct
-    # falls outside the low/mid/high bins).
-    df["draw_pct"] = df["draw_pct"].where(df["draw"] > 0)
+    # falls outside the low/mid/high bins). Dividing by ``num_runners`` (the
+    # field after non-runners) put draws above 1 in 6.8% of drawn rows.
+    _stall = pd.to_numeric(df["draw"], errors="coerce")
+    _stall = _stall.where(_stall > 0)
+    df["draw_pct"] = _stall / _stall.groupby(df["race_id"]).transform("max")
 
     # ── Track-specific draw bias ─────────────────────────────────
     # Per-track draw-position win-rate (point-in-time, no leakage).
@@ -3568,10 +3661,11 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
                 df.loc[mask, "track_draw_wr_wins"] = df.loc[mask, w_col]
                 df.loc[mask, "track_draw_wr_runs"] = df.loc[mask, r_col]
 
+        # Missing below 6 prior runs: a 0 would read as "this draw never wins".
         df["track_draw_win_rate"] = np.where(
             df["track_draw_wr_runs"] > 5,
             df["track_draw_wr_wins"] / df["track_draw_wr_runs"],
-            0.0,
+            np.nan,
         )
 
         # Match the pre-race card view: exclude earlier races on this day.
@@ -3582,7 +3676,7 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
         # Clean up
         drop_cols = ["_draw_third", "track_draw_wr_wins", "track_draw_wr_runs"]
         drop_cols += [c for c in df.columns if c.startswith("_td_")]
-        df = df.drop(columns=drop_cols, errors="ignore")
+        df = _without(df, drop_cols)
 
     # ── Draw × distance × field size interactions ────────────────
     # Draw matters enormously in sprints (especially ≤6f) on tight
@@ -3674,9 +3768,13 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
     # Handicap features
     if "handicap" in df.columns:
         df["handicap"] = df["handicap"].fillna(0).astype(int)
-        # OR x handicap interaction — OR is most meaningful in handicaps
+        # OR x handicap interaction — OR is most meaningful in handicaps.
+        # Missing for an unrated handicapper, not the race-median stand-in.
         if "official_rating" in df.columns:
-            df["or_x_handicap"] = df["official_rating"] * df["handicap"]
+            from src.feature_semantics import observed_rating
+            df["or_x_handicap"] = (
+                (observed_rating(df) * df["handicap"]).where(df["handicap"].ne(0), 0.0)
+            )
 
     # --- Odds coefficient of variation (field competitiveness) ---
     if "odds" in df.columns:
@@ -3692,10 +3790,12 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
             ascending=False, method="min"
         )
 
-    # --- OR vs top-rated in race ---
+    # --- OR vs top-rated in race (observed marks only) ---
     if "official_rating" in df.columns:
-        race_max_or = df.groupby("race_id")["official_rating"].transform("max")
-        df["or_vs_top"] = df["official_rating"] - race_max_or
+        from src.feature_semantics import observed_rating
+        _mark = observed_rating(df)
+        race_max_or = _mark.groupby(df["race_id"]).transform("max")
+        df["or_vs_top"] = _mark - race_max_or
 
     # --- Age group buckets ---
     if "age" in df.columns:
@@ -3722,30 +3822,29 @@ def add_field_quality_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     logger.info("Engineering field quality features...")
 
-    # Average official rating of the race field
+    # Official-rating context of the race field, from observed marks only.
+    # data_processor gives an unrated runner the race-median OR; ranking and
+    # spreading those stand-ins described the field as rated when it is not.
+    # Missing where the race has too few rated runners to say.
     if "official_rating" in df.columns:
-        df["field_avg_or"] = df.groupby("race_id")["official_rating"].transform("mean")
-        df["field_std_or"] = df.groupby("race_id")["official_rating"].transform("std").fillna(0)
-        race_max_or = df.groupby("race_id")["official_rating"].transform("max")
-        race_min_or = df.groupby("race_id")["official_rating"].transform("min")
-        # Vectorised second-largest: rank descending, map rank==2 back
-        _or_rnk = df.groupby("race_id")["official_rating"].rank(ascending=False, method="first")
-        _second_map = df.loc[_or_rnk == 2, ["race_id", "official_rating"]]\
-            .drop_duplicates("race_id").set_index("race_id")["official_rating"]
-        _max_map = df.groupby("race_id")["official_rating"].max()
-        race_second_or = df["race_id"].map(
-            _second_map.reindex(_max_map.index).fillna(_max_map)
-        )
-        df["or_rank_in_race"] = df.groupby("race_id")["official_rating"].rank(
-            ascending=False, method="min"
-        )
+        from src.feature_semantics import observed_rating
+        _mark = observed_rating(df)
+        _by_race = _mark.groupby(df["race_id"])
+        df["field_avg_or"] = _by_race.transform("mean")
+        df["field_std_or"] = _by_race.transform("std")
+        race_max_or = _by_race.transform("max")
+        race_min_or = _by_race.transform("min")
+        _or_rnk = _by_race.rank(ascending=False, method="first")
+        race_second_or = _mark.where(_or_rnk.eq(2)).groupby(df["race_id"]).transform("max")
+        df["or_rank_in_race"] = _by_race.rank(ascending=False, method="min")
         df["field_or_range"] = race_max_or - race_min_or
         df["field_top2_or_gap"] = race_max_or - race_second_or
-        df["or_vs_second_top"] = df["official_rating"] - race_second_or
+        df["or_vs_second_top"] = _mark - race_second_or
 
-    # Average Elo of the race field
+    # Elo spread of the race field. ``field_avg_elo`` itself is the
+    # opposition mean excluding the horse (add_opposition_strength_features);
+    # it is not recomputed here, so the column and its rolling history agree.
     if "horse_elo" in df.columns:
-        df["field_avg_elo"] = df.groupby("race_id")["horse_elo"].transform("mean")
         df["field_std_elo"] = df.groupby("race_id")["horse_elo"].transform("std").fillna(0)
         race_max_elo = df.groupby("race_id")["horse_elo"].transform("max")
         race_min_elo = df.groupby("race_id")["horse_elo"].transform("min")
@@ -3781,18 +3880,20 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Engineering target-encoded features …")
     hkey = _horse_key(df)
 
-    # Normalised position: 0 = winner, 1 = last  (same as model's norm_pos)
-    nr = df["num_runners"].replace(0, 1).values.astype(np.float32)
-    finish_pos_for_te = df.get("_finish_pos_for_history", df["finish_position"])
-    df["_norm_pos"] = (
-        (finish_pos_for_te.values.astype(np.float32) - 1)
-        / np.maximum(nr - 1, 1)
-    )
+    # Normalised position: 0 = winner, 1 = last, a non-finish counted as
+    # last (see ``_add_result_history_flags``). Leaving non-finishes out made
+    # a jockey or trainer whose runners keep falling look better than one
+    # whose runners finish down the field.
+    if "_norm_pos_for_history" in df.columns:
+        df["_norm_pos"] = df["_norm_pos_for_history"].astype(np.float32)
+    else:
+        nr = df["num_runners"].replace(0, 1).values.astype(np.float32)
+        df["_norm_pos"] = (
+            (df["finish_position"].values.astype(np.float32) - 1)
+            / np.maximum(nr - 1, 1)
+        )
     df["_norm_pos_safe"] = df["_norm_pos"].fillna(0.0)
-    df["_norm_pos_weight"] = df.get(
-        "_finished_result",
-        df["_norm_pos"].notna().astype(np.int8),
-    ).astype(np.float32)
+    df["_norm_pos_weight"] = df["_norm_pos"].notna().astype(np.float32)
 
     # Use the expanding mean (prior-only) as the global prior so it
     # doesn't peek at future races.  The expanding mean converges
@@ -3844,7 +3945,7 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
     if "jockey" in df.columns and "trainer" in df.columns:
         df["_jt_combo"] = df["jockey"].astype(str) + "_" + df["trainer"].astype(str)
         _te("_jt_combo", "jt", race_safe=True)
-        df = df.drop(columns=["_jt_combo"], errors="ignore")
+        df = _without(df, ["_jt_combo"])
 
     # ── Windowed target encodings (recent-form baselines) ────────────────
     # These complement the lifetime cumulative encodings above.  Under
@@ -3994,13 +4095,13 @@ def add_target_encoded_features(df: pd.DataFrame) -> pd.DataFrame:
     if "jockey" in df.columns and "trainer" in df.columns:
         df["_jt_combo"] = df["jockey"].astype(str) + "_" + df["trainer"].astype(str)
         df = _entity_day_start_view(df, ["_jt_combo"], _te_cols("jt"))
-        df = df.drop(columns=["_jt_combo"], errors="ignore")
+        df = _without(df, ["_jt_combo"])
     if "track" in df.columns:
         df = _entity_day_start_view(df, ["track"], _te_cols("track"))
     if "going" in df.columns:
         df = _entity_day_start_view(df, ["going"], _te_cols("going"))
 
-    df = df.drop(columns=["_norm_pos", "_norm_pos_safe", "_norm_pos_weight"], errors="ignore")
+    df = _without(df, ["_norm_pos", "_norm_pos_safe", "_norm_pos_weight"])
     return df
 
 
@@ -4067,7 +4168,7 @@ def add_opposition_strength_features(df: pd.DataFrame) -> pd.DataFrame:
     _vs_ops = [("elo_vs_field_ewma", "ewma", _ewma_alpha)]
     for name, arr in _rolling(df,hkey, "_elo_vs_opp", _vs_ops).items():
         df[name] = arr
-    df = df.drop(columns=["_elo_vs_opp"], errors="ignore")
+    df = _without(df, ["_elo_vs_opp"])
 
     # Leave cold-start opposition features missing. Tree learners can
     # branch on missingness directly, which is preferable to inventing a
@@ -4100,15 +4201,14 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["jockey_going_runs"] = _jg["jockey_going_runs"]
         df["_jg_w"] = _jg["_jg_w"]
-        df["jockey_going_wr"] = np.where(
-            df["jockey_going_runs"] > 2,
-            df["_jg_w"] / df["jockey_going_runs"],
-            0,
-        )
+        df["jockey_going_wr"] = _rate(df["_jg_w"], df["jockey_going_runs"])
         df = _entity_day_start_view(
             df, ["jockey", "going"], ["jockey_going_runs", "jockey_going_wr"]
         )
-        df = df.drop(columns=["_jg_w"], errors="ignore")
+        df["jockey_going_wr"] = _shrink_to_entity(
+            df, "jockey_going_wr", "jockey_going_runs", "jockey"
+        )
+        df = _without(df, ["_jg_w"])
 
     # --- Jockey × distance category ---
     if "dist_category" in df.columns:
@@ -4119,15 +4219,14 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["jockey_dist_cat_runs"] = _jdc["jockey_dist_cat_runs"]
         df["_jdc_w"] = _jdc["_jdc_w"]
-        df["jockey_dist_cat_wr"] = np.where(
-            df["jockey_dist_cat_runs"] > 2,
-            df["_jdc_w"] / df["jockey_dist_cat_runs"],
-            0,
-        )
+        df["jockey_dist_cat_wr"] = _rate(df["_jdc_w"], df["jockey_dist_cat_runs"])
         df = _entity_day_start_view(
             df, ["jockey", "_dc_str"], ["jockey_dist_cat_runs", "jockey_dist_cat_wr"]
         )
-        df = df.drop(columns=["_dc_str", "_jdc_w"], errors="ignore")
+        df["jockey_dist_cat_wr"] = _shrink_to_entity(
+            df, "jockey_dist_cat_wr", "jockey_dist_cat_runs", "jockey"
+        )
+        df = _without(df, ["_dc_str", "_jdc_w"])
 
     # --- Horse × going (win rate on this going type) ---
     if "going" in df.columns:
@@ -4139,12 +4238,8 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["horse_going_runs"] = _hg["horse_going_runs__xent"]
         df["_hg_w"] = _hg["_hg_w"]
-        df["horse_going_wr"] = np.where(
-            df["horse_going_runs"] > 0,
-            df["_hg_w"] / df["horse_going_runs"],
-            0,
-        )
-        df = df.drop(columns=["_hg_w"], errors="ignore")
+        df["horse_going_wr"] = _rate(df["_hg_w"], df["horse_going_runs"])
+        df = _without(df, ["_hg_w"])
 
     # --- Horse × going × distance rounded (C&D&G specialisation) ---
     if "going" in df.columns and "distance_furlongs" in df.columns:
@@ -4155,12 +4250,8 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["horse_going_dist_runs"] = _hgd["horse_going_dist_runs"]
         df["_hgd_w"] = _hgd["_hgd_w"]
-        df["horse_going_dist_wr"] = np.where(
-            df["horse_going_dist_runs"] > 0,
-            df["_hgd_w"] / df["horse_going_dist_runs"],
-            0,
-        )
-        df = df.drop(columns=["_dist_r2", "_hgd_w"], errors="ignore")
+        df["horse_going_dist_wr"] = _rate(df["_hgd_w"], df["horse_going_dist_runs"])
+        df = _without(df, ["_dist_r2", "_hgd_w"])
 
     # --- Trainer × race class (race-safe) ---
     if "race_class" in df.columns:
@@ -4171,15 +4262,14 @@ def add_cross_entity_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df["trainer_class_runs"] = _tc["trainer_class_runs"]
         df["_tc_w"] = _tc["_tc_w"]
-        df["trainer_class_wr"] = np.where(
-            df["trainer_class_runs"] > 2,
-            df["_tc_w"] / df["trainer_class_runs"],
-            0,
-        )
+        df["trainer_class_wr"] = _rate(df["_tc_w"], df["trainer_class_runs"])
         df = _entity_day_start_view(
             df, ["_tc_key"], ["trainer_class_runs", "trainer_class_wr"]
         )
-        df = df.drop(columns=["_tc_w", "_tc_key"], errors="ignore")
+        df["trainer_class_wr"] = _shrink_to_entity(
+            df, "trainer_class_wr", "trainer_class_runs", "trainer"
+        )
+        df = _without(df, ["_tc_w", "_tc_key"])
 
     return df
 
@@ -4257,15 +4347,15 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
         ("_pos_min_10", "min", 10),
         ("horse_pos_stddev_10", "std", 10),
     ]
+    # On the field-share position (non-finish = last); missing without
+    # enough prior runs rather than a placeholder spread.
     _range_results = _rolling(
-        df, hkey, "_finish_pos_for_history", _range_ops,
+        df, hkey, "_norm_pos_for_history", _range_ops,
     )
     df["horse_pos_range_10"] = (
         _range_results["_pos_max_10"] - _range_results["_pos_min_10"]
     )
     df["horse_pos_stddev_10"] = _range_results["horse_pos_stddev_10"]
-    df["horse_pos_range_10"] = df["horse_pos_range_10"].fillna(0)
-    df["horse_pos_stddev_10"] = df["horse_pos_stddev_10"].fillna(3.0)
 
     # Unlucky loser rate: places but doesn't win
     if "horse_place_rate_shrunk" in df.columns and "horse_win_rate_shrunk" in df.columns:
@@ -4301,23 +4391,24 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[df["horse_best_class_won"] == np.inf, "horse_best_class_won"] = np.nan
         df["horse_best_class_won"] = _lag(df, hkey, "horse_best_class_won")
         df["horse_best_class_won"] = df["horse_best_class_won"].fillna(7)
-        df = df.drop(columns=["_wc_filled"], errors="ignore")
+        df = _without(df, ["_wc_filled"])
 
         # Current class vs best proven level (negative = below proven)
         df["class_vs_best_won"] = _class_num - df["horse_best_class_won"]
 
-        df = df.drop(columns=["_class_num_tmp", "_win_class"], errors="ignore")
+        df = _without(df, ["_class_num_tmp", "_win_class"])
 
     # ── Campaign Intensity ─────────────────────────────────────
     if "race_date" in df.columns:
         count_source = "_result_start_for_history" if "_result_start_for_history" in df.columns else "_ones"
         if count_source == "_ones":
             df["_ones"] = 1.0
-        _, cnt_14 = _time_window(df, hkey, "race_date", count_source, 14)
-        _, cnt_30 = _time_window(df, hkey, "race_date", count_source, 30)
-        df["races_in_last_14d"] = cnt_14
-        df["races_in_last_30d"] = cnt_30
-        df = df.drop(columns=["_ones"], errors="ignore")
+        # Sum the start flags rather than count rows: a non-start is not a run.
+        starts_14, _ = _time_window(df, hkey, "race_date", count_source, 14)
+        starts_30, _ = _time_window(df, hkey, "race_date", count_source, 30)
+        df["races_in_last_14d"] = starts_14
+        df["races_in_last_30d"] = starts_30
+        df = _without(df, ["_ones"])
 
     # ── Trainer Switch ──
     if "trainer" in df.columns:
@@ -4327,7 +4418,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
             df["_prev_trainer"].notna()
             & (df["trainer"] != df["_prev_trainer"])
         ).astype(np.int8)
-        df = df.drop(columns=["_prev_trainer"], errors="ignore")
+        df = _without(df, ["_prev_trainer"])
 
     # ── Same-trainer runners in race ──
     if "trainer" in df.columns:
@@ -4347,7 +4438,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
         df["n_prev_winners_in_field"] = df.groupby("race_id")[
             "_has_won_before"
         ].transform("sum")
-        df = df.drop(columns=["_has_won_before"], errors="ignore")
+        df = _without(df, ["_has_won_before"])
 
     if "horse_prev_races" in df.columns:
         _med_runs = df.groupby("race_id")["horse_prev_races"].transform("median")
@@ -4371,11 +4462,10 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
         ("_pos_min_5", "min", 5),
     ]
     _cons_results = _rolling(
-        df, hkey, "_finish_pos_for_history", _cons_ops,
+        df, hkey, "_norm_pos_for_history", _cons_ops,
     )
-    df["horse_pos_stddev_5"] = np.where(np.isnan(_cons_results["horse_pos_stddev_5"]), 3.0, _cons_results["horse_pos_stddev_5"])
-    _range_raw = _cons_results["_pos_max_5"] - _cons_results["_pos_min_5"]
-    df["horse_pos_range_5"] = np.where(np.isnan(_range_raw), 0.0, _range_raw)
+    df["horse_pos_stddev_5"] = _cons_results["horse_pos_stddev_5"]
+    df["horse_pos_range_5"] = _cons_results["_pos_max_5"] - _cons_results["_pos_min_5"]
 
     # ── Beaten-lengths consistency ───────────────────────────────
     if "lengths_behind" in df.columns:
@@ -4383,7 +4473,7 @@ def add_supplementary_features(df: pd.DataFrame) -> pd.DataFrame:
             df, hkey, "beaten_lengths" if "beaten_lengths" in df else "lengths_behind",
             [("horse_lb_stddev_5", "std", 5)],
         )
-        df["horse_lb_stddev_5"] = np.where(np.isnan(_lb_cons["horse_lb_stddev_5"]), 3.0, _lb_cons["horse_lb_stddev_5"])
+        df["horse_lb_stddev_5"] = _lb_cons["horse_lb_stddev_5"]
 
     # ── Distance versatility ─────────────────────────────────────
     # Std of finish positions across different distance categories.
@@ -4428,25 +4518,39 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
         grouped = numeric_frame.groupby(race_ids)
         race_mean = grouped.transform("mean")
         race_std = grouped.transform("std").fillna(0.0)
-        race_best = grouped.transform("max" if higher_is_better else "min")
+
+        # ``_vs_best_in_race`` compares each runner with the best *other*
+        # runner, so the leader keeps its margin over the next best instead
+        # of reading 0 like everyone level with it.
+        oriented = numeric_frame if higher_is_better else -numeric_frame
+        race_top = oriented.groupby(race_ids).transform("max")
+        is_top = oriented.eq(race_top)
+        sole_top = is_top & is_top.groupby(race_ids).transform("sum").eq(1)
+        runner_up = oriented.where(~is_top).groupby(race_ids).transform("max")
+        best_other = race_top.where(~sole_top, runner_up)
 
         signed_vs_field = numeric_frame - race_mean if higher_is_better else race_mean - numeric_frame
-        signed_vs_best = numeric_frame - race_best if higher_is_better else race_best - numeric_frame
+        signed_vs_best = (oriented - best_other).astype("float64")
         rank_pct = numeric_frame.groupby(race_ids).rank(
             ascending=not higher_is_better,
             pct=True,
             method="average",
         )
 
+        # A missing base value stays missing in every transform; filling it
+        # with 0 made "no data" read as field average or level with the best.
         for col in valid_cols:
-            relative_cols[f"{col}_vs_field"] = signed_vs_field[col] if col == "class_change" else signed_vs_field[col].fillna(0.0)
-            relative_cols[f"{col}_z_in_race"] = np.where(
-                race_std[col] > 1e-12,
-                signed_vs_field[col] / race_std[col],
-                0.0,
-            )
-            relative_cols[f"{col}_rank_pct_in_race"] = rank_pct[col].fillna(0.5)
-            relative_cols[f"{col}_vs_best_in_race"] = signed_vs_best[col].fillna(0.0)
+            relative_cols[f"{col}_vs_field"] = signed_vs_field[col]
+            relative_cols[f"{col}_z_in_race"] = pd.Series(
+                np.where(
+                    race_std[col] > 1e-12,
+                    signed_vs_field[col] / race_std[col],
+                    0.0,
+                ),
+                index=df.index,
+            ).where(numeric_frame[col].notna())
+            relative_cols[f"{col}_rank_pct_in_race"] = rank_pct[col]
+            relative_cols[f"{col}_vs_best_in_race"] = signed_vs_best[col]
 
     higher_better_cols = [
         "horse_win_rate_shrunk",
@@ -4478,7 +4582,7 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
         "jt_prev_runs",
         "trainer_prev_runs",
         "trainer_freq",
-        "trainer_elo_vs_field",
+        "trainer_elo",
         "trainer_win_rate_shrunk",
         "trainer_place_rate_shrunk",
         "trainer_wr_14d",
@@ -4500,11 +4604,11 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
         "field_avg_elo_5",
         "field_avg_elo_10",
         "field_avg_elo_ewma",
+        # Bases are raw values, never ``*_vs_field`` columns: centring an
+        # already-centred column reproduces it exactly.
         "horse_elo_momentum",
-        "horse_elo_momentum_vs_field",
         "horse_margin_elo_momentum",
-        "horse_margin_elo_momentum_vs_field",
-        "combined_elo_vs_field",
+        "combined_elo",
         "horse_elo_surface_edge",
         "horse_elo_rt_edge",
         "horse_elo_dist_cat_edge",
@@ -4618,19 +4722,22 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
                 method="average",
             )
             for col in valid_context_cols:
-                relative_cols[f"{col}_vs_field"] = signed_vs_field[col] if col == "or_change" else signed_vs_field[col].fillna(0.0)
-                relative_cols[f"{col}_z_in_race"] = np.where(
-                    race_std[col] > 1e-12,
-                    signed_vs_field[col] / race_std[col],
-                    0.0,
-                )
-                relative_cols[f"{col}_abs_rank_pct_in_race"] = abs_rank[col].fillna(0.5)
+                relative_cols[f"{col}_vs_field"] = signed_vs_field[col]
+                relative_cols[f"{col}_z_in_race"] = pd.Series(
+                    np.where(
+                        race_std[col] > 1e-12,
+                        signed_vs_field[col] / race_std[col],
+                        0.0,
+                    ),
+                    index=df.index,
+                ).where(context_frame[col].notna())
+                relative_cols[f"{col}_abs_rank_pct_in_race"] = abs_rank[col]
 
     if relative_cols:
         overlap = [col for col in relative_cols if col in df.columns]
         if overlap:
-            df = df.drop(columns=overlap)
-        df = pd.concat([df, pd.DataFrame(relative_cols, index=df.index)], axis=1)
+            df = _without(df, overlap)
+        df = _with_columns(df, pd.DataFrame(relative_cols, index=df.index))
 
     composite_cols: dict[str, pd.Series] = {}
 
@@ -4692,7 +4799,7 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
     )
 
     if composite_cols:
-        df = pd.concat([df, pd.DataFrame(composite_cols, index=df.index)], axis=1)
+        df = _with_columns(df, pd.DataFrame(composite_cols, index=df.index))
 
     return df
 
@@ -4704,6 +4811,7 @@ def engineer_features(
     skip_ratings: bool = False,
     counts_state: dict | None = None,
     defer_global_imputation: bool = False,
+    half: str | None = None,
 ) -> pd.DataFrame:
     """
     Full feature engineering pipeline.
@@ -4718,20 +4826,25 @@ def engineer_features(
             the full history on every append (the sweeps are ~47% of FE).
             Downstream rating-dependent stages then read those columns
             directly.
+        half: Lets two processes share a build. ``"first"`` stops after
+            ``add_atr_features`` and returns the working frame; ``"second"``
+            takes that frame and finishes it. Each half carries its own
+            ``counts_state``, so no entity may be tracked on both sides.
 
     Returns:
         DataFrame with all engineered features
     """
-    logger.info(f"Starting feature engineering on {len(df)} records...")
+    if half != "second":
+        logger.info(f"Starting feature engineering on {len(df)} records...")
 
-    # Ensure race_date is proper datetime (CSV round-trip turns it to str)
-    df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
+        # Ensure race_date is proper datetime (CSV round-trip turns it to str)
+        df["race_date"] = pd.to_datetime(df["race_date"], errors="coerce")
 
-    # Sort once — every sub-function needs chronological order for
-    # cumsum / rolling / shift.  Sorting here avoids 12 redundant sorts.
-    df["_event_dt"] = _event_sort_key(df)
-    df = df.sort_values(["_event_dt", "race_id"]).copy()
-    df = _add_result_history_flags(df)
+        # Sort once — every sub-function needs chronological order for
+        # cumsum / rolling / shift.  Sorting here avoids 12 redundant sorts.
+        df["_event_dt"] = _event_sort_key(df)
+        df = df.sort_values(["_event_dt", "race_id"]).copy()
+        df = _add_result_history_flags(df)
 
     # Pipeline stages run in order; each must see the columns its
     # predecessors added (dependency notes kept beside the entries).
@@ -4768,7 +4881,7 @@ def engineer_features(
         # side effect, or those stages sort by the finer ``_event_dt`` and the
         # rolling/EWMA features (field_avg_elo_*, speed_fig_*, speed_z_class_*)
         # diverge from a full inline build. See tests/test_feature_store.py.
-        stages.append(lambda d: d.drop(columns=["_event_dt"], errors="ignore"))
+        stages.append(lambda d: _without(d, ["_event_dt"]))
     stages += [
         add_opposition_strength_features,  # needs horse_elo
         add_headgear_features,
@@ -4791,6 +4904,9 @@ def engineer_features(
         add_prior_market_features,         # independent prior-day history, appended after existing stages
         add_rtv_features,                  # quality-filtered mature prior runs and observed pre-race context
     ]
+    if half is not None:
+        handover = stages.index(add_atr_features) + 1
+        stages = stages[:handover] if half == "first" else stages[handover:]
     _profile = os.environ.get("FE_PROFILE")
     # A seeded counts_state (FeatureStore append) makes class-C stages resume
     # from carried state instead of recomputing history; None = full build.
@@ -4812,6 +4928,9 @@ def engineer_features(
             for stage in stages:
                 df = stage(df)
                 df = _defrag(df)
+
+    if half == "first":
+        return df
 
     # Final consolidation before the NaN-handling block below.
     df = _defrag(df, max_blocks=0)
@@ -4838,17 +4957,9 @@ def engineer_features(
         if c in df.columns:
             df[c] = df[c].fillna(fill_val)
 
-    # Win-rate columns: shrunk versions already handle cold-start;
-    # raw rates just need 0 (no history = no wins)
-    # Days columns: fill with "no recent run"
-    if "days_since_last_race" in df.columns:
-        df["days_since_last_race"] = df["days_since_last_race"].fillna(60)
-    if "days_log" in df.columns:
-        df["days_log"] = df["days_log"].fillna(np.log1p(60))
-    if "days_since_last_win" in df.columns:
-        df["days_since_last_win"] = df["days_since_last_win"].fillna(365)
-    if "horse_avg_lb_behind" in df.columns:
-        df["horse_avg_lb_behind"] = df["horse_avg_lb_behind"].fillna(3.0)
+    # History columns (days since a run or win, raw rates, form) stay
+    # missing for a horse without that history: a placeholder such as 60
+    # days or a 0 rate reads as a real, specific record.
 
     # Weather columns: fill with UK averages
     weather_defaults = {
@@ -4861,17 +4972,18 @@ def engineer_features(
             df[c] = df[c].fillna(val)
 
     # Drop temporary sort helper.
-    df = df.drop(columns=[
+    df = _without(df, [
         "_event_dt",
         "_finished_result",
         "_non_finisher_result",
         "_result_start",
         "_finish_pos_for_history",
+        "_norm_pos_for_history",
         "_won_for_history",
         "_placed_for_history",
         "_result_start_for_history",
         "_non_finisher_for_history",
-    ], errors="ignore")
+    ])
 
     if save:
         output_path = os.path.join(

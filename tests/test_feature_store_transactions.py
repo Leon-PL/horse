@@ -208,7 +208,7 @@ def test_batched_rebuild_failure_preserves_store(store, rows, monkeypatch):
     with monkeypatch.context() as patch:
         def broken(*args, **kwargs):
             raise OSError("injected consolidation failure")
-        patch.setattr(batched, "combine_parquet_parts", broken)
+        patch.setattr(batched, "_finish_featured", broken)
         with pytest.raises(OSError, match="injected consolidation failure"):
             batched.main()
     assert _snapshot(store) == original

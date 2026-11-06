@@ -6,8 +6,8 @@ feature-signature guard forces a clean rebuild whenever the FE code or its
 config flags change, so adopting the store never silently serves stale features.
 
 This is the seam that ``train.py`` / ``app.py`` should consume instead of
-calling ``engineer_features`` directly. See ``docs/FE_REFACTOR_PLAN.md`` and
-``docs/FE_TAXONOMY.md``.
+calling ``engineer_features`` directly. See ``docs/architecture/FE_REFACTOR_PLAN.md`` and
+``docs/architecture/FE_TAXONOMY.md``.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Config flags that change FE output. Keep in sync with the flags read at
 # runtime by feature_engineer.py / ratings.py (see the audit grep in
-# docs/FE_REFACTOR_PLAN.md). A change to any of these invalidates the store.
+# docs/architecture/FE_REFACTOR_PLAN.md). A change to any of these invalidates the store.
 FE_CONFIG_KEYS = [
     "ROLLING_WINDOWS",
     "GLICKO_ENABLED", "GLICKO_JOCKEY_TRAINER", "GLICKO_DIMENSIONAL",
@@ -52,10 +52,11 @@ FE_CONFIG_KEYS = [
 #: is how the 2026-06 "place-market edge" mirage happened.
 _FE_SOURCE_FILES = (
     "src/verified_race_metadata.py", "reference/verified_race_types.json",
-    "reference/verified_runner_ratings.json",
+    "reference/verified_runner_ratings.json", "reference/connection_aliases.json",
     "src/prize_currency_features.py", "reference/track_prize_currency.json",
     "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
-    "src/result_margins.py",
+    "src/trueskill_kernel.py",
+    "src/result_margins.py", "src/runner_identity.py",
     "src/result_status.py", "src/rating_reuse.py",
     "src/feature_semantics.py", "src/audited_surface_features.py",
     "src/established_form_features.py",
@@ -63,7 +64,7 @@ _FE_SOURCE_FILES = (
     "scripts/build_feature_store_batched.py",
     "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
     "src/atr_features.py",
-    "src/rtv_features.py",
+    "src/rtv_features.py", "src/rtv_text.py",
     "src/pedigree_backfill.py", "src/track_config.py", "src/utils.py",
     # Merge/column contract consumed by an FE stage: the sectional joins feed
     # add_atr_features.
@@ -78,14 +79,33 @@ _FE_SOURCE_FILES = (
 #: :func:`data_signature`; downstream consumers only read features.
 FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "database": "raw-data access only; values covered by data_signature",
+    "identity_schema": "source-table and repair-receipt migrations only; accepted values covered by data_signature",
     "data_scraper": "raw-data access only; values covered by data_signature",
-    "data_collector": "raw-data access only; values covered by data_signature",
+    "rtv_scraper": "compatibility import for the raw RTV collector; published values covered by rtv_cache_signature",
+    "ingestion": "collection namespace only; no feature calculations or import-time collection",
+    "ingestion.pipeline": "source orchestration only; published observations covered by data and RTV signatures",
+    "ingestion.auxiliary": "collects raw ATR/BSP only; accepted values covered by source-content signatures",
+    "ingestion.storage": "source locking, raw retention and atomic publication only",
+    "ingestion.rtv_storage": "resolves published source generations covered by rtv_cache_signature",
+    "ingestion.sporting_life": "raw-data access only; accepted observations covered by data_signature",
+    "ingestion.racing_tv": "collects raw RTV payloads; published observations covered by rtv_cache_signature",
+    "ingestion.betfair_history": "collects historical market files; accepted prices are raw observations fingerprinted by training/evaluation",
+    "ingestion.betfair_credentials": "encrypted historical-data login setup only; cannot change feature values",
+    "source_storage": "source locking, raw retention and publication only; values covered by source/data signatures",
+    "source_pipeline": "source orchestration only; published observations covered by data and RTV signatures",
+    "rtv_storage": "resolves published source generations only; their values are covered by rtv_cache_signature",
+    "source_auxiliary": "collects raw ATR/BSP sources only; their values are covered by source-content signatures",
+    "rtv_feature_collection": "source-stage materialisation only; published run/card/text values are covered by rtv_cache_signature",
+    "wf_eval": "evaluation and source text-fit scheduling; published comment scores are covered by rtv_cache_signature",
+    "clv": "downstream evaluation metrics only; cannot change feature values",
     "weather": "sync writes raw weather into the DB (covered by data_signature); "
                "no FE stage calls it since the weather stage was removed",
     "feature_inputs": "fingerprints the ATR cache for staleness checks; reads, "
                       "never changes, a feature value",
     "model": "downstream consumer (column selection only), not a value source",
     "probability_calibration": "downstream prediction calibration; cannot change feature values",
+    "race_objectives": "win-model training loss (057); downstream of FE, cannot change feature values",
+    "feature_selection": "research input-selection harness; reads features, cannot change their values",
     "bet_analysis": "downstream of FE (bet settlement/reporting)",
     "bet_settlement": "downstream of FE (bet settlement/reporting)",
     "each_way": "downstream of FE (bet settlement/reporting)",

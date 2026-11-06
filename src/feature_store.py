@@ -44,6 +44,7 @@ from functools import wraps
 import pandas as pd
 
 import config
+from src.runner_identity import identity_columns, join_runner_columns
 from src.feature_engineer import engineer_features
 from src.ratings import compute_elo_features, compute_glicko_features
 
@@ -74,7 +75,7 @@ def _stringify_objects(df: pd.DataFrame) -> pd.DataFrame:
     string representation, preserving NaN. Numeric (model) columns are
     untouched, so this affects on-disk storage only.
     """
-    df = df.copy()
+    df = df.copy(deep=False)
     for c in df.select_dtypes(include="object").columns:
         s = df[c]
         df[c] = s.where(s.isna(), s.astype(str))
@@ -288,7 +289,7 @@ class FeatureStore:
         rating_cols = [
             c for c in rated.columns if c not in base_cols and c != "_event_dt"
         ]
-        keyed = rated[["race_id", "horse_name"] + rating_cols].copy()
+        keyed = rated[identity_columns(rated) + rating_cols].copy()
         return keyed, rating_cols, {"elo": elo_state, "glicko": glicko_state}
 
     def _compute_ratings_state(
@@ -372,7 +373,7 @@ class FeatureStore:
         rebuild is enforced by tests/test_feature_store.py (fast path)."""
         seed = self.load_state()
         keyed_ratings, _rating_cols, advanced = self._seeded_rating_frame(new, seed)
-        new_rated = new.merge(keyed_ratings, on=["race_id", "horse_name"], how="left")
+        new_rated = join_runner_columns(new, keyed_ratings, _rating_cols)
 
         counts_state = self.load_counts_state() or {}
         featured_new = engineer_features(
@@ -435,7 +436,7 @@ class FeatureStore:
         card = self._continue_freq_counts(pending_card(card))
         seed = self.load_state()
         keyed_ratings, _rating_cols, _advanced = self._seeded_rating_frame(card, seed)
-        card_rated = card.merge(keyed_ratings, on=["race_id", "horse_name"], how="left")
+        card_rated = join_runner_columns(card, keyed_ratings, _rating_cols)
         # pickle.load creates a private object graph for this request. Discard
         # its in-memory advances; neither a second load nor a deep copy is needed.
         featured = engineer_features(

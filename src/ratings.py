@@ -52,6 +52,7 @@ import numpy as np
 import pandas as pd
 
 import config
+from src.trueskill_kernel import rate_races
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1173,40 +1174,39 @@ def _trueskill_pass(
     sigma_col = np.full(n, np.nan)
     has_col = np.zeros(n, dtype=np.int8)
 
-    for race_id in race_ids_ordered:
-        idx = race_group_indices[race_id]
-        race_dt = dates[idx[0]]
-        for i in idx:
-            k = keys[i]
-            if k is None:
-                continue
-            rating = ts_ratings.get(k)
-            if rating is not None:
-                months = max(float((race_dt - last_dt[k]) / np.timedelta64(1, "D")), 0.0) / 30.44
-                mu_col[i] = rating[0]
-                sigma_col[i] = min(float(np.sqrt(rating[1] ** 2 + TRUESKILL_C ** 2 * months)),
-                                   TRUESKILL_SIGMA)
-                has_col[i] = 1
-            else:
-                mu_col[i] = TRUESKILL_MU
-                sigma_col[i] = TRUESKILL_SIGMA
+    codes: dict = {}
+    entity = np.fromiter(
+        (-1 if k is None else codes.setdefault(k, len(codes)) for k in keys),
+        dtype=np.int64, count=n,
+    )
+    names = list(codes)
+    state_mu = np.fromiter((ts_ratings.get(k, (0.0,))[0] for k in names), dtype=float, count=len(names))
+    state_sigma = np.fromiter((ts_ratings.get(k, (0.0, 0.0))[1] for k in names), dtype=float, count=len(names))
+    rated = np.fromiter((k in ts_ratings for k in names), dtype=bool, count=len(names))
+    last_seen = np.array(
+        [last_dt.get(k, np.datetime64("NaT")) for k in names], dtype=dates.dtype,
+    ).astype(np.int64)
 
-        if fp is None:
-            continue
-        part, pos = _race_outcome(fp[idx], DNF_AS_LOSS)
-        upd = [j for j in range(len(idx)) if part[j] and keys[idx[j]] is not None]
-        if len(upd) < 2:
-            continue
-        rows = idx[upd]
-        groups = [(env.create_rating(mu_col[i], sigma_col[i]),) for i in rows]
-        ranks = [int(pos[j]) for j in upd]
-        try:
-            new = env.rate(groups, ranks=ranks)
-        except (FloatingPointError, ValueError):
-            continue
-        for i, (rating,) in zip(rows, new):
-            ts_ratings[keys[i]] = (float(rating.mu), float(rating.sigma))
-            last_dt[keys[i]] = race_dt
+    race_rows = [race_group_indices[race_id] for race_id in race_ids_ordered]
+    offsets = np.zeros(len(race_rows) + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum([len(rows) for rows in race_rows], dtype=np.int64)
+    rows = np.concatenate(race_rows).astype(np.int64) if race_rows else np.empty(0, dtype=np.int64)
+
+    failed = rate_races(
+        entity, np.zeros(0) if fp is None else np.asarray(fp, dtype=float), fp is not None,
+        dates.astype(np.int64), rows, offsets,
+        float(np.timedelta64(1, "D") / np.timedelta64(1, np.datetime_data(dates.dtype)[0])),
+        state_mu, state_sigma, rated, last_seen,
+        TRUESKILL_MU, TRUESKILL_SIGMA, TRUESKILL_C ** 2, env.beta ** 2, env.tau ** 2,
+        trueskill.calc_draw_margin(env.draw_probability, 2, env), trueskill.DELTA, DNF_AS_LOSS,
+        mu_col, sigma_col, has_col, 2.0, -2.0,
+    )
+    if failed >= 0:
+        raise ZeroDivisionError(f"TrueSkill update failed in race {race_ids_ordered[failed]}")
+    seen = last_seen.astype(dates.dtype)
+    for i in np.flatnonzero(rated):
+        ts_ratings[names[i]] = (float(state_mu[i]), float(state_sigma[i]))
+        last_dt[names[i]] = seen[i]
 
     if return_state:
         return mu_col, sigma_col, has_col, {"ratings": ts_ratings, "last_dt": last_dt}
