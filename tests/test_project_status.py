@@ -243,11 +243,12 @@ def test_source_readiness_requires_all_sources_in_a_fresh_current_report(status,
     assert status._source_refresh()["state"] == (status.OK if problem is None else status.BAD)
 
 
-def test_deep_probe_fingerprints_database_even_if_csv_is_stale(status, monkeypatch):
+def test_deep_probe_fingerprints_database_even_if_snapshot_is_stale(status, monkeypatch):
     import pandas as pd
     from src import database, data_processor, feature_inputs, feature_store, featured_dataset
 
-    live = pd.DataFrame({"race_id": ["123"], "horse_id": ["456"], "jockey": [""]})
+    live = pd.DataFrame({name: [None] for name in database.RESULTS_SNAPSHOT_COLUMNS})
+    live = live.assign(race_id="123", horse_id="456", jockey="")
     captured = {}
 
     class Store:
@@ -258,10 +259,10 @@ def test_deep_probe_fingerprints_database_even_if_csv_is_stale(status, monkeypat
             return TestStoreFindings.META.copy()
 
     def process(df=None):
-        assert df is not None, "A default call would fingerprint the old CSV"
-        assert df.race_id.tolist() == [123]  # CSV contract infers numeric IDs.
+        assert df is not None, "A default call would fingerprint the old snapshot"
+        assert df.race_id.tolist() == [123]  # IDs are declared numeric.
         assert df.horse_id.tolist() == [456]
-        assert df.jockey.isna().all()       # Empty database strings match CSV NA.
+        assert df.jockey.isna().all()       # An empty database string is missing.
         captured["processed"] = True
         return df
 

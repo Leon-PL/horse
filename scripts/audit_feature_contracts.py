@@ -55,7 +55,7 @@ def audit():
     examples = frame.loc[fabricated_mark_change & frame.or_change.ne(0), wanted_columns(frame,
         ["horse_id", "horse_name", "race_date", "race_type", "official_rating", "has_official_rating", "or_change"])]
     examples.head(100).to_csv(OUT / "unsupported_mark_change_examples.csv", index=False)
-    raw = pd.read_csv(ROOT / "data/raw/race_results.csv", usecols=["going", "horse_id", "race_date"])
+    raw = pd.read_parquet(ROOT / "data/raw/race_results.parquet", columns=["going", "horse_id", "race_date"])
     raw_going = raw.going.astype("string").str.strip().str.lower()
     unmatched = raw_going.loc[~raw_going.isin(_GOING_MAP)].value_counts(dropna=False)
     unmatched.rename_axis("source_going").reset_index(name="rows").to_csv(OUT / "unmapped_going.csv", index=False)

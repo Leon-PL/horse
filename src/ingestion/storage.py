@@ -29,13 +29,13 @@ def atomic_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
-def atomic_parquet(frame, path):
+def atomic_parquet(frame, path, *, schema=None):
     """Prepare a whole cache before replacing its accepted file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name+"."+uuid4().hex+".tmp")
     try:
-        frame.to_parquet(temporary, index=False)
+        frame.to_parquet(temporary, index=False, schema=schema)
         import pyarrow.parquet as pq
         if pq.ParquetFile(temporary).metadata.num_rows != len(frame):
             raise ValueError("Source cache publication changed the row count")

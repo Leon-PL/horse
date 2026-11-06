@@ -66,7 +66,6 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-import config
 from src.ingestion.atr_tabs import (ALL_ATR_COLS, ATR_ARRAY_COLS, ATR_CACHE_DIR, ATR_CACHE_FILE,
                                     COLLECTION_VERSION, EXTRA_ARRAYS, EXTRA_METRICS, EXTRA_TEXT,
                                     PERFORMANCE_TABS, current_collection_rows, load_atr_cache,
@@ -1023,16 +1022,17 @@ def backfill_atr_sectionals(
     request_delay: float | None = None,
     exclude_tracks: set[str] | None = None,
 ) -> pd.DataFrame:
-    """Scrape ATR sectionals for every race in ``race_results.csv``.
+    """Scrape ATR sectionals for every race in the published results snapshot.
 
     Appends to the cache incrementally so progress survives interruption.
     """
-    raw_path = os.path.join(config.RAW_DATA_DIR, "race_results.csv")
-    if not os.path.exists(raw_path):
-        logger.error("race_results.csv not found at %s", raw_path)
+    from src.database import read_results_snapshot, results_snapshot_path
+    raw_path = results_snapshot_path()
+    if not raw_path.exists():
+        logger.error("Results snapshot not found at %s", raw_path)
         return pd.DataFrame()
 
-    raw = pd.read_csv(raw_path, usecols=["race_date", "track", "off_time"])
+    raw = read_results_snapshot(raw_path, columns=["race_date", "track", "off_time"])
     races = (
         raw.drop_duplicates(subset=["race_date", "track", "off_time"])
         .sort_values("race_date", ascending=False)

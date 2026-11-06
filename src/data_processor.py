@@ -10,14 +10,10 @@ Handles:
 - Data normalization and encoding
 """
 
-import os
 import logging
-import tempfile
 
 import numpy as np
 import pandas as pd
-
-import config
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -55,37 +51,29 @@ def _off_time_to_seconds(off_time: pd.Series) -> pd.Series:
     return h * 3600 + m * 60 + sec
 
 
-def load_raw_data(filepath: str = None) -> pd.DataFrame:
-    """Load raw race data from CSV."""
-    if filepath is None:
-        filepath = os.path.join(config.RAW_DATA_DIR, "race_results.csv")
-
-    if not os.path.exists(filepath):
+def load_raw_data() -> pd.DataFrame:
+    """Load the published results snapshot."""
+    from src.database import read_results_snapshot, results_snapshot_path
+    path = results_snapshot_path()
+    if not path.exists():
         raise FileNotFoundError(
-            f"No data file found at {filepath}. "
+            f"No data file found at {path}. "
             "Run data collection first: python -m src.ingestion --sync 14"
         )
 
-    df = pd.read_csv(filepath)
-    logger.info(f"Loaded {len(df)} records from {filepath}")
+    df = read_results_snapshot(path)
+    logger.info(f"Loaded {len(df)} records from {path}")
     return df
 
 
 def load_database_history() -> pd.DataFrame:
-    """Current database rows, typed exactly as the published CSV would be.
+    """Current database rows, typed exactly as the published snapshot is.
 
-    The CSV round trip fixes numeric IDs, empty strings, NA values and float
-    parsing, and the store's history is keyed on those types. Reading SQLite
-    directly would hash differently even when the data is identical.
+    The store's history is keyed on those types, so the raw SQLite frame would
+    hash differently even when the data is identical.
     """
-    from src.database import load_from_database
-    current = load_from_database()
-    # Spool rather than retaining a second full CSV string in memory.
-    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="") as snapshot:
-        current.to_csv(snapshot, index=False)
-        del current
-        snapshot.seek(0)
-        return pd.read_csv(snapshot)
+    from src.database import load_from_database, results_snapshot_frame
+    return results_snapshot_frame(load_from_database())
 
 
 def apply_pedigree(df: pd.DataFrame) -> pd.DataFrame:

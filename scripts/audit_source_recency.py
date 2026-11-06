@@ -21,8 +21,8 @@ def digest(path):
 
 
 def audit(source, profiles):
-    frame = pd.read_csv(source, usecols=["horse_id", "horse_name", "race_id", "race_date",
-                                        "days_since_last_run", "race_type"])
+    frame = pd.read_parquet(source, columns=["horse_id", "horse_name", "race_id", "race_date",
+                                             "days_since_last_run", "race_type"])
     frame["race_date"] = pd.to_datetime(frame.race_date)
     frame["horse_id"] = pd.to_numeric(frame.horse_id, errors="raise").astype("int64")
     frame["source_days"] = pd.to_numeric(frame.days_since_last_run, errors="coerce")
@@ -76,7 +76,7 @@ def audit(source, profiles):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", default="data/raw/race_results.csv")
+    parser.add_argument("--source", default="data/raw/race_results.parquet")
     parser.add_argument("--profiles", default="data/research/public_prior_results/horses")
     parser.add_argument("--output", default="data/audit/source_recency_20261027.json")
     args = parser.parse_args()

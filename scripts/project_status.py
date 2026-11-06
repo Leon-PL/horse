@@ -153,7 +153,7 @@ def _feature_store(deep: bool = True) -> dict:
         pass
     if deep and meta.get("last_date"):
         # Recompute from the database: catches a backfill beneath the store.
-        # process_data() alone reads the exported CSV, which can still be old
+        # process_data() alone reads the published snapshot, which can still be old
         # after a DB repair or an interrupted snapshot publication.
         from src.data_processor import load_database_history, process_data
         live_data_sig = data_signature(process_data(df=load_database_history()), cutoff=meta["last_date"])

@@ -1,6 +1,6 @@
 """Sporting Life results: the resumable listing and race-page collector.
 
-``src.database`` owns the tables, reads, writes and the published CSV. This module
+``src.database`` owns the tables, reads, writes and the published snapshot. This module
 decides what to fetch and records how each attempt ended, so an interrupted
 collection resumes without hiding a gap.
 """
@@ -282,10 +282,10 @@ def _sync_database(days_back: int, *, enrich=False, start=None, end=None, rechec
         except Exception as exc:
             enrichment["pedigree"] = {"state": "error", "error": str(exc)}
 
-    # Save a CSV copy for the pipeline. This MUST be the full history, not the
-    # scrape window: feature engineering computes cumulative/rolling features
+    # Publish the snapshot for the pipeline. This MUST be the full history, not
+    # the scrape window: feature engineering computes cumulative/rolling features
     # across each horse's whole career, and get_featured_dataset() rebuilds the
-    # store from this CSV. Writing only `days_back` here previously clobbered
+    # store from this snapshot. Writing only `days_back` here previously clobbered
     # the feature store down to the scrape window.
     snapshot = database.publish_results_snapshot()
     lo, hi = min(all_dates, default="9999"), max(all_dates, default="0000")

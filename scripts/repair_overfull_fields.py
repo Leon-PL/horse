@@ -14,7 +14,7 @@ which also deletes rows the source no longer lists). A field that cannot be
 validated (two different horses with the same name, which the
 ``(race_id, horse_name)`` key cannot hold) only loses the rows the page marks
 ``NONRUNNER`` or ``WITHDRAWN``. Every changed row is first written to
-``data/backups/overfull_fields_<timestamp>.csv``. The whole-history CSV
+``data/backups/overfull_fields_<timestamp>.csv``. The whole-history
 snapshot that feature builds read is then re-exported from the database.
 
 Usage:

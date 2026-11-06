@@ -24,11 +24,13 @@ CODE = {"FLAT": "Flat", "AW FLAT": "Flat", "CHASE": "Chase",
 
 
 def run(metadata=None):
-    source = Path(metadata) if metadata else ROOT / "data/raw/race_results.csv"
-    local = (pd.read_parquet(source) if metadata else
-        pd.read_csv(source, usecols=["race_id", "horse_id", "horse_name", "race_date",
-            "race_name", "race_type", "distance_furlongs", "age", "track"],
-            dtype={"race_id": str, "horse_id": str}))
+    source = Path(metadata) if metadata else ROOT / "data/raw/race_results.parquet"
+    if metadata:
+        local = pd.read_parquet(source)
+    else:
+        local = pd.read_parquet(source, columns=["race_id", "horse_id", "horse_name", "race_date",
+            "race_name", "race_type", "distance_furlongs", "age", "track"])
+        local["race_id"], local["horse_id"] = local.race_id.astype(str), local.horse_id.astype(str)
     local["horse_name"] = local.horse_name.str.strip().str.title()
     paths = sorted((ROOT / "data/research").glob("public_prior_results*/horses/*.json"))
     rows = []

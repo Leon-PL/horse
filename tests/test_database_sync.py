@@ -67,6 +67,8 @@ def sync_env(tmp_path, monkeypatch):
     monkeypatch.setattr(results, "datetime", FrozenDatetime)
     monkeypatch.setattr(database, "DB_PATH", str(tmp_path / "races.db"))
     monkeypatch.setattr(database.config, "RAW_DATA_DIR", str(tmp_path))
+    # These fixtures name races with letters; real race IDs are numbers.
+    monkeypatch.setitem(database.RESULTS_SNAPSHOT_COLUMNS, "race_id", "text")
     monkeypatch.setattr(data_scraper, "SportingLifeScraper", lambda: fake)
     monkeypatch.setitem(sys.modules, "src.ingestion.weather", SimpleNamespace(
         backfill_weather_in_db=lambda dates: enrichments.append(("weather", dates))))
@@ -96,7 +98,7 @@ def test_results_only_preserves_full_export_without_enrichment(sync_env):
     sync_env.scraper.listings[YESTERDAY] = ["new"]
     result = sync(days_back=1, enrich=False)
     assert set(result.race_id) == {"old", "new"}
-    exported = pd.read_csv(sync_env.root / "race_results.csv")
+    exported = pd.read_parquet(sync_env.root / "race_results.parquet")
     assert set(exported.race_id) == {"old", "new"}
     assert ledger() == [("new", 1, 1)]
     assert sync_env.enrichments == []
@@ -262,7 +264,7 @@ def test_up_to_date_path_returns_and_exports_full_history(sync_env):
     result = sync(days_back=9)
     assert YESTERDAY not in fake.listed  # Complete and outside the recent relist window.
     assert set(result.race_id) == {"a", "old"}
-    snapshot = pd.read_csv(sync_env.root / "race_results.csv")
+    snapshot = pd.read_parquet(sync_env.root / "race_results.parquet")
     assert set(snapshot.race_id) == {"a", "old"}
     assert fake.fetched == {"a": 1}
 
@@ -349,7 +351,7 @@ def test_inconsistent_stored_counts_are_not_adopted_as_complete(sync_env):
     assert sync_env.scraper.fetched == {"a": 1}
 
 
-def test_interrupted_snapshot_publish_preserves_previous_whole_file(tmp_path, monkeypatch):
+def test_interrupted_csv_write_preserves_previous_whole_file(tmp_path, monkeypatch):
     target = tmp_path / "results.csv"
     original = pd.DataFrame(runners("old"))
     original.to_csv(target, index=False)
@@ -360,7 +362,7 @@ def test_interrupted_snapshot_publish_preserves_previous_whole_file(tmp_path, mo
 
     monkeypatch.setattr(database.os, "replace", fail_replace)
     with pytest.raises(OSError, match="injected"):
-        database._export_results_snapshot(pd.DataFrame(runners("new")), str(target))
+        database.write_csv_atomically(pd.DataFrame(runners("new")), str(target))
     assert target.read_bytes() == previous_bytes
     assert list(tmp_path.iterdir()) == [target]
 

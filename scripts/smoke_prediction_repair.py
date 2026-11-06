@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import numpy as np
 import pandas as pd
-import config
 from src.data_processor import process_data
+from src.database import read_results_snapshot
 from src.feature_store import FeatureStore
 from src.featured_dataset import fe_signature
 from src.result_status import pending_card
@@ -23,12 +23,8 @@ def smoke(store_root, features, output):
     if before["fe_signature"] != fe_signature():
         raise ValueError("Live smoke requires current feature generation")
     last = pd.Timestamp(before["last_date"])
-    parts = []
-    for chunk in pd.read_csv(Path(config.RAW_DATA_DIR) / "race_results.csv", chunksize=100_000):
-        found = chunk.loc[pd.to_datetime(chunk.race_date).eq(last)]
-        if not found.empty:
-            parts.append(found)
-    settled = pd.concat(parts, ignore_index=True)
+    history = read_results_snapshot()
+    settled = history.loc[pd.to_datetime(history.race_date).eq(last)].reset_index(drop=True)
     cards = []
     for _, typed in settled.groupby("race_type", sort=False):
         for _, field in typed.groupby("race_id", sort=False):

@@ -1405,8 +1405,8 @@ def save_racecards_cache(df: pd.DataFrame, date_str: str | None = None) -> None:
     if df is None or df.empty:
         return
     path = _racecard_cache_path(date_str)
-    from src.database import _export_results_snapshot
-    _export_results_snapshot(df, path)
+    from src.database import write_csv_atomically
+    write_csv_atomically(df, path)
     logger.info(f"💾 Saved {len(df)} runners to cache: {path}")
 
 

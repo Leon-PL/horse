@@ -2,7 +2,7 @@
 Historical Database Module
 ==========================
 SQLite-backed persistent storage for scraped race results: the schema, reads,
-writes and the published ``data/raw/race_results.csv``.
+writes and the published ``data/raw/race_results.parquet``.
 
 Collection lives in ``src.ingestion.results``, which records every fetch in the
 ledger tables defined here, so a partial scrape can be resumed safely.
@@ -19,6 +19,7 @@ Usage::
     print(db_stats())
 """
 
+import io
 import logging
 import hashlib
 import json
@@ -31,10 +32,11 @@ from uuid import uuid4
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 import pandas as pd
 
 import config
-from src.ingestion.storage import atomic_json, read_json, writer_lock
+from src.ingestion.storage import atomic_json, atomic_parquet, read_json, writer_lock
 from src.utils import normalise_horse_key
 from src.runner_identity import horse_ids, runner_keys, runner_positions, runner_index
 from src.identity_schema import rebuild_without_key, ensure_source_keys, ensure_repair_keys, adopt_stored_ids
@@ -217,6 +219,8 @@ def init_db() -> None:
             # (scripts/backfill_wind_surgery.py).
             ("wind_surgery", "INTEGER"),
             ("finish_pos_label", "TEXT"),
+            # No longer collected, but older rows hold it and the history carries it.
+            ("opening_odds", "REAL"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE results ADD COLUMN {col} {col_type}")
@@ -273,9 +277,94 @@ def _init_source_state(conn):
     conn.execute("UPDATE result_source_state SET columns_hash=? WHERE id=1", (digest,))
 
 
+# Every column of the published history, in table order. Declaring them means a
+# stray value is an error at publication, where inferring types from the values
+# would quietly turn the whole column into something else.
+RESULTS_SNAPSHOT_COLUMNS = {
+    "race_id": "whole", "race_date": "text", "off_time": "text", "track": "text",
+    "region": "text", "race_name": "text", "race_class": "real", "race_type": "text",
+    "distance_furlongs": "real", "going": "text", "prize_money": "real",
+    "num_runners": "whole", "horse_name": "text", "horse_id": "whole", "jockey": "text",
+    "trainer": "text", "age": "whole", "sex": "text", "headgear": "text",
+    "weight_lbs": "real", "draw": "whole", "form": "text", "days_since_last_run": "whole",
+    "odds": "real", "official_rating": "whole", "finish_position": "whole", "won": "whole",
+    "lengths_behind": "real", "horse_runs": "whole", "horse_wins": "whole",
+    "horse_places": "whole", "surface": "text", "handicap": "whole", "sire": "text",
+    "dam": "text", "damsire": "text", "weather_temp_max": "real", "weather_temp_min": "real",
+    "weather_precip_mm": "real", "weather_wind_kmh": "real",
+    "weather_precip_prev3": "csv_parsed_real", "opening_odds": "real",
+    "wind_surgery": "real", "finish_pos_label": "text",
+}
+
+
+def _snapshot_text(series: pd.Series) -> pd.Series:
+    """Text with one missing marker: a blank is missing, and missing is NaN."""
+    values = series.astype(object)
+    return values.where(values.notna() & values.ne(""), np.nan)
+
+
+def _snapshot_number(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return series
+    try:
+        return pd.to_numeric(_snapshot_text(series), errors="raise")
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"results.{series.name} must hold numbers: {error}") from error
+
+
+def _snapshot_whole(series: pd.Series) -> pd.Series:
+    """Integers, or floats while any row is missing, which keeps them numeric."""
+    numbers = _snapshot_number(series)
+    return numbers if numbers.hasnans else numbers.astype("int64")
+
+
+def _snapshot_real(series: pd.Series) -> pd.Series:
+    return _snapshot_number(series).astype("float64")
+
+
+def _snapshot_csv_parsed_real(series: pd.Series) -> pd.Series:
+    """Floats as the fast CSV parser reads them back from their shortest text.
+
+    This column sums rainfall readings, so it has long decimals, and the history
+    has always held the parser's slightly inexact result. Using the database's
+    value instead would move 62,189 rows by up to 7e-15 and change the data
+    signature, so that switch belongs with a planned rebuild.
+    """
+    text = io.StringIO(_snapshot_real(series).to_csv(index=False))
+    parsed = pd.read_csv(text, dtype="float64", skip_blank_lines=False).iloc[:, 0]
+    return pd.Series(parsed.to_numpy(), index=series.index, name=series.name)
+
+
+_SNAPSHOT_KINDS = {"text": (_snapshot_text, "string"), "whole": (_snapshot_whole, "int64"),
+                   "real": (_snapshot_real, "float64"),
+                   "csv_parsed_real": (_snapshot_csv_parsed_real, "float64")}
+
+
+def results_snapshot_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """The published history's columns and types, whichever route the rows took."""
+    different = set(frame.columns) ^ set(RESULTS_SNAPSHOT_COLUMNS)
+    if different:
+        raise ValueError(f"Results columns differ from the declared snapshot: {sorted(different)}")
+    return pd.DataFrame({name: _SNAPSHOT_KINDS[kind][0](frame[name])
+                         for name, kind in RESULTS_SNAPSHOT_COLUMNS.items()})
+
+
+def results_snapshot_path() -> Path:
+    return Path(config.RAW_DATA_DIR) / "race_results.parquet"
+
+
+def read_results_snapshot(path=None, columns=None) -> pd.DataFrame:
+    """Read the published history, with the same missing marker as a fresh frame."""
+    frame = pd.read_parquet(path or results_snapshot_path(), columns=columns)
+    for name in frame.columns:
+        if RESULTS_SNAPSHOT_COLUMNS[name] == "text":
+            frame[name] = _snapshot_text(frame[name])
+    return frame
+
+
 def publish_results_snapshot(*, force=False):
-    """Publish only a changed canonical revision, retaining the CSV dtype contract."""
-    path = Path(config.RAW_DATA_DIR) / "race_results.csv"
+    """Publish only a changed canonical revision, at its declared column types."""
+    path = results_snapshot_path()
     receipt_path = path.with_suffix(".source.json")
     with _get_conn() as conn:
         conn.execute("BEGIN")
@@ -669,7 +758,14 @@ def ingest_results(frame, *, publish=True):
 
 
 def _export_results_snapshot(frame: pd.DataFrame, path: str) -> None:
-    """Publish a whole-history CSV without exposing a partially written file."""
+    """Publish the whole history without exposing a partially written file."""
+    import pyarrow as pa
+    schema = pa.schema([(name, _SNAPSHOT_KINDS[kind][1]) for name, kind in RESULTS_SNAPSHOT_COLUMNS.items()])
+    atomic_parquet(results_snapshot_frame(frame), path, schema=schema)
+
+
+def write_csv_atomically(frame: pd.DataFrame, path: str) -> None:
+    """Write a CSV without exposing a partially written file."""
     folder = os.path.dirname(os.path.abspath(path))
     os.makedirs(folder, exist_ok=True)
     temporary = None
@@ -837,5 +933,5 @@ if __name__ == "__main__":
 
     if args.export:
         df = load_from_database()
-        _export_results_snapshot(df, args.export)
+        write_csv_atomically(df, args.export)
         print(f"  Exported {len(df)} records to {args.export}")
