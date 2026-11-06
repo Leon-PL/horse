@@ -95,7 +95,8 @@ def test_replacing_calibrators_is_independent_of_previous_mapping(monkeypatch):
     groups = np.full(50, 5)
     features = rng.uniform(0.05, 0.95, (groups.sum(), 2))
     positions = np.concatenate([rng.permutation(np.arange(1, 6)) for _ in groups])
-    predictors = [RacePredictor(), RacePredictor()]
+    predictors = [RacePredictor(win_calibration_method="platt_isotonic"),
+                  RacePredictor(win_calibration_method="platt_isotonic")]
     predictors[1].win_iso_cal = _ConstantCalibration()
     predictors[1].place_iso_cal = _ConstantCalibration()
     for predictor in predictors:
@@ -235,7 +236,9 @@ def test_model_factory_uses_run_seed(role, monkeypatch):
     monkeypatch.setattr(model_module, "LGBMClassifier", Model)
     predictor = RacePredictor(frameworks={"classifier": "lgbm", "place": "lgbm"}, random_seed=1729)
     method = predictor._train_win_classifier if role == "classifier" else predictor._train_place_classifier
-    fitted = method(np.ones((10, 2)), np.tile([0, 1], 5))
+    # The binary path; the exploded win model's seed is covered in test_exploded_win_model.
+    kwargs = {"objective": "cross_entropy"} if role == "classifier" else {}
+    fitted = method(np.ones((10, 2)), np.tile([0, 1], 5), **kwargs)
     assert fitted.params["random_state"] == 1729
 
 

@@ -1,5 +1,261 @@
 # Negative Results Ledger
 
+## 063. Race context, finer race types, subject models and meta learners — no gain (4 November 2026)
+
+`scripts/feature_structure_063.py` screened how the 129 inputs are used, on the
+development quarters at screen capacity. Direct arms cover 12,947 races and
+stacks 16,540. Full tables are in
+[FEATURES_AND_STACKING_063.md](research/FEATURES_AND_STACKING_063.md). Do not rebuild
+these without a new reason:
+
+| Idea | Race LL change | Quarters better |
+|---|---|---|
+| 28 race context columns | −0.00075 [−0.00252, +0.00089]; shuffled control +0.00067 | 3 of 4 |
+| 19 finer race-kind columns from race titles | −0.00024 [−0.00186, +0.00147]; shuffled control +0.00047 | 3 of 4 |
+| Finer kinds + record in this kind of race | +0.00138 [−0.00033, +0.00305] | 1 of 4 |
+| Past form weighted towards runs like today's | −0.00110 [−0.00292, +0.00074] | 3 of 4 |
+| Field gaps for 10 other strong inputs | −0.00016 [−0.00194, +0.00162] | 3 of 4 |
+| Depth 8 trees | −0.00075 [−0.00239, +0.00103] | 3 of 4 |
+| Run-by-run form model in the stack | −0.00001 [−0.00033, +0.00030] | 2 of 5 |
+| 7 subject models on top of the full model | +0.00021 [−0.00045, +0.00080] | 2 of 5 |
+| 7 subject models instead of the full model | +0.01830 [+0.01486, +0.02183] | 0 of 5 |
+| Temperature by race kind | +0.00103 [+0.00038, +0.00169] | 2 of 5 |
+| Boosted meta learner with race context | +0.00019 [−0.00059, +0.00100] | 2 of 5 |
+
+Sub-model targets for completion, position, late gain, finishing speed, placing,
+time figure and handicap mark also added nothing. The closing market head gained
+−0.00161 and the figure −0.00059, but both fall to about −0.0002 once the inputs
+and target are improved.
+
+Two ideas from the same screen were not refuted: rating-gap inputs and a 0.75
+market share in the target. With all 64 screened columns they confirmed at native
+capacity on 2025Q3–2026Q2: −0.00628 [−0.00823, −0.00426], better in all four
+quarters. This does not rescue the context arms: they are null alone, and which
+blocks earn the combined gain has not been measured. The run-by-run test does not
+cover a model that learns which past runs matter most.
+
+## 062. CatBoost pairwise — ties the 057 model at best; not worth a second framework (4 November 2026)
+
+`scripts/catboost_pairwise_062.py` used CatBoost's `PairLogit` loss on the 129
+production inputs, with pairs built from 057's three stages. Results on
+2025Q3–2026Q2 (11,905 races):
+
+| Arm | Against production | Against 057 | Quarters better than 057 |
+|---|---|---|---|
+| Results only, rate 0.2, 100–170 trees | +0.0169 [+0.0134, +0.0206] | +0.0215 [+0.0180, +0.0252] | 0 of 4 |
+| Soft target, rate 0.05, 1,382–1,600 trees | −0.0037 [−0.0064, −0.0011] | +0.0009 [−0.0014, +0.0031] | 1 of 4 |
+
+The soft-target arm ties 057 and does not beat it. It does help as a second
+model: −0.0016 [−0.0029, −0.0003] over 057, on 8,370 races. But the figure model
+already does that job (−0.0017). Added to the 057 + figure blend, CatBoost gains
+only −0.0008 [−0.0017, +0.0001]. That does not pay for a second framework and
+about 40 minutes a fit. The arm was chosen after the fast arm had been scored on
+these quarters, so it is not a registered result.
+
+**The lesson:** compare a new learner on the same soft target as production.
+The results-only arm alone would have closed this idea for the wrong reason.
+Details are in `MODEL_IDEAS_057_060.md`.
+
+## 061. Finishing order below third place — nothing more (2 November 2026)
+
+This follows 057, the exploded softmax over the first three places with stage
+weights (1, 0.25, 0.0625).
+
+**Setup.** `scripts/exploded_depth_061.py` screened five variants on the
+development quarters 2024Q1–2025Q2 at screen capacity (19,086 races). The
+grid and the rule were fixed before any fit. Race log loss against 057:
+
+| Variant | Change [95% CI] | Quarters better |
+|---|---|---|
+| Every finisher, weight 0.25 per place down | −0.00002 [−0.00109, +0.00102] | 3 of 6 |
+| Top three at full weight, flattened (temperatures 1, 0.8, 0.64) | +0.00531 [+0.00313, +0.00764] | 0 of 6 |
+| Every finisher at full weight, flattened 0.8 per place | +0.01274 [+0.00963, +0.01587] | 0 of 6 |
+| Same, flattened 0.65 | +0.02551 [+0.02097, +0.03004] | 0 of 6 |
+| Same, flattened 0.5 | +0.03725 [+0.03110, +0.04350] | 0 of 6 |
+
+**What this shows.**
+
+- **Lower places, down-weighted, add nothing.**
+- **Flattening makes the model over-confident.** One score per runner has to
+  spread wider to fit a flattened later choice. At 0.5, the top pick averages
+  a 34.2% chance but wins 31.1% of the time; the down-weighted models are
+  calibrated.
+
+Do not use temperatures on later stages to learn scores. Keep 057's three
+places.
+
+## 058–060. Luck weights, connection profiles and the figure model on its own — not confirmed (2 November 2026)
+
+These are three of the four ideas in `MODEL_IDEAS_BRIEF.md`. The fourth, the
+exploded softmax (057), is confirmed; see the progress log.
+
+**Setup.**
+
+- Harness: the 048/049 harness on the 056 store, with the 129 production
+  inputs and the production win recipe.
+- Folds: purged quarterly walk-forward, scored on 2025Q3–2026Q2 at native
+  capacity (11,905 races, 109,631 runners, non-finishers kept).
+- Choices: made on 2024Q1–2025Q2 and registered before confirmation.
+
+Race log loss against production (1.83135):
+
+| Idea | Change [95% CI] | Quarters better |
+|---|---|---|
+| 059 luck-adjusted training weights | −0.00029 [−0.00112, +0.00058] | 3 of 4 |
+| 060 learned trainer, jockey and sire profiles (13 inputs) | +0.00011 [−0.00092, +0.00113] | 1 of 4 |
+| 058 figure and spread model, used instead of production | +0.00480 [+0.00084, +0.00903] | 1 of 4 |
+
+**059, luck weights.**
+
+- Races whose beaten runners had trouble (from Racing TV close-ups and BHA
+  stewards' events) were down-weighted by 1 − 2 × the troubled losers' market
+  chance.
+- The development screen gave −0.0014, 6 of 6 quarters. At native capacity
+  that shrank to a fifth and crossed zero.
+- As with the trouble inputs in ledgers 2b and 7, unlucky results are not what
+  drives the model's errors.
+
+**060, connection profiles.**
+
+- Each trainer, jockey and sire got a rank-4 profile of results against SP by
+  context. Profiles were refitted every quarter on earlier races only.
+- They are priced: no profile input correlates with won − market beyond
+  |0.007|. The strongest are the trainer's new-yard, second-run and debut
+  projections, at 0.0067, 0.0065 and 0.0061.
+- So the yard-change and debutant parts of the 055 gap are not in the
+  connections' record against the market.
+
+**058, figure model on its own.**
+
+- It predicts pounds behind the winner plus a spread, and turns them into win
+  chances with a Thurstone race model. On its own it is worse than
+  production.
+- It is not dead. Blended out of sample, it adds −0.0042 over production and
+  −0.0017 over the 057 model, against 0.0002–0.0006 for blending near copies.
+- Its spread is wider for debutants (8.22 lb) and new-yard runners (8.09 lb)
+  than for others (7.42 lb).
+- It closes under 10% of the 055 steamer and drifter bias.
+
+Do not retry luck weights or market-residual connection profiles in these
+forms. Full tables: `MODEL_IDEAS_057_060.md`. Receipts:
+`data/research/model_ideas_057/summary_05{8,9}.json` and `summary_060.json`.
+
+## 055. Fixes for the 054 model's worst misses — all within noise (2 November 2026)
+
+The 055 review (`MODEL_ERROR_REVIEW_055.md`) found three model-side patterns
+among the worst misses:
+
+- debutants over-rated, worst from big yards;
+- the last run missing from our DB (abroad or point-to-point), although its
+  finishing position is in the pre-race form;
+- ratings carried across disciplines.
+
+`scripts/screen_controllable_055.py` sizes each one as a race-wise logit
+adjustment to the 049 `general` arm's out-of-fold predictions (126 inputs,
+2025Q3–2026Q2, 11,901 races). Each adjustment is fitted on earlier quarters
+only and scored on the next. Every candidate uses races on strictly earlier
+dates.
+
+| Adjustment | Race LL change (mean of 3 quarters) | Quarters better |
+|---|---|---|
+| Debutant shrink (1 parameter) | −0.00021 | 1 of 3 |
+| Trainer and sire debut record: win rate, actual/expected vs prior SP, market respect | +0.00029 | 1 of 3 |
+| Off-DB last run × its finishing position | +0.00011 | 1 of 3 |
+| Jumper on the Flat / Flat horse over jumps | +0.00033 | 0 of 3 |
+
+Each is below the 0.001–0.004 noise floor of a refit, and the signs flip
+between quarters.
+
+- **Debutants.** They are over-rated in 3 of 4 quarters (501 wins against
+  552.9 expected), but by different amounts each quarter, so a shrink fitted
+  on the past does not carry forward. The same 1-parameter shrink fitted on
+  development scored −0.00075 on the 054 hold-out. That was a single look at
+  golden-period data and is not a confirmation.
+- **Off-DB last run.** Runners whose last run is missing from the DB win
+  slightly more than expected (205 against 187.0), but the finishing-position
+  pattern does not generalise.
+- **Discipline carry-over.** Calibration in both segments swings from 0.72 to
+  1.23 by quarter. That is noise; Lord Byron was an anecdote.
+
+Do not build these into the store. The controllable gain that is confirmed is
+the 052 comment score (−0.0029, 4 of 4). Receipts:
+`data/research/controllable_055/summary.json`.
+
+## 053. Unused Racing TV card data — nothing beyond the Timeform comment (2 November 2026)
+
+Same harness as 049 and 052: the 126 inputs, production win recipe at native
+capacity, purged walk-forward on 2025Q3–2026Q2, 11,901 races. Race log loss,
+against the 126-input model:
+
+| Added inputs | Change [95% CI] | Quarters better |
+|---|---|---|
+| Timeform comment score (052) | −0.0029 [−0.0049, −0.0010] | 4 of 4 |
+| Card data alone | −0.0011 [−0.0024, +0.0002] | 4 of 4 |
+| Card data + a comment model that also reads pace notes and the last three close-ups | −0.0028 [−0.0051, −0.0006] | 4 of 4 |
+
+The card data (`scripts/rtv_card_extras.py`) was:
+
+- trainer, jockey, icon and text badges as 0/1 flags;
+- the number of Racing TV pundit tips;
+- the draw comment ("Favours Low") times the runner's relative stall;
+- owner runs and smoothed strike rate from earlier days only.
+
+On their own these are not confirmed. Added to the comments, card data, pace
+notes and earlier close-ups give nothing: −0.0028 against −0.0029, well inside
+the 0.001–0.004 per-quarter noise between fits that differ only in columns.
+The pace notes and close-ups lower the text model's own loss on the
+selection quarters by only 0.0044 (1.9538 to 1.9494). Its strongest close-up
+words are "impressive", "easily", "weakened" and "behind", which our margin
+and position history already encode.
+
+Each flag is close to what SP implies (actual/expected 0.91–1.07): trainer
+"in form" 1.03, pundit tips 1.05, owner strike-rate quintiles 0.98–1.02, and
+draw fit flat. So the market already prices them.
+
+**Not tested, because the card copy changes after the off (2026-10-30
+snapshots):** the race pace forecast changed after the off in 2 of 34 races,
+and smart stats (whose trainer profit figures move with results) in 1 of 34.
+Trainer badges and pace notes changed only before the off, so the stored
+history matches the pre-off card. Pace maps, course pace statistics and
+prompts exist only for the snapshot days.
+
+## 049. Race-type and course specialist win models — worse than the general model (1 November 2026)
+
+Same 126 inputs (`feature_sets/win_selected_048.txt`), production win recipe
+at native capacity, purged walk-forward on 2025Q3–2026Q2. Each specialist is
+trained only on earlier races of its own subset and scored on the same test
+races as the general model. Race log loss; the market is BSP-implied, else SP.
+
+| Subset | Test races | Market | General gap | Specialist gap | Specialist − general [95% CI] | Quarters better |
+|---|---|---|---|---|---|---|
+| Hurdles | 2,820 | 1.6641 | +0.1030 | +0.1086 | +0.0056 [−0.0001, +0.0110] | 1 of 4 |
+| Wolverhampton | 629 | 1.6855 | +0.0967 | +0.1067 | +0.0100 [−0.0057, +0.0280] | 1 of 4 |
+
+Neither model adds to the market. A conditional-logit blend
+`p ∝ market^a · model^b` was fitted on earlier quarters and scored on
+2025Q4–2026Q2. It is no better than the market alone:
+
+- all races: +0.0000 [−0.0002, +0.0004];
+- hurdles: +0.0023 general, +0.0020 specialist;
+- Wolverhampton: +0.0065 general, +0.0081 specialist.
+
+The fitted model weights are close to zero or negative.
+
+The inputs already carry each horse's whole cross-code history, and the
+general model can split on `race_type` and `track` itself. Specialising
+therefore only removes training data:
+
+| Model | Training rows | Trees chosen by early stopping |
+|---|---|---|
+| General | 504k–590k | 2,836–3,776 |
+| Hurdles | 121k–143k | 1,244–1,821 |
+| Wolverhampton | 24k–29k | 780–1,163 |
+
+Do not retry other single codes or courses as standalone models. The general
+arm reproduces 048's native confirmation to within 9e-16.
+
+Script: `scripts/specialist_models.py`. Receipts: data/research/specialist_049.
+
 ## 044. Fixed RTV history family — uncertain development gain (30 October 2026)
 
 One preset 400-tree comparison adds 26 causal telemetry/history inputs to the
@@ -12,7 +268,7 @@ or predictive-gain claim. Do not mine these outcomes for a better subset.
 The four true pre-race snapshot inputs lack historical evaluation. Historical
 telemetry backfill has unknown original revision times. Implementation remains
 available in the normal pipeline; mandatory factual repairs are independent of
-this verdict. [Implementation and evidence](RTV_FEATURES_REPAIRS_044.md).
+this verdict. [Implementation and evidence](research/RTV_FEATURES_REPAIRS_044.md).
 
 ## 038. Date-local smooth win calibration — not selected (29 October2026)
 
@@ -30,7 +286,7 @@ calibration slab is ideal; it rejects this fixed replacement. Do not repeat
 the same smoothing/window search against these outcomes.
 
 The separately evaluated place layer passes its registered overall Brier
-gate; see [038 results](PREDICTIVE_REVIEW_038.md). Its gain is not a reversal
+gate; see [038 results](research/PREDICTIVE_REVIEW_038.md). Its gain is not a reversal
 of the win result or evidence of prospective market parity.
 
 ## 32. Earlier-fitted history-context blend — small uncertain gain (2026-10-27)
@@ -44,7 +300,7 @@ delta−0.00031387,95%[-0.00247654,+0.00203919]. TransferLL1.90437727→1.902487
 also uncertain. Brier/binary point estimates improve but primary uncertainty
 gates fail; market remains substantially ahead. No promotion or reversal of012.
 Do not search more context gates on these same outcomes. See
-[results](MODEL_HISTORY_BLEND_013.md).
+[results](research/MODEL_HISTORY_BLEND_013.md).
 
 ## 31. History depth, pooled rates and availability family — not qualified (2026-10-27)
 
@@ -56,7 +312,7 @@ improve, but primary uncertainty gates fail. Matched market gap closes only
 0.38%in point estimate. No promotion. The776-field external-form diagnostic
 is a useful hypothesis, not permission to select that slice retroactively;
 its separate exploratory ensemble is013. Preserve all original scores.
-See [results](MODEL_HISTORY_012.md).
+See [results](research/MODEL_HISTORY_012.md).
 
 ## 30. Narrow relative floors on extreme-tail forecasts — no qualified gain (2026-10-26)
 
@@ -77,7 +333,7 @@ removing that veto still fails to yield a reliable later gain. The diagnostic
 is explicitly promotion-ineligible and cannot reverse011/009. No near-zero
 winning forecast occurs in either later period; no prospective efficacy claim.
 Close this floor/blend search on these inspected quarters. See
-[results](MODEL_TAIL_SMOOTHING_011.md).
+[results](research/MODEL_TAIL_SMOOTHING_011.md).
 
 ## 29. Broad shrinkage of isotonic forecasts toward Platt — not confirmed (2026-10-26)
 
@@ -94,7 +350,7 @@ do not call this direct validation of protection against near-zero winners.
 Some severe underestimates improve, but that does not establish overall lift.
 The market remains substantially ahead; no production change or rescue of009.
 This does not reject every tail smoother. Do not repeat this broad blend or
-choose only its favourable period. See [results](MODEL_CALIBRATION_010.md).
+choose only its favourable period. See [results](research/MODEL_CALIBRATION_010.md).
 
 ## 28. Existing pace/setup family in independent forecasts — no reliable gain (2026-10-26)
 
@@ -114,7 +370,7 @@ unchanged family or choose subsets from these test results.
 Exploratory error attribution shows one extreme underestimation dominates
 the net LL deterioration. Retain that race and all original scores. It
 motivates a separate training-only calibration/tail-robustness hypothesis,
-not a post-hoc rescue of this candidate. See [results](MODEL_PREDICTIONS_009.md).
+not a post-hoc rescue of this candidate. See [results](research/MODEL_PREDICTIONS_009.md).
 
 **Read this before proposing a new feature, data source or edge.**
 
@@ -394,10 +650,10 @@ development period only, 2023-08-11..2026-06-03): **20 of 21 signals priced**
 (largest |0.0073|, `atr_stride_x_gallop`); `atr_closing_in_hand_avg_3` the only
 shortlisted signal at **+0.0115** (t +4.2), against +0.0105 before. The
 verdict is final. Its golden-hold-out test is not possible (sectionals end
-2026-06-20; see `docs/SESSION_LOG.md`); the walk-forward economic test is in
+2026-06-20; see `docs/archive/SESSION_LOG.md`); the walk-forward economic test is in
 section 15.
 
-**This fires decision gate 3 in [ACTION_PLAN.md](ACTION_PLAN.md):** the
+**This fires decision gate 3 in [ACTION_PLAN.md](archive/ACTION_PLAN.md):** the
 sectionals were the last unexploited asset already in hand. With them priced,
 market microstructure (traded volume, ladder depth) is the only live
 hypothesis left that attacks the informational gap rather than re-processing
@@ -656,7 +912,7 @@ model-versus-market gap in §2c carries no meaningful label offset.
 
 ### The residual 0.04% is amended results, not scrape noise
 
-**30October2026 update:** [repair042](AMENDED_RESULTS_042.md) now addresses
+**30October2026 update:** [repair042](research/AMENDED_RESULTS_042.md) now addresses
 this previously documented source defect. The ordinary parser honours final
 amendments, and primary-source checks qualify164 complete fields, including
 131 changed winners and463 changed placings. The corrected history and its
@@ -718,6 +974,12 @@ not one clears the bar** (|partial| >= 0.01 with q <= 0.05):
 
 So "in the store but not allowlisted" turned out, in every case, to mean the
 same thing as "tested and dead". The allowlist was not leaving signal behind.
+
+*Scope (2026-11-01):* that holds for signal **beyond the market**. For the
+model's own accuracy, the old list did leave signal behind. Re-derived by
+out-of-sample race log loss (048), 126 inputs beat it by 0.0194 nats at
+production capacity on untouched quarters. All of that gain is priced: the model still trails the
+SP by 0.095. See [048](research/FEATURE_SELECTION_048.md).
 
 ### Why the weather features are *exactly* 0.0000 - a structural lesson
 
@@ -812,7 +1074,7 @@ a lead, not a finding.
 
 Tested once on the golden hold-out (races from 2026-06-11, never seen by any
 residual analysis), with the population, statistic and bar written into
-`docs/SESSION_LOG.md` before the script existed
+`docs/archive/SESSION_LOG.md` before the script existed
 (`scripts/holdout_sibling_test.py`): runners with at most one prior UK/IRE
 start and sibling history, in races with a complete BSP market; partial
 correlation of `sibling_best_or_vs_field` with won - p_BSP, within-race
@@ -894,6 +1156,20 @@ a horse closing fastest at the line but beaten is the complete, full-coverage
 version of the same signal, with no text parsing. That is what
 `atr_closing_in_hand` measures (see 2b). `src/stewards_features.py` and the two
 report scrapers were deleted on 2026-10-13 — recover from git if revisited.
+
+**Caveat (055, 2 November 2026): the Irish half of this test had almost no
+data.** In the surviving `data/processed/stewards_events.parquet`:
+
+- 91% of IHRB `horse_key` values are jockey or trainer initials ("A.P.O'",
+  "M.J");
+- 0.3% of IHRB events are fixture-matched;
+- IHRB coverage effectively ends in 2020;
+- the `non_trier` tag occurs once in 81,545 rows.
+
+The verdict therefore stands for BHA (Britain) only. A repaired IHRB parse
+would mainly add non-trier rulings, which matter for individual horses. Glin
+Road Boy, one of the 055 misses, was such a case. The rulings are too rare to
+move race log loss much.
 
 ## 8. Why the model loses to the market — characterised (2026-06-27)
 
@@ -990,7 +1266,7 @@ something already deleted is caught on the next one, found:
   dead — the single most confusing thing in the live path.
 
 Six single orphaned functions were **kept** on purpose; they are listed in
-`PROJECT_OUTLINE.md` §4.3. A reference count of zero is a prompt to look, not
+`docs/archive/PROJECT_OUTLINE_before_cleanup_2026-11-05.md` §4.3. A reference count of zero is a prompt to look, not
 a licence to delete: a settlement formula, an append-machinery helper and a
 market-anchor teacher all have obvious future callers, and stripping a
 module's API surface on a grep is how a codebase loses optionality.
@@ -1213,7 +1489,7 @@ of careful work for a family whose prior is low (every racecard prints the
 stalls position; draw features scored at most 0.0023 in 2g). GoingStick was
 not fetched (~9,300 requests, ~13 hours at the tolerated rate) because a
 single reading is race-level and cancels (2g). The data is in place for
-whoever takes this on; see docs/ROADMAP.md.
+whoever takes this on; see docs/archive/ROADMAP.md.
 
 ### Checked and clean
 
@@ -2016,7 +2292,7 @@ of all possible sectional methods, nor an independent market-parity claim.
 Any reopening needs a materially changed hypothesis and predeclared evidence.
 The one bounded race-objective comparison was subsequently completed under
 the newer probability-scoring plan; see section 26.
-See [experiment report](MARKET_COMPARISON_002.md) and the frozen models,
+See [experiment report](research/MARKET_COMPARISON_002.md) and the frozen models,
 source/input manifests and paired forecasts in
 `data/audit/market_performance/002_atr_family/`.
 
@@ -2055,7 +2331,7 @@ unpromoted research challenger; its primary benefit remains unresolved and
 would require registered confirmation on other data. Do not tune a favourable
 quarter, Hessian, regularisation, calibration, feature subset, seed or blend
 against these outcomes. This result does not reject every possible race model.
-See [full report](MARKET_COMPARISON_003.md) and immutable evidence under
+See [full report](research/MARKET_COMPARISON_003.md) and immutable evidence under
 `data/audit/market_performance/003_race_objective/`. Final full suite: 742 passed;
 nine actual model artifacts replay saved probabilities to 1.11e-16. Production
 and canonical feature/data snapshots are unchanged.
@@ -2090,7 +2366,7 @@ confirmation requires other data and a registered test. This does not close
 operational all-settled fitting or data-refresh work. Full suite 745 passed;
 32 status checks passed after an explicit parameter-cutoff reporting change.
 Nine actual artifacts replay 576 shuffled fields to 1.43e-14. Production and
-the canonical data/store remain unchanged. See [full report](MARKET_COMPARISON_004.md).
+the canonical data/store remain unchanged. See [full report](research/MARKET_COMPARISON_004.md).
 
 ## 28. Market-history proposals034–035 (2026-10-29)
 
@@ -2109,7 +2385,7 @@ target LL1.981946→1.982161 and Brier .09162586→.09165907. Stop there. The jo
 rule required both standalone families to pass, so no joint proposal follows.
 Eight checks per helper and real full/prefix/seed equality pass; these failures
 are measured predictive results rather than causal-history implementation errors.
-See [034–035 report](MARKET_HISTORY_REVIEW_034_035.md).
+See [034–035 report](research/MARKET_HISTORY_REVIEW_034_035.md).
 
 ## 29. Simple market-assisted refresh036 (2026-10-29)
 
@@ -2123,7 +2399,7 @@ market LL1.778875 versus combination1.780645; on487 established handicaps,
 The temperature's tiny overall test gain is uncertain and did not earn prior
 selection. Do not switch to it after seeing the test. No correction is deployed.
 This closes this fixed simple correction, not all market-assisted approaches.
-See [036 report](MARKET_ASSISTED_REFRESH_036.md).
+See [036 report](research/MARKET_ASSISTED_REFRESH_036.md).
 
 ## Things that are true and worth not re-deriving
 
@@ -2132,8 +2408,8 @@ See [036 report](MARKET_ASSISTED_REFRESH_036.md).
   tracks). The old cache holds 98.8% of GB races and ~80% of Irish races
   (86–100% from 2024). There is no earlier RaceiQ history to backfill.
   `add_rtv_features` remains retired; the scraper was rebuilt as a collector
-  only — see [RTV audit](RTV_SCRAPER_AUDIT_2026-10-29.md) and
-  [RTV scraper](RTV_SCRAPER.md).
+  only — see [RTV audit](operations/RTV_SCRAPER_AUDIT_2026-10-29.md) and
+  [RTV scraper](operations/RTV_SCRAPER.md).
 - **At The Races scraping** needs `curl_cffi` or the system `curl` to clear the
   Fastly TLS/JS challenge. ~2.5s per request, GB-only, resumable.
 - **Bodyweight / run-to-run weight change** — the single most valuable
@@ -2145,14 +2421,20 @@ See [036 report](MARKET_ASSISTED_REFRESH_036.md).
 
 - **Market microstructure** — traded volume and ladder depth from Betfair
   historic PRO files. The only untapped orthogonal signal identified (§9).
-- **Confirmation of the fixed race-softmax recipe** — primary improvement
-  remains unresolved after section 26; secondary Brier improved, but neither
-  challenger advanced. Only registered confirmation on other data could reopen
-  it. The bounded architecture sweep is complete; do not repeat it unchanged.
+- **Confirmation of the fixed race-softmax recipe** — confirmed by 057
+  (2 November 2026) on registered quarters 2025Q3–2026Q2:
+  - a race softmax on production's soft target: −0.0022 [−0.0039, −0.0003],
+    4 of 4 quarters;
+  - the exploded softmax with stage weights (1, 0.25, 0.0625): −0.0046
+    [−0.0064, −0.0026], 4 of 4 quarters.
+
+  The exploded softmax was installed on 4 November as
+  `20261104_235300_444862`; a store rebuild and refit remain before it can
+  serve live cards.
 - **Each-way 1/5-odds re-run** and a locked CLV harness — parked.
 - **Retrain on the repaired store** — completed 2026-10-25; production
   `20261025_193016_331639` passes provenance and replay checks. See
-  [the project audit](PROJECT_AUDIT.md). Data refresh, further model comparisons
+  [the project audit](archive/PROJECT_AUDIT.md). Data refresh, further model comparisons
   and genuinely fresh forward confirmation remain separate work.
 
 
@@ -2175,7 +2457,7 @@ is high for the established target; do not explain away the result by selecting
 a favourable subset or change windows/shrinkage after seeing it. The tests do
 not reject every possible connection-form/cadence model.27related checks pass;
 all678085source rows have strict full/prefix/append equality. No new source
-error was established. [Full definitions and results](ESTABLISHED_CONTEXT_039_040.md).
+error was established. [Full definitions and results](research/ESTABLISHED_CONTEXT_039_040.md).
 
 ##041. Raw place-head information for win: not selected (29October2026)
 
@@ -2189,7 +2471,7 @@ target1.880653→1.881153; both Briers worsen. Later-test overall LL1.878711→1
 and target1.936083→1.937554 also worsen. No native transfer, new tree fit or
 production change follows.19helper/optimizer checks pass, native replay is exact,
 and current-label/price poisoning leaves both heads unchanged. Preserve the
-pre042 source-label version of this evidence. [Definition and results](AUXILIARY_PLACE_WIN_041.md).
+pre042 source-label version of this evidence. [Definition and results](research/AUXILIARY_PLACE_WIN_041.md).
 
 ## 045. Repaired skill ratings: much better skill measures, still no market gain (30 October 2026)
 
@@ -2209,7 +2491,7 @@ lost to a fixed start, and lost more in the later test period (Elo gap 200:
 fit 2.105, test 2.198, against fixed 2.023 / 2.010). Maiden fields are mostly
 recent debutants, so each cohort starts relative to the last one's start and
 the scale drifts. Do not retry it without anchoring debutants to something
-outside the debutant pool. [Method, settings and the full table](RATING_SYSTEMS_045.md).
+outside the debutant pool. [Method, settings and the full table](research/RATING_SYSTEMS_045.md).
 
 **Plackett–Luce adds nothing over TrueSkill (1 November 2026).** About 50
 settings of an online Plackett–Luce rating were swept: Weng & Lin's Bayesian
@@ -2219,3 +2501,62 @@ TrueSkill's 2.010 / 1.996. Added to TrueSkill it gains 0.0003 nats in the fit
 period and nothing on test; over SP +0.00006. Undamped, the back of the field
 dominates its gradient. Kept as a screen option in `scripts/screen_ratings.py`
 only.
+
+## 046. Projected race profile and RTV-derived inputs over the market (31 October 2026)
+
+**Race-profile projection is dead.** Race shape is partly predictable before
+the off, mostly from trip, going and course. On 17,874 development races,
+finishing-shape correlation is 0.62, tempo about 0.22 and winner-up-front
+about 0.16. That predictability does not help pick runners. Every runner
+family scored the same as k pure-noise columns over the T-5 market (walk-forward
+conditional logit):
+
+- trip on effective duration;
+- stamina reach;
+- shape fit;
+- run style × projected shape;
+- the 009 store pace family (−0.00081 against −0.00084 for 23 noise columns).
+
+The 009 family was also built on the mis-built ATR raw-mph inputs. Do not
+rebuild projected race profiles.
+
+**Report a size-matched noise baseline.** The first run of this test had its
+sign flipped, so a 23-column family's out-of-sample overfitting cost looked
+like a gain in 6 of 6 folds. Always report a noise baseline of the same size,
+and a positive control (BSP over T-5 scored +0.018).
+
+**RTV-derived families add nothing over the price.** Each family stayed within
+noise over the T-5 market: the Timeform card, sectional time figures, and
+within-race stride and jumping measures. Beyond a market-free form proxy, four
+candidates were dead too: pace-adjusted form, early and closing time gaps,
+stride × going, and pace hint × run style.
+
+The first three families do make the form model more accurate (046 in the
+progress record), but that is not an edge. Reading the Timeform card as
+private information would be a mistake: the market prices it fully.
+[Details](research/RTV_DERIVED_046.md).
+
+## 047. Re-encoding the 154 model inputs: real faults, no accuracy gain (1 November 2026)
+
+A code review of the promoted inputs found encoding faults:
+
+- missing base values coded as "best in race" by `_vs_best_in_race`;
+- the leader's margin discarded;
+- debutants and maidens given 60 / 365 days;
+- raw finishing positions that ignore non-finishes;
+- race-median OR substitutes inside OR rank and spread;
+- thin-data jockey/trainer rates set to 0;
+- a raw £ prize difference;
+- `draw / num_runners` above 1;
+- five exact duplicate columns.
+
+Ten repair sets were screened (quick_win, four development quarters, 11,901
+races). None moved race log loss: pooled changes ran from −0.00056 to
++0.00087, every interval spanned zero, and Brier was flat. The same screen
+gave the 046 inputs −0.0187. LightGBM already compensates through other
+columns. Dropping the duplicates was slightly worse (+0.00130 [−0.00032,
++0.00307]), because column subsampling gives a duplicated signal extra weight.
+Do not re-encode existing inputs expecting accuracy; the gains came from new
+information. The faults were fixed in code anyway, for correctness, on the
+same day. The store was not rebuilt, so no rebuilt-store measurement exists
+yet. [Faults, evidence, the full table and the fixes](research/FEATURE_IMPLEMENTATION_REVIEW_047.md).

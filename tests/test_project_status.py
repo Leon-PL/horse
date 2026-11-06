@@ -41,6 +41,7 @@ def _collect_with(status, monkeypatch, sections):
     monkeypatch.setattr(status, "_feature_store", lambda: sections["feature_store"])
     monkeypatch.setattr(status, "_runs", lambda: sections["training_runs"])
     monkeypatch.setattr(status, "_production", lambda: sections["production_model"])
+    monkeypatch.setattr(status, "_source_refresh", lambda: {"state": status.OK, "detail": "sources current"})
     return status.collect()
 
 
@@ -99,6 +100,8 @@ def test_stale_results_are_reported_as_blocking(status):
         else status.WARN if behind <= status.FRESH_DATA_DAYS
         else status.BAD
     )
+    if section.get("recent_pending_races") or section.get("recent_unverified_dates"):
+        expected = status.BAD
     assert section["state"] == expected
 
 
@@ -212,6 +215,32 @@ def test_status_command_returns_failure_when_check_fails(status, monkeypatch):
               "blockers": ["feature_store: check failed"]}
     monkeypatch.setattr(status, "collect", lambda **kwargs: report)
     assert status.main() == 1
+
+
+@pytest.mark.parametrize("problem", [None, "subset", "old_range", "partial", "running", "stale", "skipped"])
+def test_source_readiness_requires_all_sources_in_a_fresh_current_report(status, tmp_path, monkeypatch, problem):
+    from datetime import datetime, timedelta, timezone
+    import json
+    from src.source_pipeline import DEFAULT_SOURCES
+    monkeypatch.setattr(status.config, "DATA_DIR", str(tmp_path))
+    now = datetime.now(timezone.utc)
+    report = {"state": "ok", "checked_at": now.isoformat(),
+              "end": (status.date.today()-timedelta(days=1)).isoformat(),
+              "sources": {name: {"state": "ok"} for name in DEFAULT_SOURCES}}
+    if problem == "subset":
+        report["sources"] = {"sl": {"state": "ok"}}
+    elif problem == "old_range":
+        report["end"] = "2020-01-01"
+    elif problem in {"partial", "running"}:
+        report["state"] = problem
+    elif problem == "stale":
+        report["checked_at"] = (now-timedelta(days=2)).isoformat()
+    elif problem == "skipped":
+        report["sources"]["atr"]["state"] = "skipped"
+    path = tmp_path/"source_refresh/status.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(report), encoding="utf-8")
+    assert status._source_refresh()["state"] == (status.OK if problem is None else status.BAD)
 
 
 def test_deep_probe_fingerprints_database_even_if_csv_is_stale(status, monkeypatch):

@@ -13,6 +13,12 @@ from scipy.special import expit, logit
 from dataclasses import dataclass
 
 
+#: Floor before taking logs. The exploded win model (057) passes
+#: ``exp(score - batch max)``, which can fall far below any probability floor
+#: while still ranking runners within a weak race; only exact zeros are floored.
+_LOG_FLOOR = np.finfo(np.float64).tiny
+
+
 def _race_inputs(probabilities, groups):
     p = np.asarray(probabilities, dtype=np.float64)
     sizes = np.asarray(groups)
@@ -45,7 +51,7 @@ def race_temperature(probabilities, groups, temperature):
     p, groups, starts = _race_inputs(probabilities, groups)
     if not len(p):
         return p.copy()
-    return _temperature_probs(np.log(np.clip(p, 1e-12, 1.0)), groups, starts, temperature)
+    return _temperature_probs(np.log(np.clip(p, _LOG_FLOOR, 1.0)), groups, starts, temperature)
 
 
 def fit_temperature(probabilities, groups, winners):
@@ -68,7 +74,7 @@ def fit_temperature(probabilities, groups, winners):
     rows = np.repeat(valid, groups)
     p, y, groups = p[rows], y[rows], groups[valid]
     starts = np.r_[0, np.cumsum(groups)[:-1]]
-    log_p = np.log(np.clip(p, 1e-12, 1.0))
+    log_p = np.log(np.clip(p, _LOG_FLOOR, 1.0))
 
     def loss(log_temperature):
         calibrated = _temperature_probs(log_p, groups, starts, np.exp(log_temperature))
@@ -171,7 +177,7 @@ def fit_recent_place_refinement(predictor, X, groups, won, placed, finish_positi
     # production histories use the registered90-calendar-day window.
     window = min(90,max(14,int(span*.2)))
     first = dates.max().normalize()-pd.Timedelta(days=window-1)
-    before = dates <= first-pd.Timedelta(days=int(getattr(config,"PURGE_DAYS",7)))
+    before = dates <= first-pd.Timedelta(days=int(config.PURGE_DAYS))
     cal = dates >= first
     train_rows,cal_rows = np.repeat(before,groups),np.repeat(cal,groups)
     if train_rows.sum()<100 or cal_rows.sum()<50 or cal.sum()<5:
@@ -210,6 +216,8 @@ def fit_recent_place_refinement(predictor, X, groups, won, placed, finish_positi
             kwargs = {"params":role_params,"sample_weight":weights}
             if role=="win":
                 kwargs["soft_y"] = teacher
+                kwargs["groups"] = groups[before]
+                kwargs["finish_positions"] = np.asarray(finish_positions)[train_rows]
             if hasattr(predictor,"_component"):
                 # A separate earlier head is necessary for place refinement;
                 # interrupted qualification must resume it just like the final

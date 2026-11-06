@@ -24,9 +24,6 @@ for d in [DATA_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR, MODELS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 # --- Data Collection Settings ---
-# Number of historical races to collect (more = better model, slower collection)
-MAX_RACES_TO_COLLECT = 2000
-
 # User agent for web requests
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -38,9 +35,6 @@ USER_AGENT = (
 REQUEST_DELAY = 2.0
 
 # --- Feature Engineering Settings ---
-# Number of recent races to consider for form calculation
-FORM_WINDOW = 5
-
 # Rolling average windows
 ROLLING_WINDOWS = [3, 5, 10, 20]
 
@@ -73,23 +67,8 @@ TEST_SIZE = 0.2
 RANDOM_SEED = 42
 
 # --- Classifier Hyperparameters ---
-LIGHTGBM_PARAMS = {
-    "n_estimators": 300,
-    "max_depth": 5,
-    "learning_rate": 0.05,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_samples": 10,
-    "reg_alpha": 0.1,
-    "reg_lambda": 1.0,
-    "random_state": RANDOM_SEED,
-    "n_jobs": -1,
-    "verbose": -1,
-}
-
-# --- Per-Sub-Model Hyperparameters (Triple Ensemble) ---
-# Each sub-model can have independent tuning.
-# These override LIGHTGBM_PARAMS where set.
+# Win (CLASSIFIER_PARAMS) and place (PLACE_CLASSIFIER_PARAMS) models, each
+# tuned independently.
 
 CLASSIFIER_PARAMS = {
     "n_estimators": 4000,
@@ -124,11 +103,22 @@ SUB_MODEL_FRAMEWORKS: dict[str, str] = {
     "place": "lgbm",       # Place classifier
 }
 
-# Win-probability calibration for newly trained models. The temperature option
-# improved chronological audit scores, but remains opt-in until confirmed on a
-# fully rebuilt feature store. Saved models preserve their fitted method.
+# Win-model loss (experiment 057, docs/MODEL_IDEAS_057_060.md).
+#   "exploded": a race softmax over the winner, then second from the runners
+#     left, then third (src/race_objectives.py), with stage weights
+#     WIN_EXPLODED_STAGE_WEIGHTS chosen on development quarters. Confirmed at
+#     -0.0046 race log loss against "cross_entropy", 4 of 4 quarters.
+#   "cross_entropy": the per-runner soft-label learner used until 057.
+# The exploded model scores runners only relative to their race, so it needs
+# "race_temperature" calibration.
+WIN_OBJECTIVE = "exploded"
+WIN_EXPLODED_STAGE_WEIGHTS = (1.0, 0.25, 0.0625)
+
+# Win-probability calibration for newly trained models. Saved models preserve
+# their fitted method. "race_temperature" is required by the exploded win
+# objective; "platt_isotonic" was the default for the cross-entropy learner.
 # Values: "platt_isotonic", "race_temperature".
-WIN_CALIBRATION_METHOD = "platt_isotonic"
+WIN_CALIBRATION_METHOD = "race_temperature"
 #038's qualified place-only refinement. Saved older models retain their exact
 #legacy probabilities; normal future fits learn this layer from earlier data.
 RECENT_PLACE_REFINEMENT = True
@@ -223,14 +213,11 @@ RECENCY_SEASONAL_BOOST = 0.15   # 15 % uplift for same-month data
 # "linear" — w = max(0, 1 - t / (2 * half_life))   (hard cutoff)
 RECENCY_DECAY_SHAPE = "exp"
 
-# --- Focal Loss (Win & Place classifiers) ---
-FOCAL_GAMMA = 2.0    # focusing parameter: higher → harder focus on ambiguous cases
-FOCAL_ALPHA = "auto" # positive-class weight — "auto" computes from actual prevalence
-
 # --- Feature Pruning ---
 # Fraction of lowest-importance features to drop (0.0 = keep all).
 # Held at 0.0 because FEATURE_ALLOWLIST below already fixes the feature set
-# (top-150 by ablation); an extra per-run prune would re-cut it nondeterministically.
+# (walk-forward selection, experiment 048); an extra per-run prune would re-cut
+# it nondeterministically.
 FEATURE_PRUNE_FRACTION = 0.0
 # Absolute Pearson correlation above which the less-important feature
 # in a pair is dropped (before importance pruning). 0.0 = disabled.
@@ -244,13 +231,16 @@ FEATURE_CORR_THRESHOLD = 0.95
 # run from a pilot model. None = use all features.
 #
 # Accepts a list of names or a path to a file (one name per line, '#'
-# comments allowed, or a JSON list). Generate one from the ablation knee:
-#   python scripts/model_lab.py --write-allowlist <K>
-# then point this at the written file. Applied AFTER it, FEATURE_PRUNE_FRACTION
-# still trims within the allow-list (set it to 0.0 to keep exactly the list).
-# Versioned selection: fresh checkouts must use the same features as research
-# runs. New experimental lists can still be supplied here explicitly.
-FEATURE_ALLOWLIST = os.path.join(BASE_DIR, "feature_sets", "win.txt")
+# comments allowed, or a JSON list). The current list comes from
+#   python -m scripts.select_features eliminate
+# (out-of-sample race log loss, docs/FEATURE_SELECTION_048.md); it beat the old
+# hand-edited win.txt by 0.0194 race LL at native capacity. Applied AFTER it,
+# FEATURE_PRUNE_FRACTION still trims within the allow-list (set it to 0.0 to
+# keep exactly the list). Versioned selection: fresh checkouts must use the
+# same features as research runs. New experimental lists can still be supplied
+# here explicitly. win_selected_056.txt is that list plus the three Timeform
+# comment-score inputs (src/rtv_text.py, experiment 052).
+FEATURE_ALLOWLIST = os.path.join(BASE_DIR, "feature_sets", "win_selected_056.txt")
 
 # --- Early Stopping ---
 # Number of boosting rounds without improvement before stopping.

@@ -21,11 +21,11 @@ Usage::
 import logging
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 
-import config
 from src.database import DB_PATH, _get_conn
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS horse_pedigree (
 def init_pedigree_table() -> None:
     with _get_conn() as conn:
         conn.execute(_CREATE_PEDIGREE)
+        conn.execute("CREATE TABLE IF NOT EXISTS pedigree_fetch_state (horse_id TEXT PRIMARY KEY, "
+                     "status TEXT NOT NULL, attempts INTEGER NOT NULL, next_retry_at TEXT, last_error TEXT)")
 
 
 def _profile_url(horse_id: str) -> str:
@@ -91,15 +93,18 @@ def pending_horse_ids(limit: int | None = None) -> list[tuple[str, str]]:
         SELECT r.horse_id, MAX(r.race_date) AS last_seen
         FROM results r
         LEFT JOIN horse_pedigree p ON p.horse_id = r.horse_id
+        LEFT JOIN pedigree_fetch_state s ON s.horse_id = r.horse_id
         WHERE r.horse_id IS NOT NULL AND r.horse_id != ''
-          AND p.horse_id IS NULL
+          AND (p.horse_id IS NULL OR (s.horse_id IS NULL AND p.horse_name IS NULL
+               AND p.sire IS NULL AND p.dam IS NULL AND p.damsire IS NULL))
+          AND (s.next_retry_at IS NULL OR s.next_retry_at <= ?)
         GROUP BY r.horse_id
         ORDER BY last_seen DESC
     """
     if limit:
         query += f" LIMIT {int(limit)}"
     with _get_conn() as conn:
-        return [(row[0], row[1]) for row in conn.execute(query)]
+        return [(row[0], row[1]) for row in conn.execute(query, (datetime.now().isoformat(),))]
 
 
 def backfill_pedigree(
@@ -115,6 +120,7 @@ def backfill_pedigree(
     from src.data_scraper import SportingLifeScraper
 
     scraper = SportingLifeScraper()
+    scraper.raw_store_path = Path(DB_PATH).parent/"sl_cache/raw.sqlite"
     todo = pending_horse_ids(limit)
     if not todo:
         logger.info("Pedigree backfill: nothing to do")
@@ -133,10 +139,13 @@ def backfill_pedigree(
                 row = None
             if row is None:
                 failures += 1
-                # Park unfetchable horses so the queue drains; retried only
-                # if the placeholder row is deleted.
-                row = {"horse_id": str(horse_id), "horse_name": None, "sire": None,
-                       "dam": None, "damsire": None, "foaled": None, "colour": None}
+                previous = conn.execute("SELECT attempts FROM pedigree_fetch_state WHERE horse_id=?", (str(horse_id),)).fetchone()
+                attempts = previous[0]+1 if previous else 1
+                retry = datetime.now()+timedelta(hours=min(24, 2**min(attempts-1, 5)))
+                conn.execute("INSERT OR REPLACE INTO pedigree_fetch_state VALUES (?,?,?,?,?)",
+                             (str(horse_id), "retryable_error", attempts, retry.isoformat(), "Profile unavailable or invalid"))
+                conn.commit()
+                continue
             conn.execute(
                 "INSERT OR REPLACE INTO horse_pedigree "
                 "(horse_id, horse_name, sire, dam, damsire, foaled, colour, fetched_at) "
@@ -146,6 +155,10 @@ def backfill_pedigree(
                  datetime.now().isoformat(timespec="seconds")),
             )
             stored += 1
+            conn.execute("INSERT INTO pedigree_fetch_state VALUES (?,?,1,NULL,NULL) "
+                         "ON CONFLICT(horse_id) DO UPDATE SET status=excluded.status, "
+                         "attempts=pedigree_fetch_state.attempts+1,next_retry_at=NULL,last_error=NULL",
+                         (str(horse_id), "available" if row.get("sire") else "confirmed_empty"))
             if n % 50 == 0:
                 conn.commit()
             if n % log_every == 0:

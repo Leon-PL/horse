@@ -23,14 +23,16 @@ def normalise_going(value, detailed_map=None):
     text = re.sub(r"\s+\)", ")", text)
     if detailed_map and text in detailed_map:
         return detailed_map[text]
-    canonical = {s.casefold(): s for s in ("Fast", "Good", "Soft", "Heavy", "Yielding", "Unknown")}
+    canonical = {s.casefold(): s for s in ("Fast", "Good", "Soft", "Heavy", "Yielding", "Standard", "Slow", "Unknown")}
     if text in canonical:
         return canonical[text]
     main = text.split("(", 1)[0].strip()
     main = re.sub(r"\s*/\s*", "/", main)
-    groups = {"standard": "Fast", "standard/fast": "Fast", "standard/slow": "Good",
+    # All-weather goings stay apart from turf; British Good to Soft shares
+    # Irish Yielding's group.
+    groups = {"standard": "Standard", "standard/fast": "Standard", "standard/slow": "Slow",
         "firm": "Fast", "good to firm": "Fast", "good": "Good",
-        "good to soft": "Soft", "soft": "Soft", "soft to heavy": "Heavy", "heavy": "Heavy",
+        "good to soft": "Yielding", "soft": "Soft", "soft to heavy": "Heavy", "heavy": "Heavy",
         "good to yielding": "Yielding", "yielding": "Yielding", "yielding to soft": "Yielding"}
     return groups.get(main, "Unknown")
 

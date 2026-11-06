@@ -1,6 +1,6 @@
 """H1: does the sibling lead (ledger 2h) hold on the golden hold-out?
 
-Pre-registered in docs/SESSION_LOG.md before this script existed: among
+Pre-registered in docs/archive/SESSION_LOG.md before this script existed: among
 hold-out runners with <= 1 prior UK/IRE start and sibling history, in races
 with a complete BSP market, the partial correlation of
 ``sibling_best_or_vs_field`` with (won - p_BSP) - within-race demeaned, price

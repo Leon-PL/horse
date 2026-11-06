@@ -60,15 +60,20 @@ def swap_results(frame, mask):
     return frame
 
 
-def audit(output=OUTPUT, include_nonfinishers=False):
-    selected = [c.strip() for c in (ROOT / "feature_sets/win.txt").read_text().splitlines() if c.strip() and not c.startswith("#")]
+def audit(output=OUTPUT, include_nonfinishers=False, features=ROOT / "feature_sets/win.txt",
+          allow_unexercised=False):
+    selected = [c.strip() for c in Path(features).read_text().splitlines() if c.strip() and not c.startswith("#")]
     if include_nonfinishers:
         selected += ["horse_non_finish_rate_shrunk", "horse_last_run_non_finish"]
     raw = fixture()
     original = derive(raw)
     missing = sorted(set(selected) - set(original))
-    if missing:
+    if missing and not allow_unexercised:
         raise ValueError(f"Fixture does not exercise selected inputs: {missing}")
+    selected = [c for c in selected if c in original]
+    # Inputs from external caches (ATR, RTV) are empty in the fixture, so they
+    # pass vacuously; name them so the report is not read as covering them.
+    vacuous = sorted(c for c in selected if original[c].nunique(dropna=True) < 2)
     cutoff = "2025-02-01"
     prefix = derive(raw.loc[raw.race_date.lt(cutoff)])
     changed = raw.copy()
@@ -96,7 +101,8 @@ def audit(output=OUTPUT, include_nonfinishers=False):
     # Controls prevent an audit that accidentally compares stale/cached output.
     sensitivity = differences(original, derive(changed), selected)
     report = {"passed": not any(checks.values()) and bool(sensitivity), "fe_signature": fe_signature(), "selected_inputs": selected,
-              "rows": len(raw), "checks": checks, "prior_outcome_sensitivity": sorted(sensitivity)}
+              "rows": len(raw), "checks": checks, "prior_outcome_sensitivity": sorted(sensitivity),
+              "not_in_fixture": missing, "constant_in_fixture": vacuous}
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     if (output / "manifest.json").exists():
@@ -111,5 +117,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", default=str(OUTPUT))
     parser.add_argument("--nonfinisher-features", action="store_true")
+    parser.add_argument("--features", default=str(ROOT / "feature_sets/win.txt"), help="feature list to audit")
+    parser.add_argument("--allow-unexercised", action="store_true",
+                        help="report, instead of refusing, inputs the synthetic fixture cannot build")
     args = parser.parse_args()
-    audit(args.output_dir, args.nonfinisher_features)
+    audit(args.output_dir, args.nonfinisher_features, args.features, args.allow_unexercised)

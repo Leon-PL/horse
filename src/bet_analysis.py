@@ -18,6 +18,7 @@ import pandas as pd
 from sklearn.metrics import brier_score_loss, log_loss
 
 from src.bet_settlement import (
+    DEFAULT_VALUE_THRESHOLD,
     EW_STAKE_UNITS,
     ew_bet_selected,
     ew_odds_in_band,
@@ -49,7 +50,7 @@ def analyse_test_set(
     win_probs: np.ndarray,
     groups_test: np.ndarray,
     test_df: pd.DataFrame,
-    value_threshold: float = 0.05,
+    value_threshold: float = DEFAULT_VALUE_THRESHOLD,
     staking_mode: str = "flat",
     kelly_fraction: float = 0.25,
     bankroll: float = 100.0,
@@ -429,6 +430,8 @@ def analyse_test_set(
     # Save the per-runner model/place probabilities so the calibration
     # page can skip re-running predict_race() on subsequent visits.
     _pred_cols = ["race_id", "horse_name"]
+    if "horse_id" in analysis_df:
+        _pred_cols.append("horse_id")
     for _c in ["odds", "jockey", "trainer", "race_date"]:
         if _c in analysis_df.columns:
             _pred_cols.append(_c)

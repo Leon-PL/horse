@@ -10,7 +10,7 @@ follow the store's settled history; changed cards/history invalidate the cache.
 import argparse, os, sys, logging
 from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.data_collector import get_scraped_racecards
+from src.ingestion.pipeline import get_scraped_racecards
 from src.feature_store import FeatureStore
 from src.live_prediction import features_for_live_cards
 

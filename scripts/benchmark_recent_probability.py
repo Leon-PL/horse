@@ -88,6 +88,7 @@ def run():
                 blend = config.WIN_SOFT_LABEL_BLEND
                 teacher = data["win_teacher_train"]
                 kw["soft_y"] = np.where(teacher > 0, blend*teacher+(1-blend)*data["y_train_won"], data["y_train_won"])
+                kw["objective"] = "cross_entropy"  # the frozen reference model's learner
             model = fn(data["X_train"], data["y_train_"+target], **kw)
             joblib.dump(model, destination)
         setattr(learner, "clf_model" if role == "win" else "place_model", model)

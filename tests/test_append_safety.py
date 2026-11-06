@@ -2,7 +2,7 @@
 
 A settled featured row must never change as later races arrive. That holds only
 while every feature is backward-or-guarded (taxonomy classes R/W/L/B/C/F in
-docs/FE_TAXONOMY.md). Two things can break it and are tested here:
+docs/architecture/FE_TAXONOMY.md). Two things can break it and are tested here:
 
 1. an *un-guarded* forward reference (``shift(-1)`` outside the one date-guarded
    collateral-form stage), and

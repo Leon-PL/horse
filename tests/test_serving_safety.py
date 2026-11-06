@@ -142,10 +142,11 @@ def test_live_card_changes_recompute_all_race_features(cache_dir, monkeypatch):
 
 
 def test_lookahead_includes_today(cache_dir, monkeypatch):
-    from src import data_collector, feature_store
+    from src import feature_store
+    from src.ingestion import pipeline
     monkeypatch.setattr(feature_store, "FeatureStore", lambda: SimpleNamespace(exists=lambda: True))
     cards = pd.DataFrame({"horse_name": ["A"]})
-    monkeypatch.setattr(data_collector, "get_scraped_racecards", lambda date_str: cards.copy())
+    monkeypatch.setattr(pipeline, "get_scraped_racecards", lambda date_str: cards.copy())
     built = []
     monkeypatch.setattr(live, "features_for_live_cards", lambda frame, day: built.append(day) or frame)
     progress = []
@@ -171,12 +172,10 @@ def test_promotion_clears_existing_session_predictions():
                   active_run_id="old", picks_preds=object(), picks_meta=object(),
                   picks_explanations={"old": "explanation"}, _prediction_result_cache={"old": object()})
     namespace = {"st": SimpleNamespace(session_state=state),
-                 "_production_revision": ("new", 2, 2),
-                 "load_run_meta": lambda rid: {"metrics": {"run": rid}}}
+                 "_production_revision": ("new", 2, 2)}
     exec(compile(ast.Module(body=[sync], type_ignores=[]), str(source), "exec"), namespace)
     assert state.predictor is None
     assert state.active_run_id == "new"
-    assert state.metrics == {"run": "new"}
     assert "picks_preds" not in state
     assert "picks_explanations" not in state
     assert "_prediction_result_cache" not in state

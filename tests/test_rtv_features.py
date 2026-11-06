@@ -107,6 +107,7 @@ def test_external_fingerprint_uses_availability_date_and_detects_historical_edit
     path = tmp_path/"runs.parquet"
     monkeypatch.setattr(rtv.config, "RTV_FEATURE_RUNS", str(path), raising=False)
     monkeypatch.setattr(rtv.config, "RTV_FEATURE_PRE", str(tmp_path/"missing.parquet"), raising=False)
+    monkeypatch.setattr(rtv.config, "RTV_FEATURE_CARDS", str(tmp_path/"missing.parquet"), raising=False)
     runs = observations()
     runs.to_parquet(path, index=False)
     first = rtv_cache_signature("2025-01-11")
@@ -116,3 +117,116 @@ def test_external_fingerprint_uses_availability_date_and_detects_historical_edit
     runs.loc[runs.race_date.eq("2025-01-01"), "fsp"] = 999.
     runs.to_parquet(path, index=False)
     assert rtv_cache_signature("2025-01-11") != first
+
+
+def test_derived_history_uses_only_matured_earlier_runs():
+    runs = observations()
+    runs["time_fig"] = [10., 20., np.nan, 90.]
+    runs["avg_length_rel"] = [1., 2., 3., 4.]
+    out = rtv.add_history_features(cards(), runs=runs)
+    assert np.isnan(out.loc[0, "rtv_time_fig_mean3"])
+    assert out.loc[2, "rtv_time_fig_best3"] == 10
+    # Race c has no figure: the mean and best skip it, the last figure carries.
+    assert out.loc[3, "rtv_time_fig_mean3"] == 10
+    assert out.loc[3, "rtv_time_fig_best3"] == 10
+    assert out.loc[3, "rtv_time_fig_last"] == 10
+    assert out.loc[3, "rtv_avg_length_rel_mean3"] == 2
+    changed = runs.assign(time_fig=runs.time_fig.where(runs.race_date.lt("2025-02-01"), -999.))
+    pd.testing.assert_frame_equal(out[list(rtv.DERIVED_FEATURES)],
+        rtv.add_history_features(cards(), runs=changed)[list(rtv.DERIVED_FEATURES)], check_exact=True)
+
+
+class _FlatPar:
+    def predict(self, frame):
+        return np.full(len(frame), np.log(60.))
+
+
+def test_time_figures_and_within_race_measures():
+    races = pd.DataFrame({"race_id": [10], "race_date": ["2025-01-01"], "track_name": ["Kempton"], "surface": ["Polytrack"],
+        "distance_yards": [1000.], "win_time_s": [60.], "distance_furlongs": [4.5]})
+    runners = pd.DataFrame({"race_id": [10]*5, "runner_id": [11, 12, 13, 14, 15],
+        "is_finisher": [True, True, False, True, True], "is_nonrunner": [False]*4+[True]})
+    links = pd.DataFrame({"rtv_race_id": [10]*3, "rtv_runner_id": [11, 12, 13], "sl_race_id": ["sl"]*3,
+        "sl_horse_id": [1, 2, 3], "race_date": ["2025-01-01"]*3})
+    sectors = pd.DataFrame({"race_id": [10]*6, "runner_id": [11, 11, 12, 12, 13, 13], "sector_number": [1, 2]*3,
+        "sector_time": [30.]*6, "sector_length_yards": [500.]*6, "race_position": [1, 1, 2, 2, 3, 3],
+        "cumulative_sector_time": [30., 60., 27., 54., 31., 62.]})
+    metrics = pd.DataFrame({"race_id": [10]*4, "runner_id": [11, 12, 13, 14], "metric": ["avg_length"]*4,
+        "value": [7., 8., 9., 6.]})
+    result = rtv.build_run_observations(races, runners, metrics, sectors, pd.DataFrame(), links, par=_FlatPar())
+    assert result.time_fig.iloc[0] == pytest.approx(0.)
+    assert result.time_fig.iloc[1] == pytest.approx(100*np.log(60/54))
+    assert np.isnan(result.time_fig.iloc[2])  # a non-finisher gets no figure
+    assert result.avg_length_rel.iloc[:3].tolist() == pytest.approx(
+        ((np.array([7., 8., 9.])-7.5)/np.std([7., 8., 9., 6.], ddof=1)).tolist())
+    too_few = rtv.build_run_observations(races, runners, metrics.iloc[:3], sectors, pd.DataFrame(), links, par=_FlatPar())
+    assert too_few.avg_length_rel.isna().all()
+    assert rtv.build_run_observations(races, runners, metrics, sectors, pd.DataFrame(), links).time_fig.isna().all()
+
+
+def test_time_par_ignores_races_outside_the_par_window():
+    days = pd.date_range(rtv.PAR_START, rtv.PAR_END, periods=600).strftime("%Y-%m-%d")
+    distance = np.tile([1000., 1500., 2000., 2500.], 150)
+    window = pd.DataFrame({"race_id": np.arange(600), "race_date": days, "track_name": "Kempton", "surface": "Polytrack",
+        "going": "standard", "race_type": "Flat", "distance_yards": distance, "win_time_s": distance/15})
+    # Older results timed by another method, and later races, must not move the par.
+    outside = window.assign(race_id=window.race_id+1000, race_date="2021-07-10", win_time_s=distance/12)
+    later = window.assign(race_id=window.race_id+2000, race_date="2025-01-01", win_time_s=distance/18)
+    probe = window.head(8)
+    expected = rtv.fit_time_par(window).predict(rtv._par_inputs(probe))
+    actual = rtv.fit_time_par(pd.concat([outside, window, later], ignore_index=True)).predict(rtv._par_inputs(probe))
+    assert actual.tolist() == expected.tolist()
+
+
+def test_card_values_parse_symbols_and_unrated_cards():
+    raw = pd.DataFrame({"card_timeform_rating": ["111p", "94?", "-", "0", None],
+        "card_timeform_star_rating": [4, 2, 1, 3, None], "card_timeform_tipped_place": [1, None, 3, None, None],
+        "card_focus_horse": [True, "False", "true", False, None]})
+    values = rtv.card_values(raw)
+    assert values.rtv_card_tf_rating.iloc[:2].tolist() == [111., 94.]
+    assert values.rtv_card_tf_rating.iloc[2:].isna().all()
+    assert values.rtv_card_tf_improver.iloc[:4].tolist() == [1., 0., 0., 0.]
+    assert values.rtv_card_tf_doubtful.iloc[:4].tolist() == [0., 1., 0., 0.]
+    assert values.rtv_card_tf_tipped.iloc[:4].tolist() == [3., 0., 1., 0.]
+    assert values.rtv_card_tf_focus.iloc[:4].tolist() == [1., 0., 1., 0.]
+    assert values.iloc[4].isna().all()  # no card published at all
+
+
+def test_card_snapshot_wins_and_backfill_fills_only_unsnapshotted_rows():
+    frame = pd.DataFrame({"race_id": ["x", "x", "live"], "horse_id": [1, 2, 3], "race_date": ["2025-01-03"]*3,
+        "track": ["Kempton Park"]*3, "off_time": ["13:00"]*3, "horse_name": ["Test Horse", "Other", "Third"]})
+    snapshot = pd.DataFrame({"race_date": ["2025-01-03"], "track_key": ["kempton"], "off_key": ["13:00"],
+        "horse_key": ["Test Horse"], "observed_at": ["2025-01-03T10:00:00Z"]})
+    for col in rtv.SNAPSHOT_FEATURES:
+        snapshot[col] = 5.
+    backfill = pd.DataFrame({"race_id": ["x", "x"], "horse_id": [1, 2], "race_date": pd.to_datetime(["2025-01-03"]*2)})
+    for col in rtv.CARD_FEATURES:
+        backfill[col] = 7.
+    out = rtv.add_pre_race_features(frame, observations=snapshot, as_of="2025-01-03T12:55:00Z")
+    out = rtv.add_card_features(out, cards=backfill)
+    assert out.loc[0, list(rtv.CARD_FEATURES)].eq(5.).all()
+    assert out.loc[1, list(rtv.CARD_FEATURES)].eq(7.).all()
+    assert out.loc[2, list(rtv.CARD_FEATURES)].isna().all()
+    # A snapshot file written before the card family existed still joins.
+    old = rtv.add_pre_race_features(frame, observations=snapshot.drop(columns=list(rtv.CARD_FEATURES)),
+        as_of="2025-01-03T12:55:00Z")
+    assert old.rtv_pre_pace_position.iloc[0] == 5 and old[list(rtv.CARD_FEATURES)].isna().all().all()
+
+
+def test_card_fingerprint_covers_the_race_date_itself(tmp_path, monkeypatch):
+    from src.feature_inputs import rtv_cache_signature
+    path = tmp_path/"cards.parquet"
+    monkeypatch.setattr(rtv.config, "RTV_FEATURE_RUNS", str(tmp_path/"missing.parquet"), raising=False)
+    monkeypatch.setattr(rtv.config, "RTV_FEATURE_PRE", str(tmp_path/"missing.parquet"), raising=False)
+    monkeypatch.setattr(rtv.config, "RTV_FEATURE_CARDS", str(path), raising=False)
+    cards = pd.DataFrame({"race_id": ["a", "b"], "horse_id": [1, 1], "race_date": pd.to_datetime(["2025-01-10", "2025-01-12"])})
+    for col in rtv.CARD_FEATURES:
+        cards[col] = 1.
+    cards.to_parquet(path, index=False)
+    first = rtv_cache_signature("2025-01-10")
+    cards.loc[1, "rtv_card_tf_rating"] = 99.
+    cards.to_parquet(path, index=False)
+    assert rtv_cache_signature("2025-01-10") == first
+    cards.loc[0, "rtv_card_tf_rating"] = 99.
+    cards.to_parquet(path, index=False)
+    assert rtv_cache_signature("2025-01-10") != first

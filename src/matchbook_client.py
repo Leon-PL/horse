@@ -201,9 +201,3 @@ class MatchbookClient:
             f"{self.edge_url}/events/{event_id}/markets",
             params=params,
         )
-
-    def get_event(self, event_id: int | str) -> dict[str, Any]:
-        """Fresh event state/schedule; prices are fetched from its WIN market."""
-        return self._request("GET", f"{self.edge_url}/events/{event_id}",
-            params={"include-prices": "false", "markets-limit": 1,
-                    "exchange-type": "back-lay", "odds-type": "DECIMAL"})

@@ -36,3 +36,20 @@ def test_pre_values_only_forward_fill_after_their_own_capture_and_bst_is_explici
     assert actual.rtv_pre_timeform_rating.tolist() == [80.,80.,82.]
     assert np.isnan(actual.rtv_pre_pace_position.iloc[0])
     assert actual.rtv_pre_pace_position.iloc[1:].eq(.3).all()
+
+
+def test_snapshot_card_ratings_keep_their_timeform_symbols(tmp_path, monkeypatch):
+    key = "2025-08-14/kempton-park/1230"
+    tables = {"pre_runners": pd.DataFrame({"race_key": [key]*2, "card_horse_name": ["A", "B"],
+        "fetched_at": ["2025-08-14T09:00:00Z"]*2, "card_timeform_rating": ["111p", "-"],
+        "card_timeform_star_rating": [4, 1], "card_timeform_tipped_place": [1, None], "card_focus_horse": [True, False]}),
+        "pace_maps": pd.DataFrame()}
+    monkeypatch.setattr(collection.rtv, "RawStore", lambda *a: SimpleNamespace(close=lambda:None))
+    monkeypatch.setattr(collection.rtv, "build_snapshot_tables", lambda **kw:tables)
+    path = tmp_path/"pre.parquet"
+    collection.refresh_pre_observations(destination=path)
+    actual = pd.read_parquet(path).sort_values("horse_key").reset_index(drop=True)
+    assert actual.rtv_pre_timeform_rating.iloc[0] == 111
+    assert actual.rtv_card_tf_improver.tolist() == [1., 0.]
+    assert actual.rtv_card_tf_tipped.tolist() == [3., 0.]
+    assert np.isnan(actual.rtv_card_tf_rating.iloc[1]) and actual.rtv_card_tf_stars.iloc[1] == 1

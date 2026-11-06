@@ -34,22 +34,40 @@ FE_ENTRY_POINTS = (
 )
 
 
+def _module_path(module: str) -> Path | None:
+    path = SRC.joinpath(*module.split("."))
+    if path.with_suffix(".py").is_file():
+        return path.with_suffix(".py")
+    if (path / "__init__.py").is_file():
+        return path / "__init__.py"
+    return None
+
+
 def _src_imports(module: str) -> set[str]:
     """``src.*`` modules imported by *module*, including function-local imports."""
-    path = SRC / f"{module}.py"
-    if not path.is_file():
+    path = _module_path(module)
+    if path is None:
         return set()
     tree = ast.parse(path.read_text(encoding="utf-8"))
     found: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
-            if node.module and node.module.startswith("src."):
-                found.add(node.module.split(".", 1)[1])
+            if node.module == "src" or (node.module and node.module.startswith("src.")):
+                prefix = node.module.removeprefix("src").lstrip(".")
+                if prefix:
+                    found.add(prefix)
+                for alias in node.names:
+                    found.add(".".join(filter(None, (prefix, alias.name))))
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.startswith("src."):
                     found.add(alias.name.split(".", 1)[1])
-    return {m for m in found if (SRC / f"{m}.py").is_file()}
+    found = {m for m in found if _module_path(m) is not None}
+    # Importing a leaf runs its package initializers too.
+    for leaf in list(found):
+        parts = leaf.split(".")
+        found.update(".".join(parts[:n]) for n in range(1, len(parts)))
+    return found
 
 
 def _reachable() -> set[str]:
@@ -65,7 +83,8 @@ def _reachable() -> set[str]:
 
 
 def _registered() -> set[str]:
-    return {os.path.basename(f)[: -len(".py")] for f in _FE_SOURCE_FILES}
+    return {f.removeprefix("src/").removesuffix(".py").replace("/", ".")
+            for f in _FE_SOURCE_FILES if f.startswith("src/") and f.endswith(".py")}
 
 
 def test_every_fe_dependency_is_hashed_or_explicitly_exempt():
@@ -83,7 +102,7 @@ def test_every_fe_dependency_is_hashed_or_explicitly_exempt():
 def test_exemptions_are_justified_and_not_also_hashed():
     """An exemption must name a real module, carry a reason, and not be hashed."""
     for module, reason in FE_SIGNATURE_EXEMPT.items():
-        assert (SRC / f"{module}.py").is_file(), f"stale exemption for {module!r}"
+        assert _module_path(module) is not None, f"stale exemption for {module!r}"
         assert reason.strip(), f"exemption for {module!r} needs a reason"
     overlap = sorted(set(FE_SIGNATURE_EXEMPT) & _registered())
     assert not overlap, f"listed as both hashed and exempt: {overlap}"
@@ -94,6 +113,13 @@ def test_registered_sources_exist():
     root = SRC.parent
     missing = [rel for rel in _FE_SOURCE_FILES if not (root / rel).is_file()]
     assert not missing, f"_FE_SOURCE_FILES names files that do not exist: {missing}"
+
+
+def test_import_walk_follows_collection_package_and_compatibility_paths():
+    assert "ingestion.pipeline" in _src_imports("source_pipeline")
+    assert "ingestion" in _src_imports("source_pipeline")
+    assert "ingestion.racing_tv" in _src_imports("ingestion.pipeline")
+    assert "ingestion.storage" in _src_imports("ingestion.sporting_life")
 
 
 def _relocate_project(monkeypatch, destination: Path) -> None:

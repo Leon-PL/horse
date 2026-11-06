@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import tempfile
 from datetime import date, datetime, timedelta
 
@@ -54,8 +53,8 @@ def history_source_signature(
 ) -> str:
     payload: dict[str, object] = {
         "serving_inputs": _serving_input_signature(),
-        "version": int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)),
-        "history_months": int(getattr(config, "LIVE_FE_HISTORY_MONTHS", 30)),
+        "version": int(config.LIVE_FEATURE_CACHE_VERSION),
+        "history_months": int(config.LIVE_FE_HISTORY_MONTHS),
         "source_path": os.path.abspath(source_path) if source_path else None,
         "source_mtime": float(source_mtime) if source_mtime is not None else None,
     }
@@ -240,7 +239,7 @@ def save_lookahead_cache(
         "artifact": [artifact.st_mtime_ns, artifact.st_size],
         "cards_sig": cards_sig,
         "history_sig": history_sig or feature_store_signature(),
-        "version": int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)),
+        "version": int(config.LIVE_FEATURE_CACHE_VERSION),
         "rows": len(featured_df),
         "cols": len(featured_df.columns),
         "built": datetime.now().isoformat(),
@@ -269,7 +268,7 @@ def lookahead_cache_valid(
     try:
         with open(paths["meta"], encoding="utf-8") as fh:
             meta = json.load(fh)
-        if int(meta.get("version", -1)) != int(getattr(config, "LIVE_FEATURE_CACHE_VERSION", 1)):
+        if int(meta.get("version", -1)) != int(config.LIVE_FEATURE_CACHE_VERSION):
             return False
         if meta.get("date") != date_str:
             return False
@@ -445,7 +444,7 @@ def build_lookahead_cache(
     history. *processed_history* is retained for backwards compatibility but is no
     longer used. Returns ``{date_str: num_rows}`` for each date cached.
     """
-    from src.data_collector import get_scraped_racecards
+    from src.ingestion.pipeline import get_scraped_racecards
     from src.feature_store import FeatureStore
 
     store = FeatureStore()

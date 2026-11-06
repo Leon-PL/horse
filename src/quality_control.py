@@ -56,7 +56,7 @@ def _resolve_cfg(cfg: dict | None) -> dict:
     merged = dict(QC_DEFAULTS)
     try:
         import config
-        merged.update(getattr(config, "QC_DEFAULTS", {}) or {})
+        merged.update(config.QC_DEFAULTS or {})
     except Exception:
         pass
     if cfg:

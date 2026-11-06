@@ -28,7 +28,8 @@ import json
 import logging
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -69,15 +70,23 @@ def _database() -> dict:
         state = WARN
     else:
         state = BAD
+    pending = stats.get("recent_pending_races", 0)
+    unverified = stats.get("recent_unverified_dates", 0)
+    if pending or unverified:
+        state = BAD
     return {
         "state": state,
         "latest_date": stats.get("latest_date"),
         "days_behind": behind,
         "races": stats.get("total_races"),
         "runners": stats.get("total_runners"),
+        "pending_races": stats.get("pending_races", 0),
+        "recent_pending_races": pending,
+        "recent_unverified_dates": unverified,
         "detail": (
             f"{stats.get('total_races'):,} races to {stats.get('latest_date')}"
             + (f" ({behind} days behind today)" if behind is not None else "")
+            + (f"; {pending} recent pending races, {unverified} unverified dates" if pending or unverified else "")
         ),
     }
 
@@ -250,6 +259,7 @@ def _production() -> dict:
     return {
         "state": state,
         "generation_state": status["state"],
+        "store_state": status.get("store_state"),
         "run_id": status["run_id"],
         "training_last_date": training_last_date,
         "parameter_age_days": age,
@@ -279,11 +289,35 @@ def _rtv_collection():
         f"{kind}: {values.get(kind, {}).get('state', 'missing')}" for kind in ("history", "snapshot")), **values}
 
 
+def _source_refresh():
+    from src.source_pipeline import DEFAULT_SOURCES
+    path = Path(config.DATA_DIR)/"source_refresh/status.json"
+    if not path.exists():
+        return {"state": WARN, "detail": "No unified source coverage report yet"}
+    report = json.loads(path.read_text(encoding="utf-8"))
+    observed = report.get("checked_at")
+    age = (datetime.now(timezone.utc)-datetime.fromisoformat(observed)).total_seconds() if observed else float("inf")
+    values = report.get("sources", {})
+    missing = sorted(set(DEFAULT_SOURCES)-values.keys())
+    issues = []
+    if missing:
+        issues.append("refresh did not cover " + ", ".join(missing))
+    if not 0 <= age <= 86400:
+        issues.append("coverage report is stale")
+    if str(report.get("end") or "") < (date.today()-timedelta(days=1)).isoformat():
+        issues.append("refresh range ends before yesterday")
+    complete = (report.get("state") == "ok" and not issues
+                and all(v.get("state") in {"ok", "cached"} for v in values.values()))
+    detail = [f"{k}: {v.get('state')}" for k, v in values.items()]
+    return {"state": OK if complete else BAD, "detail": "; ".join(detail+issues), "report": report}
+
+
 def collect(deep: bool = True) -> dict:
     """Every link's state, worst-first in the printed order."""
     sections: dict[str, dict] = {}
     for name, probe in (
         ("database", _database),
+        ("source_refresh", _source_refresh),
         ("feature_store", (lambda: _feature_store(deep=False)) if not deep
                           else (lambda: _feature_store())),
         ("training_runs", _runs),
@@ -324,6 +358,7 @@ def render(report: dict) -> str:
     ]
     labels = {
         "database": "Results database",
+        "source_refresh": "Source coverage",
         "feature_store": "Feature store",
         "training_runs": "Training runs",
         "production_model": "Promoted model",

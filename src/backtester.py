@@ -23,7 +23,7 @@ CLI::
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -38,6 +38,7 @@ from src.model import (
 from src.each_way import get_ew_terms, ew_value as _ew_value
 from src.quality_control import assess_quality
 from src.bet_settlement import (
+    DEFAULT_VALUE_THRESHOLD,
     ew_bet_selected,
     ew_odds_in_band,
     ew_placed_flag,
@@ -142,7 +143,7 @@ def walk_forward_validation(
     model_type: str = "race_predictor",  # informational only — not used to select a model
     min_train_months: int = 2,
     test_window_months: int = 1,
-    value_threshold: float = 0.05,
+    value_threshold: float = DEFAULT_VALUE_THRESHOLD,
     frameworks: dict[str, str] | None = None,
     params: dict[str, dict] | None = None,
     progress_callback=None,
@@ -233,7 +234,7 @@ def walk_forward_validation(
     folds: list[FoldResult] = []
     all_bets: list[dict] = []
 
-    purge_days = getattr(config, "PURGE_DAYS", 7)
+    purge_days = config.PURGE_DAYS
     fold_idx = 0
     test_start = min_train_months  # index into `months`
 
@@ -283,10 +284,6 @@ def walk_forward_validation(
         X_train_s = X_train
         X_test_s = X_test
 
-        # Relevance labels for ranking metrics.
-        y_train_rel = make_relevance_labels(
-            train_df["finish_position"].values.astype(int),
-        )
         groups_train = train_df.groupby("race_id", sort=False).size().values
 
         groups_test_arr = test_df.groupby("race_id", sort=False).size().values
@@ -648,8 +645,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--value-threshold",
         type=float,
-        default=0.05,
-        help="Minimum value edge for value betting strategy (default: 0.05)",
+        default=DEFAULT_VALUE_THRESHOLD,
+        help="Minimum value edge for value betting strategy (default: %(default)s)",
     )
     args = parser.parse_args()
 

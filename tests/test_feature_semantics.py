@@ -12,8 +12,11 @@ from src.data_processor import _GOING_MAP
     ("Soft (Heavy In Places )", "Heavy"),
     ("Good To Yielding (Good In Places)", "Yielding"),
     ("Heavy (Standing Water In Places)", "Heavy"),
-    ("Good To Soft (Good  In Places)", "Soft"),
-    ("Standard / Fast", "Fast"), ("Standard / Slow", "Good"),
+    ("Good To Soft (Good  In Places)", "Yielding"), ("Good To Soft", "Yielding"),
+    ("Soft (Yielding To Soft In Places)", "Soft"),
+    ("Standard", "Standard"), ("Standard / Fast", "Standard"), ("Standard / Slow", "Slow"),
+    ("Standard (Good To Firm In Places)", "Standard"), ("Standard / Slow (Firm In Places)", "Slow"),
+    ("Good To Firm", "Fast"),
     ("Fast", "Fast"), ("", "Unknown"), (None, "Unknown"), ("Mystery", "Unknown"),
 ])
 def test_going_preserves_semantics_and_is_idempotent(raw, expected):

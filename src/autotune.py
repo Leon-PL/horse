@@ -160,7 +160,7 @@ def _build_autotune_payload(data: dict, n_folds: int = 2) -> dict:
     if n_races < 20:
         raise ValueError("Not enough races to build a leak-safe autotune split. Prepare a larger dataset first.")
 
-    purge_gap = int(getattr(config, "PURGE_DAYS", 7))
+    purge_gap = int(config.PURGE_DAYS)
     date_min = race_dates_idx.min()
     date_max = race_dates_idx.max()
     total_span = max((date_max - date_min).days, 1)

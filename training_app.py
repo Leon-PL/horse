@@ -26,7 +26,6 @@ from src.featured_dataset import fe_signature
 from src.store_refresh import get_training_dataset as get_featured_dataset
 from src.feature_store import FeatureStore
 from src.run_store import (
-    GENERATION_MATCH,
     GENERATION_MISMATCH,
     GENERATION_UNKNOWN,
     delete_run,
@@ -245,16 +244,57 @@ if page == "📦 Data":
         else:
             st.write("not built")
 
+    from src.ingestion.betfair_history_ui import render_history_controls
+    render_history_controls()
+
     st.markdown("### Catch-up scrape")
     cu = st.number_input("Days to scrape into the DB", 1, 90, 14)
-    enrich_recent = st.checkbox("Also update missing pedigree and weather", value=False,
-                               help="These optional backfills can fetch older missing records too.")
+    enrich_recent = st.checkbox("Also update missing pedigree", value=False,
+                               help="Fetch at most 100 missing profiles, including retryable older records.")
     if st.button("Scrape recent days"):
         with st.spinner(f"Scraping last {cu}d …"):
-            from src.source_pipeline import sync_database
-            df = sync_database(days_back=int(cu), enrich=enrich_recent)
-        st.success(f"DB synced — {len(df):,} rows total in the DB.")
+            from src.ingestion.pipeline import refresh_sources, refresh_summary
+            source_progress = st.empty()
+            source_labels = {"sl": "Sporting Life", "rtv": "Racing TV", "atr": "ATR", "bsp": "BSP", "fx": "Exchange rates"}
+            def show_source_progress(source, value):
+                label = source_labels.get(source, source)
+                if value["state"] == "running":
+                    source_progress.info(f"Updating {label}…")
+                elif value["state"] not in {"ok", "cached", "skipped"}:
+                    source_progress.warning(f"{label} needs attention; other sources can still finish.")
+                else:
+                    source_progress.info(f"{label} finished in {value.get('seconds', 0):.1f}s")
+            report = refresh_sources(days_back=int(cu), enrich=enrich_recent, progress_callback=show_source_progress)
+        if report["state"] == "ok":
+            st.success(refresh_summary(report))
+        else:
+            st.warning(refresh_summary(report))
+        st.json(report, expanded=False)
         _db_stats.clear()
+
+    with st.expander("Older result recovery"):
+        st.caption("Check older pending jobs in manageable batches. Confirmed abandoned or excluded "
+                   "races are closed; conflicting identities remain for review.")
+        recovery_budget = st.number_input("Maximum older jobs to check", 1, 500, 100, step=25)
+        if st.button("Recover older result jobs"):
+            from src.ingestion.pipeline import refresh_sources
+            with st.spinner("Checking older result jobs…"):
+                recovery = refresh_sources(0, sources=("sl",), sl_backlog_max_races=int(recovery_budget))
+            queue = recovery.get("sources", {}).get("sl", {}).get("backlog")
+            if queue is None:
+                st.warning("Recovery could not finish. See the details below.")
+            else:
+                if queue["completed"]:
+                    st.success(f"Closed {queue['completed']:,} older result jobs.")
+                else:
+                    st.info("No older result jobs were closed in this batch.")
+                if queue["remaining_races"]:
+                    st.info(f"{queue['remaining_races']:,} jobs remain: "
+                            f"{queue.get('review_required_races', 0):,} need review, "
+                            f"{queue.get('due_races', 0):,} are ready to check, and "
+                            f"{queue.get('retry_waiting_races', 0):,} are waiting to retry.")
+            st.json(recovery, expanded=False)
+            _db_stats.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -478,7 +518,7 @@ elif page == "🔬 Backtest":
                 test_win = st.number_input("Test window months", 1, 6, 1)
             with b2:
                 vthr = st.number_input("Value threshold", 0.0, 0.5,
-                                       float(DEFAULT_VALUE_CONFIG.get("value_threshold", 0.05)),
+                                       float(DEFAULT_VALUE_CONFIG["value_threshold"]),
                                        step=0.01)
                 fast = st.checkbox("Fast fold (cheaper)", value=True)
             with b3:

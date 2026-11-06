@@ -62,27 +62,27 @@ NUMERIC = ["bsp", "ppwap", "morningwap", "ppmax", "ppmin", "ipmax", "ipmin",
 COUNTRY_PREFIX_RE = re.compile(r"^\s*[A-Z]{2,3}\s*/\s*")
 
 
-def raw_path(market: str, region: str, race_date: date) -> str:
-    return os.path.join(RAW_DIR, market, region, f"{race_date.isoformat()}.csv")
+def raw_path(market: str, region: str, race_date: date, *, raw_dir=None) -> str:
+    return os.path.join(raw_dir or RAW_DIR, market, region, f"{race_date.isoformat()}.csv")
 
 
 def download(start: date, end: date, *, regions=("uk", "ire"), market: str = "win",
-             delay: float = 0.3, timeout: int = 30) -> dict:
+             delay: float = 0.3, timeout: int = 30, raw_dir=None) -> dict:
     """Fetch every file for races in [start, end]; resumable, polite."""
     session = requests.Session()
     session.headers["User-Agent"] = "horse-research/1.0 (historical BSP archive)"
     stats = {"fetched": 0, "cached": 0, "missing": 0, "failed": 0}
     for region in regions:
-        folder = os.path.join(RAW_DIR, market, region)
+        folder = os.path.join(raw_dir or RAW_DIR, market, region)
         os.makedirs(folder, exist_ok=True)
         missing_path = os.path.join(folder, MISSING_LOG)
         missing = set(json.load(open(missing_path))) if os.path.exists(missing_path) else set()
         day = start
         while day <= end:
-            target = raw_path(market, region, day)
+            target = raw_path(market, region, day, raw_dir=raw_dir)
             if os.path.exists(target) and os.path.getsize(target) > 0:
                 stats["cached"] += 1
-            elif day.isoformat() in missing:
+            elif day.isoformat() in missing and (date.today()-day).days > 10:
                 stats["missing"] += 1
             else:
                 file_day = day + timedelta(days=1)  # the file is dated the day after
@@ -110,6 +110,7 @@ def download(start: date, end: date, *, regions=("uk", "ire"), market: str = "wi
                         with open(tmp, "wb") as fh:
                             fh.write(body)
                         os.replace(tmp, target)
+                        missing.discard(day.isoformat())
                         stats["fetched"] += 1
                 except Exception as exc:  # retried on the next run
                     stats["failed"] += 1

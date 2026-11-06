@@ -82,10 +82,11 @@ def _apply_race(
                 (ws, race_id, hid),
             )
         else:
+            from src.identity_schema import result_rowid
             cur = con.execute(
                 "UPDATE results SET wind_surgery = ? "
-                "WHERE race_id = ? AND horse_name = ?",
-                (ws, race_id, hname),
+                "WHERE rowid = ?",
+                (ws, result_rowid(con,{"race_id":race_id,"horse_name":hname})),
             )
         changed += cur.rowcount
     return changed, ws_count
@@ -186,6 +187,9 @@ def main() -> None:
     _ensure_checkpoint(con)
     backfill(con, args.start, args.end, args.dry_run, args.limit)
     con.close()
+    if not args.dry_run:
+        from src.database import publish_after_repair
+        publish_after_repair(args.db)
 
 
 if __name__ == "__main__":

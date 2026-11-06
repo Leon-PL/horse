@@ -1,4 +1,5 @@
 # 033 reviewed prior-market history plus unconditional verified source corrections
+# 047: five exact duplicates removed; transforms of *_vs_field bases renamed to the raw base
 num_runners
 handicap
 has_official_rating
@@ -22,7 +23,6 @@ horse_last_run_non_finish
 horse_avg_pos_3
 horse_best_pos_5
 days_since_last_race
-days_log
 weight_change_vs_field
 form_slope
 age_x_prev_races
@@ -64,7 +64,6 @@ draw_x_field_size
 years_from_peak
 weight_vs_field
 age_vs_field
-base_win_rate
 base_place_rate
 weight_per_furlong
 or_x_handicap
@@ -93,9 +92,8 @@ jt_prev_runs_vs_best_in_race
 trainer_prev_runs_rank_pct_in_race
 trainer_freq_rank_pct_in_race
 trainer_freq_vs_best_in_race
-trainer_elo_vs_field_vs_field
-trainer_elo_vs_field_z_in_race
-trainer_elo_vs_field_vs_best_in_race
+trainer_elo_z_in_race
+trainer_elo_vs_best_in_race
 trainer_win_rate_shrunk_vs_field
 trainer_place_rate_shrunk_vs_best_in_race
 trainer_track_win_rate_vs_field
@@ -115,13 +113,11 @@ field_avg_elo_10_vs_best_in_race
 field_avg_elo_ewma_vs_best_in_race
 horse_elo_momentum_vs_field
 horse_elo_momentum_vs_best_in_race
-horse_elo_momentum_vs_field_vs_best_in_race
 horse_margin_elo_momentum_vs_field
 horse_margin_elo_momentum_vs_best_in_race
-horse_margin_elo_momentum_vs_field_vs_field
-horse_margin_elo_momentum_vs_field_z_in_race
-combined_elo_vs_field_z_in_race
-combined_elo_vs_field_vs_best_in_race
+horse_margin_elo_momentum_z_in_race
+combined_elo_z_in_race
+combined_elo_vs_best_in_race
 horse_elo_rt_edge_z_in_race
 horse_avg_position_vs_best_in_race
 speed_fig_best_5_vs_field

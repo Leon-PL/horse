@@ -27,7 +27,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.betfair import bf_track_key  # noqa: E402
 from src.data_scraper import SportingLifeScraper  # noqa: E402
-from src.database import insert_results  # noqa: E402
+from src.database import ingest_results  # noqa: E402
 from src.utils import normalise_off_time_key  # noqa: E402
 
 
@@ -80,7 +80,7 @@ def main() -> None:
                                  "off_time": u["time"], "url": u["url"]})
         if day_rows:
             df = pd.DataFrame(day_rows)
-            ins = insert_results(df)
+            ins = ingest_results(df)
             total_inserted += ins
             all_rows.extend(day_rows)
             print(f"     scraped {len(day_rows)} runners, inserted {ins} new")

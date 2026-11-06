@@ -15,6 +15,8 @@ import pandas as pd
 
 from src.utils import normalise_horse_key, normalise_off_time_key, normalise_track_key
 from src.result_status import NONSTARTER_LABELS, result_labels
+from src.runner_identity import runner_keys
+from src.identity_schema import ensure_repair_keys, result_rowid
 
 KEY = ["race_id", "_horse_id"]
 TARGETS = ["finish_position", "finish_pos_label", "won", "lengths_behind"]
@@ -27,7 +29,7 @@ def _identified(frame):
     if ids.isna().any() or ids.le(0).any() or ids.mod(1).ne(0).any():
         raise ValueError("Amendments require valid source horse IDs")
     frame["_horse_id"] = ids.astype("int64")
-    if frame.duplicated(KEY).any() or frame.duplicated(["race_id", "horse_name"]).any():
+    if frame.duplicated(KEY).any():
         raise ValueError("Duplicate correction identity")
     return frame.sort_values(KEY).reset_index(drop=True)
 
@@ -154,6 +156,7 @@ def apply_amendments(connection, before, proposed, *, repair_id, evidence, manag
             repair_id TEXT NOT NULL, race_id TEXT NOT NULL, horse_name TEXT NOT NULL,
             original_row_json TEXT NOT NULL, corrected_values_json TEXT NOT NULL,
             PRIMARY KEY (repair_id, race_id, horse_name))""")
+        ensure_repair_keys(connection, "result_amendment_rows", "original_row_json", "corrected_values_json")
         applied = connection.execute("SELECT content_sha256 FROM result_amendment_batches WHERE repair_id=?",
                                      (str(repair_id),)).fetchone()
         if applied and applied[0] != digest:
@@ -173,12 +176,12 @@ def apply_amendments(connection, before, proposed, *, repair_id, evidence, manag
         original = _json_rows(expected)
         changed = _json_rows(after[["race_id", "horse_name", *TARGETS]])
         for old, new in zip(original, changed):
-            connection.execute("INSERT INTO result_amendment_rows VALUES (?,?,?,?,?)", (str(repair_id),
+            connection.execute("INSERT INTO result_amendment_rows (repair_id,race_id,horse_name,original_row_json,corrected_values_json,runner_key) VALUES (?,?,?,?,?,?)", (str(repair_id),
                 old["race_id"], old["horse_name"], json.dumps(old, sort_keys=True, allow_nan=False),
-                json.dumps(new, sort_keys=True, allow_nan=False)))
+                json.dumps(new, sort_keys=True, allow_nan=False), runner_keys(pd.DataFrame([old])).iloc[0]))
             values = [new[c] for c in TARGETS]
             cursor = connection.execute("""UPDATE results SET finish_position=?, finish_pos_label=?, won=?, lengths_behind=?
-                WHERE race_id=? AND horse_name=?""", (*values, old["race_id"], old["horse_name"]))
+                WHERE rowid=?""", (*values, result_rowid(connection,old)))
             if cursor.rowcount != 1:
                 raise ValueError("Correction target changed; rolling back the entire batch")
         actual = _current_rows(connection, expected)

@@ -136,8 +136,9 @@ def apply_plan(conn, plan, backup):
             fh.flush()
             os.fsync(fh.fileno())
         for repair in plan["repairs"]:
-            conn.executemany("DELETE FROM results WHERE race_id = ? AND horse_name = ?",
-                             [(repair["race_id"], name) for name in repair["remove"]])
+            from src.identity_schema import result_rowid
+            conn.executemany("DELETE FROM results WHERE rowid = ?",
+                             [(result_rowid(conn,{"race_id":repair["race_id"],"horse_name":name}),) for name in repair["remove"]])
             actual = conn.execute("SELECT COUNT(*) FROM results WHERE race_id = ?",
                                    (repair["race_id"],)).fetchone()[0]
             if actual != repair["after"]:

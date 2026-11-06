@@ -11,6 +11,8 @@ import json
 
 import numpy as np
 import pandas as pd
+from src.runner_identity import runner_index, runner_keys
+from src.identity_schema import ensure_repair_keys, result_rowid
 
 TARGETS = ("finish_position", "finish_pos_label", "won", "lengths_behind")
 KEYS = ["race_id", "horse_name"]
@@ -19,9 +21,16 @@ KEYS = ["race_id", "horse_name"]
 def _ordered(frame):
     out = frame.copy()
     out["race_id"] = out.race_id.astype(str)
-    if out.duplicated(KEYS).any():
+    if not runner_index(out).is_unique:
         raise ValueError("Duplicate repair identity")
-    return out.sort_values(KEYS).reset_index(drop=True)
+    out["_runner_key"] = runner_keys(out)
+    return out.sort_values([*KEYS, "_runner_key"]).drop(columns="_runner_key").reset_index(drop=True)
+
+
+def _indexed(frame):
+    out = frame.copy()
+    out.index = runner_index(out)
+    return out
 
 
 def _rows(frame):
@@ -37,15 +46,19 @@ def validate(before, after, additional, evidence):
     before, after = _ordered(before), _ordered(after)
     if set(before.race_id) != set(after.race_id) or set(before) != set(after):
         raise ValueError("Repair must include complete original/replacement fields")
-    indexed = before.set_index(KEYS)
-    remaining = after.set_index(KEYS)
+    indexed = _indexed(before)
+    remaining = _indexed(after)
     if not remaining.index.isin(indexed.index).all():
         raise ValueError("Existing repair cannot invent starters")
-    ordinary = [c for c in before if c not in {*KEYS, *TARGETS}]
+    ordinary = [c for c in before if c not in TARGETS]
     pd.testing.assert_frame_equal(indexed.loc[remaining.index, ordinary], remaining[ordinary], check_dtype=False, check_exact=True)
     removed = indexed.loc[~indexed.index.isin(remaining.index)]
     approved_removals = {tuple(x) for x in evidence.get("confirmed_nonstarters", [])}
-    if (not set(removed.index).issubset(approved_removals) or not removed.finish_position.eq(0).all() or not removed.won.eq(0).all()):
+    approved_ids = {(str(race), "sl:"+str(horse)) for race,horse in evidence.get("confirmed_nonstarter_ids", [])}
+    name_counts = before.groupby(KEYS).size()
+    approved = all(key in approved_ids or ((str(row.race_id),row.horse_name) in approved_removals
+        and name_counts.loc[(row.race_id,row.horse_name)] == 1) for key,row in removed.iterrows())
+    if (not approved or not removed.finish_position.eq(0).all() or not removed.won.eq(0).all()):
         raise ValueError("Nonstarter removal lacks exact reviewed evidence")
     if not additional.empty and set(additional.race_id.astype(str)) & set(before.race_id):
         raise ValueError("New and corrected fields overlap")
@@ -78,6 +91,7 @@ def apply_verified_results(connection, before, after, additional, *, repair_id, 
             connection.execute("BEGIN IMMEDIATE")
         connection.execute("CREATE TABLE IF NOT EXISTS verified_result_batches (repair_id TEXT PRIMARY KEY, content_sha256 TEXT NOT NULL, observed_at TEXT NOT NULL, evidence_json TEXT NOT NULL)")
         connection.execute("CREATE TABLE IF NOT EXISTS verified_result_rows (repair_id TEXT, race_id TEXT, horse_name TEXT, before_json TEXT, after_json TEXT, PRIMARY KEY (repair_id,race_id,horse_name))")
+        ensure_repair_keys(connection, "verified_result_rows", "before_json", "after_json")
         prior = connection.execute("SELECT content_sha256 FROM verified_result_batches WHERE repair_id=?", (repair_id,)).fetchone()
         if prior:
             if prior[0] != digest:
@@ -85,36 +99,38 @@ def apply_verified_results(connection, before, after, additional, *, repair_id, 
             pd.testing.assert_frame_equal(_ordered(_current(connection, after.race_id.unique()))[after.columns], after, check_dtype=False, check_exact=True)
             if not additional.empty:
                 actual_new = _current(connection, additional.race_id.unique())
-                if len(actual_new) != len(additional) or set(map(tuple, actual_new[KEYS].values)) != set(map(tuple, additional[KEYS].values)):
+                if len(actual_new) != len(additional) or set(runner_index(actual_new)) != set(runner_index(additional)):
                     raise ValueError("A previously inserted field changed")
             return {"already_applied": True, "content_sha256": digest}
         pd.testing.assert_frame_equal(_ordered(_current(connection, before.race_id.unique()))[before.columns], before, check_dtype=False, check_exact=True)
         if not additional.empty and not _current(connection, additional.race_id.unique()).empty:
             raise ValueError("A missing field appeared after review")
         connection.execute("INSERT INTO verified_result_batches VALUES (?,?,?,?)", (repair_id, digest, datetime.now(timezone.utc).isoformat(), json.dumps(evidence, sort_keys=True)))
-        old = before.set_index(KEYS)
-        new = after.set_index(KEYS)
+        old = _indexed(before)
+        new = _indexed(after)
         for key, record in old.iterrows():
-            replacement = new.loc[[key]].reset_index() if key in new.index else pd.DataFrame()
-            connection.execute("INSERT INTO verified_result_rows VALUES (?,?,?,?,?)", (repair_id, *key,
-                json.dumps(_rows(old.loc[[key]].reset_index())[0], sort_keys=True),
-                json.dumps(_rows(replacement)[0], sort_keys=True) if not replacement.empty else None))
+            replacement = new.loc[[key]] if key in new.index else pd.DataFrame()
+            connection.execute("INSERT INTO verified_result_rows (repair_id,race_id,horse_name,before_json,after_json,runner_key) VALUES (?,?,?,?,?,?)",
+                (repair_id, record.race_id, record.horse_name, json.dumps(_rows(old.loc[[key]])[0], sort_keys=True),
+                 json.dumps(_rows(replacement)[0], sort_keys=True) if not replacement.empty else None, key[1]))
+            rowid = result_rowid(connection, record)
             if replacement.empty:
-                connection.execute("DELETE FROM results WHERE race_id=? AND horse_name=?", key)
+                connection.execute("DELETE FROM results WHERE rowid=?", (rowid,))
             else:
                 values = [replacement.iloc[0][c] for c in TARGETS]
                 values = [None if pd.isna(v) else v.item() if isinstance(v, np.generic) else v for v in values]
-                connection.execute("UPDATE results SET finish_position=?,finish_pos_label=?,won=?,lengths_behind=? WHERE race_id=? AND horse_name=?", (*values, *key))
+                connection.execute("UPDATE results SET finish_position=?,finish_pos_label=?,won=?,lengths_behind=? WHERE rowid=?", (*values, rowid))
         if not additional.empty:
             from src.database import _insert_results
             _insert_results(connection, additional)
             if "scraped_at" in additional:
                 if pd.to_datetime(additional.scraped_at, errors="coerce").isna().any():
                     raise ValueError("Invalid reviewed source observation timestamp")
-                connection.executemany("UPDATE results SET scraped_at=? WHERE race_id=? AND horse_name=?",
-                    [(str(row.scraped_at), str(row.race_id), row.horse_name) for row in additional.itertuples()])
+                connection.executemany("UPDATE results SET scraped_at=? WHERE rowid=?",
+                    [(str(row["scraped_at"]), result_rowid(connection,row)) for row in additional.to_dict("records")])
             for row in _rows(additional):
-                connection.execute("INSERT INTO verified_result_rows VALUES (?,?,?,?,?)", (repair_id, row["race_id"], row["horse_name"], None, json.dumps(row, sort_keys=True)))
+                connection.execute("INSERT INTO verified_result_rows (repair_id,race_id,horse_name,before_json,after_json,runner_key) VALUES (?,?,?,?,?,?)",
+                    (repair_id, row["race_id"], row["horse_name"], None, json.dumps(row, sort_keys=True), runner_keys(pd.DataFrame([row])).iloc[0]))
         completed_ids = list(after.race_id.unique()) + (list(additional.race_id.unique()) if not additional.empty else [])
         connection.executemany("UPDATE result_sync_races SET completed=1,last_error=NULL WHERE race_id=?", [(str(x),) for x in completed_ids])
         actual = _ordered(_current(connection, after.race_id.unique()))

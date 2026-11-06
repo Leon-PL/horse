@@ -3,9 +3,9 @@ Bet Selection & Settlement Rules
 ================================
 Single source of truth for the betting-strategy rules shared by:
 
-- the test-set betting simulation     (src/model.py : analyse_test_set)
+- the test-set betting simulation     (src/bet_analysis.py : analyse_test_set)
 - the walk-forward backtester         (src/backtester.py : walk_forward_validation)
-- the live Today's Picks settlement   (app.py)
+- the live Today's Picks settlement   (picks_app.py)
 - each-way pick filtering             (src/each_way.py : ew_value_bets)
 
 Strategies
@@ -28,6 +28,23 @@ EW_MIN_ODDS = 4.0
 EW_MAX_ODDS = 51.0
 # An each-way bet costs 2 units: 1 on the win leg + 1 on the place leg.
 EW_STAKE_UNITS = 2.0
+# Base edge for the odds-scaled value threshold (dynamic_value_threshold).
+DEFAULT_VALUE_THRESHOLD = 0.05
+
+# Default staking and selection settings shared by the apps and training runs.
+DEFAULT_VALUE_CONFIG: dict = {
+    "staking_mode": "flat",
+    "value_threshold": DEFAULT_VALUE_THRESHOLD,
+    "value_min_odds": 1.0,
+    "value_max_odds": 101.0,
+    "kelly_fraction": 0.25,
+    "bankroll": 100.0,
+    "ew_enabled": True,
+    "ew_fraction": 0.20,
+    "ew_min_place_edge": 0.15,
+    "ew_min_odds": EW_MIN_ODDS,
+    "ew_max_odds": EW_MAX_ODDS,
+}
 
 
 def valid_decimal_odds(odds):

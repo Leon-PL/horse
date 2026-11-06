@@ -104,6 +104,42 @@ def test_unbuilt_store_is_unverified(registry_dirs, store_signature):
     assert registry.feature_generation_status()["state"] == registry.GENERATION_UNKNOWN
 
 
+@pytest.mark.parametrize("error,expected", [
+    (RuntimeError("FeatureStore is in use by another operation; retry shortly."), "busy"),
+    (PermissionError("metadata access denied"), "unreadable"),
+    (RuntimeError("Invalid feature-store commit journal"), "unreadable"),
+])
+def test_store_access_errors_do_not_claim_an_unsigned_store_or_request_a_rebuild(
+    registry_dirs, monkeypatch, error, expected
+):
+    rid = _make_run(registry_dirs, "20260101_120000", "abc123")
+    def unavailable():
+        raise error
+    monkeypatch.setattr(registry, "store_fe_signature", unavailable)
+    result = registry.feature_generation_status(rid)
+    assert result["state"] == registry.GENERATION_UNKNOWN
+    assert result["store_state"] == expected
+    assert "retry" in result["message"].lower()
+    assert "rebuild" not in result["message"].lower()
+    assert "carries no signature" not in result["message"]
+    assert not registry.promote(rid)
+    assert registry.get_production_run_id() is None
+
+
+def test_actual_store_lock_reports_busy_and_recovers_after_release(registry_dirs, monkeypatch):
+    from src.feature_store import FeatureStore
+    monkeypatch.setattr(config, "PROCESSED_DATA_DIR", str(registry_dirs.parent/"processed"))
+    store = FeatureStore()
+    with open(store.meta_path, "w", encoding="utf-8") as stream:
+        json.dump({"fe_signature": "abc123"}, stream)
+    rid = _make_run(registry_dirs, "20260101_120000", "abc123")
+    with store._access():
+        result = registry.feature_generation_status(rid)
+        assert result["store_state"] == "busy"
+        assert "rebuild" not in result["message"].lower()
+    assert registry.feature_generation_status(rid)["state"] == registry.GENERATION_MATCH
+
+
 def test_rebuilding_the_store_invalidates_an_already_promoted_model(
     registry_dirs, store_signature, monkeypatch
 ):

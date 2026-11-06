@@ -16,11 +16,12 @@ import sys
 
 import numpy as np
 import pandas as pd
+from src.runner_identity import identity_columns, runner_positions
 import config
 from src.feature_store import FeatureStore
 from src.featured_dataset import fe_signature, _portable_config_value
 
-COMPONENT_FILES = ("src/ratings.py", "src/result_margins.py", "src/utils.py")
+COMPONENT_FILES = ("src/ratings.py", "src/result_margins.py", "src/utils.py", "src/runner_identity.py")
 
 
 def digest(path):
@@ -92,14 +93,12 @@ class ValidatedRatingCache:
                 raise ValueError(f"Rating input changed: {col}")
         prefix = processed.loc[processed.race_date.le(processed.race_date.min() + pd.Timedelta(days=10))]
         fresh, columns, _ = self.store._seeded_rating_frame(prefix, None)
-        cached = self.store.load_featured(columns=["race_id", "horse_name", *columns])
-        check = fresh.merge(cached, on=["race_id", "horse_name"], validate="one_to_one", suffixes=("_fresh", "_cached"))
-        if len(check) != len(fresh):
-            raise ValueError("Cached rating prefix has missing identities")
+        cached = self.store.load_featured(columns=[*identity_columns(previous), *columns])
+        positions = runner_positions(fresh, cached)
         for col in columns:
-            if not np.allclose(check[f"{col}_fresh"], check[f"{col}_cached"], atol=1e-12, rtol=0, equal_nan=True):
+            if not np.allclose(fresh[col], cached.iloc[positions][col], atol=1e-12, rtol=0, equal_nan=True):
                 raise ValueError(f"Stored feature is not a reusable raw rating: {col}")
-        self.ratings = cached.set_index(["race_id", "horse_name"], verify_integrity=True)
+        self.ratings = cached.reset_index(drop=True)
         self.final_state = self.store.load_state()
         self.columns = columns
         return {"source_root": str(Path(self.store.root).resolve()),
@@ -109,7 +108,5 @@ class ValidatedRatingCache:
     def for_chunk(self, chunk):
         if self.ratings is None:
             raise ValueError("Validate the complete processed snapshot before using cached ratings")
-        keys = pd.MultiIndex.from_frame(chunk[["race_id", "horse_name"]])
-        if not keys.isin(self.ratings.index).all():
-            raise ValueError("Rating cache lacks a requested runner")
-        return self.ratings.reindex(keys).reset_index()
+        positions = runner_positions(chunk, self.ratings)
+        return self.ratings.iloc[positions].reset_index(drop=True)

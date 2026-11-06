@@ -111,7 +111,7 @@ def test_partial_failure_is_retried_without_refetching_successes(sync_env):
     database.sync_database(days_back=1)
     assert fake.fetched == {"a": 1, "b": 2}
     assert len(database.load_from_database()) == 4
-    assert len(sync_env.enrichments) == 4  # Only the two successful inserts.
+    assert sync_env.enrichments == []  # Ordinary result refreshes do not run optional enrichment.
 
 
 def test_listing_has_no_arbitrary_race_cap_and_deduplicates_links(sync_env):
@@ -191,9 +191,9 @@ def test_legacy_migration_rechecks_recent_dates_only_and_repairs_fragments(sync_
     with caplog.at_level("INFO"):
         result = database.sync_database(days_back=10)
     assert old not in fake.listed
-    assert fake.fetched == {"b": 1, "c": 1}
+    assert fake.fetched == {"a": 1, "b": 1, "c": 1}  # Recent complete fields are revision-checked too.
     assert len(result) == 8
-    assert ledger() == [("a", 1, 0), ("b", 1, 1), ("c", 1, 1)]
+    assert ledger() == [("a", 1, 1), ("b", 1, 1), ("c", 1, 1)]
     assert "older legacy dates without a completeness audit" in caplog.text
 
 

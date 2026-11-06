@@ -1,247 +1,119 @@
-# Horse racing prediction system
+# Horse racing probabilities
 
-**Current model update, 30 October 2026:** the RTV review repairs 75 disputed
-fields, recovers 14 missing fields and corrects 12 RTV casualty classifications.
-The database, rebuilt histories and new win/place weights are installed together.
-[Repairs, RTV features and checks](docs/RTV_FEATURES_REPAIRS_044.md).
+A local application that collects UK and Irish racing data, builds historical
+features, trains LightGBM win/place models and presents race probabilities.
 
-The 29 October history-state speed optimization remains active.
-[Timing, rollout and checks](docs/LIVE_FEATURE_SPEED_20261029.md).
+The project follows four stages: **collect and aggregate → build features →
+train and evaluate → predict**. See the [project structure](docs/architecture/PROJECT_STRUCTURE.md)
+for ownership and data flow, the [inventory](docs/PROJECT_INVENTORY.md) for tools,
+and [CONTINUATION](CONTINUATION.md) for the current handoff.
 
-This is the operating guide. The project collects UK and Irish racing results,
-builds historical form and ratings, and predicts each runner's chance of winning
-and placing. The objective is reliable probabilities on later races. Market
-parity and a profitable betting strategy have not been established.
+## Current state
 
-**Experimentation phase, 30 October 2026:** the live forecast recorder, its
-scheduled task and the source-pinned forward studies were removed; there is no
-live model to protect while the model is still being developed. The feature
-signature now ignores comments, docstrings and formatting, and
-`train.py --fit-as-of` no longer requires a validation certificate.
+The synthetic race generator and sample collection interface have been removed.
+Real-source collection lives in `src/ingestion/`; existing supported collection
+commands still work through compatibility aliases.
+[Cleanup details](docs/operations/PRE_FEATURE_CLEANUP_2026-11-05.md).
 
-**Racing TV integration, 30 October 2026:** normal training/app refreshes
-collect, compare and compute RTV features alongside Sporting Life. The feature
-paths include 26 prior-run telemetry inputs and four genuine pre-race snapshot
-inputs. The fixed trial's gain is uncertain, so the deployed selection remains
-154 inputs. [Feature design and evidence](docs/RTV_FEATURES_REPAIRS_044.md),
-[original source integration](docs/RTV_PIPELINE_043.md).
+Full Betfair historical market downloads can now run during source refreshes
+after one-time account setup in **Data → Historical exchange data**. This keeps
+the timed prices from the manual archives; a paid Live App Key is not required.
+[Setup and access requirements](docs/operations/BETFAIR_HISTORY_AUTOMATION.md).
 
-**Place calibration added29October2026:** the154-input recipe includes
-a recent, training-fitted place-probability layer. Its earlier development
-place Brier improved from0.174255 to0.173851. Those are the038 historical
-scores, not a new score for the freshly corrected042 model.
-See [the six-issue review and evidence](docs/PREDICTIVE_REVIEW_038.md) and
-[the current handoff](CONTINUATION.md).
+The fresh ATR historical backfill is running independently at a two-second base
+request interval plus jitter. Progress is in
+`data/atr_cache/rebuild_v2/status.json`. It resumes from its SQLite checkpoint;
+do not start a second worker or delete that directory.
+[Backfill operation and qualification](docs/operations/ATR_REBUILD_2026-11-05.md).
 
-Checks034–036 did not earn a model change. Normal collection now preserves
-source-confirmed nonfinish reasons (037), reported claims, penalties and dated
-ride descriptions (038). The context feature prototype needs wider evidence
-before selection. [History proposals](docs/MARKET_HISTORY_REVIEW_034_035.md),
-[market-assisted results](docs/MARKET_ASSISTED_REFRESH_036.md),
-[collector repair](docs/NONFINISH_SOURCE_037.md).
-
-Use the project in three ways: **Forecast**, **Maintain**, or **Research**.
-The [project inventory](docs/PROJECT_INVENTORY.md) identifies the files and tools
-behind each workflow, including historical experiments.
-
-## How it works
-
-```text
-Results database -> clean history -> historical feature store
-                                        |
-                                        +-> train and evaluate -> saved candidate
-                                        |                             |
-                                        |                       explicit promotion
-                                        |                             |
-Today's racecards + historical features + promoted model -> forecasts
-```
-
-A feature is a piece of information about a runner, such as its earlier form.
-Updating these histories and fitting new model parameters are separate jobs.
-New results can update forecast inputs while the promoted model stays fixed.
-
-The CLI and training app share `src.training.train_run`. Normal training uses
-`src.store_refresh.get_training_dataset` for historical features. The picks app
-uses the promoted model and `src.live_prediction.features_for_live_cards`.
-
-## Check the current state
-
-Run commands below from the project folder in PowerShell:
+The installed feature store and model need refresh/refitting after the source
+and identity repairs. This cleanup does not fit or promote a replacement model.
+Check actual compatibility before using forecasts:
 
 ```powershell
 .venv\Scripts\python.exe scripts/project_status.py
 ```
 
-This is the authority for current readiness. It checks the results database,
-feature history, saved runs and promoted model, including whether their
-fingerprints agree. Its full check can take a few minutes; `--quick` skips the
-database-content comparison.
-
-**Full database-content readiness, 30 October 2026 at 17:23 UTC: passed.**
-Source facts, store, current code and promoted model agree. Installed serving
-QA passes on 106 complete fields / 1,010 runners and a saved five-runner card,
-with exact single-race/batch and staged/installed input/probability agreement.
-The internal scrape timestamp is excluded consistently from the normal CSV
-contract. Receipts are in `data/audit/rtv_repair_features_044/installation/` and
-`source_contract/`. These are operational checks, not a new predictive-accuracy
-estimate. Rerun status for the latest state.
-
-**Current installation:** promoted run `20261030_135650_092286` uses 154 inputs,
-separate LightGBM win/place heads with 3,705 / 2,990 trees, and Platt plus
-isotonic win calibration. Its place layer learns a smooth map, field shrinkage
-and expected place mass from a purged recent 90-day window. The final heads
-were fitted through **28 October**. Results
-and feature histories now extend through **29 October**: 755,357 runners in
-80,302 races. The 044 review corrects 336 positions, including 19 winners,
-in addition to the earlier 042 corrections. Daily currency updates
-also work through verified HTTPS; the latest history uses the corrected rates.
-Normal training and live forecasts consume these fixes automatically.
-
-The three 033 inputs describe market assessments and opposition in completed
-earlier races. Historical market probabilities also inform the training target.
-All confirmed Glicko, comparable-mark, source-rating and race-type repairs are
-unconditional in ordinary CLI/app training; there is no optional repair track.
-
-For the preceding 033 feature generation, on the same 2,469 historical market fields, race log loss improves
-1.789123 to 1.784530, versus the market's 1.686613. Lower is better: this closes
-about 4.48% of the prior gap. Win Brier improves overall and for established
-handicaps; place Brier improves from 0.174612 to 0.174255. These are previously
-inspected development results, not fresh confirmation. The current full-data
-weights carry no additional held-out score.
-[Results, source checks and installation evidence](docs/PRIOR_MARKET_HISTORY_033.md).
-
-038 keeps those win probabilities fixed. On 2,591 development fields, place
-Brier improves 0.174255392→0.173851156, with date 95% delta interval
-[-0.000700465,-0.000103740]. The recent win-map trial worsens and was rejected.
-These inspected dates do not establish future improvement or market parity.
-[Current calibration, source and recorder evidence](docs/PREDICTIVE_REVIEW_038.md).
-
-The earlier performance and continuous-trip proposals remain unselected after
-their small screens. Their reports preserve the findings without repeating
-large fits: [performance](docs/HANDICAP_PERFORMANCE_031.md),
-[race types and trip](docs/RACE_TYPE_AND_TRIP_REVIEW_032.md).
-
-## Forecast: use the installed model
+## Collect and aggregate
 
 ```powershell
-.venv\Scripts\python.exe -m streamlit run picks_app.py
+.venv\Scripts\python.exe -m src.ingestion --sync 14 --results-only
 ```
 
-- **Today's Picks:** inspect win/place probabilities and selection diagnostics.
-- **Matchbook API:** inspect the exchange connection and prices.
+This refreshes Sporting Life results, Racing TV observations, bounded ATR
+recovery, Betfair BSP and currency references. It retains raw evidence,
+checks identities and publishes source coverage. Independent providers run
+with bounded concurrency after canonical results are available. A partial
+report returns a nonzero exit code.
 
-Matchbook credentials belong in the untracked `.env` file. They are needed for
-the exchange-dependent pages; historical data collection and offline training
-do not require them. Selection and paper-trading displays are separate from
-forecast accuracy evidence.
+`--enrich` drains a bounded pedigree queue; `--weather` explicitly collects
+research weather. `--start` and `--end` select an historical range.
+`--sl-backlog-max-races` bounds older result recovery and `--atr-max-races`
+bounds the normal ATR queue. The separate full ATR backfill uses its own durable
+queue. Use `--help` for the complete options.
 
-There is no forward recorder. It was removed on 30 October 2026 with its
-`src/forward_*` modules, scheduled task and study-transition scripts; the code
-is in git history before that date, and the earlier studies' data remain under
-`data/forecasts/forward/`. The task definition is saved in
-`data/audit/recorder_removal_20261030/`.
+Source maintenance is also available on the **Data** page of the maintenance
+app. See the [source operating notes](docs/operations/STAGE1_IMPLEMENTATION_2026-11-04.md)
+and [BSP/ATR provenance](docs/operations/BSP_AND_ATR_2026-11-05.md).
 
-## Maintain: update history or deliberately replace the model
+## Build features, train and evaluate
 
-Open the maintenance app in a separate terminal:
-
-```powershell
-.venv\Scripts\python.exe -m streamlit run training_app.py --server.port 8502
-```
-
-Use **Data** to inspect coverage and collect recent results, **Train** to fit
-candidates, and **Registry** to review and promote a saved run. Tune, Backtest,
-Insights and Diagnostics are research/analysis controls.
-
-### Update history without retraining
-
-The following uses the existing shared refresh path. It appends newer dates
-when valid and rebuilds if earlier results or feature definitions changed:
+Refresh the historical dataset without fitting a model:
 
 ```powershell
-.venv\Scripts\python.exe -m src.source_pipeline --sync 14 --results-only
 .venv\Scripts\python.exe -c "from src.store_refresh import get_training_dataset; get_training_dataset()"
-.venv\Scripts\python.exe scripts/project_status.py
 ```
 
-The first command updates Sporting Life and a bounded recent RTV window,
-and skips optional pedigree/weather enrichment; the Data page
-offers those separately. A necessary full rebuild can take substantial time.
-If feature definitions changed, a compatible model is also required before
-serving can resume. Updating histories alone does not make fitted parameters
-newer.
+The store appends valid newer dates and rebuilds when earlier observations or
+feature definitions change. A full rebuild can take substantial time. Feature
+signatures and source fingerprints prevent silent reuse of incompatible history.
+Processing prepares data in memory instead of writing an unused global export.
 
-### Train, review, then promote
+Fit and evaluate a candidate from current local data:
 
 ```powershell
 .venv\Scripts\python.exe train.py --no-refresh --threads 2
 ```
 
-This uses current local data, refreshes features as needed, evaluates on the
-latest 90 calendar days kept out of fitting, and saves a candidate. Review its
-scores, fitting dates and feature compatibility in **Registry**, then explicitly
-promote it and rerun the readiness check. A new saved run does not replace
-production automatically.
+Review scores, dates and feature compatibility in **Registry**, then explicitly
+promote a chosen run. Saving a candidate does not replace the selected model.
+`train.py --fit-as-of YYYY-MM-DD` fits through a settled cutoff without a held-out
+score; `--validation-report` reuses and checks an earlier evaluated recipe.
 
-To fit through a settled cutoff with no held-out period, run
-`train.py --fit-as-of YYYY-MM-DD`; the run has no held-out score. Passing
-`--validation-report` (or using **Train -> Refit a validated model with newer
-results**) additionally reuses and checks an earlier evaluated recipe.
-The [inventory](docs/PROJECT_INVENTORY.md#maintenance-commands) includes the
-equivalent commands and explicit full rebuild.
+## Open the apps
 
-## Research: test one defined change
+```powershell
+.venv\Scripts\python.exe -m streamlit run picks_app.py
+.venv\Scripts\python.exe -m streamlit run training_app.py --server.port 8502
+```
 
-Start with the [negative-results ledger](docs/NEGATIVE_RESULTS.md) and
-[implementation record](docs/MARKET_PERFORMANCE_PROGRESS.md). Use the
-[forecast benchmark protocol](docs/FORECAST_BENCHMARK_PROTOCOL.md) for experiment
-rules. Older plans are background rather than a standing instruction to run
-their work queues.
+Use the first app for forecasts. The second provides **Data**, **Train** and
+**Registry**, plus research controls. Serving requires compatible data, feature
+history and fitted model weights.
 
-Define the hypothesis, baseline, data, dates and decision rule before fitting.
-Compare identical complete races using race log loss and Brier together.
-Use the shared purged evaluation helpers in `src/wf_eval.py`; keep feature
-selection, tuning and calibration separate from final evaluation.
-Dates already inspected in earlier experiments are not fresh confirmation.
-Profitability and execution require separate evidence.
+## Research and development
 
-Use the [inventory](docs/PROJECT_INVENTORY.md) to find benchmark, audit and
-historical experiment tools. Some are pinned to old inputs or write canonical
-data; inspect their settings and effects before running them.
+Read the [negative-results ledger](docs/NEGATIVE_RESULTS.md),
+[research progress](docs/MARKET_PERFORMANCE_PROGRESS.md) and
+[evaluation protocol](docs/operations/FORECAST_BENCHMARK_PROTOCOL.md) before
+repeating experiments. Numbered reports are in [docs/research](docs/research/);
+earlier plans and handoffs are in [docs/archive](docs/archive/).
 
-## Setup and development
-
-The installation uses Python 3.14 in `.venv`, built from `uv.lock` on the
-project-local runtime in `data/tooling/python`. Development tools use a
-separate locked environment under `data/tooling/`. From PowerShell:
+Use Python 3.14 from the project `.venv`. `pyproject.toml` owns dependencies,
+`uv.lock` locks them, and `requirements.lock` exports the core runtime. The
+development environment has separate tooling:
 
 ```powershell
 .\scripts\tooling.ps1 setup
-.\scripts\tooling.ps1 venv
 .\scripts\tooling.ps1 test
 .\scripts\tooling.ps1 validate
 .\scripts\tooling.ps1 lint
 ```
 
-`pyproject.toml` owns declarations; `uv.lock` locks the graph and
-`requirements.lock` is its core-runtime pip export. The lock targets
-Windows/Python 3.14. See [development tools](docs/DEVELOPMENT_TOOLS.md) for
-compatibility limits, the validation pilot, generated tests and measured DuckDB
-comparison. The initial Ruff run is a report of existing findings.
+See [development tools](docs/operations/DEVELOPMENT_TOOLS.md) and the
+[script guide](scripts/README.md). Local `data/` and `models/` are excluded from
+Git; dependency installation does not recreate the installed data or model.
+Read [CLAUDE.md](CLAUDE.md) before changing feature or settlement calculations.
 
-For a separate pip installation, `requirements.txt` points to the runtime
-export. Local `data/` and `models/` artifacts are excluded from Git; installing
-dependencies does not recreate the database, feature store or production model.
-
-Development checks:
-
-```powershell
-.\scripts\tooling.ps1 test -TestPath tests
-```
-
-Read [CLAUDE.md](CLAUDE.md) for correctness rules before changing calculations.
-The [inventory](docs/PROJECT_INVENTORY.md#consolidation-boundaries) records
-duplicate refresh paths, source-fingerprint constraints and the next code
-consolidation steps. [CONTINUATION.md](CONTINUATION.md) holds session handoff
-detail; [PROJECT_OUTLINE.md](PROJECT_OUTLINE.md) retains the older architecture
-account. This README is the starting point for operating the project.
+The [previous README](docs/archive/README_before_cleanup_2026-11-05.md) retains
+the detailed installation and experiment chronology.

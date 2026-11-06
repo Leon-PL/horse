@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Iterator, Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -55,12 +55,12 @@ BOOT_CHUNK_CELLS = 4_000_000
 
 def purge_days() -> int:
     """The project-wide train/test embargo, so research matches production."""
-    return max(0, int(getattr(config, "PURGE_DAYS", 7)))
+    return max(0, int(config.PURGE_DAYS))
 
 
 def golden_holdout_start() -> pd.Timestamp:
     """First race date of the pre-registered golden hold-out (config)."""
-    return pd.Timestamp(getattr(config, "GOLDEN_HOLDOUT_START", "2026-06-11"))
+    return pd.Timestamp(config.GOLDEN_HOLDOUT_START)
 
 
 def development_mask(race_dates) -> np.ndarray:

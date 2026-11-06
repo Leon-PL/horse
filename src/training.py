@@ -34,6 +34,7 @@ from typing import Callable
 import pandas as pd
 
 import config
+from src.bet_settlement import DEFAULT_VALUE_CONFIG
 from src.clv import compute_clv
 from src.data_processor import process_data
 from src.featured_dataset import data_signature, fe_signature
@@ -44,21 +45,6 @@ from src.run_store import save_run
 logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[[str, float], None]
-
-
-DEFAULT_VALUE_CONFIG: dict = {
-    "staking_mode": "flat",
-    "value_threshold": 0.05,
-    "value_min_odds": 1.0,
-    "value_max_odds": 101.0,
-    "kelly_fraction": 0.25,
-    "bankroll": 100.0,
-    "ew_enabled": True,
-    "ew_fraction": 0.20,
-    "ew_min_place_edge": 0.15,
-    "ew_min_odds": 4.0,
-    "ew_max_odds": 51.0,
-}
 
 
 @dataclass
@@ -191,14 +177,12 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     # 1) Data — optional catch-up scrape, then the full processed history.
     if cfg.refresh_data:
         _tick(f"Scraping last {cfg.catchup_days}d into the DB", 0.02)
-        try:
-            from src.source_pipeline import sync_database
-            if validation:
-                sync_database(days_back=cfg.catchup_days, enrich=False)
-            else:
-                sync_database(days_back=cfg.catchup_days)
-        except Exception as exc:
-            logger.warning("Catch-up scrape failed (%s); using DB as-is", exc)
+        from src.source_pipeline import refresh_sources, refresh_summary
+        refresh_report = refresh_sources(days_back=cfg.catchup_days)
+        _tick(refresh_summary(refresh_report), 0.07)
+        if refresh_report["state"] != "ok":
+            raise RuntimeError(refresh_summary(refresh_report) +
+                ". Complete the source catch-up before training, or explicitly choose --no-refresh to use local history.")
     _tick("Processing history", 0.08)
     processed = process_data(save=False)
 
@@ -282,6 +266,7 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     if cfg.run_walk_forward:
         _tick("Walk-forward validation", 0.92)
         from src.backtester import walk_forward_validation
+        vc = {**DEFAULT_VALUE_CONFIG, **cfg.value_config}
         wf_report = walk_forward_validation(
             featured,
             min_train_months=cfg.wf_min_train_months,
@@ -291,13 +276,13 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
             blend_market_odds=cfg.blend_market_odds,
             random_seed=cfg.seed,
             win_calibration_method=cfg.win_calibration_method,
-            value_threshold=cfg.value_config.get("value_threshold", 0.05),
-            value_min_odds=cfg.value_config.get("value_min_odds", 1.0),
-            value_max_odds=cfg.value_config.get("value_max_odds", 101.0),
-            ew_enabled=cfg.value_config.get("ew_enabled", True),
-            ew_min_place_edge=cfg.value_config.get("ew_min_place_edge", 0.15),
-            ew_min_odds=cfg.value_config.get("ew_min_odds", 4.0),
-            ew_max_odds=cfg.value_config.get("ew_max_odds", 51.0),
+            value_threshold=vc["value_threshold"],
+            value_min_odds=vc["value_min_odds"],
+            value_max_odds=vc["value_max_odds"],
+            ew_enabled=vc["ew_enabled"],
+            ew_min_place_edge=vc["ew_min_place_edge"],
+            ew_min_odds=vc["ew_min_odds"],
+            ew_max_odds=vc["ew_max_odds"],
             progress_callback=(lambda m, p: _tick(m, 0.92 + 0.05 * p)) if progress_cb else None,
         )
 

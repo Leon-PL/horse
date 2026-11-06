@@ -1,6 +1,6 @@
 # Archived research candidate only; not production.
 # Experiment 002 completed 2026-10-26: failed its registered advancement rule.
-# Retain 149 inputs; see docs/MARKET_COMPARISON_002.md before reopening.
+# Retain 149 inputs; see docs/research/MARKET_COMPARISON_002.md before reopening.
 # Excludes full-sample ATR composites and their descendants.
 horse_glicko_rank
 horse_glicko_vs_field

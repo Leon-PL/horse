@@ -133,7 +133,7 @@ class RaceProbabilityPredictor:
                 loss = -float(np.sum(data.get_label() * np.log(np.clip(p, 1e-12, 1))) / len(val_groups))
                 return "race_log_loss", loss, False
 
-            callbacks = [lgb.early_stopping(int(getattr(config, "EARLY_STOPPING_ROUNDS", 100)), verbose=False)]
+            callbacks = [lgb.early_stopping(int(config.EARLY_STOPPING_ROUNDS), verbose=False)]
         selected = lgb.train(params, dataset, num_boost_round=maximum, valid_sets=validation_sets,
                              feval=metric, callbacks=callbacks)
         rounds = selected.best_iteration or selected.current_iteration()
@@ -199,13 +199,14 @@ class RaceProbabilityPredictor:
     def predict_races(self, frame, *, win_only=True):
         if self.model is None:
             raise ValueError("Fit or load a research model first")
-        ordered = frame.sort_values(["race_id", "horse_name"], kind="stable").copy()
-        if ordered.duplicated(["race_id", "horse_name"]).any():
+        from src.runner_identity import identity_columns, runner_index
+        ordered = frame.sort_values(["race_id", "horse_name"]+(["horse_id"] if "horse_id" in frame else []), kind="stable").copy()
+        if not runner_index(ordered).is_unique:
             raise ValueError("Duplicate runner identities")
         groups = ordered.groupby("race_id", sort=False).size().to_numpy()
         raw = self._raw(self.model, ordered[self.feature_cols].to_numpy(dtype=np.float32), groups)
         ordered["win_probability"] = self.calibrator._calibrate_win_probs(raw, groups)
-        return ordered[["race_id", "horse_name", "win_probability"]]
+        return ordered[[*identity_columns(ordered), "win_probability"]]
 
     def save(self, path):
         state = dict(self.__dict__)

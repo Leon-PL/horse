@@ -10,7 +10,7 @@ import re
 import config
 
 ROOT = Path(config.BASE_DIR)
-RECIPE_SOURCES = ("src/model.py", "src/probability_calibration.py", "src/utils.py",
+RECIPE_SOURCES = ("src/model.py", "src/race_objectives.py", "src/probability_calibration.py", "src/utils.py",
                   "src/each_way.py",
                   "src/forecast_evaluation.py", "src/wf_eval.py", "src/training.py",
                   "src/store_refresh.py", "src/parquet_io.py", "src/deployment_validation.py")

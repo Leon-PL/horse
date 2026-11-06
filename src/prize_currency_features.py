@@ -53,7 +53,7 @@ def _atomic_text(path, text):
         Path(temporary).unlink(missing_ok=True)
 
 
-def _rates_for(dates):
+def _rates_for(dates, *, refresh=False):
     _, path = _paths()
     stat = path.stat()
     rates = _read_rates(str(path), stat.st_mtime_ns, stat.st_size)
@@ -67,7 +67,7 @@ def _rates_for(dates):
         checked = json.loads(receipt_path.read_text(encoding="utf-8")).get("date") == today
     except (OSError, ValueError):
         checked = False
-    if rates.observation_date.max() < needed and not checked:
+    if refresh and rates.observation_date.max() < needed and not checked:
         try:
             with urlopen(ECB_URL, timeout=20) as response:
                 document = ET.fromstring(response.read())
@@ -91,6 +91,20 @@ def _rates_for(dates):
         except Exception as error:
             logger.warning("ECB update unavailable; retaining dated known reference rates: %s", error)
     return rates
+
+
+def refresh_prize_references():
+    """Source-stage ECB update; ordinary processing only reads dated rates."""
+    dates = pd.Series([pd.Timestamp.now().normalize()])
+    rates = _rates_for(dates, refresh=True)
+    receipt = Path(config.DATA_DIR)/"reference/ecb_checked.json"
+    try:
+        checked = json.loads(receipt.read_text(encoding="utf-8")).get("date") == pd.Timestamp.now().date().isoformat()
+    except (OSError, ValueError):
+        checked = False
+    current = rates.observation_date.max() >= dates.max()-pd.Timedelta(days=1)
+    return {"state": "ok" if checked or current else "partial", "latest_observation": str(rates.observation_date.max().date()),
+            "checked_today": checked}
 
 
 def reference_signature():

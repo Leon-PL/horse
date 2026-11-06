@@ -213,12 +213,6 @@ def place_odds_decimal(win_odds_decimal: float, fraction: float) -> float:
     return 1.0 + (win_odds_decimal - 1.0) * fraction
 
 
-def implied_place_prob(win_odds_decimal: float, fraction: float) -> float:
-    """Implied probability of placing from the EW terms."""
-    p_odds = place_odds_decimal(win_odds_decimal, fraction)
-    return 1.0 / p_odds
-
-
 # ── EW Value Calculation ─────────────────────────────────────────────
 
 def ew_value(

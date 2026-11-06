@@ -413,34 +413,6 @@ def _snapshot_datasets(
         logger.info("  Processed-data snapshot saved (parquet)")
 
 
-def restore_run_model(run_id: str) -> bool:
-    """
-    Copy a run's ``model.joblib`` back to the global models directory.
-
-    Returns ``True`` if the model was restored successfully.
-    """
-    import shutil as _shutil
-
-    run_dir = os.path.join(RUNS_DIR, run_id)
-    snapshot = os.path.join(run_dir, "model.joblib")
-    if not os.path.isfile(snapshot):
-        logger.warning(f"Run {run_id} has no model snapshot.")
-        return False
-
-    # Figure out which canonical filename to restore to.
-    # Peek inside the joblib to detect the model type.
-    import joblib
-
-    data = joblib.load(snapshot)
-    dest_name = "triple_ensemble_models.joblib"
-
-    os.makedirs(config.MODELS_DIR, exist_ok=True)
-    dest = os.path.join(config.MODELS_DIR, dest_name)
-    _shutil.copy2(snapshot, dest)
-    logger.info(f"Model from run {run_id} restored to {dest}")
-    return True
-
-
 def run_has_model(run_id: str) -> bool:
     """Check whether a run has a saved model snapshot."""
     return os.path.isfile(os.path.join(RUNS_DIR, run_id, "model.joblib"))
@@ -515,13 +487,20 @@ def feature_generation_status(run_id: str | None = None) -> dict:
     run_sig = run_signatures(rid).get("fe_signature")
     try:
         store_sig = store_fe_signature()
-    except Exception:  # pragma: no cover - unreadable store meta
-        logger.warning("Could not read the feature-store signature", exc_info=True)
-        store_sig = None
+    except Exception as error:
+        busy = isinstance(error, RuntimeError) and "FeatureStore is in use by another operation" in str(error)
+        if not busy:
+            logger.warning("Could not read the feature-store signature", exc_info=True)
+        return {"state": GENERATION_UNKNOWN, "run_id": rid,
+                "run_fe_signature": run_sig, "store_fe_signature": None,
+                "store_state": "busy" if busy else "unreadable", "store_error": str(error),
+                "message": ("Feature history is in use by another operation. Retry when it finishes."
+                            if busy else f"Could not read feature-history metadata: {error}. Check access and retry.")}
 
     result = {
         "state": GENERATION_UNKNOWN, "run_id": rid,
         "run_fe_signature": run_sig, "store_fe_signature": store_sig,
+        "store_state": "ready" if store_sig else "unsigned",
         "message": "",
     }
     if not run_sig:

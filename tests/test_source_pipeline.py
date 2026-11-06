@@ -21,7 +21,7 @@ def frames():
 @pytest.fixture
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(sources, "_refresh_rtv_features", lambda *args: {"state": "ok"})
+    monkeypatch.setattr(sources, "_refresh_rtv_features", lambda *args, **kwargs: {"state": "ok"})
     monkeypatch.setattr("requests.sessions.Session.request", lambda *a, **kw: pytest.fail("No network in source tests"))
     return tmp_path
 
@@ -53,21 +53,26 @@ def test_unified_sync_preserves_canonical_frame_and_refreshes_rtv_without_weathe
     from src import database
     expected = pd.DataFrame({"horse_id": [123], "odds": [4.5], "finish_position": [1]})
     calls = []
-    monkeypatch.setattr(database, "sync_database", lambda **kw: calls.append(kw) or expected)
-    monkeypatch.setattr(sources, "refresh_rtv_history", lambda **kw: calls.append(kw))
-    actual = sources.sync_database(days_back=3, enrich=False)
+    monkeypatch.setattr(database, "sync_database", lambda **kw: calls.append(kw) or {"state": "ok"})
+    monkeypatch.setattr(database, "load_from_database", lambda: expected)
+    monkeypatch.setattr(sources, "refresh_rtv_history", lambda **kw: calls.append(kw) or {"state": "ok"})
+    actual = sources.sync_database(days_back=3, enrich=False, sources=("sl", "rtv"))
     assert actual is expected
-    assert calls == [{"days_back": 3, "enrich": False}, {"days_back": 10}]
+    assert calls[0]["days_back"] == 3 and calls[0]["enrich"] is False and calls[0]["return_report"] is True
+    assert calls[1] == {"days_back": 10}
+    assert actual.attrs["source_refresh"]["state"] == "ok"
 
 
 def test_rtv_outage_does_not_prevent_canonical_sync(isolated, monkeypatch, caplog):
     from src import database
     expected = pd.DataFrame({"race_id": [1]})
-    monkeypatch.setattr(database, "sync_database", lambda **kw: expected)
+    monkeypatch.setattr(database, "sync_database", lambda **kw: {"state": "ok"})
+    monkeypatch.setattr(database, "load_from_database", lambda: expected)
     def broken(**kwargs):
         raise sources.rtv.RTVTransientError("rate limited")
     monkeypatch.setattr(sources, "refresh_rtv_history", broken)
-    assert sources.sync_database(1) is expected
+    assert sources.sync_database(1, sources=("sl", "rtv")) is expected
+    assert expected.attrs["source_refresh"]["state"] == "partial"
     assert "rate limited" in caplog.text
 
 
@@ -136,3 +141,17 @@ def test_snapshot_generation_contains_only_the_current_capture_and_is_throttled(
     assert written.runner_id.tolist() == [2]
     assert sources.capture_rtv_snapshot(day)["state"] == "cached"
     assert calls == [day]
+
+
+def test_matched_text_keys_rtv_text_to_sl_runners(monkeypatch):
+    races, runners, canonical = frames()
+    races["card_analyst_verdict_text"] = "Test Horse can follow up."
+    runners["card_analyst_comment_text"], runners["comment"] = "Won well last time.", "led, ran on"
+    tables = {"races": races, "runners": runners}
+    monkeypatch.setattr(sources, "load_history_table", lambda name, start, end: tables[name])
+    monkeypatch.setattr(sources, "canonical_rows", lambda start, end: canonical)
+    text = sources.load_matched_text("2026-10-29", "2026-10-29")
+    assert text.drop(columns=["pace_hint", "draw_comment"]).to_dict("records") == [{"race_id": "sl-1", "horse_id": 303,
+        "race_date": "2026-10-29", "tf_comment": "Won well last time.", "tf_verdict": "Test Horse can follow up.",
+        "close_up": "led, ran on"}]
+    assert text[["pace_hint", "draw_comment"]].isna().all(axis=None)

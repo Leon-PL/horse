@@ -212,20 +212,20 @@ class TestOutcomeClassification:
         f = _FakeFetcher({"/racecard/": (404, "")})
         assert atr._fetch_one(f, "Naas", "10-June-2026", "1430")[0] == atr.NOT_FOUND
 
-    def test_racecard_200_no_raceid_is_not_found(self):
+    def test_racecard_200_no_raceid_is_retryable(self):
         f = _FakeFetcher({"/racecard/": (200, "<html>no id</html>")})
-        assert atr._fetch_one(f, "Kempton", "10-June-2026", "1910")[0] == atr.NOT_FOUND
+        assert atr._fetch_one(f, "Kempton", "10-June-2026", "1910")[0] == atr.BLOCKED
 
     def test_ajax_blocked_is_blocked_not_no_data(self):
         # Racecard OK with a RaceID, but every AJAX fragment is rate-limited.
-        f = _FakeFetcher({"/racecard/": (200, _RACECARD), "/ajax/sectionals/": (429, "")})
+        f = _FakeFetcher({"/racecard/": (200, _RACECARD), "/ajax/sectionals-razor/": (429, "")})
         outcome, rows = atr._fetch_one(f, "Kempton", "10-June-2026", "1910")
         assert outcome == atr.BLOCKED
         assert rows is None
 
     def test_ajax_404_fragment_is_not_found(self):
         # Racecard OK, but the sectional fragments genuinely don't exist (404).
-        f = _FakeFetcher({"/racecard/": (200, _RACECARD), "/ajax/sectionals/": (404, "")})
+        f = _FakeFetcher({"/racecard/": (200, _RACECARD), "/ajax/sectionals-razor/": (404, "")})
         assert atr._fetch_one(f, "Kempton", "10-June-2026", "1910")[0] == atr.NOT_FOUND
 
     def test_full_data_path(self):
@@ -241,26 +241,27 @@ class TestOutcomeClassification:
         assert rows[0]["horse_name"] == "Moonshine"
         assert rows[0]["atr_raceid"] == "1595773"
 
-    def test_outcome_wrapper_prefers_data_over_block(self, monkeypatch):
-        # BST day: first (adjusted) candidate blocked, fallback candidate has data.
+    def test_outcome_wrapper_never_retries_a_different_summer_race(self, monkeypatch):
+        # UTC is explicit; falling back an hour can silently collect another field.
         monkeypatch.setattr(atr, "_is_bst", lambda d: True)
-        seen = {"n": 0}
+        seen = []
 
         def fake_fetch_one(fetcher, slug, atr_date, hhmm):
-            seen["n"] += 1
-            return (atr.BLOCKED, None) if seen["n"] == 1 else (atr.DATA, [{"horse_name": "X"}])
+            seen.append(hhmm)
+            return (atr.BLOCKED, None) if hhmm == "1910" else (atr.DATA, [{"horse_name": "X"}])
 
         monkeypatch.setattr(atr, "_fetch_one", fake_fetch_one)
         outcome, rows = atr.fetch_atr_sectionals_outcome("2026-06-10", "Kempton", "18:10", fetcher=object())
-        assert outcome == atr.DATA
+        assert outcome == atr.BLOCKED and rows is None
+        assert seen == ["1910"]
 
-    def test_outcome_wrapper_blocked_when_no_data_seen(self, monkeypatch):
+    def test_outcome_wrapper_preserves_exact_race_absence(self, monkeypatch):
         monkeypatch.setattr(atr, "_is_bst", lambda d: True)
-        # One candidate blocked, the other not-found -> overall BLOCKED (can't conclude absence).
+        # A missing correct time does not justify trying a different field.
         outcomes = iter([(atr.NOT_FOUND, None), (atr.BLOCKED, None)])
         monkeypatch.setattr(atr, "_fetch_one", lambda *a: next(outcomes))
         outcome, _ = atr.fetch_atr_sectionals_outcome("2026-06-10", "Kempton", "18:10", fetcher=object())
-        assert outcome == atr.BLOCKED
+        assert outcome == atr.NOT_FOUND
 
 
 class TestTrackExclusion:

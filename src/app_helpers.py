@@ -1,83 +1,23 @@
 """
 App Helper Layer
 ================
-Pure/diagnostic helpers shared by the Streamlit apps: cached run-store
-wrappers, chart builders for the registry/insights views, pace diagnostic
-panels, SHAP rendering, metric formatting and the experiment log.
+Pure/diagnostic helpers for the Streamlit picks app: cached run-metadata
+and database-stat reads, pace diagnostic panels, SHAP rendering and the
+value-bet mask.
 
-These functions hold no page logic — the picks and training apps import
-them.
+These functions hold no page logic.
 """
 
-"""
-Streamlit Web Application — v3.0
-================================
-Interactive web interface for the Horse Racing Prediction system.
-
-Features:
-- Train models with hyperparameter tuning & presets
-- Experiment tracking and comparison
-- Predictions for upcoming races
-- Walk-forward backtesting
-- Data exploration and model insights
-
-Run with:
-    streamlit run app.py
-"""
-
-import os
-import sys
 import logging
 
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import config
-from src.data_collector import collect_data, get_scraped_racecards, scrape_todays_results
-from src.data_processor import process_data
-from src.feature_engineer import engineer_features
-from src.live_prediction import (
-    build_lookahead_cache,
-    cards_signature,
-    clear_lookahead_cache,
-    feature_engineer_with_history_core,
-    gap_fill_signature,
-    history_source_signature,
-    load_lookahead_cache,
-    lookahead_cache_valid,
-    save_lookahead_cache,
-)
 from src.database import db_stats as _raw_db_stats
-from src.model import (
-    RacePredictor,
-    get_autotune_search_space,
-    get_feature_importance,
-    get_feature_columns,
-)
-from src.autotune import (
-    AUTOTUNE_MODEL_INFO,
-    build_config_snippet,
-    create_autotune_session,
-    delete_autotune_session,
-    list_autotune_sessions,
-    load_autotune_session,
-    load_optuna_study,
-    run_autotune_session,
-)
-from src.backtester import walk_forward_validation
-from src.run_store import save_run, list_runs as _raw_list_runs, load_run as _raw_load_run, load_run_meta as _raw_load_run_meta, delete_run as _raw_delete_run, rename_run, get_latest_run_id, restore_run_model, run_has_model, get_run_processed_path, get_run_featured_path, prune_runs, run_disk_usage
-from src.utils import format_odds, kelly_criterion, compact_numeric_dtypes as _compact_numeric_dtypes
-from src.bet_settlement import dynamic_value_threshold, ew_placed_flag, settle_ew_bet, settle_win_bet
-from src.each_way import compute_ew_columns, ew_value_bets, get_ew_terms, kelly_ew, EachWayTerms
-from src.matchbook_client import MatchbookAPIError, MatchbookClient
-from src.matchbook_signals import build_fake_prediction_frame, build_signal_frame
-from src.paper_trade_store import append_paper_trades, build_paper_trades_from_signals, load_paper_trades, save_paper_trades, settle_paper_trades
+from src.run_store import load_run_meta as _raw_load_run_meta
+from src.bet_settlement import DEFAULT_VALUE_THRESHOLD, dynamic_value_threshold
 
 logger = logging.getLogger(__name__)
 
@@ -116,14 +56,26 @@ def _attach_pace_diagnostics(
     if feature_df is None or feature_df.empty or predictions is None or predictions.empty:
         return predictions
 
-    join_cols = [c for c in ["race_id", "horse_name"] if c in predictions.columns and c in feature_df.columns]
-    pace_cols = [c for c in _PACE_DISPLAY_COLUMNS if c in feature_df.columns]
-    if not join_cols or not pace_cols:
+    from src.runner_identity import join_runner_columns
+    pace_cols = [c for c in _PACE_DISPLAY_COLUMNS if c in feature_df.columns and c not in predictions.columns]
+    if not all(c in predictions and c in feature_df for c in ("race_id", "horse_name")) or not pace_cols:
         return predictions
+    return join_runner_columns(predictions, feature_df, pace_cols, require_all=False, skip_ambiguous=True)
 
-    pace_frame = feature_df[join_cols + pace_cols].drop_duplicates(subset=join_cols, keep="last")
-    merged = predictions.merge(pace_frame, on=join_cols, how="left")
-    return merged
+
+def attach_result_outcomes(predictions, results):
+    """Associate results by source identity; unknown namesakes stay unsettled."""
+    from src.runner_identity import runner_positions
+    import numpy as np
+    positions = (runner_positions(predictions,results,require_all=False,skip_ambiguous=True)
+                 if results is not None and not results.empty else np.full(len(predictions),-1,dtype=int))
+    values = results.reset_index(drop=True).reindex(positions) if results is not None else pd.DataFrame(index=range(len(predictions)))
+    out = predictions.copy()
+    for source,target in (("finish_position","result_fp"),("won","result_won")):
+        out[target] = pd.to_numeric(values.get(source,pd.Series(0,index=values.index)),errors="coerce").fillna(0).to_numpy(dtype=int)
+    out["result_fp_label"] = values.get("finish_pos_label",pd.Series("",index=values.index)).fillna("").astype(str).to_numpy()
+    out["is_settled"] = positions >= 0
+    return out
 
 
 def _has_pace_diagnostics(df: pd.DataFrame | None) -> bool:
@@ -213,31 +165,11 @@ def _render_pace_panel(predictions: pd.DataFrame, *, key: str) -> None:
 
 
 # ── Cached wrappers for disk I/O ─────────────────────────────────────
-@st.cache_data(ttl=60, show_spinner=False)
-def list_runs() -> list[dict]:
-    return _raw_list_runs()
-
-
-# Run snapshots are immutable once written (rename/delete clear these
-# caches explicitly), so a long TTL avoids re-decompressing zstd
-# snapshots every minute while browsing the Experiments pages.
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_run(run_id: str) -> dict:
-    return _raw_load_run(run_id)
-
-
+# A long TTL avoids re-reading run metadata on every rerun; a rename made
+# in the training app shows here within the hour.
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_run_meta(run_id: str) -> dict:
     return _raw_load_run_meta(run_id)
-
-
-def delete_run(run_id: str) -> bool:
-    result = _raw_delete_run(run_id)
-    if result:
-        list_runs.clear()
-        load_run.clear()
-        load_run_meta.clear()
-    return result
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -263,7 +195,7 @@ def _value_bet_mask(frame: pd.DataFrame, value_config: dict | None) -> pd.Series
         return pd.Series(False, index=getattr(frame, "index", pd.Index([])))
 
     cfg = value_config or {}
-    base_thresh = float(cfg.get("value_threshold", 0.05))
+    base_thresh = float(cfg.get("value_threshold", DEFAULT_VALUE_THRESHOLD))
     min_odds, max_odds = _value_odds_range(cfg)
     odds = pd.to_numeric(frame["odds"], errors="coerce")
     dyn_thresh = dynamic_value_threshold(base_thresh, odds)
@@ -303,26 +235,6 @@ def _drop_market_feature_columns(df: pd.DataFrame) -> tuple[pd.DataFrame, list[s
     if not to_drop:
         return df, []
     return df.drop(columns=to_drop), to_drop
-
-
-# ── Cached chart builders for Overfitting Diagnostics ─────────────────
-# Plotly figure construction is expensive (~1.3 s for 7 charts).
-# These functions cache the built figures so subsequent Streamlit
-# reruns with the same data return instantly.
-
-
-def _flatten_numeric_metrics(metrics: dict | None, prefix: str = "") -> dict[str, float]:
-    """Flatten nested metric dicts into a single numeric mapping."""
-    out: dict[str, float] = {}
-    if not isinstance(metrics, dict):
-        return out
-    for key, value in metrics.items():
-        full_key = f"{prefix}/{key}" if prefix else str(key)
-        if isinstance(value, dict):
-            out.update(_flatten_numeric_metrics(value, full_key))
-        elif isinstance(value, (int, float, np.integer, np.floating)) and pd.notna(value):
-            out[full_key] = float(value)
-    return out
 
 
 def _render_shap_explanation(
@@ -434,22 +346,3 @@ def _render_shap_explanation(
         )
         fig2.update_layout(height=380, xaxis_tickangle=-30)
         st.plotly_chart(fig2, width="stretch")
-
-
-# ── Experiment log file ──────────────────────────────────────────────
-EXPERIMENTS_FILE = os.path.join(config.DATA_DIR, "experiments.json")
-
-
-@st.cache_resource(show_spinner="Loading data …")
-def _cached_load_df(path: str, _mtime: float) -> pd.DataFrame:
-    """Read Parquet (or legacy CSV) — cached by path + modification time.
-
-    ``cache_resource`` (not ``cache_data``): featured datasets run to
-    gigabytes, and cache_data deep-copies the value on EVERY call, which
-    made each rerun pay seconds of copying and doubled memory. The
-    returned frame is shared — treat it as read-only and ``.copy()``
-    before mutating.
-    """
-    if path.endswith(".parquet"):
-        return pd.read_parquet(path, engine="pyarrow")
-    return pd.read_csv(path)

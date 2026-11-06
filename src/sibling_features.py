@@ -197,9 +197,3 @@ def _empty(df: pd.DataFrame) -> pd.DataFrame:
     for col in SIBLING_FEATURES:
         out[col] = 0 if col in ("has_sibling_history", "sibling_any_winner") else np.nan
     return out
-
-
-def add_sibling_features(df: pd.DataFrame) -> pd.DataFrame:
-    """FE-stage shape: return *df* with the sibling columns attached."""
-    logger.info("Engineering sibling (dam-produce) features...")
-    return pd.concat([df, compute_sibling_features(df)], axis=1)

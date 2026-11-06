@@ -40,10 +40,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from src.source_pipeline import get_scraped_racecards
-from src.data_collector import scrape_todays_results
-from src.data_processor import process_data
+from src.ingestion.sporting_life import scrape_todays_results
 from src.live_prediction import (
-    feature_engineer_with_history_core,
     features_for_live_cards,
     feature_store_signature,
 )
@@ -53,16 +51,19 @@ from src.run_store import (
     GENERATION_MISMATCH,
     GENERATION_UNKNOWN,
     feature_generation_status,
-    get_run_processed_path,
-    get_run_featured_path,
     get_production_run_id,
     production_model_revision,
 )
 from src.utils import (
     kelly_criterion,
-    compact_numeric_dtypes as _compact_numeric_dtypes,
 )
-from src.bet_settlement import dynamic_value_threshold, ew_placed_flag, settle_ew_bet, settle_win_bet
+from src.bet_settlement import (
+    DEFAULT_VALUE_CONFIG,
+    dynamic_value_threshold,
+    ew_placed_flag,
+    settle_ew_bet,
+    settle_win_bet,
+)
 from src.each_way import (
     ew_value_bets,
     get_ew_terms,
@@ -78,7 +79,6 @@ logger = logging.getLogger(__name__)
 from src.app_helpers import (
     _attach_pace_diagnostics,
     _cached_db_stats,
-    _cached_load_df,
     _has_pace_diagnostics,
     _ordinal,
     _pace_race_summary,
@@ -113,31 +113,8 @@ st.markdown(
 # ── Session State ────────────────────────────────────────────────────
 _DEFAULTS = {
     "predictor": None,
-    "featured_data": None,
-    "train_processed_data": None,
-    "train_dataset_meta": None,
-    "autotune_featured_data": None,
-    "autotune_processed_data": None,
-    "autotune_dataset_meta": None,
-    "model_featured_data": None,
-    "model_dataset_meta": None,
-    "metrics": None,
-    "bt_report": None,
-    "test_analysis": None,
     "active_run_id": None,
-    "value_config": {
-        "staking_mode": "flat",
-        "value_threshold": 0.05,
-        "value_min_odds": 1.0,
-        "value_max_odds": 101.0,
-        "kelly_fraction": 0.25,
-        "bankroll": 100.0,
-        "ew_enabled": True,
-        "ew_fraction": 0.20,
-        "ew_min_place_edge": 0.15,
-        "ew_min_odds": 4.0,
-        "ew_max_odds": 51.0,
-    },
+    "value_config": dict(DEFAULT_VALUE_CONFIG),
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -175,24 +152,6 @@ def load_existing_model():
     st.session_state.predictor = p
     st.session_state.active_run_id = revision[0] if revision else None
     return p is not None
-
-
-def _cached_load_history_context(path: str, _mtime: float) -> tuple[pd.DataFrame, object]:
-    """Load processed history and its last available race date.
-
-    Not cached itself: _cached_load_df already caches the heavy read
-    (an extra cache_data layer here used to deep-copy the whole history
-    frame on every call), and the max-date scan is milliseconds.
-    """
-    hist = _cached_load_df(path, _mtime)
-    if hist is None or hist.empty or "race_date" not in hist.columns:
-        return hist, None
-
-    race_dates = hist["race_date"]
-    if not pd.api.types.is_datetime64_any_dtype(race_dates):
-        race_dates = pd.to_datetime(race_dates, errors="coerce")
-    last_hist = race_dates.max()
-    return hist, last_hist.date() if pd.notna(last_hist) else None
 
 
 def _predictor_runtime_token(predictor: RacePredictor | None) -> str:
@@ -235,12 +194,11 @@ def _attach_qc_inputs(preds: pd.DataFrame, feature_df: pd.DataFrame | None) -> p
     """Carry data-quality gate inputs (e.g. horse_prev_races) onto predictions."""
     if feature_df is None or feature_df.empty or preds is None or preds.empty:
         return preds
-    join_cols = [c for c in ["race_id", "horse_name"] if c in preds.columns and c in feature_df.columns]
+    from src.runner_identity import join_runner_columns
     qc_cols = [c for c in _QC_INPUT_COLUMNS if c in feature_df.columns and c not in preds.columns]
-    if not join_cols or not qc_cols:
+    if not all(col in preds and col in feature_df for col in ("race_id","horse_name")) or not qc_cols:
         return preds
-    src = feature_df[join_cols + qc_cols].drop_duplicates(subset=join_cols, keep="last")
-    return preds.merge(src, on=join_cols, how="left")
+    return join_runner_columns(preds,feature_df,qc_cols,require_all=False,skip_ambiguous=True)
 
 
 def _predict_featured_frame(
@@ -285,180 +243,6 @@ def _predict_featured_frame(
     return _prediction_cache_set(cache_key, combined)
 
 
-def _global_featured_dataset_path() -> str | None:
-    """Path to the canonical featured dataset.
-
-    The single persistent FeatureStore is now the one source of truth, so this
-    resolves to its ``featured.parquet`` first and only falls back to the
-    legacy global file for back-compat with old on-disk datasets.
-    """
-    store_path = os.path.join(config.PROCESSED_DATA_DIR, "feature_store", "featured.parquet")
-    if os.path.exists(store_path):
-        return store_path
-    pq_path = os.path.join(config.PROCESSED_DATA_DIR, "featured_races.parquet")
-    csv_path = os.path.join(config.PROCESSED_DATA_DIR, "featured_races.csv")
-    if os.path.exists(pq_path):
-        return pq_path
-    if os.path.exists(csv_path):
-        return csv_path
-    return None
-
-
-def _dataset_meta_from_frame(
-    df: pd.DataFrame | None,
-    *,
-    data_source: str | None = None,
-    requested_days: int | None = None,
-    cache_key: str | None = None,
-    featured_path: str | None = None,
-    processed_path: str | None = None,
-    origin: str | None = None,
-) -> dict[str, object]:
-    dates = pd.to_datetime(df["race_date"], errors="coerce") if isinstance(df, pd.DataFrame) and "race_date" in df.columns else pd.Series(dtype="datetime64[ns]")
-    date_min = dates.min() if not dates.empty else pd.NaT
-    date_max = dates.max() if not dates.empty else pd.NaT
-    span_days = None
-    months = None
-    if pd.notna(date_min) and pd.notna(date_max):
-        span_days = int((date_max - date_min).days) + 1
-        months = int(dates.dt.to_period("M").nunique())
-    actual_days = span_days if span_days is not None else (int(requested_days) if requested_days is not None else None)
-    return {
-        "data_source": data_source,
-        "requested_days": int(requested_days) if requested_days is not None else None,
-        "actual_days": actual_days,
-        "date_start": date_min.date().isoformat() if pd.notna(date_min) else None,
-        "date_end": date_max.date().isoformat() if pd.notna(date_max) else None,
-        "months": months,
-        "rows": int(len(df)) if isinstance(df, pd.DataFrame) else 0,
-        "cols": int(len(df.columns)) if isinstance(df, pd.DataFrame) else 0,
-        "cache_key": cache_key,
-        "featured_path": featured_path,
-        "processed_path": processed_path,
-        "origin": origin,
-    }
-
-
-def _set_model_dataset(
-    featured_df: pd.DataFrame | None,
-    *,
-    dataset_meta: dict[str, object] | None = None,
-) -> None:
-    featured_df = _compact_numeric_dtypes(featured_df, label="prediction featured")
-    st.session_state.model_featured_data = featured_df
-    st.session_state.model_dataset_meta = dataset_meta or None
-
-
-def _load_run_featured_dataset(run_id: str) -> tuple[pd.DataFrame | None, dict[str, object]]:
-    try:
-        run_meta = load_run_meta(run_id)
-    except Exception:
-        run_meta = {}
-
-    tc = run_meta.get("training_config", {}) if isinstance(run_meta.get("training_config", {}), dict) else {}
-    data_source = run_meta.get("data_source") or tc.get("data_source")
-    requested_days = tc.get("dataset_days_requested", tc.get("days_back"))
-
-    snapshot_path = get_run_featured_path(run_id)
-    if snapshot_path and os.path.exists(snapshot_path):
-        mtime = os.path.getmtime(snapshot_path)
-        featured = _cached_load_df(snapshot_path, mtime)
-        meta = _dataset_meta_from_frame(
-            featured,
-            data_source=data_source,
-            requested_days=requested_days,
-            featured_path=snapshot_path,
-            processed_path=get_run_processed_path(run_id),
-            origin="run_featured_snapshot",
-        )
-        meta["run_id"] = run_id
-        return featured, meta
-
-    # No frozen snapshot for this run: fall through so the caller serves the
-    # single canonical feature store (load_model_data's store fallback). The
-    # store is read-only here — we never trigger a (slow) rebuild on a load.
-    return None, {"run_id": run_id, "origin": "missing"}
-
-
-def load_model_data(run_id: str | None = None, force: bool = False) -> bool:
-    target_run_id = run_id if run_id is not None else st.session_state.get("active_run_id")
-    current_meta = st.session_state.get("model_dataset_meta") or {}
-    if (
-        not force
-        and target_run_id is not None
-        and current_meta.get("run_id") == target_run_id
-        and st.session_state.get("model_featured_data") is not None
-    ):
-        return True
-
-    if target_run_id:
-        featured, meta = _load_run_featured_dataset(target_run_id)
-        if featured is not None:
-            _set_model_dataset(featured, dataset_meta=meta)
-            return True
-
-    path = _global_featured_dataset_path()
-    if path and os.path.exists(path):
-        mtime = os.path.getmtime(path)
-        featured = _cached_load_df(path, mtime)
-        meta = _dataset_meta_from_frame(
-            featured, data_source="store", featured_path=path, origin="feature_store"
-        )
-        meta["run_id"] = target_run_id
-        _set_model_dataset(featured, dataset_meta=meta)
-        return True
-
-    _set_model_dataset(None, dataset_meta={"run_id": target_run_id, "origin": "missing"})
-    return False
-
-
-def _load_processed_history() -> pd.DataFrame | None:
-    hist, _ = _get_processed_history_context()
-    return hist
-
-
-def _get_processed_history_context() -> tuple[pd.DataFrame | None, dict[str, object]]:
-    """Load the processed (pre-feature-engineering) historical data.
-
-    If the active run has a processed-data snapshot, that is used in
-    preference to the global file — ensuring feature engineering uses
-    the exact same history the model was trained on.
-    """
-    _run_id = st.session_state.get("active_run_id")
-    if _run_id:
-        _snap = get_run_processed_path(_run_id)
-        if _snap and os.path.exists(_snap):
-            _mtime = os.path.getmtime(_snap)
-            _hist, _last_hist_date = _cached_load_history_context(_snap, _mtime)
-            return _hist, {
-                "path": _snap,
-                "mtime": _mtime,
-                "last_hist_date": _last_hist_date,
-            }
-
-    pq_path = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.parquet")
-    csv_path = os.path.join(config.PROCESSED_DATA_DIR, "processed_races.csv")
-    path = pq_path if os.path.exists(pq_path) else csv_path
-    if not os.path.exists(path):
-        return None, {"path": None, "mtime": None, "last_hist_date": None}
-    mtime = os.path.getmtime(path)
-    hist, last_hist_date = _cached_load_history_context(path, mtime)
-    return hist, {
-        "path": path,
-        "mtime": mtime,
-        "last_hist_date": last_hist_date,
-    }
-
-
-def feature_engineer_with_history(
-    live_processed: pd.DataFrame,
-    extra_history: pd.DataFrame | None = None,
-    history_df: pd.DataFrame | None = None,
-) -> pd.DataFrame:
-    hist = history_df if history_df is not None else _load_processed_history()
-    return feature_engineer_with_history_core(hist, live_processed, extra_history=extra_history)
-
-
 # Refresh session state whenever another process promotes/replaces a model.
 # The cache identity and displayed run must always describe the same artifact.
 _production_revision = production_model_revision()
@@ -466,16 +250,9 @@ if st.session_state.get("_production_revision") != _production_revision:
     st.session_state["_production_revision"] = _production_revision
     st.session_state.predictor = None
     st.session_state.active_run_id = _production_revision[0] if _production_revision else None
-    st.session_state.metrics = None
-    st.session_state.test_analysis = None
     for _key in ("picks_preds", "picks_meta", "picks_model_fp", "picks_explanations",
                  "_prediction_result_cache", "_prediction_result_cache_order"):
         st.session_state.pop(_key, None)
-    if _production_revision:
-        try:
-            st.session_state.metrics = load_run_meta(_production_revision[0]).get("metrics")
-        except (OSError, ValueError):
-            logger.warning("Could not load production run metadata", exc_info=True)
 
 
 def _mask_token(token: str | None) -> str:
@@ -603,17 +380,17 @@ if _prod_id:
 _pending_vc = st.session_state.pop("_pending_value_config", None)
 if isinstance(_pending_vc, dict):
     st.session_state.value_config.update(_pending_vc)
-    st.session_state["_g_staking_mode"] = st.session_state.value_config.get("staking_mode", "flat")
-    st.session_state["_g_value_threshold"] = float(st.session_state.value_config.get("value_threshold", 0.05))
+    st.session_state["_g_staking_mode"] = st.session_state.value_config["staking_mode"]
+    st.session_state["_g_value_threshold"] = float(st.session_state.value_config["value_threshold"])
     st.session_state["_g_value_odds_range"] = _value_odds_range(st.session_state.value_config)
-    st.session_state["_g_kelly_fraction"] = float(st.session_state.value_config.get("kelly_fraction", 0.25))
-    st.session_state["_g_bankroll"] = float(st.session_state.value_config.get("bankroll", 100.0))
-    st.session_state["_g_ew_enabled"] = bool(st.session_state.value_config.get("ew_enabled", True))
-    st.session_state["_g_ew_fraction"] = float(st.session_state.value_config.get("ew_fraction", 0.20))
-    st.session_state["_g_ew_min_edge"] = float(st.session_state.value_config.get("ew_min_place_edge", 0.15))
+    st.session_state["_g_kelly_fraction"] = float(st.session_state.value_config["kelly_fraction"])
+    st.session_state["_g_bankroll"] = float(st.session_state.value_config["bankroll"])
+    st.session_state["_g_ew_enabled"] = bool(st.session_state.value_config["ew_enabled"])
+    st.session_state["_g_ew_fraction"] = float(st.session_state.value_config["ew_fraction"])
+    st.session_state["_g_ew_min_edge"] = float(st.session_state.value_config["ew_min_place_edge"])
     st.session_state["_g_ew_odds_range"] = (
-        float(st.session_state.value_config.get("ew_min_odds", 4.0)),
-        float(st.session_state.value_config.get("ew_max_odds", 51.0)),
+        float(st.session_state.value_config["ew_min_odds"]),
+        float(st.session_state.value_config["ew_max_odds"]),
     )
 
 # ── Global Value Strategy Config ──────────────────────────────────────
@@ -676,7 +453,7 @@ with st.sidebar.expander("⚙️ Value Strategy", expanded=False):
     st.markdown("**Each-Way Settings**")
     _g_ew_enabled = st.checkbox(
         "Enable each-way analysis",
-        value=st.session_state.value_config.get("ew_enabled", True),
+        value=st.session_state.value_config["ew_enabled"],
         key="_g_ew_enabled",
         help="Show each-way value bets alongside win value bets.",
     )
@@ -686,8 +463,8 @@ with st.sidebar.expander("⚙️ Value Strategy", expanded=False):
         "EW odds fraction",
         _ew_frac_options,
         index=_ew_frac_options.index(
-            st.session_state.value_config.get("ew_fraction", 0.20)
-        ) if st.session_state.value_config.get("ew_fraction", 0.20) in _ew_frac_options else 0,
+            st.session_state.value_config["ew_fraction"]
+        ) if st.session_state.value_config["ew_fraction"] in _ew_frac_options else 0,
         format_func=lambda x: _ew_frac_labels.get(x, f"{x:.2f}"),
         key="_g_ew_fraction",
         help=(
@@ -700,7 +477,7 @@ with st.sidebar.expander("⚙️ Value Strategy", expanded=False):
     _g_ew_min_edge = st.slider(
         "Min place edge",
         min_value=0.01, max_value=0.20,
-        value=st.session_state.value_config.get("ew_min_place_edge", 0.15),
+        value=st.session_state.value_config["ew_min_place_edge"],
         step=0.01,
         key="_g_ew_min_edge",
         help="Minimum place_prob \u2212 implied_place_prob edge for EW bets.",
@@ -709,8 +486,8 @@ with st.sidebar.expander("⚙️ Value Strategy", expanded=False):
         "EW odds range",
         min_value=2.0, max_value=101.0,
         value=(
-            st.session_state.value_config.get("ew_min_odds", 4.0),
-            st.session_state.value_config.get("ew_max_odds", 51.0),
+            st.session_state.value_config["ew_min_odds"],
+            st.session_state.value_config["ew_max_odds"],
         ),
         step=1.0,
         key="_g_ew_odds_range",
@@ -1033,42 +810,9 @@ if page == "💰 Today's Picks":
         # Merge results into predictions if available
         if "picks_results" in st.session_state and st.session_state["picks_results"] is not None:
             _res_df = st.session_state["picks_results"]
-            # Build a lookup: (race_id, horse_name) → {finish_position, won, finish_pos_label}
-            _res_df["_race_id_str"] = _res_df["race_id"].astype(str)
-            _res_lookup = {}
-            for _, _rr in _res_df.iterrows():
-                _key = (str(_rr["race_id"]), str(_rr["horse_name"]).strip().lower())
-                _res_lookup[_key] = {
-                    "finish_position": int(_rr.get("finish_position", 0)),
-                    "won": int(_rr.get("won", 0)),
-                    "lengths_behind": float(_rr.get("lengths_behind", 0.0)),
-                    "finish_pos_label": str(_rr.get("finish_pos_label", "") or ""),
-                }
-            # Settled race IDs (those with results)
-            _settled_rids = set(_res_df["_race_id_str"].unique())
-
-            # Map onto predictions
-            _fp_list, _won_list, _settled_list, _fpl_list = [], [], [], []
-            for _, _pr in full_preds.iterrows():
-                _k = (str(_pr["race_id"]), str(_pr["horse_name"]).strip().lower())
-                _match = _res_lookup.get(_k)
-                if _match and str(_pr["race_id"]) in _settled_rids:
-                    _fp_list.append(_match["finish_position"])
-                    _won_list.append(_match["won"])
-                    _settled_list.append(True)
-                    _fpl_list.append(_match["finish_pos_label"])
-                else:
-                    _fp_list.append(0)
-                    _won_list.append(0)
-                    _settled_list.append(False)
-                    _fpl_list.append("")
-            full_preds["result_fp"] = _fp_list
-            full_preds["result_won"] = _won_list
-            full_preds["is_settled"] = _settled_list
-            full_preds["result_fp_label"] = _fpl_list
-            full_preds["result_is_nr"] = [
-                lbl.upper() in _NR_LABELS for lbl in _fpl_list
-            ]
+            from src.app_helpers import attach_result_outcomes
+            full_preds = attach_result_outcomes(full_preds,_res_df)
+            full_preds["result_is_nr"] = full_preds.result_fp_label.str.upper().isin(_NR_LABELS)
         else:
             full_preds["result_fp"] = 0
             full_preds["result_won"] = 0
@@ -1091,14 +835,14 @@ if page == "💰 Today's Picks":
         # ── identify EW value bets ────────────────────────────────
         _tp_ew_cfg = st.session_state.value_config
         if (
-            _tp_ew_cfg.get("ew_enabled", True)
+            _tp_ew_cfg["ew_enabled"]
             and "ew_value" in full_preds.columns
         ):
             ew_df = ew_value_bets(
                 full_preds,
-                min_place_edge=_tp_ew_cfg.get("ew_min_place_edge", 0.05),
-                min_odds=_tp_ew_cfg.get("ew_min_odds", 4.0),
-                max_odds=_tp_ew_cfg.get("ew_max_odds", 51.0),
+                min_place_edge=_tp_ew_cfg["ew_min_place_edge"],
+                min_odds=_tp_ew_cfg["ew_min_odds"],
+                max_odds=_tp_ew_cfg["ew_max_odds"],
             )
             full_preds["is_ew_value"] = full_preds.index.isin(ew_df.index)
         else:
@@ -1110,7 +854,7 @@ if page == "💰 Today's Picks":
         # whole race). Rules + thresholds live in src/quality_control.py and are
         # shown/tunable in the Quality Control panel below — never inlined here.
         from src.quality_control import apply_betting_gate
-        _qc_cfg = st.session_state.get("qc_config", dict(getattr(config, "QC_DEFAULTS", {})))
+        _qc_cfg = st.session_state.get("qc_config", dict(config.QC_DEFAULTS))
         _qc = apply_betting_gate(full_preds, ["is_value", "is_ew_value"], _qc_cfg)
         full_preds["qc_blocked"] = _qc["race_blocked"].to_numpy()
         full_preds["qc_flagged"] = _qc["runner_flagged"].to_numpy()
@@ -1146,7 +890,7 @@ if page == "💰 Today's Picks":
                 "(distinct from value rules). Defined in `src/quality_control.py`; "
                 "thresholds below are live-tunable."
             )
-            _cfg_now = dict(st.session_state.get("qc_config", dict(getattr(config, "QC_DEFAULTS", {}))))
+            _cfg_now = dict(st.session_state.get("qc_config", dict(config.QC_DEFAULTS)))
             qc1, qc2, qc3 = st.columns(3)
             _enabled = qc1.checkbox("Gates enabled", value=bool(_cfg_now.get("enabled", True)), key="qc_enabled")
             _max_odds = qc2.number_input(

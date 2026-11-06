@@ -100,9 +100,10 @@ def _apply_race(con: sqlite3.Connection, race_id: str, runners: list[dict]) -> i
                 (draw, race_id, hid),
             )
         else:
+            from src.identity_schema import result_rowid
             cur = con.execute(
-                "UPDATE results SET draw = ? WHERE race_id = ? AND horse_name = ?",
-                (draw, race_id, hname),
+                "UPDATE results SET draw = ? WHERE rowid = ?",
+                (draw, result_rowid(con,{"race_id":race_id,"horse_name":hname})),
             )
         changed += cur.rowcount
     return changed
@@ -208,6 +209,9 @@ def main() -> None:
         backfill_flat(con, args.start, args.end, args.dry_run, args.limit)
 
     con.close()
+    if not args.dry_run:
+        from src.database import publish_after_repair
+        publish_after_repair(args.db)
 
 
 if __name__ == "__main__":

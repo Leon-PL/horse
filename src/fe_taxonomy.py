@@ -1,9 +1,9 @@
 """Machine-readable feature-engineering stage taxonomy.
 
-The prose version is ``docs/FE_TAXONOMY.md``; this is the enforced one. Each
+The prose version is ``docs/architecture/FE_TAXONOMY.md``; this is the enforced one. Each
 ``engineer_features`` pipeline stage maps to its **dominant compute class**,
 which determines how it becomes incremental in an append (build-once /
-append-forever; see ``docs/FE_REFACTOR_PLAN.md``).
+append-forever; see ``docs/architecture/FE_REFACTOR_PLAN.md``).
 
 ``tests/test_fe_taxonomy.py`` keeps this in lock-step with the actual pipeline:
 adding or removing a stage without classifying it fails the suite, and no stage

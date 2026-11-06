@@ -1,0 +1,251 @@
+"""Source IDs survive namesakes, cache joins, schema changes and repairs."""
+import sqlite3
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from src import database, identity_schema
+from src.runner_identity import join_runner_columns, runner_keys, runner_positions
+from src.verified_result_repair import apply_verified_results
+
+
+def twins():
+    return pd.DataFrame({"race_id": ["123", "123"], "race_date": ["2025-01-01"]*2,
+        "horse_id": ["1", "2"], "horse_name": ["Sierra Nevada"]*2, "num_runners": [2,2],
+        "finish_position": [1,2], "won": [1,0], "lengths_behind": [0.,1.], "finish_pos_label": ["",""]})
+
+
+@pytest.fixture
+def isolated(tmp_path, monkeypatch):
+    monkeypatch.setattr(database,"DB_PATH",str(tmp_path/"races.db"))
+    monkeypatch.setattr(database.config,"RAW_DATA_DIR",str(tmp_path))
+    return tmp_path
+
+
+def test_namesakes_match_by_source_id_without_expanding_or_reordering_rows():
+    left = twins().iloc[::-1].copy()
+    left.index = [7,7]
+    right = twins()
+    right["horse_id"] = [1.,2.]
+    right["rating"] = [10.,20.]
+    joined = join_runner_columns(left,right,["rating"])
+    assert joined.rating.tolist() == [20.,10.]
+    assert joined.index.tolist() == [7,7] and len(joined) == 2
+
+
+def test_known_different_ids_never_match_by_name():
+    left,right = twins().iloc[:1].copy(),twins().iloc[:1].copy()
+    right["horse_id"] = "3"
+    with pytest.raises(ValueError,match="identity match"):
+        runner_positions(left,right)
+    assert runner_positions(left,right,require_all=False).tolist() == [-1]
+
+
+def test_missing_ids_can_only_fall_back_to_unambiguous_names():
+    left = twins()
+    right = twins().drop(columns="horse_id")
+    with pytest.raises(ValueError,match="Duplicate runner identities"):
+        runner_positions(left,right)
+    left = left.iloc[:1]
+    right = right.iloc[:1]
+    assert runner_positions(left,right).tolist() == [0]
+
+
+def test_empty_right_side_with_optional_matches_preserves_population():
+    right = twins().iloc[:0].assign(rating=pd.Series(dtype=float))
+    joined = join_runner_columns(twins(),right,["rating"],require_all=False)
+    assert len(joined) == 2 and joined.rating.isna().all()
+
+
+def test_skipping_duplicate_ids_keeps_original_name_ambiguity():
+    right = pd.concat([twins().iloc[:1]]*2+[twins().iloc[1:]], ignore_index=True)
+    left = twins().iloc[:1].drop(columns="horse_id")
+    assert runner_positions(left, right, require_all=False, skip_ambiguous=True).tolist() == [-1]
+
+
+def test_complete_fields_allow_namesakes_but_reject_repeated_source_ids():
+    frame=twins()
+    database._validate_race_results(frame,"2025-01-01","123")
+    frame["horse_id"]=["1",1.]
+    with pytest.raises(ValueError,match="duplicate source horse"):
+        database._validate_race_results(frame,"2025-01-01","123")
+
+
+def test_field_writer_retains_both_ids_handles_renames_and_deletes_only_obsolete_ids(isolated):
+    frame=twins()
+    assert database.ingest_results(frame) == 2
+    frame.loc[0,"horse_name"]="Renamed Horse"
+    assert database.ingest_results(frame) == 0
+    loaded=database.load_from_database().set_index("horse_id")
+    assert len(loaded)==2 and loaded.loc["1","horse_name"]=="Renamed Horse"
+    reduced=frame.iloc[:1].assign(num_runners=1)
+    database.ingest_results(reduced)
+    assert database.load_from_database().horse_id.tolist()==["1"]
+
+
+def test_identical_text_and_context_for_namesakes_remain_separate(isolated):
+    frame=twins().assign(sl_commentary="Same comment",sl_verdict="Same verdict",reported_jockey_claim_lbs=0)
+    database.ingest_results(frame)
+    database.ingest_results(frame)
+    assert len(database.load_runner_text())==2
+    # Context content includes source IDs; latest-observation selection must too.
+    assert len(database.load_result_context())==2
+
+
+def legacy_schema():
+    return {"_CREATE_TABLE":database._CREATE_TABLE.rsplit(");",1)[0].rstrip()+",UNIQUE(race_id,horse_name));",
+            "_CREATE_RUNNER_TEXT":database._CREATE_RUNNER_TEXT.rsplit(");",1)[0].rstrip()+
+                ",PRIMARY KEY(race_id,horse_name,phase,content_sha256));"}
+
+
+def create_legacy(isolated):
+    sql=legacy_schema()
+    with sqlite3.connect(database.DB_PATH) as con:
+        con.execute(sql["_CREATE_TABLE"])
+        con.execute(sql["_CREATE_RUNNER_TEXT"])
+        con.execute("INSERT INTO results(race_id,race_date,horse_name,horse_id,num_runners,finish_position,won) "
+                    "VALUES ('123','2025-01-01','Sierra Nevada','1',2,1,1)")
+    database.init_db()
+
+
+def test_legacy_migration_preserves_rows_rowids_revisions_and_triggers(isolated):
+    create_legacy(isolated)
+    with sqlite3.connect(database.DB_PATH) as con:
+        before=con.execute("SELECT rowid,* FROM results").fetchall()
+        revision=con.execute("SELECT revision FROM result_source_state").fetchone()[0]
+    assert database.migrate_runner_identity()["results"]
+    assert not database.migrate_runner_identity()["results"]
+    with sqlite3.connect(database.DB_PATH) as con:
+        assert before==con.execute("SELECT rowid,* FROM results").fetchall()
+        assert revision==con.execute("SELECT revision FROM result_source_state").fetchone()[0]
+        plan=con.execute("EXPLAIN QUERY PLAN SELECT * FROM results WHERE race_id=?",("123",)).fetchall()
+        assert any("results_race_lookup" in row[3] for row in plan)
+    database.ingest_results(twins())
+    with sqlite3.connect(database.DB_PATH) as con:
+        assert con.execute("SELECT COUNT(*) FROM results").fetchone()[0]==2
+        assert con.execute("SELECT revision FROM result_source_state").fetchone()[0]>revision
+
+
+def test_failed_migration_rolls_back_original_table_and_values(isolated,monkeypatch):
+    create_legacy(isolated)
+    original=database.rebuild_without_key
+    def interrupted(con,table,columns):
+        original(con,table,columns)
+        raise RuntimeError("interrupted migration")
+    monkeypatch.setattr(database,"rebuild_without_key",interrupted)
+    with pytest.raises(RuntimeError,match="interrupted"):
+        database.migrate_runner_identity()
+    with sqlite3.connect(database.DB_PATH) as con:
+        assert con.execute("SELECT horse_name FROM results").fetchall()==[("Sierra Nevada",)]
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute("INSERT INTO results(race_id,race_date,horse_name,horse_id) VALUES ('123','2025-01-01','Sierra Nevada','2')")
+
+
+def test_reviewed_repair_can_target_namesakes_independently_and_repeat_without_changes(isolated):
+    database.ingest_results(twins())
+    with sqlite3.connect(database.DB_PATH) as con:
+        before=pd.read_sql_query("SELECT * FROM results",con)
+        after=before.copy()
+        after["finish_position"]=[2,1]
+        after["won"]=[0,1]
+        after["lengths_behind"]=[np.nan,0.]
+        proof={"review_roster_sha256":"a"*64,"verification_sha256":"b"*64}
+        apply_verified_results(con,before,after,pd.DataFrame(),repair_id="twins",evidence=proof)
+        assert con.execute("SELECT horse_id FROM results WHERE won=1").fetchone()[0]=="2"
+        assert con.execute("SELECT COUNT(DISTINCT runner_key) FROM verified_result_rows").fetchone()[0]==2
+        assert apply_verified_results(con,before,after,pd.DataFrame(),repair_id="twins",evidence=proof)["already_applied"]
+        with pytest.raises(ValueError,match="ambiguous"):
+            identity_schema.result_rowid(con,{"race_id":"123","horse_name":"Sierra Nevada"})
+
+
+def test_keys_keep_source_ids_separate_from_name_fallback():
+    frame=twins()
+    assert runner_keys(frame).tolist()==["sl:1","sl:2"]
+
+
+def test_legacy_name_only_write_retains_known_ids_and_rejects_ambiguous_names(isolated):
+    frame=twins().iloc[:1].assign(num_runners=1)
+    database.ingest_results(frame)
+    database.ingest_results(frame.drop(columns="horse_id"))
+    assert database.load_from_database().horse_id.tolist()==["1"]
+    database.ingest_results(twins())
+    with pytest.raises(ValueError,match="Ambiguous legacy"):
+        database.ingest_results(frame.drop(columns="horse_id"))
+
+
+def test_legacy_append_stays_idempotent_for_duplicate_input_rows(isolated):
+    legacy=twins().iloc[:1].drop(columns="horse_id")
+    assert database.insert_results(pd.concat([legacy,legacy],ignore_index=True))==1
+    assert database.insert_results(pd.concat([legacy,legacy],ignore_index=True))==0
+
+
+def test_result_settlement_associates_namesakes_with_their_own_outcomes():
+    from src.app_helpers import attach_result_outcomes
+    frame=twins()
+    predictions=frame[["race_id","horse_name","horse_id"]].iloc[::-1]
+    settled=attach_result_outcomes(predictions,frame)
+    assert settled.result_won.tolist()==[0,1] and settled.is_settled.all()
+    unknown=attach_result_outcomes(predictions.drop(columns="horse_id"),frame)
+    assert not unknown.is_settled.any()
+
+
+@pytest.mark.parametrize("side",["left","right","revision"])
+def test_atr_does_not_identify_distinct_horses_by_a_shared_display_name(monkeypatch,side):
+    from src import attheraces_scraper as atr
+    left=twins().assign(track="Kempton",off_time="12:00")
+    cached=left.iloc[:1].assign(atr_horse_id="atr-1",atr_final_time=100.)
+    if side != "left":
+        left=left.iloc[:1].copy()
+        other=cached.copy()
+        other["atr_horse_id"]="atr-2" if side=="right" else "atr-1"
+        other["atr_final_time"]=101.
+        cached=pd.concat([cached,other],ignore_index=True)
+    monkeypatch.setattr(atr,"load_atr_cache",lambda:cached)
+    joined=atr.merge_atr_sectionals(left)
+    assert len(joined)==len(left)
+    if side=="revision":
+        assert joined.atr_final_time.tolist()==[101.]
+    else:
+        assert joined.atr_final_time.isna().all()
+
+
+def test_rtv_name_snapshot_does_not_fill_both_namesakes():
+    from src import rtv_features as rtv
+    frame=twins().assign(track="Kempton",off_time="12:00")
+    observation={"race_date":"2025-01-01","track_key":"kempton","off_key":"12:00","horse_key":"Sierra Nevada",
+                 "observed_at":"2025-01-01T11:50:00Z",**{name:1. for name in rtv.SNAPSHOT_FEATURES}}
+    result=rtv.add_pre_race_features(frame,observations=pd.DataFrame([observation]),as_of="2025-01-01T11:55:00Z")
+    assert result[list(rtv.SNAPSHOT_FEATURES)].isna().all().all()
+
+
+def test_feature_store_build_append_and_live_keep_namesakes_separate(tmp_path, monkeypatch):
+    import config
+    from src import attheraces_scraper
+    from src.data_processor import process_data
+    from src.feature_store import FeatureStore
+    from tests.test_live_parity import _synthetic_raw
+
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(attheraces_scraper, "load_atr_cache", pd.DataFrame)
+    raw = _synthetic_raw(n_days=8, races_per_day=1, field=2)
+    raw["horse_id"] = [1, 2]*8
+    raw["horse_name"] = "Sierra Nevada"
+    raw["finish_position"] = [1, 2]*8
+    raw["won"] = [1, 0]*8
+    proc = process_data(raw, save=False)
+    dates = sorted(proc.race_date.unique())
+    store = FeatureStore(str(tmp_path/"store"))
+    built = store.build(proc[proc.race_date < dates[-2]])
+    appended = store.append(proc[proc.race_date == dates[-2]])
+    assert len(built) == 12 and len(appended) == 2
+    assert len(store.load_featured()) == 14
+    card = proc[proc.race_date == dates[-1]]
+    live = store.featurize_live(card)
+    reversed_live = store.featurize_live(card.iloc[::-1])
+    for frame in (appended, live, reversed_live):
+        by_id = frame.set_index("horse_id")
+        assert len(frame) == 2 and by_id.index.is_unique
+        assert by_id.loc[1, "horse_elo"] > by_id.loc[2, "horse_elo"]
+    pd.testing.assert_series_equal(live.set_index("horse_id").horse_elo.sort_index(),
+                                   reversed_live.set_index("horse_id").horse_elo.sort_index())
