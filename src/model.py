@@ -49,7 +49,8 @@ def _ensure_lightgbm() -> None:
 import config
 from src.bet_settlement import DEFAULT_VALUE_THRESHOLD, placed_mask, value_bet_selection as _value_bet_selection
 from src.bet_analysis import analyse_test_set
-from src.betfair import attach_bsp, load_bsp, market_prob_bsp_preferred
+from src.betfair import market_prob_bsp_preferred
+from src.source_prices import attach_bsp, load_bsp  # noqa: E402 -- thread limits are configured above
 from src.probability_calibration import fit_temperature, race_temperature
 
 logging.basicConfig(level=logging.INFO)

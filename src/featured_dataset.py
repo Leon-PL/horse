@@ -51,6 +51,7 @@ FE_CONFIG_KEYS = [
 #: nor exempted below — a missing entry silently serves stale features, which
 #: is how the 2026-06 "place-market edge" mirage happened.
 _FE_SOURCE_FILES = (
+    "src/source_contracts.py", "src/source_dataset.py",
     "src/verified_race_metadata.py", "reference/verified_race_types.json",
     "reference/verified_runner_ratings.json", "reference/connection_aliases.json",
     "src/prize_currency_features.py", "reference/track_prize_currency.json",
@@ -77,6 +78,7 @@ _FE_SOURCE_FILES = (
 #: feature value, with the reason. Raw-data access is covered separately by
 #: :func:`data_signature`; downstream consumers only read features.
 FE_SIGNATURE_EXEMPT: dict[str, str] = {
+    "ingestion.publication": "publishes immutable source observations; values and crosswalks covered by accepted source hashes",
     "database": "raw-data access only; values covered by data_signature",
     "identity_schema": "source-table and repair-receipt migrations only; accepted values covered by data_signature",
     "ingestion": "collection namespace only; no feature calculations or import-time collection",
@@ -105,6 +107,8 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "bet_settlement": "downstream of FE (bet settlement/reporting)",
     "each_way": "downstream of FE (bet settlement/reporting)",
     "betfair": "post-race prices joined at eval time, not an FE input",
+    "source_prices": "manifest-selected post-race prices used only in training/evaluation",
+    "source_health": "consumer readiness reporting only; cannot change feature values",
 }
 
 
@@ -273,6 +277,9 @@ def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
         m = store.meta()
         m["fe_signature"] = fe_sig
         m["data_signature"] = data_sig
+        from src.source_dataset import current_manifest
+        if current_manifest() is not None:
+            m["dataset_manifest"] = current_manifest()
         from src.prize_currency_features import reference_signature
         m["prize_reference_signature"] = reference_signature()
         last = store.last_date()

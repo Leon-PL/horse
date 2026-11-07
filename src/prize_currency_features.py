@@ -19,7 +19,9 @@ FEATURES = ("horse_max_prize_contested", "horse_avg_prize_contested", "prize_mon
 
 def _paths():
     base = Path(config.BASE_DIR) / "reference"
-    return base / "track_prize_currency.json", base / "ecb_gbp_per_eur.csv"
+    from src.source_dataset import source_path
+    return (source_path("fx", "units", base / "track_prize_currency.json"),
+            source_path("fx", "rates", base / "ecb_gbp_per_eur.csv"))
 
 
 @lru_cache(maxsize=8)

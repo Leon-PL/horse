@@ -166,6 +166,7 @@ def test_training_provenance_is_frozen_before_fit(monkeypatch, change_during_loa
             state.update(fe="changed during fit", git="new", data="replacement")
             return {}
 
+    monkeypatch.setattr("src.source_dataset.select_dataset", lambda **kwargs: {"id": "provenance-fixture", "sources": {}})
     monkeypatch.setattr(tr, "process_data", lambda: frame.copy())
     monkeypatch.setattr(tr, "get_training_dataset", load_features)
     monkeypatch.setattr(tr, "fe_signature", lambda: state["fe"])

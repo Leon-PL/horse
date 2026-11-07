@@ -6,6 +6,18 @@ preserved in [the archive](docs/archive/CONTINUATION_before_cleanup_2026-11-05.m
 
 ## Collection cleanup
 
+**Shared source publication, 7 November:** `src/source_contracts.py`,
+`src/source_dataset.py` and `src/ingestion/publication.py` provide the common
+accepted-data boundary. Ordinary processing/builds freeze source versions;
+training records its manifest including Betfair. ATR promotion reads completed
+worker jobs without editing its pinned code or original cache. Source
+fingerprints cover link/timing sidecars, and ATR history respects its assumed
+48-hour availability delay with explicit support and age. This changes feature
+definitions: rebuild/refit compatibility is still required. The selected model
+is unchanged. See [operations and qualification](docs/operations/SOURCE_PUBLICATION_2026-11-07.md).
+Use `python -m src.ingestion --publish-sources` for local adoption and
+`--source-status` for accepted-data quality, separately from worker progress.
+
 **Temporary-code cleanup, 6 November:** completed diagnosis, migration, restart
 and qualification helpers from the recent collection work have been removed.
 Audit results, code snapshots and database recovery checkpoints remain in place.

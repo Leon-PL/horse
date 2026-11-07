@@ -42,6 +42,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import closing, contextmanager
+from contextvars import copy_context
 from datetime import datetime
 from pathlib import Path
 
@@ -59,6 +60,7 @@ from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore, _stringify_obj
 from src.featured_dataset import data_signature, fe_signature
 from src.feature_inputs import atr_cache_signature, rtv_cache_signature
 from src.parquet_io import RollingParquetWriter, combine_parquet_parts
+from src.source_dataset import current_manifest, dataset_build, install_manifest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -193,7 +195,8 @@ def _helper_processes(wanted: bool):
     runtime (fe_sweep, audit scripts) stays here instead of quietly diverging.
     """
     spawn = multiprocessing.get_context("spawn")
-    pools = [ProcessPoolExecutor(max_workers=1, mp_context=spawn) for _ in range(2)] if wanted else []
+    pools = [ProcessPoolExecutor(max_workers=1, mp_context=spawn, initializer=install_manifest,
+                                 initargs=(current_manifest(),)) for _ in range(2)] if wanted else []
     usable = False
     try:
         checks = [pool.submit(_settings_match, _settings()) for pool in pools]
@@ -262,6 +265,7 @@ def main() -> None:
     ap.add_argument("--reuse-ratings-from", default=None,
                     help="unchanged rating snapshot, requiring a frozen receipt")
     ap.add_argument("--ratings-receipt", default=None)
+    ap.add_argument("--dataset-manifest", default=None, help="Replay a verified immutable dataset ID; no collection")
     args = ap.parse_args()
 
     store = FeatureStore(args.store_root) if args.store_root is not None else FeatureStore()
@@ -271,12 +275,15 @@ def main() -> None:
     if args.reuse_ratings_from:
         from src.rating_reuse import ValidatedRatingCache
         ratings_cache = ValidatedRatingCache(args.reuse_ratings_from, args.ratings_receipt)
-    with store._staged_update() as pending:
+    from src.source_dataset import load_manifest, use_manifest
+    selected = load_manifest(args.dataset_manifest) if args.dataset_manifest else None
+    with use_manifest(selected), store._staged_update() as pending:
         meta = _build(pending, args.chunk_rows, ratings_cache=ratings_cache)
     logger.info("Feature store committed: %d featured rows", meta["featured_rows"])
     print(json.dumps(meta, indent=2))
 
 
+@dataset_build
 def _build(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processed=None) -> dict:
     """Build into the supplied staging store without touching the live files."""
     t0 = time.perf_counter()
@@ -316,7 +323,7 @@ def _build(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processe
     with _helper_processes(len(processed) >= HELPERS_MIN_ROWS) as (rater, finisher), atr_merge_scope(), \
             closing(_StoreTail(parts_dir, counts_state)) as tail, \
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="store-inputs") as input_writer:
-        saving_inputs = input_writer.submit(_save_inputs, store, processed, last_date)
+        saving_inputs = input_writer.submit(copy_context().run, _save_inputs, store, processed, last_date)
         if finisher is not None:
             finisher.submit(_open_tail, parts_dir).result()
         for i, (lo, hi) in enumerate(spans):
@@ -394,6 +401,8 @@ def _build(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processe
         "fe_signature": fe_sig_at_start,
         **input_signatures,
     }
+    if current_manifest() is not None:
+        meta["dataset_manifest"] = current_manifest()
     from src.prize_currency_features import reference_signature
     meta["prize_reference_signature"] = reference_signature()
     if reused_ratings:

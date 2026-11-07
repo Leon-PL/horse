@@ -11,6 +11,7 @@ import pandas as pd
 
 import config
 from src.feature_engineer import engineer_features
+from src.source_dataset import live_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -372,6 +373,7 @@ def _require_current_history(store_last, date_str: str) -> None:
         )
 
 
+@live_dataset
 def features_for_live_cards(
     cards: pd.DataFrame, date_str: str, *, store=None, use_cache: bool = True,
 ) -> pd.DataFrame:

@@ -142,6 +142,12 @@ def evaluate(predictor: RacePredictor, metrics: dict, featured: pd.DataFrame) ->
 
 
 def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> str:
+    from contextlib import ExitStack
+    with ExitStack() as inputs:
+        return _train_run(cfg, progress_cb=progress_cb, inputs=inputs)
+
+
+def _train_run(cfg: TrainingConfig, *, progress_cb=None, inputs) -> str:
     """Run the full pipeline for *cfg* and save a lean run. Returns the run_id."""
     t0 = time.time()
     if cfg.threads is not None and (isinstance(cfg.threads, bool)
@@ -180,10 +186,13 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
         from src.ingestion.pipeline import refresh_sources, refresh_summary
         refresh_report = refresh_sources(days_back=cfg.catchup_days)
         _tick(refresh_summary(refresh_report), 0.07)
-        if refresh_report["state"] != "ok":
+        if refresh_report["state"] != "ok" and not refresh_report.get("readiness", {}).get("training", {}).get("ready", False):
             raise RuntimeError(refresh_summary(refresh_report) +
                 ". Complete the source catch-up before training, or explicitly choose --no-refresh to use local history.")
     _tick("Processing history", 0.08)
+    from src.source_dataset import select_dataset, use_manifest, current_manifest
+    manifest = current_manifest() or select_dataset(include_prices=True)
+    inputs.enter_context(use_manifest(manifest))
     processed = process_data()
 
     # 2) Features — the store seam (build once / append new dates, never rebuild
@@ -298,6 +307,7 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
         "git_sha": source_git_sha,
         "seed": source_config["seed"],
         "signatures": source_signatures,
+        "dataset_manifest": manifest,
         "split": dict(getattr(predictor, "eval_split_info", {})),
         "recipe": recipe,
         "validation_reference": validation,

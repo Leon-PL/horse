@@ -14,6 +14,11 @@ from src.deployment_validation import training_recipe, write_validation_report
 from src.model import RacePredictor
 
 
+@pytest.fixture(autouse=True)
+def accepted_deployment_inputs(monkeypatch):
+    monkeypatch.setattr("src.source_dataset.select_dataset", lambda **kwargs: {"id": "deployment-fixture", "sources": {}})
+
+
 @pytest.fixture
 def evaluated(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "FEATURE_ALLOWLIST", ["signal", "second_signal"])

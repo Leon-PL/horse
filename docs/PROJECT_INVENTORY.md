@@ -1,5 +1,13 @@
 # Project inventory
 
+**Shared source publication, 7 November:** [contract, operations and qualification](operations/SOURCE_PUBLICATION_2026-11-07.md).
+`src/source_contracts.py` owns identity/timing/quality rules; `src/source_dataset.py`
+publishes immutable versions and selects manifests; `src/ingestion/publication.py`
+adapts native stores and promotes validated ATR work. `src/source_health.py`
+separates attempts from consumer readiness, and `src/source_prices.py` selects
+evaluation prices. Use the normal collection CLI's `--publish-sources` and
+`--source-status` options; builds can replay a recorded `--dataset-manifest`.
+
 **Store build speed, 6 November:** [timings and equivalence report](operations/STORE_BUILD_SPEED_2026-11-06.md).
 A full store build takes 14.1 minutes, down from 92, with every feature kept and
 the store byte-identical to the old build. On long histories it runs in three

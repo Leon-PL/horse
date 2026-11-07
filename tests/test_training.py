@@ -132,6 +132,11 @@ def test_save_run_is_lean(tmp_path, monkeypatch):
 
 
 # ── train_run orchestration (mocked) ──────────────────────────────────
+@pytest.fixture(autouse=True)
+def accepted_training_inputs(monkeypatch):
+    monkeypatch.setattr("src.source_dataset.select_dataset", lambda **kwargs: {"id": "training-fixture", "sources": {}})
+
+
 def test_training_refuses_history_without_a_complete_valid_field(monkeypatch):
     frame = pd.DataFrame({"race_id": ["r1", "r1"],
         "race_date": pd.to_datetime(["2025-01-01"]*2),

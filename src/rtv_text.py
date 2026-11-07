@@ -42,12 +42,14 @@ FEATURES = SNAPSHOT_FEATURES + ("rtv_text_prob",)
 
 def text_path():
     from src.ingestion.rtv_storage import materialised_path
-    return Path(config.RTV_FEATURE_TEXT) if hasattr(config, "RTV_FEATURE_TEXT") else materialised_path("text", Path(config.DATA_DIR)/"rtv_cache/feature_text.parquet")
+    from src.source_dataset import source_path
+    return source_path("rtv", "text", Path(config.RTV_FEATURE_TEXT) if hasattr(config, "RTV_FEATURE_TEXT") else materialised_path("text", Path(config.DATA_DIR)/"rtv_cache/feature_text.parquet"))
 
 
 def scores_path():
     from src.ingestion.rtv_storage import materialised_path
-    return Path(config.RTV_FEATURE_TEXT_SCORES) if hasattr(config, "RTV_FEATURE_TEXT_SCORES") else materialised_path("scores", Path(config.DATA_DIR)/"rtv_cache/feature_text_scores.parquet")
+    from src.source_dataset import source_path
+    return source_path("rtv", "scores", Path(config.RTV_FEATURE_TEXT_SCORES) if hasattr(config, "RTV_FEATURE_TEXT_SCORES") else materialised_path("scores", Path(config.DATA_DIR)/"rtv_cache/feature_text_scores.parquet"))
 
 
 def models_dir():
@@ -286,7 +288,8 @@ def _scores_table(scores):
 
 @lru_cache(maxsize=2)
 def _cached_scores(path, modified, size):
-    return _scores_table(pd.read_parquet(path))
+    from src.source_dataset import model_table
+    return _scores_table(model_table("rtv", "scores", path))
 
 
 def replaced_columns(frame, stale, output):

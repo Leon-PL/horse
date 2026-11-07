@@ -62,16 +62,19 @@ SECTIONAL_BAD = {"sector_count_vs_distance", "sector_glitch", "cumulative_mismat
 
 def runs_path():
     from src.ingestion.rtv_storage import materialised_path
-    return Path(config.RTV_FEATURE_RUNS) if hasattr(config, "RTV_FEATURE_RUNS") else materialised_path("runs", Path(config.DATA_DIR)/"rtv_cache/feature_runs.parquet")
+    from src.source_dataset import source_path
+    return source_path("rtv", "runs", Path(config.RTV_FEATURE_RUNS) if hasattr(config, "RTV_FEATURE_RUNS") else materialised_path("runs", Path(config.DATA_DIR)/"rtv_cache/feature_runs.parquet"))
 
 
 def pre_path():
-    return Path(getattr(config, "RTV_FEATURE_PRE", Path(config.DATA_DIR)/"rtv_cache/feature_pre.parquet"))
+    from src.source_dataset import source_path
+    return source_path("rtv", "pre", Path(getattr(config, "RTV_FEATURE_PRE", Path(config.DATA_DIR)/"rtv_cache/feature_pre.parquet")))
 
 
 def cards_path():
     from src.ingestion.rtv_storage import materialised_path
-    return Path(config.RTV_FEATURE_CARDS) if hasattr(config, "RTV_FEATURE_CARDS") else materialised_path("cards", Path(config.DATA_DIR)/"rtv_cache/feature_cards.parquet")
+    from src.source_dataset import source_path
+    return source_path("rtv", "cards", Path(config.RTV_FEATURE_CARDS) if hasattr(config, "RTV_FEATURE_CARDS") else materialised_path("cards", Path(config.DATA_DIR)/"rtv_cache/feature_cards.parquet"))
 
 
 def _number(frame, name):
@@ -360,7 +363,8 @@ def _history_observations(runs):
 
 @lru_cache(maxsize=2)
 def _cached_history(path, modified, size):
-    return _history_observations(pd.read_parquet(path))
+    from src.source_dataset import model_table
+    return _history_observations(model_table("rtv", "runs", path))
 
 
 def add_history_features(frame, *, runs=None):
@@ -397,8 +401,11 @@ def _cached_snapshots(path, modified, size):
 def add_pre_race_features(frame, *, observations=None, as_of=None):
     output = pd.DataFrame(np.nan, index=pd.RangeIndex(len(frame)), columns=SNAPSHOT_FEATURES)
     path = pre_path()
+    from src.source_dataset import current_manifest, read_table
     if observations is not None:
         observations = observations.copy()
+    elif current_manifest() is not None:
+        observations = read_table("rtv", "pre", linked=True)
     elif path.exists():
         stat = path.stat()
         observations = _cached_snapshots(str(path.resolve()), stat.st_mtime_ns, stat.st_size).copy(deep=False)
@@ -421,6 +428,11 @@ def add_pre_race_features(frame, *, observations=None, as_of=None):
         target["_cutoff"] = cutoff.where(cutoff.le(ceiling), ceiling)
         observations["observed_at"] = pd.to_datetime(observations.observed_at, utc=True, errors="raise")
         keys = ["race_date", "track_key", "off_key", "horse_key"]
+        if {"sl_race_id", "sl_horse_id", "match_status"}.issubset(observations) and {"race_id", "horse_id"}.issubset(frame):
+            observations = observations.loc[observations.match_status.eq("matched")].copy()
+            target["sl_race_id"] = frame.race_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
+            target["sl_horse_id"] = frame.horse_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
+            keys = ["sl_race_id", "sl_horse_id"]
         observations = observations.loc[~observations.duplicated(keys+["observed_at"], keep=False)]
         target = target.loc[target._cutoff.notna() & ~target.duplicated(keys,keep=False)]
         joined = pd.merge_asof(target.sort_values("_cutoff"), observations.sort_values("observed_at"),
@@ -439,7 +451,8 @@ def _card_table(cards):
 
 @lru_cache(maxsize=2)
 def _cached_cards(path, modified, size):
-    return _card_table(pd.read_parquet(path))
+    from src.source_dataset import model_table
+    return _card_table(model_table("rtv", "cards", path))
 
 
 def add_card_features(frame, *, cards=None):

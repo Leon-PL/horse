@@ -14,8 +14,12 @@ The synthetic race generator and sample collection interface have been removed.
 Real-source collection lives in `src/ingestion/`, with one command:
 `python -m src.ingestion`. Storage is in `src/database.py` and cleaning is in
 `src/data_processor.py`. [Consolidation report](docs/operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md).
-The database hands off through `data/raw/race_results.parquet`, whose column types are
-declared in `src/database.py`. [Report](docs/operations/RESULTS_SNAPSHOT_AND_TEST_FIXES_2026-11-06.md).
+The database still exports `data/raw/race_results.parquet`, with declared types.
+Ordinary processing, feature builds and training now select immutable accepted
+source versions through a dataset manifest under `data/sources/`. Results and
+pedigree are captured together; ATR promotion, RTV, FX and evaluation prices use
+the same publication contract. [Data flow](Racing%20Data%20Flow.md) and
+[publication operations](docs/operations/SOURCE_PUBLICATION_2026-11-07.md).
 
 Full Betfair historical market downloads are the main refresh's Betfair source
 (`--sources betfair`), including win/place BSP, timed prices and market changes.

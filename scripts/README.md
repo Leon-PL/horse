@@ -1,5 +1,11 @@
 # Commands
 
+Source publication is part of the collection command: use
+`python -m src.ingestion --publish-sources` for local accepted-data adoption and
+ATR promotion, and `--source-status` for accepted-version quality. The batched
+builder accepts `--dataset-manifest ID` for verified replay into a candidate store.
+See [publication operations](../docs/operations/SOURCE_PUBLICATION_2026-11-07.md).
+
 Run commands from the project root with `.venv\Scripts\python.exe`. For example,
 `python -m src.ingestion --sync 14` refreshes the normal real-source plan.
 Use `--help` before deliberate backfills, repairs or model installation.

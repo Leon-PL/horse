@@ -250,6 +250,8 @@ def _publish_source_health(path, report, previous):
     for name, body in report["sources"].items():
         attempt = {**body, "checked_at": report["checked_at"],
                    "requested_start": report["start"], "requested_end": report["end"]}
+        from src.ingestion.publication import latest_source_health
+        attempt["health"] = latest_source_health(name, attempt)
         prior = merged.get(name, {})
         # An older explicit backfill does not recheck or erase newer coverage.
         if (prior.get("requested_end") or "") > report["end"]:
@@ -363,6 +365,25 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
                                        for value in report["sources"].values()) else "partial")
         report["checked_at"] = _now().isoformat()
         report["seconds"] = round(time.monotonic()-started, 3)
+        # Publish through the common boundary after native stores are accepted.
+        # Isolated/test coordinators without a canonical database have nothing
+        # to adopt. A failed adoption retains all previous accepted versions.
+        if (Path(config.DATA_DIR) / "races.db").exists():
+            from src.source_dataset import capture_dataset
+            try:
+                manifest = capture_dataset(include_prices=True)
+                report["dataset_manifest_id"] = manifest["id"]
+            except Exception as error:
+                report["publication_error"] = str(error)
+                report["state"] = "partial"
+        from src.source_health import consumer_readiness
+        known = {**previous.get("sources", {}), **report["sources"]}
+        report["readiness"] = {purpose: consumer_readiness(known, purpose=purpose, requested_end=report["end"])
+                               for purpose in ("features", "training", "serving", "evaluation")}
+        if report.get("publication_error"):
+            for value in report["readiness"].values():
+                value["ready"] = False
+                value["blockers"].append("source publication failed")
         publish_report()
         return report
 
@@ -457,6 +478,8 @@ def load_matched_text(start, end):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--sync", type=int, metavar="DAYS")
+    parser.add_argument("--publish-sources", action="store_true", help="Publish local accepted sources and promote validated ATR work; no network")
+    parser.add_argument("--source-status", action="store_true", help="Show accepted source versions and quality; no network")
     parser.add_argument("--rtv-only", action="store_true")
     parser.add_argument("--results-only", action="store_true", help="Skip optional pedigree/weather; required sources are still collected")
     parser.add_argument("--snapshot", action="store_true")
@@ -471,6 +494,16 @@ def main():
     parser.add_argument("--recheck", action="store_true", help="Revalidate completed SL races in the requested range")
     parser.add_argument("--replay", action="store_true", help="Offline SL parser replay from retained responses")
     args = parser.parse_args()
+    if args.publish_sources:
+        from src.source_dataset import capture_dataset
+        manifest = capture_dataset(include_prices=True)
+        print(json.dumps({"dataset_manifest_id": manifest["id"], "sources": {
+            name: {"version": value["version"], "coverage": value["reports"]} for name, value in manifest["sources"].items()}}, indent=2))
+    if args.source_status:
+        from src.source_dataset import registry_root
+        from src.ingestion.publication import source_health
+        print(json.dumps({path.parent.name: source_health({}, _read(path))
+                          for path in registry_root().glob("*/latest.json")}, indent=2))
     if args.sync is not None or args.start or args.end:
         args.sync = 14 if args.sync is None else args.sync
         result = (refresh_rtv_history(args.sync, start=args.start, end=args.end, reparse=args.replay) if args.rtv_only else

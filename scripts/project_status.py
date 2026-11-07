@@ -284,6 +284,19 @@ def _source_refresh():
     observed = report.get("checked_at")
     age = (datetime.now(timezone.utc)-datetime.fromisoformat(observed)).total_seconds() if observed else float("inf")
     values = report.get("sources", {})
+    if report.get("readiness"):
+        from src.source_health import consumer_readiness
+        readiness = consumer_readiness(values, purpose="serving", requested_end=report.get("end"))
+        # A subset check cannot refresh the mandatory providers' check times.
+        for provider in ("sl", "fx"):
+            checked = values.get(provider, {}).get("checked_at") or observed
+            elapsed = (datetime.now(timezone.utc)-datetime.fromisoformat(checked)).total_seconds() if checked else float("inf")
+            if not 0 <= elapsed <= 86400:
+                readiness["blockers"].append(f"{provider}: coverage report is stale")
+        readiness["ready"] = not readiness["blockers"] and not report.get("publication_error")
+        detail = [f"{k}: {v.get('state')}" for k, v in values.items()]
+        return {"state": OK if readiness["ready"] and not readiness["limitations"] else WARN if readiness["ready"] else BAD,
+                "detail": "; ".join(detail+readiness["blockers"]), "readiness": readiness, "report": report}
     missing = sorted(set(DEFAULT_SOURCES)-values.keys())
     issues = []
     if missing:

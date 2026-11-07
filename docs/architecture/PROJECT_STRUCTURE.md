@@ -52,6 +52,14 @@ horse/
 
 ## Boundaries
 
+**7 November source-boundary update:** every ordinary build selects immutable
+accepted versions with `src/source_dataset.py`. `src/source_contracts.py` owns
+shared identity/timing/quality rules, `src/ingestion/publication.py` adapts native
+stores and promotes ready ATR work, and `src/source_prices.py` attaches selected
+evaluation prices. The older native hand-offs below remain producer/interchange
+interfaces. See [the current data flow](../../Racing%20Data%20Flow.md) and
+[publication operations](../operations/SOURCE_PUBLICATION_2026-11-07.md).
+
 | Stage | Owner | Output and rule |
 |---|---|---|
 | 1. Collect and aggregate | `ingestion.pipeline.refresh_sources` | Canonical SL records plus independently retained RTV, ATR, BSP and FX observations. No sample-data mode. |
@@ -100,6 +108,7 @@ join and its column contract remain in the feature-code signature.
 | Location | Role | Retention |
 |---|---|---|
 | `data/races.db` | Canonical results, identities, source queues and pedigree | Keep; repairs and exports flow through its writer |
+| `data/sources/` | Immutable accepted observations, identity/timing receipts and dataset manifests | Keep versions referenced by stores and saved runs |
 | `data/raw/race_results.parquet` + source receipt | Published processing input | Keep synchronized with the database |
 | `data/sl_cache`, `data/rtv_cache`, `data/atr_cache` | Raw responses, source observations, manifests and checkpoints | Keep for replay, coverage and recovery |
 | `data/atr_cache/rebuild_v2` | Running fresh ATR backfill | Keep; never reset during ordinary cleanup |

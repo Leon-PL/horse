@@ -1,5 +1,9 @@
 # Documentation
 
+The [current racing data flow](../Racing%20Data%20Flow.md) and
+[shared source publication](operations/SOURCE_PUBLICATION_2026-11-07.md) describe
+the immutable input boundary introduced on 7 November.
+
 Start with the [operating guide](../README.md) and
 [current project structure](architecture/PROJECT_STRUCTURE.md).
 

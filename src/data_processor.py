@@ -14,6 +14,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+from src.source_dataset import processing_inputs
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,7 +55,8 @@ def _off_time_to_seconds(off_time: pd.Series) -> pd.Series:
 def load_raw_data() -> pd.DataFrame:
     """Load the published results snapshot."""
     from src.database import read_results_snapshot, results_snapshot_path
-    path = results_snapshot_path()
+    from src.source_dataset import source_path
+    path = source_path("sl", "results", results_snapshot_path())
     if not path.exists():
         raise FileNotFoundError(
             f"No data file found at {path}. "
@@ -81,7 +83,8 @@ def apply_pedigree(df: pd.DataFrame) -> pd.DataFrame:
     if "horse_id" not in df.columns:
         return df
     from src.database import load_pedigree
-    ped = load_pedigree()
+    from src.source_dataset import current_manifest, read_table
+    ped = read_table("pedigree", "horses") if current_manifest() is not None else load_pedigree()
     if ped.empty:
         return df
     ped["horse_id"] = ped["horse_id"].astype(str)
@@ -513,6 +516,7 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+@processing_inputs
 def process_data(df: pd.DataFrame = None) -> pd.DataFrame:
     """
     Full data processing pipeline.
@@ -531,6 +535,9 @@ def process_data(df: pd.DataFrame = None) -> pd.DataFrame:
     try:
         df = apply_pedigree(df)
     except Exception:
+        from src.source_dataset import current_manifest
+        if current_manifest() is not None:
+            raise  # A selected accepted input must never silently disappear.
         logger.warning("Pedigree cache unavailable; sire/dam left as-is", exc_info=True)
 
     df = clean_data(df)
@@ -550,4 +557,7 @@ def process_data(df: pd.DataFrame = None) -> pd.DataFrame:
     df = encode_categorical(df)
     df = df.drop(columns=["_event_dt"], errors="ignore")
 
+    from src.source_dataset import current_manifest
+    if current_manifest() is not None:
+        df.attrs["dataset_manifest_id"] = current_manifest()["id"]
     return df

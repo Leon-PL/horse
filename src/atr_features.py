@@ -471,7 +471,8 @@ def _merge_table() -> pd.DataFrame | None:
     """The prepared cache, or None when there is nothing to join."""
     if _merge_table_scope:
         return _merge_table_scope[0]
-    cache = load_atr_cache()
+    from src.source_dataset import current_manifest, read_table
+    cache = read_table("atr", "sectionals", linked=True) if current_manifest() is not None else load_atr_cache()
     table = None if cache.empty else _atr_merge_table(cache)
     if _merge_table_scope is not None:
         _merge_table_scope.append(table)
@@ -486,6 +487,19 @@ def merge_atr_sectionals(df: pd.DataFrame) -> pd.DataFrame:
     per-furlong series remain JSON strings (see :data:`ATR_ARRAY_COLS`).
     Only the keys take part in the join, so a wide frame is not copied.
     """
+    from src.source_dataset import current_manifest, read_table
+    if current_manifest() is not None:
+        cache = read_table("atr", "sectionals", linked=True)
+        cache = cache.loc[cache.match_status.eq("matched")] if "match_status" in cache else cache.iloc[:0]
+        keys = ["sl_race_id", "sl_horse_id"]
+        values = cache.reindex(columns=[*keys, *ALL_ATR_COLS])
+        if values.duplicated(keys).any():
+            raise ValueError("Accepted ATR identities are not unique")
+        left = pd.DataFrame({"sl_race_id": df.race_id.astype("string").str.replace(r"\.0$", "", regex=True),
+                             "sl_horse_id": df.horse_id.astype("string").str.replace(r"\.0$", "", regex=True)})
+        joined = left.merge(values, on=keys, how="left", validate="many_to_one")
+        joined.index = df.index
+        return pd.concat([df.drop(columns=[c for c in ALL_ATR_COLS if c in df]), joined.drop(columns=keys)], axis=1)
     cache_slim = _merge_table()
     if cache_slim is None:
         for c in ALL_ATR_COLS:
@@ -518,3 +532,98 @@ def merge_atr_sectionals(df: pd.DataFrame) -> pd.DataFrame:
         int(matched.sum()), len(merged), 100 * matched.sum() / max(1, len(merged)),
     )
     return merged.drop(columns=["_atr_merge"], errors="ignore")
+
+
+@lru_cache(maxsize=1)
+def _published_history(results_version, atr_version):
+    """Small scalar history, with every canonical start retained as a window slot."""
+    from src.source_dataset import read_table
+    canonical = read_table("sl", "results")
+    raw = read_table("atr", "sectionals", linked=True)
+    timing = read_table("atr", "observations_sectionals")
+    raw["_available"] = pd.to_datetime(timing.available_at, utc=True).to_numpy()
+    raw = raw.loc[raw.match_status.eq("matched")].copy()
+    keys = ["sl_race_id", "sl_horse_id"]
+    if raw.duplicated(keys).any():
+        raise ValueError("Accepted ATR identities are not unique")
+    canonical = canonical.copy()
+    canonical["sl_race_id"] = canonical.race_id.astype("string").str.replace(r"\.0$", "", regex=True)
+    canonical["sl_horse_id"] = canonical.horse_id.astype("string").str.replace(r"\.0$", "", regex=True)
+    context = canonical.merge(raw.reindex(columns=[*keys, *ALL_ATR_COLS, "_available"]), on=keys, how="inner", validate="one_to_one")
+    run = compute_atr_run_features(context)
+    columns = list(dict.fromkeys([*(name for name, _ in RUN_METRICS), "atr_closing_in_hand", *COMMENT_TAGS]))
+    scalars = pd.concat([context[keys + ["_available"]].reset_index(drop=True), run.reindex(columns=columns).reset_index(drop=True)], axis=1)
+    history = canonical[["sl_race_id", "sl_horse_id", "race_date", "off_time"]].merge(scalars, on=keys, how="left", validate="one_to_one")
+    history["_event"] = pd.to_datetime(history.race_date.astype(str).str[:10] + " " + history.off_time.map(_normalise_off_time_key), utc=True)
+    history = history.sort_values(["sl_horse_id", "_event", "sl_race_id"], kind="stable").reset_index(drop=True)
+    history["_position"] = np.arange(len(history))
+    return history
+
+
+def published_atr_rolling(frame):
+    """Prior starts whose observations were available at the target decision.
+
+    Windows retain untracked starts as missing slots. The full immutable scalar
+    history is shared across chunks, so chunk boundaries cannot change support.
+    """
+    from src.source_dataset import current_manifest
+    manifest = current_manifest()
+    if "atr" not in manifest["sources"]:
+        output = {}
+        for metric, _ in RUN_METRICS:
+            for suffix in ("avg_3", "avg_5", "best_3", "trend"):
+                output[f"{metric}_{suffix}"] = np.full(len(frame), np.nan)
+        for count in (3, 5):
+            output[f"atr_closing_in_hand_avg_{count}"] = np.full(len(frame), np.nan)
+            for tag in COMMENT_TAGS:
+                if tag not in {"atr_cmt_eased", "atr_cmt_comfortable"}:
+                    output[f"{tag}_rate_{count}"] = np.full(len(frame), np.nan)
+        output["atr_observation_count_5"] = np.zeros(len(frame))
+        output["atr_days_since_observation"] = np.full(len(frame), np.nan)
+        return output
+    history = _published_history(manifest["sources"]["sl"]["version"], manifest["sources"]["atr"]["version"])
+    target = pd.DataFrame({"_row": np.arange(len(frame)),
+        "sl_horse_id": frame.horse_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()})
+    target["_event"] = pd.to_datetime(frame.race_date.astype(str).str[:10] + " " + frame.off_time.map(_normalise_off_time_key), utc=True).to_numpy()
+    if "prediction_as_of" in frame:
+        decision = pd.to_datetime(frame.prediction_as_of, utc=True, errors="raise").to_numpy()
+        target["_event"] = target._event.where(target._event.le(decision), decision)
+    linked = pd.merge_asof(target.sort_values("_event"), history[["_event", "sl_horse_id", "_position"]].sort_values("_event"),
+                           on="_event", by="sl_horse_id", direction="backward", allow_exact_matches=False).sort_values("_row")
+    positions = linked._position.fillna(-1).to_numpy(dtype="int64")[:, None] - np.arange(5)
+    safe = np.clip(positions, 0, max(len(history)-1, 0))
+    if history.empty:
+        return {}
+    horses = history.sl_horse_id.to_numpy()[safe]
+    available = pd.to_datetime(history._available, utc=True).to_numpy(dtype="datetime64[ns]")[safe]
+    decisions = pd.to_datetime(target._event, utc=True).to_numpy(dtype="datetime64[ns]")[:, None]
+    valid = (positions >= 0) & (horses == target.sl_horse_id.to_numpy()[:, None]) & (available <= decisions)
+    output = {}
+
+    def window(column, count, operation="mean"):
+        values = pd.to_numeric(history[column], errors="coerce").to_numpy(float)[safe[:, :count]]
+        values = np.where(valid[:, :count], values, np.nan)
+        support = np.isfinite(values).sum(axis=1)
+        if operation == "mean":
+            return np.divide(np.nansum(values, axis=1), support, out=np.full(len(frame), np.nan), where=support > 0)
+        filled = np.where(np.isfinite(values), values, -np.inf if operation == "max" else np.inf)
+        result = filled.max(axis=1) if operation == "max" else filled.min(axis=1)
+        return np.where(support, result, np.nan)
+
+    for metric, higher in RUN_METRICS:
+        short = metric.removeprefix("atr_")
+        for count in (3, 5):
+            output[f"atr_{short}_avg_{count}"] = window(metric, count)
+        output[f"atr_{short}_best_3"] = window(metric, 3, "max" if higher else "min")
+        output[f"atr_{short}_trend"] = output[f"atr_{short}_avg_3"] - output[f"atr_{short}_avg_5"]
+    for count in (3, 5):
+        output[f"atr_closing_in_hand_avg_{count}"] = window("atr_closing_in_hand", count)
+        for tag in COMMENT_TAGS:
+            if tag not in {"atr_cmt_eased", "atr_cmt_comfortable"}:
+                output[f"{tag}_rate_{count}"] = window(tag, count)
+    support = valid & np.isfinite(pd.to_numeric(history.atr_finishing_speed_pct, errors="coerce").to_numpy(float)[safe])
+    output["atr_observation_count_5"] = support.sum(axis=1).astype(float)
+    events = history._event.to_numpy(dtype="datetime64[ns]")[safe]
+    ages = np.where(support, (decisions-events) / np.timedelta64(1, "D"), np.inf).min(axis=1)
+    output["atr_days_since_observation"] = np.where(np.isfinite(ages), ages, np.nan)
+    return output

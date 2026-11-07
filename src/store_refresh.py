@@ -5,6 +5,7 @@ Only parquet consolidation is streamed; all five files still commit together.
 """
 from pathlib import Path
 import logging
+from datetime import datetime, timezone
 
 import pandas as pd
 
@@ -14,28 +15,36 @@ from src.featured_dataset import (
     _atr_signature, _rtv_signature, _model_load_columns, _stamp, data_signature, fe_signature,
 )
 from src.parquet_io import combine_parquet_parts
+from src.source_dataset import dataset_build
 
 logger = logging.getLogger(__name__)
 
 
+@dataset_build
 def append_current_store(processed, *, store=None):
     """Return False for a rebuild; otherwise append/no-op under one store lock."""
     store = store or FeatureStore()
     with store._access():
+        def rebuild(reason):
+            store._rebuild_reason = reason
+            return False
         meta = store.meta()
+        from src.source_dataset import current_manifest
+        if meta.get("dataset_manifest") and current_manifest() is None:
+            return rebuild("unversioned_input_for_versioned_store")
         signature = fe_signature()
         if (not store.exists() or meta.get("schema_version") != STORE_SCHEMA_VERSION
                 or meta.get("fe_signature") != signature or not Path(store.counts_state_path).exists()):
-            return False
+            return rebuild("feature_code_or_store_schema_changed")
         last = store.last_date()
         if last is None or data_signature(processed, cutoff=last) != meta.get("data_signature"):
-            return False
+            return rebuild("processed_history_changed")
         atr = meta.get("atr_signature")
         if not atr or atr != _atr_signature(last):
-            return False
+            return rebuild("atr_history_changed")
         current_rtv = _rtv_signature(last)
         if (meta.get("rtv_signature") is not None or any(current_rtv["sig"].values())) and meta.get("rtv_signature") != current_rtv:
-            return False
+            return rebuild("rtv_history_changed")
         dates = pd.to_datetime(processed.race_date)
         new = processed.loc[dates.gt(last)].copy()
         if new.empty:
@@ -65,17 +74,31 @@ def append_current_store(processed, *, store=None):
         return True
 
 
+@dataset_build
 def get_training_dataset(*, processed=None, rebuild=False):
     processed = process_data() if processed is None else processed
+    reason = "explicit"
     if not rebuild:
         store = FeatureStore()
         with store._access():
             if append_current_store(processed, store=store):
                 return store.load_featured(columns=_model_load_columns(store))
+            reason = store._rebuild_reason
     # All CLI/UI training uses the same corrected builder. A new definition
     # must rebuild every carried history, without materialising 1,000+ full
     # feature columns at once on this machine.
     from scripts.build_feature_store_batched import _build
+    from src.ingestion.storage import atomic_json, read_json
+    from src.source_dataset import registry_root, current_manifest
+    path = registry_root() / "builds.json"
+    history = read_json(path).get("builds", [])
+    meta = FeatureStore().meta()
+    history.append({"started_at": datetime.now(timezone.utc).isoformat(),
+                    "reason": reason,
+                    "previous_last_date": meta.get("last_date"),
+                    "previous_manifest": (meta.get("dataset_manifest") or {}).get("id"),
+                    "dataset_manifest": (current_manifest() or {}).get("id")})
+    atomic_json(path, {"builds": history[-1000:]})
     store = FeatureStore()
     with store._staged_update() as pending:
         _build(pending, 60_000, processed=processed)

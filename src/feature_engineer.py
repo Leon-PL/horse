@@ -30,6 +30,7 @@ from src.track_config import get_track_config, direction_code, shape_code
 from src.rtv_features import add_rtv_features
 
 import config
+from src.source_dataset import dataset_build
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2522,6 +2523,33 @@ def add_atr_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     from src.atr_features import merge_atr_sectionals, ALL_ATR_COLS
     from src.atr_features import compute_atr_run_features, RUN_METRICS, COMMENT_TAGS
+    from src.source_dataset import current_manifest
+
+    if current_manifest() is not None:
+        from src.atr_features import published_atr_rolling
+        new = published_atr_rolling(df)
+        race_ids = df.race_id
+        for metric, _ in RUN_METRICS:
+            column = f"{metric}_avg_3"
+            if column in new:
+                values = pd.Series(new[column], index=df.index)
+                new[f"{column}_vs_field"] = (values - values.groupby(race_ids).transform("mean")).to_numpy()
+        # These unused legacy composites depended on batch-wide statistics.
+        # Field-relative scaling is causal and invariant to chunk boundaries.
+        zscores = []
+        for column in ("atr_max_speed_avg_3", "atr_finishing_speed_pct_avg_3"):
+            values = pd.Series(new.get(column, np.nan), index=df.index)
+            deviation = values.groupby(race_ids).transform("std")
+            zscores.append((values-values.groupby(race_ids).transform("mean")) / deviation.where(deviation.gt(0)))
+        new["atr_speed_score"] = ((zscores[0]+zscores[1])/2).to_numpy()
+        from src.track_config import get_track_config
+        circumference = pd.to_numeric(df.track.map(lambda track: get_track_config(track).get("circumference_f", np.nan)), errors="coerce")
+        # Circumference in miles is a fixed physical scale. Normalising a
+        # race's course against its own field would make every value missing.
+        new["atr_stride_x_gallop"] = np.asarray(new.get("atr_peak_stride_length_avg_3", np.nan)) * (circumference/8.).to_numpy()
+        new["has_atr_history"] = pd.notna(new.get("atr_finishing_speed_pct_avg_3", np.full(len(df), np.nan))).astype(np.int8)
+        raw = set(ALL_ATR_COLS) | {name for name, _ in RUN_METRICS} | set(COMMENT_TAGS) | {"atr_closing_in_hand"}
+        return _with_columns(_without(df, [c for c in raw if c in df]), pd.DataFrame(new, index=df.index))
 
     logger.info("Engineering ATR sectional features...")
 
@@ -4804,6 +4832,7 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+@dataset_build
 def engineer_features(
     df: pd.DataFrame,
     save: bool = True,

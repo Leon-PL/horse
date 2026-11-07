@@ -13,6 +13,15 @@ from src.parquet_io import combine_parquet_parts
 from tests.test_feature_store_transactions import simple_features, rows
 
 
+@pytest.fixture(autouse=True)
+def fixed_source_versions(monkeypatch):
+    # Transaction fault injection must not read or race the live backfills.
+    from src import featured_dataset
+    for module in (featured_dataset, store_refresh):
+        monkeypatch.setattr(module, "_atr_signature", lambda cutoff: {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": "atr-fixture"})
+        monkeypatch.setattr(module, "_rtv_signature", lambda cutoff: {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": {"runs": "rtv-fixture"}})
+
+
 def test_streamed_parquet_preserves_rows_missing_values_and_numeric_widening(tmp_path):
     first = pd.DataFrame({"id": [1, 2], "value": [np.nan, 4.0], "name": ["a", None]})
     second = pd.DataFrame({"id": [3.0], "name": ["b"], "later": [2.5]})

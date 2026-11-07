@@ -16,6 +16,14 @@ from src import feature_store, featured_dataset, parquet_io, store_refresh
 from src.feature_store import FeatureStore
 
 
+@pytest.fixture(autouse=True)
+def isolated_source_adoption(monkeypatch):
+    # These tests inject synthetic processing/FE. Adoption is independently
+    # qualified against real stores and must not run against the user's data.
+    monkeypatch.setattr("src.source_dataset.capture_dataset", lambda **kwargs: None)
+    monkeypatch.setattr("src.source_dataset.select_dataset", lambda **kwargs: None)
+
+
 @pytest.fixture
 def simple_features(monkeypatch):
     """Cheap stateful FE: retries expose double-counting as wrong feature values."""
@@ -247,6 +255,7 @@ def test_batched_rebuild_failure_preserves_store(store, rows, monkeypatch):
     monkeypatch.setattr(batched, "fe_signature", lambda: "current-fe")
     monkeypatch.setattr(batched, "data_signature", lambda *args, **kwargs: "current-data")
     monkeypatch.setattr(batched, "atr_cache_signature", lambda cutoff: "current-atr")
+    monkeypatch.setattr(batched, "rtv_cache_signature", lambda cutoff: {"runs": None})
     monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2"])
 
     with monkeypatch.context() as patch:
@@ -272,6 +281,7 @@ def test_batched_rebuild_can_use_separate_store(store, rows, monkeypatch, tmp_pa
     monkeypatch.setattr(batched, "fe_signature", lambda: "candidate-fe")
     monkeypatch.setattr(batched, "data_signature", lambda *args, **kwargs: "same-data")
     monkeypatch.setattr(batched, "atr_cache_signature", lambda cutoff: "same-atr")
+    monkeypatch.setattr(batched, "rtv_cache_signature", lambda cutoff: {"runs": None})
     monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2", "--store-root", str(destination)])
     batched.main()
     assert _snapshot(store) == original
@@ -293,6 +303,7 @@ def test_batched_rebuild_refuses_to_stamp_code_that_changed_mid_build(store, row
     monkeypatch.setattr(batched, "fe_signature", lambda: next(signatures))
     monkeypatch.setattr(batched, "data_signature", lambda *args, **kwargs: "current-data")
     monkeypatch.setattr(batched, "atr_cache_signature", lambda cutoff: "current-atr")
+    monkeypatch.setattr(batched, "rtv_cache_signature", lambda cutoff: {"runs": None})
     monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2"])
 
     with pytest.raises(RuntimeError, match="changed while the store was building"):

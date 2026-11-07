@@ -96,7 +96,8 @@ def compute_clv(
         ``{"overall": {...}, "by_strategy": {name: {...}}, "coverage": float,
         "n_bets": int, "n_matched": int, "bsp_available": bool}``.
     """
-    path = bsp_path or BSP_PATH
+    from src.source_dataset import source_path
+    path = bsp_path or source_path("betfair", "bsp", BSP_PATH)
     out: dict = {"n_bets": int(len(bets)), "n_matched": 0, "coverage": 0.0,
                  "bsp_available": os.path.exists(path), "overall": {}, "by_strategy": {}}
     if bets is None or bets.empty or not out["bsp_available"] or "odds" not in bets.columns:
@@ -115,17 +116,19 @@ def compute_clv(
     b["_ok"] = b["off_time"].map(normalise_off_time_key) if "off_time" in b.columns else ""
     b["_hk"] = b["horse_name"].map(bf_horse_key)
 
-    bsp = pd.read_parquet(path, columns=["race_date", "track_key", "off_key", "horse_key", "bsp"])
-    bsp["_rd"] = _race_date_str(bsp["race_date"])
-    bsp = bsp.dropna(subset=["bsp"])
-    bsp = bsp[pd.to_numeric(bsp["bsp"], errors="coerce") > 1.0]
-
-    merged = b.merge(
-        bsp[["_rd", "track_key", "off_key", "horse_key", "bsp"]].rename(
-            columns={"track_key": "_tk", "off_key": "_ok", "horse_key": "_hk"}
-        ),
-        on=["_rd", "_tk", "_ok", "_hk"], how="left",
-    )
+    from src.source_dataset import current_manifest, read_table
+    from src.source_prices import attach_bsp
+    bsp = (read_table("betfair", "bsp", linked=True) if current_manifest() is not None and bsp_path is None
+           else pd.read_parquet(path))
+    if "track" not in bsp and "track_key" in bsp:
+        bsp["track"] = bsp.track_key
+    if "track" not in b:
+        b["track"] = b["track_key"]
+    if "off_time" not in b:
+        b["off_time"] = ""
+    merged = attach_bsp(b.drop(columns="bsp", errors="ignore"), bsp, cols=("bsp",))
+    numeric_bsp = pd.to_numeric(merged.bsp, errors="coerce")
+    merged["bsp"] = numeric_bsp.where(np.isfinite(numeric_bsp) & numeric_bsp.gt(1.0))
     matched = merged.dropna(subset=["bsp"])
     out["n_matched"] = int(len(matched))
     out["coverage"] = float(len(matched) / len(merged)) if len(merged) else 0.0
