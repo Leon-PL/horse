@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import time
 from uuid import uuid4
 import zlib
 
@@ -13,6 +14,18 @@ import zlib
 def read_json(path):
     path = Path(path)
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _replace_after_readers(temporary, path):
+    """Windows readers can briefly prevent an otherwise atomic replacement."""
+    for attempt in range(8):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == 7:
+                raise
+            time.sleep(min(.05 * 2**attempt, .5))
 
 
 def atomic_json(path, value):
@@ -24,7 +37,7 @@ def atomic_json(path, value):
             json.dump(value, stream, indent=2, default=str, allow_nan=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _replace_after_readers(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -41,7 +54,7 @@ def atomic_parquet(frame, path, *, schema=None):
             raise ValueError("Source cache publication changed the row count")
         with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        _replace_after_readers(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 

@@ -30,10 +30,12 @@ import numpy as np
 import pandas as pd
 
 import config
+from src.runner_identity import runner_positions
 from src.utils import normalise_horse_key, normalise_off_time_key, normalise_track_key
 
 DEFAULT_BSP_PATH = os.path.join(config.PROCESSED_DATA_DIR, "betfair_bsp.parquet")
 _PUNCT_RE = re.compile(r"[^a-z0-9 ]")
+PRICE_KEYS = ["race_date", "track_key", "off_key", "horse_key"]
 
 # Betfair uses shorter course names than the RTV-sourced DB for a few tracks.
 # Map DB-side normalised keys -> the Betfair-side normalised key so both
@@ -108,6 +110,23 @@ def load_bsp(path: str | None = None) -> pd.DataFrame | None:
     return pd.read_parquet(path)
 
 
+def price_runner_positions(left, right, *, skip_ambiguous=True):
+    """Match Betfair selections within a race; names are a unique fallback only.
+
+    The shared identity matcher receives Betfair IDs on both sides here. Sporting
+    Life horse IDs never act as exchange selection IDs or supply a crosswalk.
+    """
+    races = pd.MultiIndex.from_frame(pd.concat(
+        [left[PRICE_KEYS[:3]], right[PRICE_KEYS[:3]]], ignore_index=True))
+    codes, _ = pd.factorize(races)
+    def identity(frame, race_codes):
+        return pd.DataFrame({"race_id": race_codes,
+            "horse_id": frame.get("bf_runner_id", pd.Series(pd.NA, index=frame.index)).to_numpy(),
+            "horse_name": frame.horse_key.to_numpy()})
+    return runner_positions(identity(left, codes[:len(left)]), identity(right, codes[len(left):]),
+                            require_all=False, skip_ambiguous=skip_ambiguous)
+
+
 def attach_bsp(
     df: pd.DataFrame,
     bsp: pd.DataFrame | None = None,
@@ -156,21 +175,17 @@ def attach_bsp(
     )
     # Recompute the right-side track key from the raw course name so aliases
     # apply on both sides regardless of what was stored in the parquet.
-    right = bsp[["race_date", "track", "off_key", "horse_key", *cols]].copy()
+    identity_columns = ["bf_runner_id"] if "bf_runner_id" in bsp else []
+    right = bsp[list(dict.fromkeys(["race_date", "track", "off_key", "horse_key", *identity_columns, *cols]))].copy()
     right["race_date"] = _date10(right["race_date"])
     right["track_key"] = right["track"].map(bf_track_key)
-    keys = ["race_date", "track_key", "off_key", "horse_key"]
-    right = right[[*keys, *cols]].drop_duplicates()
-    # Identical duplicates are harmless. Conflicting values or multiple left
-    # runners collapsing onto one normalised identity are not a price match.
-    right = right.loc[~right.duplicated(keys, keep=False)]
-    ambiguous_left = left_keys.duplicated(keys, keep=False).to_numpy()
-    merged = left_keys.merge(
-        right, on=keys, how="left", sort=False, validate="many_to_one"
-    )
+    right = right[list(dict.fromkeys([*PRICE_KEYS, *identity_columns, *cols]))].drop_duplicates().reset_index(drop=True)
+    if "bf_runner_id" in out:
+        left_keys["bf_runner_id"] = out.bf_runner_id.to_numpy()
+    positions = price_runner_positions(left_keys, right)
+    merged = right.reindex(positions)
     for c in cols:
         out[c] = merged[c].to_numpy()
-        out.loc[ambiguous_left, c] = np.nan
     return out
 
 

@@ -339,7 +339,8 @@ def parse_place_market(stream: bytes) -> list[dict] | None:
             for rc in mc.get("rc", []):
                 if "ltp" not in rc:
                     continue
-                rid = rc["id"]; last_ltp[rid] = rc["ltp"]
+                rid = rc["id"]
+                last_ltp[rid] = rc["ltp"]
                 if off_ms is not None and pt is not None and pt <= off_ms:
                     ltp_pre[rid] = rc["ltp"]
                 if cut_300 is not None and pt is not None and pt <= cut_300:
@@ -364,6 +365,7 @@ def parse_place_market(stream: bytes) -> list[dict] | None:
             "off_time": off_hhmm,
             "track": track,
             "horse_name": horse,
+            "bf_runner_id": rid,
             "place_bsp": r.get("bsp"),
             "place_ltp_300s": ltp_300.get(rid),
             "place_ltp_preoff": ltp_pre.get(rid),

@@ -88,3 +88,28 @@ def test_two_left_identities_collapsing_to_one_key_are_unknown():
     out = attach_bsp(ours, betfair, cols=("bsp",))
     assert out.bsp.iloc[[0, 2]].isna().all()
     assert out.bsp.iloc[1] == 2.1
+
+
+@pytest.mark.parametrize("same_price", [False, True])
+def test_namesakes_require_exchange_identity_even_when_prices_agree(same_price):
+    ours, right = _frames()
+    ours["horse_name"] = "Sierra Nevada"
+    ours["horse_id"] = [1040489, 1038101]
+    right["horse_key"] = bf_horse_key("Sierra Nevada")
+    right["bf_runner_id"] = [45802885, 620329]
+    if same_price:
+        right["bsp"] = 3.5
+    assert attach_bsp(ours, right, cols=("bsp",)).bsp.isna().all()
+    assert pd.isna(attach_bsp(ours.iloc[:1], right, cols=("bsp",)).bsp.iloc[0])
+    ours["bf_runner_id"] = [45802885., 620329.]
+    expected = [3.5, 3.5 if same_price else 2.1]
+    assert attach_bsp(ours, right.iloc[::-1], cols=("bsp",)).bsp.tolist() == expected
+    assert ours.horse_id.tolist() == [1040489, 1038101]
+
+
+def test_same_name_different_known_exchange_selection_is_not_a_fallback():
+    ours, right = _frames()
+    ours["bf_runner_id"] = [99, 2]
+    right["bf_runner_id"] = [1, 2]
+    result = attach_bsp(ours, right, cols=("bsp",))
+    assert pd.isna(result.bsp.iloc[0]) and result.bsp.iloc[1] == 2.1

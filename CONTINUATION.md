@@ -31,6 +31,23 @@ See the [cleanup report](docs/operations/PRE_FEATURE_CLEANUP_2026-11-05.md).
 
 ## Betfair historical downloads
 
+**Runner identity recovery, 6 November:** the 22:50 publication failure is the
+Gowran Park Sierra Nevada pair (2022-06-12, 15:50). Matching now uses exchange
+selection IDs within the race, with unique-name fallback. PLACE retains IDs and
+the publisher upgrades older staged/published parses from exact retained raw
+revisions. A repeated winner alias and an unidentified legacy PLACE observation
+are preserved under `history/identity_review/` before replacement. Real replay
+produces all 15 runners in each cache, with distinct prices for both Sierra Nevadas.
+Ambiguous name-only model joins stay unknown; SL IDs are not exchange IDs.
+See [recovery and evidence](docs/operations/BETFAIR_RUNNER_IDENTITY_2026-11-06.md)
+and `data/audit/betfair_identity_20261106/` for publication/restart receipts. The
+backfill also pins `src/betfair.py`, `src/runner_identity.py` and ingestion `storage.py`;
+do not edit its seven collector/matcher/storage dependencies while it runs. All
+4,988 stopped markets published (17,157 total); older PLACE parses gained IDs.
+A transient Windows progress-file lock also stopped consolidation; atomic writes
+now retry that lock before failing safely, and consolidation resumes its checkpoint.
+ATR's separate four pins remain unchanged.
+
 **Import speed, 6 November:** both WIN and PLACE are retained. Grouped durable
 checkpoints, bounded parallel work and lightweight progress counters replace
 per-market saves/counts. Identical real-market output was verified; the controlled

@@ -24,13 +24,14 @@ import pandas as pd
 import requests
 
 import config
-from src.betfair import bf_horse_key, bf_track_key
+from src.betfair import PRICE_KEYS, bf_horse_key, bf_track_key, price_runner_positions
+from src.runner_identity import identity_values
 from src.ingestion.betfair_credentials import connection_path, load_connection, save_connection
 from src.ingestion.storage import atomic_json, atomic_parquet, writer_lock
 from src.utils import normalise_off_time_key
 
 API = "https://historicdata.betfair.com/api/"
-KEYS = ["race_date", "track_key", "off_key", "horse_key"]
+KEYS = PRICE_KEYS
 CHECKPOINT_MARKETS = 128
 CHECKPOINT_INTERVAL_SECONDS = 2.0
 PROGRESS_INTERVAL_SECONDS = 5.0
@@ -405,41 +406,130 @@ class HistoryStore:
 
 
 def merge_observations(existing, incoming):
-    """Fill absent observations; retain every previously accepted non-null value."""
+    """Preserve accepted values by selection ID, with unique-name fallback.
+
+    An unidentified legacy row cannot be assigned to either namesake. Return it
+    for durable review before identified observations replace it in the cache.
+    """
     def keyed(frame):
-        frame = frame.copy()
+        frame = frame.copy().reset_index(drop=True)
         if frame.empty:
-            return frame.reindex(columns=list(dict.fromkeys([*KEYS, *frame.columns]))).set_index(KEYS)
+            return frame.reindex(columns=list(dict.fromkeys([*KEYS, *frame.columns])))
         frame["race_date"] = pd.to_datetime(frame.race_date).dt.strftime("%Y-%m-%d")
         frame["track_key"] = frame.track.map(bf_track_key)
         frame["off_key"] = frame.off_time.map(normalise_off_time_key)
         frame["horse_key"] = frame.horse_name.map(bf_horse_key)
-        if frame.duplicated(KEYS).any():
-            raise HistoryError("Ambiguous historical runner keys; publication stopped for review.")
-        return frame.set_index(KEYS)
+        return frame
+    def review_records(frame):
+        # Standard JSON preserves the complete float representation; pandas'
+        # default JSON precision would round legacy price observations.
+        records = frame.astype(object).where(frame.notna(), None).to_dict("records")
+        return json.loads(json.dumps(records, default=str, allow_nan=False))
     left, right = keyed(existing), keyed(incoming)
+    review = []
+    left_ids = identity_values(left.get("bf_runner_id", pd.Series(pd.NA, index=left.index)))
+    native = pd.MultiIndex.from_arrays([left[name] for name in KEYS[:3]] + [left_ids])
+    duplicate_ids = left_ids.notna().to_numpy() & native.duplicated(keep=False)
+    duplicates = left.loc[duplicate_ids]
+    groups = {}
+    for position in duplicates.index:
+        groups.setdefault(native[position], []).append(position)
+    removed = []
+    for positions in groups.values():
+        # These are observations of one proven selection, sometimes retained
+        # under different country/name spellings. Keep accepted values in their
+        # existing order, fill gaps, and preserve every superseded row for review.
+        first, *others = positions
+        review.extend(review_records(left.loc[others]))
+        for column in left:
+            if pd.isna(left.at[first, column]):
+                values = left.loc[others, column].dropna()
+                if not values.empty:
+                    left.at[first, column] = values.iloc[0]
+        removed.extend(others)
+    left = left.drop(index=removed).reset_index(drop=True)
+    known_right = right.loc[identity_values(right.get("bf_runner_id", pd.Series(pd.NA, index=right.index))).notna()]
+    namesakes = pd.MultiIndex.from_frame(known_right.loc[known_right.duplicated(KEYS, keep=False), KEYS])
+    unidentified = identity_values(left.get("bf_runner_id", pd.Series(pd.NA, index=left.index))).isna()
+    unresolved = unidentified.to_numpy() & pd.MultiIndex.from_frame(left[KEYS]).isin(namesakes)
+    review.extend(review_records(left.loc[unresolved]))
+    left = left.loc[~unresolved].reset_index(drop=True)
+    try:
+        positions = price_runner_positions(right, left, skip_ambiguous=False)
+    except ValueError:
+        raise HistoryError("Ambiguous historical runner identities; publication stopped for review.") from None
+    report = {"new_rows": int((positions < 0).sum()), "preserved_price_conflicts": 0}
+    if review:
+        report["identity_review"] = review
     if left.empty:
         columns = list(dict.fromkeys([*left.columns, *right.columns]))
-        return right.reindex(columns=columns).reset_index(), {"new_rows": len(right), "preserved_price_conflicts": 0}
-    common = left.index.intersection(right.index)
-    conflicts = 0
+        return right.reindex(columns=columns).reset_index(drop=True), report
+    matched_right = right.index[positions >= 0]
+    matched_left = positions[positions >= 0]
     for column in right.columns:
         if column not in left:
             left[column] = pd.NA
-        prior = left.loc[common, column]
-        new = right.loc[common, column]
+        prior = left.loc[matched_left, column].reset_index(drop=True)
+        new = right.loc[matched_right, column].reset_index(drop=True)
         both = prior.notna() & new.notna()
         if column in {"bsp", "place_bsp"}:
-            conflicts += int((both & pd.to_numeric(prior, errors="coerce").sub(pd.to_numeric(new, errors="coerce")).abs().gt(1e-8)).sum())
-        missing = common[prior.isna()]
-        left.loc[missing, column] = right.loc[missing, column]
-    additions = right.loc[~right.index.isin(left.index)]
+            report["preserved_price_conflicts"] += int((both & pd.to_numeric(prior, errors="coerce").sub(pd.to_numeric(new, errors="coerce")).abs().gt(1e-8)).sum())
+        missing = (prior.isna() & new.notna()).to_numpy()
+        left.loc[matched_left[missing], column] = new.loc[missing].to_numpy()
+    additions = right.loc[positions < 0]
     if not additions.empty:
         left = pd.concat([left, additions], sort=False)
-    return left.reset_index(), {"new_rows": len(additions), "preserved_price_conflicts": conflicts}
+    return left.reset_index(drop=True), report
+
+
+def restore_place_runner_ids(store):
+    """Upgrade old PLACE parses from their exact retained raw revision.
+
+    Previously published old parses are restaged so the ordinary publisher also
+    fills their cache identities; no separate manual backfill is needed.
+    """
+    from src.ingestion.betfair_archives import store_path
+    archive = store_path(store.root)
+    with store.connection() as con:
+        staged = con.execute("SELECT remote,rows_json,sha256,first_date,last_date FROM files "
+                             "WHERE state IN ('downloaded','published') AND market='PLACE'").fetchall()
+    def replay(entry):
+        remote, body, digest, first, last = entry
+        old = json.loads(body)
+        if all(row.get("bf_runner_id") is not None for row in old):
+            return None
+        path = local_path(store.root, remote)
+        raw = path.read_bytes() if path.exists() else None
+        if raw is None or hashlib.sha256(raw).hexdigest() != digest:
+            raw = None
+            if archive.exists():
+                with closing(sqlite3.connect(archive.resolve().as_uri()+"?mode=ro", uri=True, timeout=30)) as con:
+                    retained = con.execute("SELECT body FROM payloads WHERE sha256=? AND verified=1", (digest,)).fetchone()
+                if retained and hashlib.sha256(retained[0]).hexdigest() == digest:
+                    raw = retained[0]
+        if raw is None:
+            raise HistoryError("Retained PLACE source revision is missing; staged observations are preserved for review.")
+        market, parsed = parse_download(raw, remote, date.fromisoformat(first), date.fromisoformat(last))
+        if market != "PLACE" or len(old) != len(parsed) or any(
+            any(key != "bf_runner_id" and new.get(key) != value for key, value in prior.items())
+            or (prior.get("bf_runner_id") is not None and prior["bf_runner_id"] != new["bf_runner_id"])
+            for prior, new in zip(old, parsed)):
+            raise HistoryError("Replayed PLACE observations changed; existing staged values are preserved for review.")
+        rows = [{**prior, "bf_runner_id": new["bf_runner_id"]} for prior, new in zip(old, parsed)]
+        return {"remote": remote, "payload": raw, "market": market, "rows": rows, "retain_file": False}
+    restored = 0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for offset in range(0, len(staged), CHECKPOINT_MARKETS):
+            # Bound parsed bodies and commit only after the whole group verifies.
+            records = [record for record in pool.map(replay, staged[offset:offset+CHECKPOINT_MARKETS])
+                       if record is not None]
+            store.save_many(records)
+            restored += len(records)
+    return restored
 
 
 def publish(store, processed):
+    restored = restore_place_runner_ids(store)
     with store.connection() as con:
         pending = con.execute("SELECT remote,market,rows_json FROM files WHERE state='downloaded'").fetchall()
     report = {}
@@ -461,6 +551,15 @@ def publish(store, processed):
             if name == "betfair_bsp.parquet":
                 incoming["bsp_source"] = "historical_api"
             result, stats = merge_observations(before, incoming)
+            review = stats.pop("identity_review", None)
+            if review:
+                digest = hashlib.sha256(json.dumps(review, sort_keys=True).encode()).hexdigest()
+                review_path = store.root / "identity_review" / f"{name}.{digest}.json"
+                atomic_json(review_path, {"cache": name, "reason": "Legacy ambiguous names or repeated selection observations",
+                                          "observations": review})
+                stats.update(identity_review_rows=len(review), identity_review_path=str(review_path))
+            if market == "PLACE" and restored:
+                stats["restored_identity_markets"] = restored
             atomic_parquet(result, path)
             report[name] = {**stats, "rows": len(result)}
         with store.connection() as con:
@@ -638,7 +737,8 @@ def drain_history(start, end, *, budget=5000, workers=4):
         if not acquired:
             return {"state": "busy", "reason": "A Betfair historical backfill is already running"}
         sources = [Path(__file__).with_name(name) for name in
-                   ("betfair_history.py", "betfair_streams.py", "betfair_archives.py", "betfair_credentials.py")]
+                   ("betfair_history.py", "betfair_streams.py", "betfair_archives.py", "betfair_credentials.py", "storage.py")]
+        sources.extend(Path(__file__).parents[1] / name for name in ("betfair.py", "runner_identity.py"))
         def hashes():
             return {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sources}
         pins = hashes()

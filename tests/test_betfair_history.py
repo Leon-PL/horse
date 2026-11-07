@@ -583,3 +583,202 @@ def test_mixed_failed_and_successful_markets_keep_accurate_checkpoint_counts(env
     assert result["state"] == "partial" and result["failed"] == 1
     assert result["files"] == {"published": 1, "retry": 1}
     assert result["processed"] == 1 and result["downloaded"] == 1
+
+
+def namesake_payload(number=100, market="WIN"):
+    message = json.loads(bz2.decompress(payload(number, market)))
+    runners = message["mc"][0]["marketDefinition"]["runners"]
+    runners[0].update(name="Sierra Nevada (USA)", id=45802885, bsp=4.61)
+    runners[1].update(name="Sierra Nevada (GB)", id=620329, bsp=19.52)
+    return bz2.compress(json.dumps(message).encode())
+
+
+@pytest.mark.parametrize("market", ["WIN", "PLACE"])
+def test_namesakes_publish_and_replay_by_exchange_id(environment, market):
+    client = FakeClient(files={remote(100): namesake_payload(market=market)})
+    first = history.sync_history(FIRST, LAST, client=client)
+    assert first["state"] == "ok" and first["files"] == {"published": 1}
+    name = "betfair_bsp" if market == "WIN" else "betfair_place_bsp"
+    cache = pd.read_parquet(environment / f"processed/{name}.parquet")
+    price = "bsp" if market == "WIN" else "place_bsp"
+    assert cache.horse_name.tolist() == ["Sierra Nevada", "Sierra Nevada"]
+    assert cache.set_index("bf_runner_id")[price].to_dict() == {45802885: 4.61, 620329: 19.52}
+    replay, stats = history.merge_observations(cache, cache.iloc[::-1])
+    assert len(replay) == 2 and stats == {"new_rows": 0, "preserved_price_conflicts": 0}
+
+
+def test_existing_named_runner_keeps_price_and_gains_its_namesake():
+    rows = pd.DataFrame(history.parse_download(namesake_payload(), remote(100), FIRST, LAST)[1])
+    existing = rows.iloc[:1].assign(bsp=9., bf_runner_id=45802885., existing_note="keep").drop(columns="bf_market_id")
+    merged, stats = history.merge_observations(existing, rows.iloc[::-1])
+    assert len(merged) == 2 and stats == {"new_rows": 1, "preserved_price_conflicts": 1}
+    by_id = merged.set_index("bf_runner_id")
+    assert by_id.loc[45802885, "bsp"] == 9. and by_id.loc[45802885, "existing_note"] == "keep"
+    assert by_id.loc[45802885, "bf_market_id"] == "1.100"
+    assert by_id.loc[620329, "bsp"] == 19.52
+
+
+def test_unique_legacy_name_gains_id_but_different_known_ids_do_not_match():
+    rows = pd.DataFrame(history.parse_download(payload(), remote(100), FIRST, LAST)[1])
+    legacy = rows.drop(columns="bf_runner_id").assign(bsp=9.)
+    merged, stats = history.merge_observations(legacy, rows)
+    assert len(merged) == 2 and merged.bf_runner_id.tolist() == [1, 2]
+    assert merged.bsp.tolist() == [9., 9.] and stats["preserved_price_conflicts"] == 2
+    other = rows.iloc[:1].assign(bf_runner_id=99, bsp=25.)
+    merged, stats = history.merge_observations(rows.iloc[:1], other)
+    assert len(merged) == 2 and stats["new_rows"] == 1
+    assert merged.set_index("bf_runner_id").bsp.to_dict() == {1: 3.5, 99: 25.}
+
+
+def test_old_place_stage_restores_ids_and_retains_unidentifiable_cache_row(environment):
+    root = environment / "betfair/history"
+    store = history.HistoryStore(root)
+    body = namesake_payload(market="PLACE")
+    market, rows = history.parse_download(body, remote(100), FIRST, LAST)
+    assert {row["bf_runner_id"] for row in rows} == {45802885, 620329}
+    old = [{k: v for k, v in row.items() if k != "bf_runner_id"} for row in rows]
+    store.discover([remote(100)], FIRST, LAST)
+    store.save(remote(100), body, market, old)
+    destination = environment / "processed"
+    destination.mkdir()
+    legacy = pd.DataFrame(old[:1]).assign(place_bsp=99., legacy_note="preserve without guessing")
+    legacy.to_parquet(destination / "betfair_place_bsp.parquet", index=False)
+    report = history.publish(store, destination)["betfair_place_bsp.parquet"]
+    assert report["restored_identity_markets"] == 1 and report["identity_review_rows"] == 1
+    review = json.loads(Path(report["identity_review_path"]).read_text())
+    assert review["observations"][0]["place_bsp"] == 99.
+    assert review["observations"][0]["legacy_note"] == "preserve without guessing"
+    assert store.counts() == {"published": 1}
+    with store.connection() as con:
+        updated = json.loads(con.execute("SELECT rows_json FROM files").fetchone()[0])
+    assert [{k: v for k, v in row.items() if k != "bf_runner_id"} for row in updated] == old
+    cache = pd.read_parquet(destination / "betfair_place_bsp.parquet")
+    assert len(cache) == 2
+    assert cache.set_index("bf_runner_id").place_bsp.to_dict() == {45802885: 4.61, 620329: 19.52}
+    assert history.restore_place_runner_ids(store) == 0 and history.publish(store, destination) == {}
+
+
+def test_place_identity_upgrade_requires_its_exact_retained_revision(environment):
+    root = environment / "betfair/history"
+    store = history.HistoryStore(root)
+    body = namesake_payload(market="PLACE")
+    market, parsed = history.parse_download(body, remote(100), FIRST, LAST)
+    old = [{k: v for k, v in row.items() if k != "bf_runner_id"} for row in parsed]
+    store.discover([remote(100)], FIRST, LAST)
+    store.save(remote(100), body, market, old)
+    path = history.local_path(root, remote(100))
+    path.write_bytes(payload(market="PLACE"))
+    with pytest.raises(history.HistoryError, match="revision is missing"):
+        history.publish(store, environment / "processed")
+    assert store.counts() == {"downloaded": 1}
+    assert not (environment / "processed/betfair_place_bsp.parquet").exists()
+    path.write_bytes(body)
+    assert history.restore_place_runner_ids(store) == 1
+
+
+def test_place_identity_upgrade_rejects_changed_staged_observations(environment):
+    store = history.HistoryStore(environment / "betfair/history")
+    body = namesake_payload(market="PLACE")
+    market, parsed = history.parse_download(body, remote(100), FIRST, LAST)
+    old = [{k: v for k, v in row.items() if k != "bf_runner_id"} for row in parsed]
+    old[0]["place_bsp"] = 99.
+    store.discover([remote(100)], FIRST, LAST)
+    store.save(remote(100), body, market, old)
+    with pytest.raises(history.HistoryError, match="observations changed"):
+        history.restore_place_runner_ids(store)
+    with store.connection() as con:
+        assert json.loads(con.execute("SELECT rows_json FROM files").fetchone()[0]) == old
+
+
+def test_already_published_legacy_place_rows_are_upgraded_by_the_normal_publisher(environment):
+    store = history.HistoryStore(environment / "betfair/history")
+    body = namesake_payload(market="PLACE")
+    market, parsed = history.parse_download(body, remote(100), FIRST, LAST)
+    old = [{k: v for k, v in row.items() if k != "bf_runner_id"} for row in parsed]
+    store.discover([remote(100)], FIRST, LAST)
+    store.save(remote(100), body, market, old)
+    with store.connection() as con:
+        con.execute("UPDATE files SET state='published'")
+    outputs = history.publish(store, environment / "processed")
+    assert outputs["betfair_place_bsp.parquet"]["restored_identity_markets"] == 1
+    assert store.counts() == {"published": 1}
+    assert history.restore_place_runner_ids(store) == 0
+
+
+def test_backfill_pins_the_shared_exchange_identity_matcher(environment, monkeypatch):
+    monkeypatch.setattr(history, "sync_history", lambda *a, **kw: {"state": "ok", "files": {}})
+    report = history.drain_history(FIRST, LAST)
+    assert {"betfair.py", "runner_identity.py", "storage.py"}.issubset(report["code_hashes"])
+
+
+def test_legacy_review_must_be_saved_before_replacing_the_accepted_cache(environment, monkeypatch):
+    store = history.HistoryStore(environment / "betfair/history")
+    body = namesake_payload(market="PLACE")
+    market, rows = history.parse_download(body, remote(100), FIRST, LAST)
+    store.discover([remote(100)], FIRST, LAST)
+    store.save(remote(100), body, market, rows)
+    destination = environment / "processed"
+    destination.mkdir()
+    path = destination / "betfair_place_bsp.parquet"
+    pd.DataFrame(rows[:1]).drop(columns="bf_runner_id").assign(place_bsp=99.).to_parquet(path, index=False)
+    before = path.read_bytes()
+    original = history.atomic_json
+    def cannot_preserve_review(path, value):
+        raise OSError("review storage unavailable")
+    monkeypatch.setattr(history, "atomic_json", cannot_preserve_review)
+    with pytest.raises(OSError, match="review storage unavailable"):
+        history.publish(store, destination)
+    assert path.read_bytes() == before and store.counts() == {"downloaded": 1}
+    monkeypatch.setattr(history, "atomic_json", original)
+    assert history.publish(store, destination)[path.name]["identity_review_rows"] == 1
+    assert store.counts() == {"published": 1}
+
+
+def test_legacy_alias_for_one_selection_is_consolidated_without_losing_its_observation():
+    rows = pd.DataFrame(history.parse_download(namesake_payload(), remote(100), FIRST, LAST)[1])
+    existing = rows.iloc[:1].assign(bsp=4.61, old_note=pd.NA)
+    alias = existing.assign(horse_name="Sierra Nevada USA", bsp=4.613702474634567, old_note="retained alias")
+    merged, stats = history.merge_observations(pd.concat([existing, alias], ignore_index=True), rows)
+    assert len(merged) == 2 and merged.bf_runner_id.is_unique
+    winner = merged.loc[merged.bf_runner_id.eq(45802885)].iloc[0]
+    assert winner.bsp == 4.61 and winner.old_note == "retained alias"
+    assert stats["identity_review"][0]["horse_name"] == "Sierra Nevada USA"
+    assert stats["identity_review"][0]["bsp"] == 4.613702474634567
+
+
+def test_place_identity_upgrade_reuses_consolidated_source_by_exact_hash(environment):
+    from src.ingestion import betfair_archives as archives
+    from test_betfair_archives import archive
+    body = namesake_payload(market="PLACE")
+    directory = environment / "betfair"
+    archive(directory / "old.tar", [("BASIC/123/1.100.bz2", body)])
+    archives.consolidate(directory)
+    store = history.HistoryStore(directory / "history")
+    market, rows = history.parse_download(body, remote(100), FIRST, LAST)
+    old = [{k: v for k, v in row.items() if k != "bf_runner_id"} for row in rows]
+    store.discover([remote(100)], FIRST, LAST)
+    store.save(remote(100), body, market, old, retain_file=False)
+    assert history.restore_place_runner_ids(store) == 1
+    with store.connection() as con:
+        restored, digest = con.execute("SELECT rows_json,sha256 FROM files").fetchone()
+    assert {row["bf_runner_id"] for row in json.loads(restored)} == {45802885, 620329}
+    assert digest == hashlib.sha256(body).hexdigest()
+    assert not history.local_path(store.root, remote(100)).exists()
+
+
+def test_place_identity_upgrade_does_not_commit_a_partially_verified_group(environment):
+    store = history.HistoryStore(environment / "betfair/history")
+    for number in (100, 101):
+        body = namesake_payload(number, "PLACE")
+        market, rows = history.parse_download(body, remote(number), FIRST, LAST)
+        old = [{k: v for k, v in row.items() if k != "bf_runner_id"} for row in rows]
+        if number == 101:
+            old[0]["place_bsp"] = 99.
+        store.discover([remote(number)], FIRST, LAST)
+        store.save(remote(number), body, market, old)
+    with pytest.raises(history.HistoryError, match="observations changed"):
+        history.restore_place_runner_ids(store)
+    with store.connection() as con:
+        saved = con.execute("SELECT rows_json FROM files").fetchall()
+    assert all("bf_runner_id" not in json.loads(body)[0] for body, in saved)
+    assert store.counts() == {"downloaded": 2}

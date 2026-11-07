@@ -79,8 +79,15 @@ WIN prices update `betfair_bsp.parquet` and `betfair_bsp_early.parquet`; fuller
 timing metrics update `betfair_timing.parquet`. PLACE prices update
 `betfair_place_bsp.parquet`. Previously accepted non-null values and unrelated
 columns remain; absent observations are filled and new runners appended.
-Disagreeing known BSP prices are counted and preserved for review. Ambiguous
-runner keys stop publication. New files publish atomically under the source
+Disagreeing known BSP prices are counted and preserved for review. Runners match
+by exchange selection ID within the race, with a unique-name fallback when an ID
+is absent. Distinct selections may share a name. Ambiguous legacy observations
+and repeated accepted observations of one ID are retained in `identity_review/`
+before the cache is replaced; duplicate incoming identities still stop publication.
+Old PLACE parses gain IDs from their exact retained source revision during normal
+publication, including records published before that field was collected. See the
+[runner identity recovery](BETFAIR_RUNNER_IDENTITY_2026-11-06.md).
+New files publish atomically under the source
 writer lock. A crash between outputs can be resumed idempotently.
 
 The API requests British/Irish WIN and PLACE **market files only**. Betfair says
