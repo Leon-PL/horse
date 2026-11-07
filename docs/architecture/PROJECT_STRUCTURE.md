@@ -29,7 +29,8 @@ horse/
       betfair_history.py                  full historical market downloads and import
       betfair_credentials.py              Windows-encrypted account connection
       fx.py                               ECB reference rates
-      weather.py, bha_stewards.py         explicit research collectors
+      bha_stewards.py, bha_reports.py     regular BHA reports, revisions and full PDF extraction
+      weather.py                         explicit research weather collector
       storage.py                          locks, raw payloads, atomic writes
       rtv_storage.py                      accepted RTV generations and partitions
     database.py, identity_schema.py        canonical result store and published snapshot

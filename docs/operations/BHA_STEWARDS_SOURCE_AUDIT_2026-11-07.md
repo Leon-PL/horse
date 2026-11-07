@@ -1,5 +1,10 @@
 # BHA stewards: retained source, missing active ingestion — 7 November 2026
 
+**Subsequent deployment:** BHA is now in regular ingestion, with retained full
+PDFs, durable revisions and accepted-source tables. See the
+[current operating guide](BHA_REGULAR_INGESTION_2026-11-07.md). The findings below
+describe the earlier state that prompted the repair.
+
 BHA stewards' reports exist in this project, but the normal source refresh does
 not collect them. They have no accepted source adapter, dataset-manifest entry or
 current feature consumer. Calling this only an "unwired collector" obscures both

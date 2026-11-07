@@ -116,7 +116,7 @@ class Deferred(RuntimeError):
 class Client:
     """One connection pool and shared request pace; cooldown survives restarts."""
     def __init__(self, con, root, *, request_delay=1.0, session=None):
-        if request_delay < .5:
+        if not math.isfinite(request_delay) or request_delay < .5:
             raise ValueError('BHA request delay must be at least 0.5 seconds')
         self.con = con
         self.session = session or requests.Session()
@@ -333,6 +333,7 @@ def refresh_reports(start, end, *, root=None, max_dates=31, max_documents=64, re
         if not acquired:
             return {'state': 'busy', 'reason': 'BHA collector is already running'}
         with closing(connect(root)) as con:
+            active_code = code_hashes()
             legacy = Path(config.DATA_DIR) / 'raw/bha_stewards_reports.csv'
             if not control(con, 'legacy_import') and legacy.exists():
                 atomic_json(root / 'status.json', {'state': 'importing_legacy', 'checked_at': now().isoformat()})
@@ -360,18 +361,24 @@ def refresh_reports(start, end, *, root=None, max_dates=31, max_documents=64, re
                         'retry_after': control(con, 'retry_after', 0), 'requests': client.requests,
                         'request_seconds': round(client.seconds, 3), 'wait_seconds': round(client.wait_seconds, 3),
                         'seconds': round(time.monotonic()-started, 3), 'parser_version': PARSER_VERSION,
-                        'code_hashes': code_hashes()}
+                        'code_hashes': active_code}
                 body['available_through'] = end if not pending and not docs else None
                 body['publication_lag_days'] = 1
                 atomic_json(root / 'status.json', body)
                 return body
             status('running')
             try:
+                if (root / 'STOP').exists():
+                    return status('stopped')
+                if control(con, 'retry_after', 0) > now().timestamp():
+                    return status('waiting')
                 recent = (date.today()-timedelta(days=7)).isoformat()
                 rows = con.execute("SELECT * FROM days WHERE day BETWEEN ? AND ? AND next_retry<=? "
                     "AND (state<>'complete' OR (day>=? AND checked_at<?)) ORDER BY day DESC LIMIT ?",
                     (start, end, now().timestamp(), recent, (now()-timedelta(hours=24)).isoformat(), max_dates)).fetchall()
                 for row in rows:
+                    if code_hashes() != active_code:
+                        return status('code_changed')
                     if (root / 'STOP').exists():
                         return status('stopped')
                     with con:
@@ -393,6 +400,8 @@ def refresh_reports(start, end, *, root=None, max_dates=31, max_documents=64, re
                     "(race_date>=? AND d.checked_at<?)) ORDER BY race_date DESC,d.report_key LIMIT ?",
                     (start, end, now().timestamp(), recent, (now()-timedelta(hours=24)).isoformat(), max_documents)).fetchall()
                 for row in rows:
+                    if code_hashes() != active_code:
+                        return status('code_changed')
                     if (root / 'STOP').exists():
                         return status('stopped')
                     try:
@@ -441,17 +450,20 @@ def main():
         if code_hashes() != initial_code:
             atomic_json((args.root or default_root()) / 'status.json',
                         {'state': 'code_changed', 'checked_at': now().isoformat(), 'reason': 'Review and restart the BHA collector'})
-            break
+            return
         report = refresh_reports(args.start, args.end, root=args.root, max_dates=args.max_dates,
                                  max_documents=args.max_documents, request_delay=args.request_delay,
                                  recheck=args.recheck)
         args.recheck = False
         print(json.dumps(report), flush=True)
+        if args.drain and report['state'] == 'waiting':
+            time.sleep(min(30, max(1, report['retry_after']-now().timestamp())))
+            continue
         if not args.drain or report['state'] != 'partial':
             break
         if not report['fetched_days'] and not report['fetched_documents'] and not report['failed']:
             break
-    if args.publish:
+    if args.publish and report['state'] not in {'stopped', 'busy', 'code_changed'}:
         from src.source_dataset import capture_dataset
         manifest = capture_dataset(include_prices=True)
         print(json.dumps({'published_dataset': manifest['id']}), flush=True)

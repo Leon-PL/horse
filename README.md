@@ -53,7 +53,10 @@ Check actual compatibility before using forecasts:
 ```
 
 This refreshes Sporting Life results, Racing TV observations, bounded ATR
-recovery, Betfair BSP and currency references. It retains raw evidence,
+recovery, full Betfair history, currency references and BHA stewards' reports.
+BHA includes full PDFs, going/rails, non-runner reasons and race notes; see
+[BHA collection and catch-up](docs/operations/BHA_REGULAR_INGESTION_2026-11-07.md).
+The refresh retains raw evidence,
 checks identities and publishes source coverage. Independent providers run
 with bounded concurrency after canonical results are available. A partial
 report returns a nonzero exit code.

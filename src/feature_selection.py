@@ -57,6 +57,17 @@ SCREEN_PARAMS = {"n_estimators": 400, "learning_rate": 0.04}
 SHAP_CHUNK_ROWS = 20_000
 
 
+def candidate_feature_columns(frame):
+    """All safe numeric candidates, before the existing production allowlist.
+
+    Identifiers, outcomes and other excluded fields keep the model's normal
+    exclusions. New BHA columns can enter selection without changing live input
+    selection or mutating shared configuration.
+    """
+    from src.model import get_feature_columns
+    return get_feature_columns(frame, apply_allowlist=False)
+
+
 # ---------------------------------------------------------------- hygiene --
 
 def hygiene_filter(

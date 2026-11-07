@@ -60,13 +60,16 @@ reference implementation for tests; the production full-build route is batched.
 | Racing TV | rtv/runs, cards, pre, text, scores | Canonical links for materialised history; persisted links for captured snapshots; existing run-availability and pre-decision cutoffs |
 | FX | fx/units, rates | Frozen reference files; EUR conversion uses a rate strictly before race date |
 | Betfair | betfair/bsp, bsp_early, timing, place_bsp | Namespaced market/selection IDs and persisted canonical links; evaluation/teacher prices, never live predictors |
+| BHA stewards | bha/reports, documents, race_notes | BHA year/fixture keys and native race numbers; full JSON/PDF evidence, recorded observation times and revisions; history features use an explicit 48-hour assumption |
 
-BHA stewards' reports are a retained source outside this accepted-source table.
-The standalone collector is not called by normal refreshes, and its archive ends
-on 20 June 2026 despite the live feed working on 7 November. It has no current
-accepted-source adapter or feature consumer. This is an explicit integration gap;
-the earlier trouble-feature experiment does not cover every report section.
-See [the BHA source audit](docs/operations/BHA_STEWARDS_SOURCE_AUDIT_2026-11-07.md).
+BHA is included in normal source refreshes. Full reports add going, rails,
+non-runner reasons and suspension context beyond the summary feed. Historical
+catch-up uses the same durable collector. Normal feature building derives 161
+horse-history candidates, available to feature selection without changing the
+current production allowlist. The configured 48-hour availability rule is an
+assumption; raw capture times remain unchanged. See
+[BHA collection and coverage](docs/operations/BHA_REGULAR_INGESTION_2026-11-07.md)
+and [feature definitions](docs/research/BHA_FEATURE_CANDIDATES_2026-11-07.md).
 
 Weather is also present in the results snapshot because the legacy canonical
 schema stores those measurements on runner rows. Its separate publication makes

@@ -18,6 +18,8 @@ Use `--help` before deliberate backfills or repairs.
 |---|---|
 | Check installed state | `project_status.py`, `validate_data_contracts.py` |
 | Collect history | `python -m src.ingestion`; `--enrich` drains the pedigree queue; `backfill_rtv_text.py` rebuilds the Timeform comment-score history |
+| BHA stewards and full reports | Included in normal ingestion as `bha`. Historical catch-up: `python -m src.ingestion.bha_stewards --start YYYY-MM-DD --end YYYY-MM-DD --drain --publish`; `--status` reads progress; see [collection guide](../docs/operations/BHA_REGULAR_INGESTION_2026-11-07.md) |
+| Derive BHA candidates without training | `python -m src.bha_features --historical`; materialises source-backed observations, dated runner candidates and current horse-state candidates, also wired into normal FE; see [definitions](../docs/research/BHA_FEATURE_CANDIDATES_2026-11-07.md) |
 | Resume ATR five-tab backfill | `python -m src.ingestion.atr_rebuild --request-delay 2`; first check its status so a second worker is not launched; see [tab coverage](../docs/operations/ATR_TAB_COVERAGE_2026-11-06.md) |
 | Audit ATR native IDs | `python -m src.ingestion.atr_ids --out data/audit/atr_id_audit.json`; reads production data without changing it; see [ID repair and speed](../docs/operations/ATR_SPEED_AND_IDS_2026-11-07.md) |
 | Inspect one ATR jumps result | `python -m src.ingestion.atr_jumps --help`; explicit native race ID and racecard URL; keeps its observation separate from the sectional cache |
