@@ -1,15 +1,29 @@
 """Persisted, append-only feature store.
 
-Builds the featured dataset once and appends new race dates instead of
-re-engineering the whole history every time. This is phase 1 of the
-incremental-FE work:
+Five files committed together: featured rows, processed history, rating state,
+carried pandas-stage state and metadata.
 
-  * **Persistence + ergonomics** — `build()` once, then `append()` new
+Who writes it:
+
+  * ``scripts/build_feature_store_batched.py`` builds the real store in
+    date-ordered chunks, never holding more than one chunk in memory.
+  * ``src.store_refresh.append_current_store`` appends new race dates through
+    :meth:`FeatureStore._fast_featurize`, seeded from the carried state, and
+    returns False when the store must be rebuilt instead.
+  * :meth:`FeatureStore.build` featurises a whole history in memory. It is the
+    reference the tests prove the other two against, and suits small stores
+    only: on the full history it needs more than 16 GB.
+  * :meth:`FeatureStore.featurize_live` reads the carried state for upcoming
+    cards and never writes.
+
+Design record from the incremental-FE work:
+
+  * **Persistence + ergonomics** — build once, then append new
     dates. The featured rows and the processed history are kept on disk;
     historical featured rows are never recomputed (the no-leakage rule
     guarantees a settled row's features never change as later races
     arrive — see CLAUDE.md hard rule #1).
-  * **Correctness** — `append()` re-features new rows through the
+  * **Correctness** — appending re-features new rows through the
     parity-tested `feature_engineer_with_history_core` path, so the
     appended rows are identical to a full batch rebuild. This is enforced
     by `tests/test_feature_store.py`.
@@ -169,7 +183,7 @@ class FeatureStore:
     def _staged_update(self):
         """Yield a staging store; publish only after every output is complete.
 
-        Used by build/append and the memory-bounded rebuild script. A failure
+        Used by build, the training refresh and the batched builder. A failure
         before journaling leaves the old store untouched. After journaling,
         the next operation finishes the commit before exposing any data.
         Requires room for both old and new files; no old-data copies are made.
@@ -240,8 +254,8 @@ class FeatureStore:
     @_locked
     def load_counts_state(self) -> dict | None:
         """Carried pandas-stage state (counts/rolling/time-window/lag/extrema/
-        expanding). ``None`` if the store predates the incremental flip — the
-        caller must then fall back to the full-recompute append."""
+        expanding). ``None`` if the store predates the incremental flip, which
+        then has to be rebuilt."""
         if not os.path.exists(self.counts_state_path):
             return None
         with open(self.counts_state_path, "rb") as fh:
@@ -340,7 +354,11 @@ class FeatureStore:
     # ── build / append ────────────────────────────────────────────────
     @_locked
     def build(self, processed: pd.DataFrame) -> pd.DataFrame:
-        """Build the store from scratch over the full processed history.
+        """Featurise *processed* in memory and commit it as the whole store.
+
+        The in-memory reference build, for tests and small stores. Build the
+        real store with ``python -m scripts.build_feature_store_batched``:
+        holding the full history here needs more than 16 GB.
 
         Runs the FE pass with an (empty) ``counts_state`` collector so every
         stateful pandas stage writes its end-state — identical features to a
@@ -417,21 +435,25 @@ class FeatureStore:
         """Feature-engineer an UNSETTLED future *card* against the store's
         persisted rating + counts state — **read-only**.
 
-        Same bounded fast path as :meth:`append` (ratings seeded from persisted
-        state, every stateful stage resumed from carried ``counts_state``,
-        ``skip_ratings=True``), so live features match training exactly. Unlike
-        ``append`` it operates on freshly deserialised state and never persists,
+        Same bounded fast path as the training refresh
+        (``src.store_refresh.append_current_store``): ratings seeded from
+        persisted state, every stateful stage resumed from carried
+        ``counts_state``, ``skip_ratings=True``, so live features match
+        training exactly. Unlike the refresh it operates on freshly
+        deserialised state and never persists,
         so result-less rows can't corrupt the store. This is the correct live-FE
         path: it avoids both the all-default ratings of a from-scratch sweep over
         stale/empty history AND the OOM of feature-engineering full history in one
         shot."""
         if not self.exists():
-            raise RuntimeError("FeatureStore is empty; build() it before live featurisation.")
+            raise RuntimeError(
+                "FeatureStore is empty; build it with "
+                "`python -m scripts.build_feature_store_batched` before live featurisation.")
         counts_state = self.load_counts_state()
         if counts_state is None:
             raise RuntimeError(
-                "FeatureStore lacks carried state (pre-flip store); rebuild via "
-                "get_featured_dataset(rebuild=True) before live featurisation.")
+                "FeatureStore lacks carried state (pre-flip store); rebuild it with "
+                "`python -m scripts.build_feature_store_batched` before live featurisation.")
         from src.result_status import pending_card
         card = self._continue_freq_counts(pending_card(card))
         seed = self.load_state()
@@ -456,57 +478,3 @@ class FeatureStore:
             if col.startswith(oh_prefixes) and col not in have:
                 featured[col] = 0
         return featured
-
-    @_locked
-    def append(self, processed_new: pd.DataFrame) -> pd.DataFrame:
-        """Feature-engineer and append new race dates (NEW ROWS ONLY).
-
-        Only rows strictly after the store's ``last_date`` are taken (the
-        store holds settled history; re-appending the same dates is a
-        no-op). Returns the newly appended featured rows.
-
-        The whole FE pass runs on the new rows only — ratings seeded from
-        persisted state and every pandas stage resumed from carried
-        ``counts_state`` — so history is never recomputed. Parity with a full
-        rebuild is enforced by tests/test_feature_store.py. A store predating
-        the incremental flip (no carried state) must be rebuilt rather than
-        appended; ``get_featured_dataset`` enforces that via the schema-version
-        guard, but we also assert it here.
-        """
-        if not self.exists():
-            raise RuntimeError("FeatureStore is empty; call build() first.")
-        if self.load_counts_state() is None:
-            raise RuntimeError(
-                "FeatureStore lacks carried state (pre-flip store); rebuild via "
-                "get_featured_dataset(rebuild=True) before appending."
-            )
-
-        processed_hist = self.load_processed()
-        last = self.last_date()
-        new = processed_new.copy()
-        if last is not None:
-            new = new[_event_date(new) > last]
-        if new.empty:
-            logger.info("FeatureStore.append: no rows after %s — nothing to do", last)
-            return new
-
-        featured_new, advanced, counts_state = self._fast_featurize(new)
-
-        # Persist: append featured + processed, advance + save rating state.
-        featured_all = pd.concat(
-            [self.load_featured(), featured_new], ignore_index=True, sort=False
-        )
-        processed_all = pd.concat(
-            [processed_hist, new], ignore_index=True, sort=False
-        )
-        with self._staged_update() as pending:
-            _stringify_objects(featured_all).to_parquet(pending.featured_path, index=False, engine="pyarrow")
-            _stringify_objects(processed_all).to_parquet(pending.processed_path, index=False, engine="pyarrow")
-            pending._save_state(advanced)
-            pending._save_counts_state(counts_state)
-            pending._write_meta(processed_all, featured_all, op="appended", previous=self.meta())
-        logger.info(
-            "FeatureStore.append: +%d featured rows (now %d)",
-            len(featured_new), len(featured_all),
-        )
-        return featured_new

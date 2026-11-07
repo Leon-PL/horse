@@ -1,12 +1,13 @@
-"""Single build path for the featured training dataset.
+"""Signatures and metadata stamps that keep the feature store current.
 
-Builds the featured dataset ONCE via :class:`FeatureStore`, then APPENDS new
-race dates instead of re-engineering the whole history on every train. A
-feature-signature guard forces a clean rebuild whenever the FE code or its
-config flags change, so adopting the store never silently serves stale features.
+``fe_signature`` fingerprints the feature code and its config, ``data_signature``
+the processed history, and the ATR and Racing TV helpers the caches that feature
+stages read directly. ``_stamp`` records them in the store's metadata.
 
-This is the seam that ``train.py`` / ``app.py`` should consume instead of
-calling ``engineer_features`` directly. See ``docs/architecture/FE_REFACTOR_PLAN.md`` and
+The training refresh (``src.store_refresh.get_training_dataset``) and the
+batched builder (``scripts/build_feature_store_batched.py``) use them to decide
+between appending new dates and rebuilding. The older in-memory entry point,
+``get_featured_dataset``, was retired on 2026-11-07. See
 ``docs/architecture/FE_TAXONOMY.md``.
 """
 
@@ -25,7 +26,6 @@ import numpy as np
 import pandas as pd
 
 import config
-from src.data_processor import process_data
 from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore
 
 logger = logging.getLogger(__name__)
@@ -291,12 +291,6 @@ def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
                 os.remove(temporary)
 
 
-def _rebuild(store: FeatureStore, processed: pd.DataFrame, fe_sig: str) -> pd.DataFrame:
-    featured = store.build(processed)
-    _stamp(store, fe_sig, data_signature(processed, cutoff=store.last_date()))
-    return featured
-
-
 # Columns the training/eval code needs present in the frame even when they
 # aren't model features (settlement, EW pricing, ranking label, BSP/CLV).
 _REQUIRED_KEEP = {"num_runners", "handicap", "bsp", "relevance", "finish_time_secs"}
@@ -327,71 +321,3 @@ def _model_load_columns(store: FeatureStore) -> list[str] | None:
         if (not is_feature) or (n in allow) or (n in _REQUIRED_KEEP):
             keep.append(n)
     return keep
-
-
-def get_featured_dataset(
-    *,
-    processed: pd.DataFrame | None = None,
-    rebuild: bool = False,
-) -> pd.DataFrame:
-    """Return the full featured dataset, building or appending as needed.
-
-    Rebuilds from scratch when the store is cold, ``rebuild=True``, the
-    ``fe_signature`` (FE code/config) changed, or the **historical data
-    changed beneath the store** (a backfill/cleanup edited rows at-or-before
-    the store's last date). Otherwise appends only the newer race dates.
-
-    The append path features NEW ROWS ONLY (ratings + every pandas stage
-    seeded from carried state) — history is never recomputed. The
-    ``fe_signature`` guard (which folds in ``STORE_SCHEMA_VERSION``) forces a
-    full rebuild for any store predating the incremental flip, so the append
-    always has carried state to resume from.
-
-    Args:
-        processed: pre-processed history; loaded via ``process_data`` if None.
-        rebuild: force a full rebuild even if the store looks current.
-    """
-    store = FeatureStore()
-    if processed is None:
-        processed = process_data()
-
-    # The decision, row/state commit, signature stamp and final load must all
-    # refer to one generation. Locking individual store methods leaves gaps
-    # where another writer could advance the store and receive our signature.
-    with store._access():
-        fe_sig = fe_signature()
-        meta = store.meta()
-
-        if rebuild or not store.exists():
-            return _rebuild(store, processed, fe_sig)
-
-        if meta.get("fe_signature") != fe_sig:
-            logger.info("FeatureStore stale: FE code/config changed — full rebuild")
-            return _rebuild(store, processed, fe_sig)
-
-        last = store.last_date()
-        if meta.get("data_signature") != data_signature(processed, cutoff=last):
-            logger.info(
-                "FeatureStore stale: history changed beneath it (backfill/cleanup) "
-                "— full rebuild"
-            )
-            return _rebuild(store, processed, fe_sig)
-
-        atr = meta.get("atr_signature")
-        if isinstance(atr, dict) and atr.get("cutoff"):
-            if _atr_signature(atr["cutoff"])["sig"] != atr.get("sig"):
-                logger.info("FeatureStore stale: ATR sectional cache changed beneath it — full rebuild")
-                return _rebuild(store, processed, fe_sig)
-
-        rtv = meta.get("rtv_signature")
-        current_rtv = _rtv_signature(last)
-        if (rtv is not None or any(current_rtv["sig"].values())) and rtv != current_rtv:
-            logger.info("FeatureStore stale: RTV observation cache changed beneath it — full rebuild")
-            return _rebuild(store, processed, fe_sig)
-        store.append(processed)
-        _stamp(store, fe_sig, data_signature(processed, cutoff=store.last_date()))
-        cols = _model_load_columns(store)
-        if cols is not None:
-            logger.info("FeatureStore: loading %d of %d columns (allow-list active)",
-                        len(cols), len(store.featured_schema_names()))
-        return store.load_featured(columns=cols)

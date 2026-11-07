@@ -3,7 +3,8 @@
 The store's promise: building from part of the history and then appending
 the rest must produce featured rows identical to a single full batch
 rebuild. This guards the "build once then append" workflow against silent
-drift.
+drift. Appends go through ``src.store_refresh.append_current_store``, the
+path training uses.
 """
 
 import numpy as np
@@ -14,7 +15,9 @@ import config
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.feature_store import FeatureStore
+from src.featured_dataset import _stamp, data_signature, fe_signature
 from src.model import get_feature_columns
+from src.store_refresh import append_current_store
 from tests.test_live_parity import _synthetic_raw
 
 
@@ -37,13 +40,26 @@ def proc_split():
     return proc, hist, new, boundary
 
 
+def _build_then_append(store_root, hist, proc):
+    """Build *hist*, stamp it current, then append the rest of *proc* as training does."""
+    store = FeatureStore(root=str(store_root))
+    built = store.build(hist.copy())
+    _stamp(store, fe_signature(), data_signature(hist, cutoff=hist["race_date"].max()))
+    assert append_current_store(proc.copy(), store=store), "a current store must append, not rebuild"
+    return store, built
+
+
+def _rows_from(featured, boundary):
+    return featured[pd.to_datetime(featured["race_date"]) >= boundary]
+
+
 def _assert_append_matches_batch(store_root, proc, hist, new, boundary):
     batch = engineer_features(proc.copy(), save=False)
     batch_new = batch[batch["race_date"] >= boundary]
 
-    store = FeatureStore(root=str(store_root))
-    store.build(hist.copy())
-    appended = store.append(new.copy())
+    store, _ = _build_then_append(store_root, hist, proc)
+    appended = _rows_from(store.load_featured(), boundary)
+    assert len(appended) == len(new)
 
     model_cols = [c for c in get_feature_columns(batch) if c in appended.columns]
     assert model_cols
@@ -75,15 +91,12 @@ def test_append_matches_full_rebuild(proc_split, tmp_path):
 
 def test_persisted_featured_grows_and_dedupes(proc_split, tmp_path):
     proc, hist, new, _ = proc_split
-    store = FeatureStore(root=str(tmp_path / "store2"))
-    built = store.build(hist.copy())
-    appended = store.append(new.copy())
+    store, built = _build_then_append(tmp_path / "store2", hist, proc)
 
     full = store.load_featured()
-    assert len(full) == len(built) + len(appended)
+    assert len(full) == len(built) + len(new)
     # Re-appending the same dates is a no-op (store holds settled history).
-    again = store.append(new.copy())
-    assert again.empty
+    assert append_current_store(proc.copy(), store=store)
     assert len(store.load_featured()) == len(full)
 
 
@@ -91,9 +104,7 @@ def test_appended_rating_state_matches_full_sweep(proc_split, tmp_path):
     """Building then appending must leave the same rating end-state as one
     full-history sweep — the persisted state stays bit-correct."""
     proc, hist, new, _ = proc_split
-    store = FeatureStore(root=str(tmp_path / "store3"))
-    store.build(hist.copy())
-    store.append(new.copy())
+    store, _ = _build_then_append(tmp_path / "store3", hist, proc)
     incremental = store.load_state()["elo"]
 
     full = FeatureStore(root=str(tmp_path / "store_full"))

@@ -368,8 +368,12 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
     won_c = pd.to_numeric(df.get("won", np.nan), errors="coerce").to_numpy()
     lb_c = pd.to_numeric(df.get("lengths_behind", np.nan), errors="coerce").to_numpy()
 
-    # Comment tags.
+    # Comment tags. With no comment the tags are unknown, not zero: the published
+    # tags stay missing, so the rolled rates skip that run rather than counting
+    # it as a run where the comment said nothing. The gating flags below read
+    # the unmasked tags, where a missing comment simply raises no flag.
     cmt_series = df.get("atr_in_running_comment", pd.Series([""] * n, index=df.index)).fillna("").astype(str)
+    has_comment = cmt_series.str.strip().ne("").to_numpy()
     tags = _comment_tags(cmt_series.tolist())
 
     early = np.full(n, np.nan)
@@ -412,7 +416,7 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
     out["atr_upgrade_clean"] = upgrade
     out["atr_closing_in_hand"] = in_hand
     for t in COMMENT_TAGS:
-        out[t] = tags[t]
+        out[t] = np.where(has_comment, tags[t], np.nan)
 
     res = pd.DataFrame(out, index=df.index)
 

@@ -25,6 +25,26 @@ The published history is now `data/raw/race_results.parquet`, at the types decla
 rebuild moved `weather_precip_prev3` to the database's exact values and eight feature columns
 slightly, because running totals now resume exactly across chunks; see the
 [follow-up report](docs/operations/RESULTS_SNAPSHOT_AND_TEST_FIXES_2026-11-06.md).
+
+**ATR comments, 7 November:** a runner with no ATR comment now gives missing comment tags, not
+zeros, so the `atr_cmt_*` rates skip that run. This moves `fe_signature()` to `33491388b5ad5e6e`.
+The store was deliberately not rebuilt and still holds the zeros, and the production input
+`atr_cmt_front_rate_5_vs_field` was trained on them, so apply the rebuild and a refit together.
+
+**Old build route retired, 7 November:** `featured_dataset.get_featured_dataset` and
+`FeatureStore.append` are removed. Training refreshes the store only through
+`src.store_refresh.get_training_dataset`, and the empty-store and pre-flip errors now name
+`python -m scripts.build_feature_store_batched`. The append, parity, transaction and
+live-feature tests run against `append_current_store`. This moves `fe_signature()` again, to
+`60990991f5a30931`, superseding the value above. The store was deliberately not rebuilt while
+scraping continues, so `project_status.py` reports it stale and the next training run will
+rebuild it (about 14 minutes). Do that rebuild and the refit together.
+
+**ATR rebuild:** quote progress as two groups. Races with a known ATR ID (2023-08-10 to
+2026-06-20) run at 258 an hour. Races with no ID cannot run, because ATR answers its results
+pages with a client challenge; that covers everything before 2023-08-10 and from 2026-06-21, so
+the July to October 2026 gap will not close by itself. This is an access decision, not a code fix.
+
 The synthetic race generator, sample collection API and unused collector shim
 are removed. Processing no longer writes an unused global Parquet by default.
 See the [cleanup report](docs/operations/PRE_FEATURE_CLEANUP_2026-11-05.md).

@@ -42,7 +42,8 @@ def main():
 
     store = FeatureStore()
     if not store.exists():
-        raise SystemExit("FeatureStore is empty — build it first (get_featured_dataset).")
+        raise SystemExit("FeatureStore is empty; build it first with "
+                         "`python -m scripts.build_feature_store_batched`.")
     total = {d: build_for_date(store, d) for d in dates}
     print("Built lookahead cache:", total)
 

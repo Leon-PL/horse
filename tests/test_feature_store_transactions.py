@@ -1,4 +1,8 @@
-"""Fault injection: rows and carried history must advance as one generation."""
+"""Fault injection: rows and carried history must advance as one generation.
+
+Appends go through ``src.store_refresh.append_current_store``, the path
+training uses, so every append test first stamps the store as current.
+"""
 
 import json
 import os
@@ -8,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from src import feature_store
+from src import feature_store, featured_dataset, parquet_io, store_refresh
 from src.feature_store import FeatureStore
 
 
@@ -43,10 +47,39 @@ def rows():
 
 
 @pytest.fixture
-def store(tmp_path, simple_features, rows):
+def signatures(monkeypatch):
+    atr = lambda cutoff: {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": "test-atr"}
+    rtv = lambda cutoff: {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": {"runs": None, "pre": None}}
+    for module in (featured_dataset, store_refresh):
+        monkeypatch.setattr(module, "fe_signature", lambda: "test-fe")
+        monkeypatch.setattr(module, "_atr_signature", atr)
+        monkeypatch.setattr(module, "_rtv_signature", rtv)
+
+
+def _stamp_current(store, rows):
+    featured_dataset._stamp(store, "test-fe", featured_dataset.data_signature(
+        rows, cutoff=rows["race_date"].max()))
+
+
+@pytest.fixture
+def store(tmp_path, simple_features, signatures, rows):
     result = FeatureStore(str(tmp_path / "store"))
     result.build(rows.iloc[:2])
+    _stamp_current(result, rows.iloc[:2])
     return result
+
+
+def _append(store, rows):
+    """Append the dates *store* lacks from *rows*, the full history, as training does."""
+    assert store_refresh.append_current_store(rows, store=store), "store should be current"
+
+
+def _apply(store, operation, rows):
+    if operation == "build":
+        store.build(rows)
+        _stamp_current(store, rows)
+    else:
+        _append(store, rows)
 
 
 def _snapshot(store):
@@ -77,6 +110,15 @@ def _fail_serialization(monkeypatch, filename):
             return result
 
         monkeypatch.setattr(pd.DataFrame, "to_parquet", broken)
+        combine = parquet_io.combine_parquet_parts
+
+        def broken_combine(paths, destination, *args, **kwargs):
+            result = combine(paths, destination, *args, **kwargs)
+            if Path(destination).name == filename:
+                raise OSError("injected serialization failure")
+            return result
+
+        monkeypatch.setattr(store_refresh, "combine_parquet_parts", broken_combine)
     else:
         module = pickle if filename.endswith(".pkl") else json
         original = module.dump
@@ -96,17 +138,16 @@ def test_failed_write_preserves_previous_generation_and_retry(
     store, rows, monkeypatch, operation, filename,
 ):
     original = _snapshot(store)
-    incoming = rows if operation == "build" else rows.iloc[2:]
     with monkeypatch.context() as patch:
         _fail_serialization(patch, filename)
         with pytest.raises(OSError, match="injected serialization failure"):
-            getattr(store, operation)(incoming)
+            _apply(store, operation, rows)
     assert _snapshot(store) == original
     _assert_complete(store, rows.iloc[:2])
 
-    getattr(store, operation)(incoming)
+    _apply(store, operation, rows)
     _assert_complete(store, rows)
-    assert store.append(rows.iloc[2:]).empty
+    _append(store, rows)  # nothing left to append: no double counting
     _assert_complete(store, rows)
 
 
@@ -140,17 +181,20 @@ def test_interrupted_commit_recovers_once_on_reopen(
             if current == stop_after:
                 raise KeyboardInterrupt("simulated process interruption")
 
-    incoming = rows if operation == "build" else rows.iloc[2:]
     with monkeypatch.context() as patch:
         patch.setattr(feature_store.os, "replace", interrupted)
         with pytest.raises(KeyboardInterrupt, match="simulated process interruption"):
-            getattr(store, operation)(incoming)
+            _apply(store, operation, rows)
     assert Path(store._journal_path).exists()
 
     reopened = FeatureStore(store.root)
     # Even a metadata/status read must recover before exposing a generation.
     assert reopened.meta()["processed_rows"] == len(rows)
-    assert reopened.append(rows.iloc[2:]).empty
+    if operation == "build":
+        # The interruption came before the signature stamp; training would
+        # rebuild here, so stamp what the completed build would have.
+        _stamp_current(reopened, rows)
+    _append(reopened, rows)
     _assert_complete(reopened, rows)
 
 
@@ -165,13 +209,13 @@ def test_blocked_commit_never_exposes_partial_generation(store, rows, monkeypatc
     with monkeypatch.context() as patch:
         patch.setattr(feature_store.os, "replace", blocked)
         with pytest.raises(PermissionError, match="injected locked file"):
-            store.append(rows.iloc[2:])
+            _append(store, rows)
         reopened = FeatureStore(store.root)
         for read in (reopened.exists, reopened.meta, reopened.load_featured,
                      reopened.load_processed, reopened.load_state, reopened.load_counts_state):
             with pytest.raises(PermissionError, match="injected locked file"):
                 read()
-    assert store.append(rows.iloc[2:]).empty
+    _append(store, rows)
     _assert_complete(store, rows)
 
 
@@ -257,22 +301,12 @@ def test_batched_rebuild_refuses_to_stamp_code_that_changed_mid_build(store, row
 
 
 @pytest.fixture
-def dataset(store, rows, monkeypatch):
-    from src import featured_dataset
-
-    monkeypatch.setattr(featured_dataset, "FeatureStore", lambda: store)
-    monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "test-fe")
-    monkeypatch.setattr(featured_dataset, "_atr_signature", lambda cutoff: {
-        "cutoff": str(pd.Timestamp(cutoff).date()), "sig": "test-atr",
-    })
-    featured_dataset._stamp(store, "test-fe", featured_dataset.data_signature(rows.iloc[:2]))
+def dataset(store):
+    """The signature module, with *store* already stamped current."""
     return featured_dataset
 
 
-@pytest.mark.parametrize("rebuild", [False, True])
-def test_dataset_lock_spans_decision_commit_stamp_and_load(
-    dataset, store, rows, monkeypatch, rebuild,
-):
+def test_dataset_lock_spans_decision_commit_stamp_and_load(store, rows, monkeypatch):
     """A second writer cannot replace the generation between public methods."""
     competing = FeatureStore(store.root)
     checkpoints = []
@@ -280,14 +314,14 @@ def test_dataset_lock_spans_decision_commit_stamp_and_load(
     def check_competing_writer(phase):
         checkpoints.append(phase)
         with pytest.raises(RuntimeError, match="in use by another operation"):
-            competing.append(rows)
+            competing.load_counts_state()
 
     def signature():
         check_competing_writer("decision")
         return "test-fe"
 
-    original_data_signature = dataset.data_signature
-    original_stamp = dataset._stamp
+    original_data_signature = store_refresh.data_signature
+    original_stamp = store_refresh._stamp
 
     def data_signature(*args, **kwargs):
         check_competing_writer("source-signature")
@@ -301,19 +335,20 @@ def test_dataset_lock_spans_decision_commit_stamp_and_load(
         check_competing_writer("before-final-load")
         return None
 
-    monkeypatch.setattr(dataset, "fe_signature", signature)
-    monkeypatch.setattr(dataset, "data_signature", data_signature)
-    monkeypatch.setattr(dataset, "_stamp", stamp)
-    monkeypatch.setattr(dataset, "_model_load_columns", columns)
-    featured = dataset.get_featured_dataset(processed=rows, rebuild=rebuild)
+    monkeypatch.setattr(store_refresh, "FeatureStore", lambda: store)
+    monkeypatch.setattr(store_refresh, "fe_signature", signature)
+    monkeypatch.setattr(store_refresh, "data_signature", data_signature)
+    monkeypatch.setattr(store_refresh, "_stamp", stamp)
+    monkeypatch.setattr(store_refresh, "_model_load_columns", columns)
+    featured = store_refresh.get_training_dataset(processed=rows)
 
     assert featured["history_count"].tolist() == list(range(len(rows)))
-    assert {"decision", "source-signature", "after-row-commit"} <= set(checkpoints)
-    if not rebuild:
-        assert "before-final-load" in checkpoints
+    assert checkpoints[0] == "decision"
+    assert {"source-signature", "after-row-commit", "before-final-load"} <= set(checkpoints)
     _assert_complete(store, rows)
-    assert store.meta()["data_signature"] == original_data_signature(rows)
-    assert competing.append(rows).empty  # lock is released after the whole operation
+    assert store.meta()["data_signature"] == original_data_signature(
+        rows, cutoff=rows["race_date"].max())
+    assert competing.load_counts_state() is not None  # lock released after the whole operation
 
 
 @pytest.mark.parametrize("failure", ["serialization", "flush", "replace"])

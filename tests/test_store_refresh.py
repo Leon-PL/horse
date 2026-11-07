@@ -11,7 +11,6 @@ from src.feature_store import FeatureStore
 from src.featured_dataset import _stamp, data_signature, fe_signature
 from src.parquet_io import combine_parquet_parts
 from tests.test_feature_store_transactions import simple_features, rows
-from tests.test_feature_store import proc_split
 
 
 def test_streamed_parquet_preserves_rows_missing_values_and_numeric_widening(tmp_path):
@@ -53,18 +52,3 @@ def test_streaming_commit_and_retry_preserve_rows_and_carried_state(tmp_path, mo
     assert store.meta()["featured_rows"] == store.meta()["processed_rows"] == 4
     assert store_refresh.append_current_store(rows, store=store)  # no double counting
     assert store.load_counts_state()["counter"]["rows"] == 4
-
-
-def test_bounded_append_matches_native_feature_values(tmp_path, proc_split):
-    processed, history, _, _ = proc_split
-    original = FeatureStore(str(tmp_path / "native"))
-    bounded = FeatureStore(str(tmp_path / "bounded"))
-    for store in [original, bounded]:
-        store.build(history.copy())
-        _stamp(store, fe_signature(), data_signature(history, cutoff=history.race_date.max()))
-    original.append(processed.copy())
-    assert store_refresh.append_current_store(processed.copy(), store=bounded)
-    pd.testing.assert_frame_equal(pd.read_parquet(original.featured_path),
-                                  pd.read_parquet(bounded.featured_path), check_dtype=False)
-    pd.testing.assert_frame_equal(pd.read_parquet(original.processed_path),
-                                  pd.read_parquet(bounded.processed_path), check_dtype=False)

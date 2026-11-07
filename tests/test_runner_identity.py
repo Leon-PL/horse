@@ -224,6 +224,8 @@ def test_feature_store_build_append_and_live_keep_namesakes_separate(tmp_path, m
     from src import atr_features
     from src.data_processor import process_data
     from src.feature_store import FeatureStore
+    from src.featured_dataset import _stamp, data_signature, fe_signature
+    from src.store_refresh import append_current_store
     from tests.test_live_parity import _synthetic_raw
 
     monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
@@ -236,10 +238,15 @@ def test_feature_store_build_append_and_live_keep_namesakes_separate(tmp_path, m
     proc = process_data(raw)
     dates = sorted(proc.race_date.unique())
     store = FeatureStore(str(tmp_path/"store"))
-    built = store.build(proc[proc.race_date < dates[-2]])
-    appended = store.append(proc[proc.race_date == dates[-2]])
+    history = proc[proc.race_date < dates[-2]]
+    built = store.build(history)
+    _stamp(store, fe_signature(), data_signature(history, cutoff=history.race_date.max()))
+    # Append the next day the way training does.
+    assert append_current_store(proc[proc.race_date <= dates[-2]], store=store)
+    featured = store.load_featured()
+    appended = featured[pd.to_datetime(featured.race_date) == dates[-2]]
     assert len(built) == 12 and len(appended) == 2
-    assert len(store.load_featured()) == 14
+    assert len(featured) == 14
     card = proc[proc.race_date == dates[-1]]
     live = store.featurize_live(card)
     reversed_live = store.featurize_live(card.iloc[::-1])

@@ -167,7 +167,7 @@ def test_training_provenance_is_frozen_before_fit(monkeypatch, change_during_loa
             return {}
 
     monkeypatch.setattr(tr, "process_data", lambda: frame.copy())
-    monkeypatch.setattr(tr, "get_featured_dataset", load_features)
+    monkeypatch.setattr(tr, "get_training_dataset", load_features)
     monkeypatch.setattr(tr, "fe_signature", lambda: state["fe"])
     monkeypatch.setattr(tr, "data_signature", lambda df, cutoff: state["data"])
     monkeypatch.setattr(tr, "_git_sha", lambda: state["git"])

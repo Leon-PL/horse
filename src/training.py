@@ -6,7 +6,7 @@ Streamlit Train & Tune page), which
 drifted apart. This module is the single entry point: a typed
 :class:`TrainingConfig` plus :func:`train_run`, which runs the real flow
 
-    process_data -> get_featured_dataset (the store seam) -> RacePredictor.train
+    process_data -> get_training_dataset (the store refresh) -> RacePredictor.train
     -> evaluate (calibration + backtest ROI + CLV vs BSP) -> save a lean run
 
 An explicit deployment cutoff instead reuses ``RacePredictor.fit_as_of`` and
@@ -38,7 +38,7 @@ from src.bet_settlement import DEFAULT_VALUE_CONFIG
 from src.clv import compute_clv
 from src.data_processor import process_data
 from src.featured_dataset import data_signature, fe_signature
-from src.store_refresh import get_training_dataset as get_featured_dataset
+from src.store_refresh import get_training_dataset
 from src.model import RacePredictor
 from src.run_store import save_run
 
@@ -190,7 +190,7 @@ def train_run(cfg: TrainingConfig, *, progress_cb: ProgressCb | None = None) -> 
     #    unless code/data signatures changed).
     _tick("Loading featured dataset (feature store)", 0.15)
     source_fe_signature = fe_signature()
-    featured = get_featured_dataset(processed=processed)
+    featured = get_training_dataset(processed=processed)
     if fe_signature() != source_fe_signature:
         raise RuntimeError("Feature-generation code changed while loading the dataset; restart training.")
     if validation and validation["fe_signature"] != source_fe_signature:

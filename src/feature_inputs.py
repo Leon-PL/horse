@@ -11,8 +11,8 @@ that produced the phantom +15% place edge (ledger 1, 13).
 The store's meta records ``atr_signature = {"cutoff", "sig"}`` when it is
 built, and ``scripts/project_status.py`` recomputes it. This module is
 deliberately outside the FE import graph, so it does not move
-``fe_signature``; folding the check into ``get_featured_dataset`` is the
-proper home and waits for the next rebuild that is needed anyway.
+``fe_signature``. The training refresh, ``src.store_refresh``, compares it
+before appending.
 """
 
 from __future__ import annotations

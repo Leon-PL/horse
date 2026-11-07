@@ -57,7 +57,7 @@ horse/
 | 1. Collect and aggregate | `ingestion.pipeline.refresh_sources` | Canonical SL records plus independently retained RTV, ATR, BSP and FX observations. No sample-data mode. |
 | Hand-off | `database.publish_results_snapshot` | `data/raw/race_results.parquet`, every column at the type declared in `RESULTS_SNAPSHOT_COLUMNS`, with a receipt naming the database revision. |
 | Prepare for features | `data_processor.process_data` | Reads that snapshot, or `load_database_history` for a check of the live database, joins pedigree, cleans and encodes. Clean runner frame in memory; nothing is written. |
-| 2. Build features | `featured_dataset` / `FeatureStore` | Historical features, incremental state and signatures. Accepted source content is fingerprinted. |
+| 2. Build features | `store_refresh` / `FeatureStore` / `featured_dataset` | Historical features and incremental state. `store_refresh` appends new dates or calls the batched builder; `featured_dataset` fingerprints the code and accepted source content. |
 | 3. Train and evaluate | `training`, `model`, evaluation modules, `run_store` | Candidate models and measured results; explicit selected-run pointer. |
 | 4. Predict | `live_prediction`, `picks_app` | Today's cards joined to compatible historical state. |
 
