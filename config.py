@@ -235,6 +235,11 @@ FEATURE_CORR_THRESHOLD = 0.95
 # comment-score inputs (src/rtv_text.py, experiment 052).
 FEATURE_ALLOWLIST = os.path.join(BASE_DIR, "feature_sets", "win_selected_056.txt")
 
+# BHA retrospective feature availability: an explicit assumption, not a claim
+# that the original publication/revision timestamp was captured. Raw source
+# capture times are retained unchanged. "recorded" restores capture-only use.
+BHA_FEATURE_AVAILABILITY_POLICY = "race_plus_48h"
+
 # --- Early Stopping ---
 # Number of boosting rounds without improvement before stopping.
 # 0 = disabled (train for full n_estimators on all training data).

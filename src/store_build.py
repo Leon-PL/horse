@@ -51,7 +51,7 @@ import config
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore, _stringify_objects
-from src.featured_dataset import data_signature, fe_signature
+from src.featured_dataset import data_signature, fe_signature, _bha_signature
 from src.feature_inputs import atr_cache_signature, rtv_cache_signature
 from src.parquet_io import RollingParquetWriter, combine_parquet_parts
 from src.source_dataset import current_manifest, dataset_build, install_manifest
@@ -227,6 +227,7 @@ def _save_inputs(store: FeatureStore, processed: pd.DataFrame, cutoff) -> dict:
         # The sectional cache is read inside FE, outside both signatures.
         "atr_signature": {"cutoff": str(cutoff.date()), "sig": atr_cache_signature(cutoff)},
         "rtv_signature": {"cutoff": str(cutoff.date()), "sig": rtv_cache_signature(cutoff)},
+        "bha_signature": _bha_signature(cutoff),
     }
 
 

@@ -76,6 +76,7 @@ def test_regular_refresh_retains_full_json_and_pdf_and_restart_does_no_http(env)
     assert row.non_race_incidents_text == 'Incident outside a race'
     assert row.available_at == row.observed_at and row.available_at[:10] >= DAY
     assert tables['documents'].iloc[0].text.startswith('Full report')
+    assert tables['documents'].iloc[0].going_text == 'Good'
     assert len(tables['race_notes']) == 1
     assert len(calls) == 2
     assert bha.refresh_reports(DAY, DAY, root=root, client_factory=factory)['state'] == 'cached'
@@ -225,6 +226,8 @@ def test_stop_marker_prevents_requests_without_discarding_the_queue(env):
     root, factory, calls, pages = env
     root.mkdir()
     (root/'STOP').touch()
+    with bha.connect(root) as con:
+        bha.set_control(con, 'retry_after', bha.now().timestamp()+3600)
     assert bha.refresh_reports(DAY, DAY, root=root, client_factory=factory)['state'] == 'stopped'
     assert not calls
 
@@ -232,6 +235,13 @@ def test_stop_marker_prevents_requests_without_discarding_the_queue(env):
 @pytest.mark.parametrize('value,expected', [('bad date', 0), ('nan', 0), ('3600', 3600)])
 def test_retry_after_parsing_cannot_cancel_provider_cooldown(value, expected):
     assert bha.retry_delay(value) == expected
+
+
+@pytest.mark.parametrize('delay', [float('nan'), float('inf'), 0, -.1])
+def test_invalid_request_gap_cannot_disable_pacing(tmp_path, delay):
+    with bha.connect(tmp_path) as con:
+        with pytest.raises(ValueError, match='delay'):
+            bha.Client(con, tmp_path, request_delay=delay)
 
 
 def test_fixture_source_publication_retains_recorded_availability_and_native_keys(env, monkeypatch):
@@ -249,3 +259,25 @@ def test_fixture_source_publication_retains_recorded_availability_and_native_key
     assert timing.availability_basis.eq('recorded').all()
     assert timing.available_at.iloc[0] >= pd.Timestamp(DAY, tz='UTC')
     assert publication.publish_bha(canonical)['version'] == receipt['version']
+
+
+def test_drain_continues_other_dates_after_an_item_failure(monkeypatch):
+    import sys
+    answers = iter([{'state': 'partial', 'failed': 1, 'fetched_days': 0, 'fetched_documents': 0},
+                    {'state': 'ok'}])
+    calls = []
+    monkeypatch.setattr(sys, 'argv', ['bha', '--drain'])
+    monkeypatch.setattr(bha, 'refresh_reports', lambda *a, **k: calls.append(k) or next(answers))
+    bha.main()
+    assert len(calls) == 2
+
+
+def test_drain_waits_without_spamming_during_provider_cooldown(monkeypatch):
+    import sys
+    answers = iter([{'state': 'waiting', 'retry_after': bha.now().timestamp()+3600}, {'state': 'ok'}])
+    sleeps = []
+    monkeypatch.setattr(sys, 'argv', ['bha', '--drain'])
+    monkeypatch.setattr(bha, 'refresh_reports', lambda *a, **k: next(answers))
+    monkeypatch.setattr(bha.time, 'sleep', sleeps.append)
+    bha.main()
+    assert sleeps == [30]

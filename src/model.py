@@ -676,7 +676,7 @@ def _resolve_feature_allowlist() -> set[str] | None:
     return result
 
 
-def get_feature_columns(df: pd.DataFrame) -> list[str]:
+def get_feature_columns(df: pd.DataFrame, *, apply_allowlist=True) -> list[str]:
     """Get the list of feature columns (exclude targets and identifiers).
 
     Accepts every numeric dtype: the previous int64/float64/int32/float32
@@ -693,7 +693,7 @@ def get_feature_columns(df: pd.DataFrame) -> list[str]:
         and pd.api.types.is_numeric_dtype(df[col])
         and not pd.api.types.is_complex_dtype(df[col])
     ]
-    allow = _resolve_feature_allowlist()
+    allow = _resolve_feature_allowlist() if apply_allowlist else None
     if allow is not None:
         kept = [c for c in cols if c in allow]
         if not kept:

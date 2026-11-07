@@ -32,6 +32,42 @@ preserved in [the archive](docs/archive/CONTINUATION_before_cleanup_2026-11-05.m
 
 ## Collection cleanup
 
+**BHA feature candidates, 7 November:** normal FE now appends 161 numeric BHA
+history candidates through `bha_features.add_bha_features`; `bha_events` handles
+source-backed horse attribution. No model trials or selection fits were run.
+The current derivation produced 462,785 observation rows, 275 withdrawals and
+73,695 current horse states under `data/processed/bha_candidates/`.
+Feature selection can use `candidate_feature_columns` to discover candidates
+before the existing production allowlist. The full production store has not been
+rebuilt. Code and BHA-input signatures now force the normal refresh when needed.
+**Latest user decision, 7 November: use a two-day assumption.**
+`config.BHA_FEATURE_AVAILABILITY_POLICY = "race_plus_48h"` makes report and
+withdrawal features eligible 48 hours after their source event. This supersedes
+the earlier capture-only choice. Actual source capture times remain unchanged;
+original publication and later amendment times are unverified. The selected
+snapshot's latest captured text is therefore used retrospectively under this
+explicit assumption. Same-race and future-start exclusions still apply. See
+[definitions](docs/research/BHA_FEATURE_CANDIDATES_2026-11-07.md) and
+`data/audit/bha_two_day_20261107/`. Historical candidate rows are materialised by
+`python -m src.bha_features --historical`; the full production store still needs
+its normal refresh. The completed two-day regeneration contains 758,304 runner
+rows; 493,672 have eligible report history in their latest five starts. All 40
+timing/signature checks passed. Collection continues independently.
+
+**BHA regular ingestion, 7 November:** `bha` is now in the normal source plan.
+`ingestion.bha_stewards` owns a durable SQLite day/revision/document queue;
+`ingestion.bha_reports` retains all report fields and extracts full PDFs. Accepted
+tables are `bha/reports`, `bha/documents` and `bha/race_notes`, with source-native
+identities and actual observation times. The 8,463-report CSV is preserved.
+The first coordinated run added four reports/full PDFs for 6 November and 29
+race-note blocks; new model features have not been enabled. Full historical
+catch-up uses the same collector; check `data/bha/status.json` and its worker
+lock before starting anything. Read [the operating guide](docs/operations/BHA_REGULAR_INGESTION_2026-11-07.md)
+and `data/audit/bha_regular_ingestion_20261107/` for evidence. Its normalisation
+benchmark improved 12.3 times; cached native refresh used zero HTTP requests.
+The full source coordinator also performs other-provider publication, so those
+native timings are not an end-to-end ingestion benchmark.
+
 **Shared source publication, 7 November:** `src/source_contracts.py`,
 `src/source_dataset.py` and `src/ingestion/publication.py` provide the common
 accepted-data boundary. Ordinary processing/builds freeze source versions;
@@ -51,8 +87,9 @@ unversioned "direct-input" frames. A frame without a dataset ID uses the last co
 or stops; a store without a recorded dataset rebuilds. On the frozen qualified dataset the
 production outputs (processed frame, 1,233-column store, carried state, prices by ID and by
 name, CLV) were identical before and after. Tests now run against an explicit fixture dataset
-(`tests/conftest.py`). Merged with the layout cleanup above, `fe_signature()` is now
-`976b75cd74f90909`; the rebuild and refit already owed above cover it. The installed store records no dataset, so live prediction refuses
+(`tests/conftest.py`). Merged with the layout cleanup and the BHA history
+features above, `fe_signature()` is now `7996b7d7a82c8f69`; the rebuild and refit already owed
+above cover it. The installed store records no dataset, so live prediction refuses
 it until that rebuild. See [the qualification](docs/operations/SOURCE_PUBLICATION_2026-11-07.md#fallback-paths-removed).
 
 **Temporary-code cleanup, 6 November:** completed diagnosis, migration, restart
