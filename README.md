@@ -87,21 +87,20 @@ Fit and evaluate a candidate from current local data:
 .venv\Scripts\python.exe train.py --no-refresh --threads 2
 ```
 
-Review scores, dates and feature compatibility in **Registry**, then explicitly
-promote a chosen run. Saving a candidate does not replace the selected model.
+Review scores, dates and feature compatibility with `src.run_store`
+(`list_runs`, `feature_generation_status`), then explicitly promote a chosen run
+with `train.py --promote` or `src.run_store.promote(run_id)`. Saving a candidate does not replace the selected model.
 `train.py --fit-as-of YYYY-MM-DD` fits through a settled cutoff without a held-out
 score; `--validation-report` reuses and checks an earlier evaluated recipe.
 
-## Open the apps
+## Forecasts and saved runs
 
-```powershell
-.venv\Scripts\python.exe -m streamlit run picks_app.py
-.venv\Scripts\python.exe -m streamlit run training_app.py --server.port 8502
-```
-
-Use the first app for forecasts. The second provides **Data**, **Train** and
-**Registry**, plus research controls. Serving requires compatible data, feature
-history and fitted model weights.
+The Streamlit apps (`picks_app.py`, `training_app.py`) were removed on
+2026-11-07; there is no UI. `scripts/build_lookahead.py` prepares dated live
+features and `src.live_prediction` scores them against the promoted run.
+Saved runs are listed, renamed, deleted and pruned through `src.run_store`
+(`list_runs`, `rename_run`, `delete_run`, `prune_runs`). Serving requires
+compatible data, feature history and fitted model weights.
 
 ## Research and development
 
@@ -110,6 +109,11 @@ Read the [negative-results ledger](docs/NEGATIVE_RESULTS.md),
 [evaluation protocol](docs/operations/FORECAST_BENCHMARK_PROTOCOL.md) before
 repeating experiments. Numbered reports are in [docs/research](docs/research/);
 earlier plans and handoffs are in [docs/archive](docs/archive/).
+
+Pipeline code is in `src/` and operating commands in `scripts/`. New experiments,
+screens and audits go in [research/](research/README.md), which pipeline code
+never imports. The earlier research code was retired on 2026-11-07 and is in
+git at commit `26d1b6f`.
 
 Use Python 3.14 from the project `.venv`. `pyproject.toml` owns dependencies,
 `uv.lock` locks them, and `requirements.lock` exports the core runtime. The

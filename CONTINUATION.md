@@ -1,8 +1,34 @@
-# Current handoff — 6 November 2026
+# Current handoff — 7 November 2026
 
 Start with [README](README.md), the [project structure](docs/architecture/PROJECT_STRUCTURE.md),
 and [project inventory](docs/PROJECT_INVENTORY.md). Earlier handoff notes are
 preserved in [the archive](docs/archive/CONTINUATION_before_cleanup_2026-11-05.md).
+
+## Layout cleanup, 7 November
+
+- **No UI.** The Streamlit apps (`picks_app.py`, `training_app.py`), their helper
+  modules and the app-only Matchbook/paper-trade/autotune modules were removed,
+  with `streamlit` and `plotly` (23 packages left `uv.lock`; `.venv` re-synced).
+  Use `train.py`, `src.run_store` and `scripts/build_lookahead.py`.
+- **Research is separate.** 150 research scripts, 25 research-only `src`
+  modules plus `src/research/`, and 52 research test files were removed;
+  `scripts/` now holds 13 operating commands. New work goes in
+  [research/](research/README.md), which pipeline code never imports
+  (`tests/test_layout.py`). Everything removed is in git at `26d1b6f`, except
+  `benchmark_atr_queue.py`, copied to `data/archive/removed_research_2026-11-07/`.
+  No saved model references a removed module.
+- **Unevaluated ATR candidates removed with it:** the new-tab and rich ATR
+  families below (`src/research/atr_*_features.py`,
+  `scripts/derive_atr_rich_features.py`) had no predictive evaluation yet. Their
+  frozen outputs stay in `data/research/`; restore the code into `research/` from
+  `26d1b6f` to continue.
+- **Builder in `src/`, research names gone.** The store build moved from
+  `scripts/build_feature_store_batched.py` (now only its command line) into
+  `src/store_build.py` (`build_store`), and `src/` no longer imports `scripts/`
+  (`tests/test_layout.py`). `prior_market_research.py` became
+  `prior_market_features.py` and `audited_surface_features.py` became
+  `surface_features.py`. These change `fe_signature` (now `72cca8f88f9f9ff6`)
+  but no feature value; the store needed a rebuild already.
 
 ## Collection cleanup
 
@@ -25,8 +51,8 @@ unversioned "direct-input" frames. A frame without a dataset ID uses the last co
 or stops; a store without a recorded dataset rebuilds. On the frozen qualified dataset the
 production outputs (processed frame, 1,233-column store, carried state, prices by ID and by
 name, CLV) were identical before and after. Tests now run against an explicit fixture dataset
-(`tests/conftest.py`). This moves `fe_signature()` to `5f1b9689bce1820e`; the rebuild and refit
-already owed above cover it. The installed store records no dataset, so live prediction refuses
+(`tests/conftest.py`). Merged with the layout cleanup above, `fe_signature()` is now
+`976b75cd74f90909`; the rebuild and refit already owed above cover it. The installed store records no dataset, so live prediction refuses
 it until that rebuild. See [the qualification](docs/operations/SOURCE_PUBLICATION_2026-11-07.md#fallback-paths-removed).
 
 **Temporary-code cleanup, 6 November:** completed diagnosis, migration, restart
@@ -63,10 +89,22 @@ live-feature tests run against `append_current_store`. This moves `fe_signature(
 scraping continues, so `project_status.py` reports it stale and the next training run will
 rebuild it (about 14 minutes). Do that rebuild and the refit together.
 
-**ATR rebuild:** quote progress as two groups. Races with a known ATR ID (2023-08-10 to
-2026-06-20) run at 258 an hour. Races with no ID cannot run, because ATR answers its results
-pages with a client challenge; that covers everything before 2023-08-10 and from 2026-06-21, so
-the July to October 2026 gap will not close by itself. This is an access decision, not a code fix.
+**ATR speed and IDs, 7 November:** the worker now loads saved daily indices, persists all
+exact IDs from each discovered day immediately, uses indexed queue selection, groups exports,
+and recovers unexported fields after shutdown. Eleven duplicated IDs affected races an hour
+apart; the reviewed plan clears 13 conflicting hints while preserving every saved runner.
+Browser-read source receipts add 63 previously missing IDs across 15 September 2020 and
+4 November 2026. The normal browser works, but direct HTTP and isolated automated browsers
+remain challenged; no unattended browser dependency was deployed. Known-ID collection can
+continue while discovery respects its cooldown. Remaining missing dates are not yet recovered.
+Read [the current ID and speed report](docs/operations/ATR_SPEED_AND_IDS_2026-11-07.md) and
+`data/audit/atr_speed_ids_20261107/adoption.json`. Use live status and qualification receipts
+for progress and throughput. All five performance tabs and parsing rules remain unchanged.
+The reviewed adoption preserved all 43,857 saved rows exactly, removed every duplicate ID,
+and left 34,197 missing IDs. The ten-race live check added 117 runners in 121.63 seconds
+(about 296 races/hour), with no failures, reaching 43,974 rows before continuous restart.
+This is a short sample, not a full-backfill ETA. Runtime launch details are saved in the
+same audit directory and in `data/atr_cache/rebuild_v2/launch_options.json`.
 
 The synthetic race generator, sample collection API and unused collector shim
 are removed. Processing no longer writes an unused global Parquet by default.
@@ -89,7 +127,8 @@ do not edit its seven collector/matcher/storage dependencies while it runs. All
 4,988 stopped markets published (17,157 total); older PLACE parses gained IDs.
 A transient Windows progress-file lock also stopped consolidation; atomic writes
 now retry that lock before failing safely, and consolidation resumes its checkpoint.
-ATR's separate four pins remain unchanged.
+ATR's separate pins are maintained by the reviewed ATR deployments; the 7 November ID
+module brings that set to five. Betfair's seven collector pins are unaffected.
 
 **Import speed, 6 November:** both WIN and PLACE are retained. Grouped durable
 checkpoints, bounded parallel work and lightweight progress counters replace
@@ -103,7 +142,7 @@ the full backfill, including network gaps and archive work. Archive scans and pu
 batch overheads; do not use the writer benchmark as the total backfill ETA.
 See [measurements and verification](docs/operations/BETFAIR_IMPORT_SPEED_2026-11-06.md)
 and `data/audit/betfair_performance_20261106/`. Temporary test queues were removed;
-the reusable profiler is `scripts/benchmark_betfair_ingestion.py`. ATR pins match.
+the profiler `scripts/benchmark_betfair_ingestion.py` was retired on 7 November (commit `26d1b6f`). ATR pins match.
 
 **Consolidated main path, 6 November:** the default source plan now uses `betfair`
 for full Historical BASIC WIN/PLACE data. Public BSP fetching and both separate
@@ -127,8 +166,9 @@ truncated sources, corrupt nonzero headers and legitimate interleaved zero paddi
 The Historical Data API downloader is implemented in `src/ingestion/betfair_history.py`.
 It retains full BASIC WIN/PLACE files, resumes its SQLite queue and merges missing
 observations into the existing price caches. Normal source refreshes opt in once
-an account is connected. **Data → Historical exchange data** supplies certificate
-download, account connection and catch-up controls. Login settings use Windows
+an account is connected. The Data-page setup controls were removed with the
+Streamlit apps on 2026-11-07; the setup guide now gives the Python and CLI
+routes for connection and catch-up. Login settings use Windows
 account encryption; certificate login does not require a paid Live App Key.
 
 **Connected and verified, 6 November:** the user uploaded the public certificate

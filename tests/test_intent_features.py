@@ -1,5 +1,6 @@
-"""Tests for the intent-signal additions: wind surgery (scrape + FE),
-trainer travel distance, and jockey-booking strength."""
+"""Tests for the intent-signal additions: wind surgery (scrape + FE) and
+jockey-booking strength. Trainer travel distance (src/trainer_locations.py) was
+refuted and removed with the research code on 2026-11-07."""
 
 import numpy as np
 import pandas as pd
@@ -9,12 +10,6 @@ from src.ingestion.sporting_life import SportingLifeScraper
 from src.feature_engineer import (
     add_medical_features,
     add_trainer_runner_intent_features,
-)
-from src.trainer_locations import (
-    _surname_initial_key,
-    haversine_km,
-    normalise_trainer_name,
-    resolve_trainer_latlon,
 )
 
 
@@ -112,52 +107,6 @@ class TestWindSurgeryFeatures:
         df = _ws_history_df().drop(columns=["sex"])
         out = add_medical_features(df)
         assert "wind_surgery_run" in out.columns
-
-
-# ---------------------------------------------------------------------------
-# Trainer locations: normalisation, matching, geometry
-# ---------------------------------------------------------------------------
-
-class TestTrainerNameMatching:
-    def test_normalise_strips_titles_and_dots(self):
-        assert normalise_trainer_name("Dr R. Newland") == "r newland"
-        assert normalise_trainer_name("Mrs J.  Smith") == "j smith"
-
-    def test_surname_initial_key(self):
-        assert _surname_initial_key("n w alexander") == ("alexander", "n")
-        assert _surname_initial_key("nick walter alexander") == ("alexander", "n")
-        # joint licences use the first partner
-        assert _surname_initial_key("r newland & j insole") == ("newland", "r")
-        assert _surname_initial_key("smith") is None
-
-    def test_resolve_exact_initial_and_ambiguous(self, tmp_path):
-        csv = tmp_path / "trainers.csv"
-        pd.DataFrame([
-            dict(bha_id=1, bha_style="N. W. Alexander",
-                 bha_fullname="Nick Walter Alexander",
-                 licence_type="Combined", county="Fife", lat=56.25, lon=-3.15),
-            # two J Smiths in different counties -> surname+initial ambiguous
-            dict(bha_id=2, bha_style="J. Smith", bha_fullname="John Smith",
-                 licence_type="Flat", county="Kent", lat=51.20, lon=0.70),
-            dict(bha_id=3, bha_style="J. Smith", bha_fullname="James Smith",
-                 licence_type="Flat", county="Fife", lat=56.25, lon=-3.15),
-        ]).to_csv(csv, index=False)
-
-        res = resolve_trainer_latlon(
-            ["Nick Alexander", "N W Alexander", "Jake Smith", "Nobody Here"],
-            path=csv,
-        )
-        # initial-form and full-form both hit the same yard
-        assert res["N W Alexander"] == (56.25, -3.15)
-        assert res["Nick Alexander"] == (56.25, -3.15)
-        # ambiguous surname+initial must NOT resolve
-        assert "Jake Smith" not in res
-        assert "Nobody Here" not in res
-
-    def test_haversine_sanity(self):
-        # London -> Edinburgh is ~535 km
-        d = haversine_km(51.5074, -0.1278, 55.9533, -3.1883)
-        assert 500 < float(d) < 570
 
 
 # ---------------------------------------------------------------------------

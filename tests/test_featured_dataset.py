@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 import config
-import scripts.build_feature_store_batched as batched
+import src.store_build as batched
 from src import store_refresh
 from src.feature_store import STORE_SCHEMA_VERSION
 from src.featured_dataset import data_signature, fe_signature
@@ -115,7 +115,7 @@ def patch_store(monkeypatch):
         fake = _FakeStore(exists=exists, meta=meta, last_date=last_date,
                           carried_state=carried_state)
         monkeypatch.setattr(store_refresh, "FeatureStore", lambda: fake)
-        monkeypatch.setattr(batched, "_build",
+        monkeypatch.setattr(batched, "build_store",
                             lambda store, chunk_rows, *, processed: fake.calls.append("build"))
         return fake
 

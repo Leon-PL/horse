@@ -160,7 +160,8 @@ separate necessary fits. The original031/032 proposals remain unselected.
 
 The three inputs now run in ordinary feature engineering and are selected by
 `feature_sets/win.txt`; future normal training needs no research switch.
-The helper retains its original `src/prior_market_research.py` filename, but
+The helper retains its original `src/prior_market_research.py` filename (renamed
+`src/prior_market_features.py` on 2026-11-07), but
 is now an actual dependency of the normal pipeline and its fingerprint.
 Eight helper checks and eight integration/signature checks pass. The latter
 include live-state seeding and genuinely missing card measurements.

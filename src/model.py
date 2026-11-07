@@ -33,8 +33,8 @@ from sklearn.metrics import (
     log_loss,
 )
 # LightGBM is imported lazily: importing it can take 10-30 seconds on
-# Windows (DLL scanning), and the Streamlit app imports this module at
-# startup. Training/prediction entry points call _ensure_lightgbm() first.
+# Windows (DLL scanning), and many scripts import this module only for its
+# helpers. Training/prediction entry points call _ensure_lightgbm() first.
 LGBMRegressor = None
 LGBMClassifier = None
 
@@ -94,11 +94,12 @@ class _IdentityScaler:
         return np.asarray(X, dtype=np.float32)
 
     def __reduce__(self):
-        # Streamlit re-execs app.py via exec(), which creates shadow copies
-        # of every imported name.  Pickle validates that the function object
-        # stored in __reduce__ is identical (by id) to the one reachable via
-        # its __qualname__ in its __module__.  Under Streamlit the ids
-        # diverge → PicklingError.
+        # The former Streamlit UI re-exec'd its script via exec(), which
+        # created shadow copies of every imported name.  Pickle validates that
+        # the function object stored in __reduce__ is identical (by id) to the
+        # one reachable via its __qualname__ in its __module__; under module
+        # reloads the ids diverge → PicklingError.  Saved models reference
+        # _rebuild_identity_scaler, so keep this even without the UI.
         #
         # Fix: force-resolve the canonical function from the *real* module
         # at reduce-time so pickle's identity check always passes.

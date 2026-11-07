@@ -11,7 +11,7 @@ from math import inf, isfinite, nan
 import numpy as np
 import pandas as pd
 
-from src.audited_surface_features import synthetic_surface
+from src.surface_features import synthetic_surface
 from src.feature_semantics import observed_rating
 from src.result_status import NONSTARTER_LABELS, result_labels
 from src.utils import normalise_horse_key

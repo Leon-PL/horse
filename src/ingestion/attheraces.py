@@ -109,7 +109,7 @@ _BROWSER_HEADERS = {
 # Minimum gap between requests (seconds).  ATR's Fastly edge rate-limits
 # aggressively: sustained fast crawling earns 429s and JS challenges, so be
 # deliberately gentle.  Tunable via the CLI / the ``request_delay`` arg.
-# Usually one results-index request per day plus three fragments per race.
+# Usually one results-index request per day plus five fragments per race.
 _REQUEST_DELAY = 1.5
 _PUBLICATION_DELAY_HOURS = 48
 
@@ -287,6 +287,9 @@ class _Fetcher:
         self.raw_store_path = Path(ATR_CACHE_DIR)/"raw.sqlite"
         self._raw_store = None
         self.last_response = {}
+        self.request_count = 0
+        self.request_seconds = 0.0
+        self.throttle_seconds = 0.0
 
         if _curl_cffi_requests is not None:
             self.mode = "curl_cffi"
@@ -307,6 +310,7 @@ class _Fetcher:
         gap = self._delay + random.uniform(0, self._delay * 0.4)
         elapsed = time.time() - self._last_request
         if elapsed < gap:
+            self.throttle_seconds += gap - elapsed
             time.sleep(gap - elapsed)
         self._last_request = time.time()
 
@@ -317,6 +321,8 @@ class _Fetcher:
         treat it as a transient block, never as genuine absence of data.
         """
         self._throttle()
+        self.request_count += 1
+        started = time.monotonic()
         self.last_response = {"url": url, "reason": "transport_error"}
         response_headers = {}
         headers = _ajax_headers(referer) if referer else {}
@@ -332,8 +338,11 @@ class _Fetcher:
                 status, text = r.status_code, r.text
                 response_headers = getattr(r, 'headers', {})
         except Exception as exc:  # pragma: no cover - network drift
+            self.request_seconds += time.monotonic() - started
             logger.warning("ATR request failed (%s): %s", self.mode, exc)
             return None
+
+        self.request_seconds += time.monotonic() - started
 
         # Retain the exact decoded input to the parsers, including real status
         # codes. This permits diagnosis/reparse without repeating HTTP requests.
@@ -341,7 +350,8 @@ class _Fetcher:
             from src.ingestion.storage import RawPayloadStore
             self._raw_store = RawPayloadStore(self.raw_store_path)
         digest = self._raw_store.put(url, status, text.encode("utf-8"))
-        self.last_response = {"url": url, "status": status, "sha256": digest}
+        self.last_response = {"url": url, "status": status, "sha256": digest,
+                              "provider":self.mode}
         retry_after = _retry_after_seconds(response_headers.get('Retry-After'))
         if retry_after is not None:
             self.last_response['retry_after_seconds'] = retry_after
@@ -388,7 +398,7 @@ class _Fetcher:
 
 def _extract_raceid(html_text: str) -> str | None:
     """Read the active sectional-tab ID, with legacy racecard fallbacks."""
-    ids = set(re.findall(r"/ajax/sectionals-razor/(\d+)/(?:times|tools|stride)\b", html_text))
+    ids = set(re.findall(r"/ajax/sectionals-razor/(\d+)/(?:times|tools|stride|jumpsdata|distanceran)\b", html_text))
     if ids:
         return ids.pop() if len(ids) == 1 else None
     m = re.search(r"RaceID:\s*(\d+)", html_text)
@@ -430,9 +440,14 @@ def _results_index(fetcher: "_Fetcher", atr_date: str) -> tuple[str, dict[str, s
     if not hasattr(fetcher, "_results_indexes"):
         fetcher._results_indexes = {}
     indexes = fetcher._results_indexes
+    def resolved(value, receipt=None):
+        callback = getattr(fetcher, 'on_index', None)
+        if callback is not None:
+            callback(atr_date, value, receipt or {})
+        return DATA, value
     if atr_date in indexes:
         value = indexes[atr_date]
-        return (DATA, value) if value is not None else (NOT_FOUND, {})
+        return resolved(value) if value is not None else (NOT_FOUND, {})
     index_dir = getattr(fetcher, "index_dir", None)
     index_path = Path(index_dir)/f"{atr_date}.json" if index_dir is not None else None
     if index_path is not None and index_path.exists():
@@ -446,7 +461,7 @@ def _results_index(fetcher: "_Fetcher", atr_date: str) -> tuple[str, dict[str, s
             ):
                 raise ValueError("Invalid saved ATR results index")
             indexes[atr_date] = value
-            return DATA, value
+            return resolved(value, receipt)
         except (KeyError, ValueError, TypeError) as exc:
             logger.warning("Ignoring invalid ATR index %s: %s", index_path, exc)
     response = fetcher.get(f"{ATR_BASE}/results/{atr_date}")
@@ -461,19 +476,23 @@ def _results_index(fetcher: "_Fetcher", atr_date: str) -> tuple[str, dict[str, s
     try:
         value = _parse_results_index(text)
     except ValueError as exc:
+        fetcher.last_response = {**getattr(fetcher,'last_response',{}),'reason':'unrecognised_index'}
         logger.warning("ATR index rejected: %s", exc)
         return BLOCKED, {}
     value = {path: raceid for path, raceid in value.items()
              if re.fullmatch(rf"/racecard/[^/]+/{re.escape(atr_date)}/\d{{4}}", path)}
     if not value:
+        fetcher.last_response = {**getattr(fetcher,'last_response',{}),'reason':'unrecognised_index'}
         # An unrecognised page is not evidence that its races lack sectionals.
         return BLOCKED, {}
     indexes[atr_date] = value
+    receipt = {"source_url": f"{ATR_BASE}/results/{atr_date}",
+               "retrieved_at": datetime.now(timezone.utc).isoformat(),
+               "source_sha256":getattr(fetcher,'last_response',{}).get('sha256'), "race_ids": value}
     if index_path is not None:
         from src.ingestion.storage import atomic_json
-        atomic_json(index_path, {"source_url": f"{ATR_BASE}/results/{atr_date}",
-                                 "retrieved_at": datetime.now().isoformat(), "race_ids": value})
-    return DATA, value
+        atomic_json(index_path, receipt)
+    return resolved(value, receipt)
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +827,10 @@ def _fetch_one(
         if not raceid:
             # HTML drift must not permanently suppress a real race.
             return BLOCKED, None
+        callback = getattr(fetcher,'on_index',None)
+        if callback is not None:
+            callback(atr_date,{page_path:raceid},{'source_url':ATR_BASE+page_path,
+                     'source_sha256':getattr(fetcher,'last_response',{}).get('sha256')})
 
     return _fetch_fragments(fetcher, raceid, page_path)
 

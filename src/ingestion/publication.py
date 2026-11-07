@@ -227,6 +227,7 @@ def capture_sources(*, include_prices=False, canonical_cards=None):
     weather = canonical[["race_id", "race_date", *weather_columns]].drop_duplicates("race_id")
     sources["weather"] = _publish("weather", {"races": weather},
         {"races": TableContract("race", ("race_id", "race_date"), ("race_id",), role="research")}, canonical)
+    sources["bha"] = _adopt("bha", lambda: publish_bha(canonical))
     sources["atr"] = _adopt("atr", lambda: publish_atr(canonical), canonical=canonical)
     from src.ingestion.rtv_storage import FEATURE_TABLES, native_path, pin_generation
     with pin_generation():
@@ -273,6 +274,23 @@ def capture_sources(*, include_prices=False, canonical_cards=None):
             return _publish("betfair", tables, contracts, canonical, eligible=len(canonical))
         sources["betfair"] = _adopt("betfair", publish_prices, canonical=canonical)
     return {name: receipt for name, receipt in sources.items() if receipt is not None}
+
+
+def publish_bha(canonical):
+    """BHA fixture reports and race notes retain their native grain and timing."""
+    from src.ingestion.bha_stewards import read_tables, default_root
+    if not (default_root() / "reports.sqlite").exists():
+        raise FileNotFoundError("BHA reports have not been collected yet")
+    tables = read_tables()
+    contracts = {}
+    for name in tables:
+        keys = ("report_key", "race_number") if name == "race_notes" else ("report_key",)
+        contracts[name] = TableContract("fixture report" if name != "race_notes" else "native race note",
+            ("report_key", "race_date", "observed_at", "available_at", "source_url", *keys[1:]),
+            keys, role="research", types=(("observed_at", "timestamp"), ("available_at", "timestamp")))
+    return _publish("bha", tables, contracts, canonical,
+                    provenance={"identity": "BHA year/fixture; race numbers and local times remain source-native",
+                                "availability": "recorded observation; printed PDF footer is not first publication"})
 
 
 def source_health(attempt, receipt=None):

@@ -2,12 +2,13 @@
 
 Reviewed and organized on 5 November 2026; collection consolidated on 6 November.
 The application is one four-stage
-pipeline with a separate research toolkit. Stage one has a dedicated package;
+pipeline. Research lives in `research/`, which pipeline code never imports
+(since 7 November). Stage one has a dedicated package;
 the other stages retain stable module names used by saved models and experiments.
 
 ```text
 horse/
-  picks_app.py, training_app.py, train.py    user entry points
+  train.py                                training entry point (no UI)
   config.py                               shared settings and paths
   src/
     ingestion/                            collection and source publication
@@ -27,7 +28,6 @@ horse/
       betfair_streams.py                  BASIC market-stream parsers
       betfair_history.py                  full historical market downloads and import
       betfair_credentials.py              Windows-encrypted account connection
-      betfair_history_ui.py               Data-page connection and catch-up controls
       fx.py                               ECB reference rates
       weather.py, bha_stewards.py         explicit research collectors
       storage.py                          locks, raw payloads, atomic writes
@@ -38,8 +38,9 @@ horse/
     feature_*.py, fe_*.py, ratings.py       feature definitions and store
     training.py, model.py, run_store.py    fitting and saved-run registry
     live_prediction.py                    current-card prediction inputs
-  scripts/                                maintenance and research commands
-  tests/                                  fixtures and regression checks
+  scripts/                                operating commands only
+  research/                               experiments; may import src, never imported by it
+  tests/                                  pipeline fixtures and regression checks
   feature_sets/                           versioned model input selections
   reference/                              versioned corrections and lookup rules
   docs/
@@ -65,9 +66,9 @@ interfaces. See [the current data flow](../../Racing%20Data%20Flow.md) and
 | 1. Collect and aggregate | `ingestion.pipeline.refresh_sources` | Canonical SL records plus independently retained RTV, ATR, BSP and FX observations. No sample-data mode. |
 | Hand-off | `database.publish_results_snapshot` | `data/raw/race_results.parquet`, every column at the type declared in `RESULTS_SNAPSHOT_COLUMNS`, with a receipt naming the database revision. |
 | Prepare for features | `data_processor.process_data` | Reads that snapshot, or `load_database_history` for a check of the live database, joins pedigree, cleans and encodes. Clean runner frame in memory; nothing is written. |
-| 2. Build features | `store_refresh` / `FeatureStore` / `featured_dataset` | Historical features and incremental state. `store_refresh` appends new dates or calls the batched builder; `featured_dataset` fingerprints the code and accepted source content. |
+| 2. Build features | `store_refresh` / `FeatureStore` / `featured_dataset` | Historical features and incremental state. `store_refresh` appends new dates or calls the batched builder (`store_build`); `featured_dataset` fingerprints the code and accepted source content. |
 | 3. Train and evaluate | `training`, `model`, evaluation modules, `run_store` | Candidate models and measured results; explicit selected-run pointer. |
-| 4. Predict | `live_prediction`, `picks_app` | Today's cards joined to compatible historical state. |
+| 4. Predict | `live_prediction` | Today's cards joined to compatible historical state. |
 
 Collection can run without building features or fitting a model. The coordinator
 collects canonical results before identity joins, then runs independent providers
@@ -86,8 +87,8 @@ canonical runners, and `published_atr_rolling` in `src/atr_features.py` reads th
 selected dataset's version, so editing feature code does not stop the worker. The
 worker's queue and raw response store are separate from the accepted cache.
 
-`src/trainer_locations.py`, `scripts/fetch_bha_going.py` and
-`scripts/fetch_forecast_previous_runs.py` are one-off research collectors outside the
+The one-off research collectors (`src/trainer_locations.py`, `scripts/fetch_bha_going.py`,
+`scripts/fetch_forecast_previous_runs.py`) were retired on 2026-11-07; they were outside the
 normal plan.
 
 ## Compatibility

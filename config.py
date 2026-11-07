@@ -48,17 +48,10 @@ LIVE_FE_HISTORY_MONTHS = 30
 LIVE_FEATURE_CACHE_VERSION = 2
 
 # Date-stamped cache entries (live feature cache, lookahead cache,
-# racecards cache) older than this are deleted on app start-up.
+# racecards cache) older than this are deleted by
+# src.utils.cleanup_stale_caches, which scripts/build_lookahead.py runs before
+# each build (--no-cleanup skips it). The removed picks app ran it on start-up.
 CACHE_TTL_DAYS = 30
-
-# --- Matchbook API Settings ---
-MATCHBOOK_EDGE_URL = os.getenv("MATCHBOOK_EDGE_URL", "https://api.matchbook.com/edge/rest")
-MATCHBOOK_BPAPI_URL = os.getenv("MATCHBOOK_BPAPI_URL", "https://api.matchbook.com/bpapi/rest")
-MATCHBOOK_TIMEOUT_SECS = float(os.getenv("MATCHBOOK_TIMEOUT_SECS", "15"))
-MATCHBOOK_HORSE_RACING_SPORT_ID = int(os.getenv("MATCHBOOK_HORSE_RACING_SPORT_ID", "24735152712200"))
-MATCHBOOK_DEFAULT_CURRENCY = os.getenv("MATCHBOOK_DEFAULT_CURRENCY", "GBP")
-MATCHBOOK_USERNAME = os.getenv("MATCHBOOK_USERNAME", "")
-MATCHBOOK_PASSWORD = os.getenv("MATCHBOOK_PASSWORD", "")
 
 # Test set size
 TEST_SIZE = 0.2

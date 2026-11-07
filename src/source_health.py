@@ -11,6 +11,7 @@ POLICIES = {
     "atr": {"required_for": (), "publication_lag_days": 2},
     "rtv": {"required_for": (), "publication_lag_days": 2},
     "betfair": {"required_for": (), "publication_lag_days": 6},
+    "bha": {"required_for": (), "publication_lag_days": 1},
 }
 
 

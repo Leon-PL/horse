@@ -1,19 +1,8 @@
-from dataclasses import asdict
 import numpy as np
 import pandas as pd
 import pytest
 
 from src.probability_calibration import PlaceProbabilityRefinement, fit_recent_place_refinement
-from src.recent_probability import RecentPlaceMap
-
-
-def test_canonical_prediction_exactly_replays_the_qualified_prototype():
-    raw = np.tile([.1,.2,.7,.4,.5,.3,.05],3)
-    win = np.tile([.02,.05,.5,.15,.15,.1,.03],3)
-    prototype = RecentPlaceMap(1.039010931244931,.023650450438974926,.00035894774324743726,{("Chase",2):.01})
-    canonical = PlaceProbabilityRefinement(**asdict(prototype))
-    np.testing.assert_array_equal(canonical.predict(raw,win,[7]*3,[2]*3,["Chase"]*3),
-                                  prototype.predict(raw,win,[7]*3,[2]*3,["Chase"]*3))
 
 
 def test_recent_calibration_cannot_fit_a_current_or_future_calibration_label(monkeypatch):

@@ -39,7 +39,7 @@ Their publication and consumer-selection rules are shared.
 | Validate and publish | src/ingestion/publication.py, src/source_contracts.py | Typed observations, identity links, timing and quality receipts |
 | Select immutable inputs | src/source_dataset.py | Content-addressed dataset manifest under data/sources/datasets/ |
 | Process | src/data_processor.py | Results, pedigree and FX from that selected manifest |
-| Build and append | src/store_refresh.py, scripts/build_feature_store_batched.py | Features and carried state using the same selected versions |
+| Build and append | src/store_refresh.py, src/store_build.py | Features and carried state using the same selected versions |
 | Commit | src/feature_store.py | Five store files committed together; metadata includes the manifest |
 | Fit and evaluate | src/training.py, src/source_prices.py, src/clv.py | Candidate run with exact feature-source and Betfair versions |
 | Predict | src/live_prediction.py | Selected inputs for the whole card calculation; decision-time snapshot checks |
@@ -65,6 +65,13 @@ reference implementation for tests; the production full-build route is batched.
 | Racing TV | rtv/runs, cards, pre, text, scores | Canonical links for materialised history; persisted links for captured snapshots; existing run-availability and pre-decision cutoffs |
 | FX | fx/units, rates | Frozen reference files; EUR conversion uses a rate strictly before race date |
 | Betfair | betfair/bsp, bsp_early, timing, place_bsp | Namespaced market/selection IDs and persisted canonical links; evaluation/teacher prices, never live predictors |
+
+BHA stewards' reports are a retained source outside this accepted-source table.
+The standalone collector is not called by normal refreshes, and its archive ends
+on 20 June 2026 despite the live feed working on 7 November. It has no current
+accepted-source adapter or feature consumer. This is an explicit integration gap;
+the earlier trouble-feature experiment does not cover every report section.
+See [the BHA source audit](docs/operations/BHA_STEWARDS_SOURCE_AUDIT_2026-11-07.md).
 
 Weather is also present in the results snapshot because the legacy canonical
 schema stores those measurements on runner rows. Its separate publication makes

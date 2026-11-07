@@ -297,18 +297,6 @@ def test_rate_limit_wait_is_shared_and_honours_retry_after(monkeypatch):
     assert timestamps[1] - timestamps[0] >= 17
 
 
-def test_connection_controls_render_without_an_account(environment):
-    from streamlit.testing.v1 import AppTest
-    cert, key = credentials.certificate_paths()
-    cert.parent.mkdir(parents=True)
-    cert.write_text("test public certificate")
-    key.write_text("test private key")
-    app = AppTest.from_string("from src.ingestion.betfair_history_ui import render_history_controls\nrender_history_controls()")
-    app.run(timeout=20)
-    assert not app.exception
-    assert [field.label for field in app.text_input] == ["Betfair username", "Betfair password"]
-
-
 @pytest.fixture
 def login_files(environment):
     cert, key = credentials.certificate_paths()
@@ -434,26 +422,6 @@ def test_failed_diagnostic_write_does_not_change_a_successful_setup(login_files,
         raise OSError("read-only diagnostic destination")
     monkeypatch.setattr(history, "atomic_json", no_diagnostic)
     assert history.connect_account("login", "password", *login_files)["state"] == "connected"
-
-
-@pytest.mark.parametrize("diagnostic_write_fails", [False, True])
-def test_connection_form_displays_the_failed_access_step(login_files, monkeypatch, diagnostic_write_fails):
-    from streamlit.testing.v1 import AppTest
-    monkeypatch.delenv("BETFAIR_HISTORY_ENABLED", raising=False)
-    monkeypatch.setattr(history.HistoryClient, "certificate_login", lambda *a, **kw: FakeClient(packages=[]))
-    if diagnostic_write_fails:
-        def no_diagnostic(*args):
-            raise OSError("read-only diagnostic destination")
-        monkeypatch.setattr(history, "atomic_json", no_diagnostic)
-    app = AppTest.from_string("from src.ingestion.betfair_history_ui import render_history_controls\nrender_history_controls()")
-    app.run(timeout=20)
-    app.text_input[0].input("private-login")
-    app.text_input[1].input("private-password")
-    next(button for button in app.button if button.label == "Connect for automatic downloads").click().run(timeout=20)
-    assert not app.exception
-    assert any("Historical data access failed" in error.value and "sign-in succeeded" in error.value
-               for error in app.error)
-    assert all("private-" not in error.value for error in app.error)
 
 
 def test_main_refresh_uses_full_history_and_reports_the_publication_gap(monkeypatch):

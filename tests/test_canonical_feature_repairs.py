@@ -41,7 +41,7 @@ def test_ordinary_training_rebuild_receives_corrections_without_research_flags(m
     from contextlib import nullcontext
     from src import store_refresh
     from src.data_processor import process_data
-    from scripts import build_feature_store_batched as builder
+    from src import store_build as builder
     from tests.test_live_parity import _synthetic_raw
     raw = _synthetic_raw(n_days=1, races_per_day=1, field=4)
     raw = raw.assign(race_id=622145, race_date="2021-04-28", track="Punchestown", race_type="Flat",
@@ -59,7 +59,7 @@ def test_ordinary_training_rebuild_receives_corrections_without_research_flags(m
     def build(store, chunk, **kwargs):
         captured.append(kwargs["processed"])
         assert chunk == 60000
-    monkeypatch.setattr(builder, "_build", build)
+    monkeypatch.setattr(builder, "build_store", build)
     result = store_refresh.get_training_dataset(rebuild=explicit_rebuild)
     assert result.signal.tolist() == [1.] and len(captured) == 1
     assert captured[0].race_type.eq("Chase").all()

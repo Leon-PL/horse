@@ -1,7 +1,4 @@
 """Regression coverage for production identity and pre-race feature reuse."""
-import ast
-from functools import lru_cache
-from pathlib import Path
 from types import SimpleNamespace
 import json
 
@@ -53,26 +50,6 @@ def test_model_revision_changes_on_promotion_and_replacement(registry_dirs):
     assert first != second
     (registry_dirs / second[0] / "model.joblib").write_bytes(b"replacement model")
     assert registry.production_model_revision() != second
-
-
-def test_serving_cache_loads_exact_promoted_revision(registry_dirs, monkeypatch):
-    # Execute the actual cached loader without running the network/UI page body.
-    source = Path(__file__).resolve().parents[1] / "picks_app.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    loader = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_cached_load_model")
-    st = SimpleNamespace(cache_resource=lambda **kw: lru_cache(maxsize=kw["max_entries"]))
-    calls = []
-    monkeypatch.setattr(registry, "load_run_predictor", lambda rid: calls.append(rid) or object())
-    namespace = {"st": st}
-    exec(compile(ast.Module(body=[loader], type_ignores=[]), str(source), "exec"), namespace)
-    load = namespace["_cached_load_model"]
-    assert load(None) is None
-    registry.promote("20260101_120000", allow_feature_mismatch=True)
-    first = load(registry.production_model_revision())
-    assert load(registry.production_model_revision()) is first
-    registry.promote("20260201_120000", allow_feature_mismatch=True)
-    assert load(registry.production_model_revision()) is not first
-    assert calls == ["20260101_120000", "20260201_120000"]
 
 
 @pytest.fixture
@@ -155,30 +132,6 @@ def test_lookahead_includes_today(cache_dir, monkeypatch):
     assert built == [today.isoformat(), (today + live.timedelta(days=1)).isoformat()]
     assert len(result) == 2
     assert progress[-1][:2] == (2, 2)
-
-
-def test_promotion_clears_existing_session_predictions():
-    source = Path(__file__).resolve().parents[1] / "picks_app.py"
-    tree = ast.parse(source.read_text(encoding="utf-8"))
-    sync = next(n for n in tree.body if isinstance(n, ast.If)
-                and isinstance(n.test, ast.Compare)
-                and any(isinstance(c, ast.Name) and c.id == "_production_revision" for c in n.test.comparators))
-
-    class State(dict):
-        __getattr__ = dict.__getitem__
-        __setattr__ = dict.__setitem__
-
-    state = State(_production_revision=("old", 1, 1), predictor=object(),
-                  active_run_id="old", picks_preds=object(), picks_meta=object(),
-                  picks_explanations={"old": "explanation"}, _prediction_result_cache={"old": object()})
-    namespace = {"st": SimpleNamespace(session_state=state),
-                 "_production_revision": ("new", 2, 2)}
-    exec(compile(ast.Module(body=[sync], type_ignores=[]), str(source), "exec"), namespace)
-    assert state.predictor is None
-    assert state.active_run_id == "new"
-    assert "picks_preds" not in state
-    assert "picks_explanations" not in state
-    assert "_prediction_result_cache" not in state
 
 
 def test_cache_rejects_parquet_from_another_writer(cache_dir):

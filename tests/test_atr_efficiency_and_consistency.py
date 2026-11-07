@@ -1,10 +1,8 @@
-"""Efficiency direction, retained poor runs, grade semantics and repeatability."""
+"""ATR efficiency direction, retained poor runs and unknown placeholders."""
 import numpy as np
-import pandas as pd
 import pytest
 
 from src import atr_features as af
-from src.research.atr_rich_features import derive_run_metrics, build_prior_features, CONSISTENCY
 from test_atr_features import _make_history
 
 
@@ -41,55 +39,6 @@ def record(day, score, *, grade="C", horse="101", race=None, **kwargs):
             "atr_efficiency_score": score, "atr_efficiency_grade": grade,
             "atr_finishing_speed_pct": 100+day, "atr_race_finishing_speed_pct": 100,
             **kwargs}
-
-
-def test_grade_order_and_log_error_preserve_bad_runs():
-    frame = pd.DataFrame([record(i+1, score, grade=grade) for i, (grade, score) in enumerate([
-        ("A++", .03), ("A+", 1.5), ("A", 5), ("B", 12), ("C", 22), ("D", 42), ("E", 73), ("F", 147), ("?", None)])])
-    result = derive_run_metrics(frame)
-    assert result.atr_rich_efficiency_grade_rank.iloc[:8].tolist() == list(range(8))
-    assert np.isnan(result.atr_rich_efficiency_grade_rank.iloc[-1])
-    assert result.atr_rich_efficiency_log_error.iloc[7] == pytest.approx(np.log1p(147))
-
-
-def test_profile_gaps_pair_the_same_positions_including_missing_cells():
-    frame = pd.DataFrame([record(1, 42, atr_energy_dist=[100, None, 110, 80],
-        atr_optimum_energy=[100, 120, 100, 100])])
-    result = derive_run_metrics(frame).iloc[0]
-    assert result.atr_rich_profile_worst_gap_pp == 20
-    assert result.atr_rich_profile_irregularity_pp == 10  # residuals 0, +10, -20
-
-
-def test_smooth_cadence_change_is_not_mistaken_for_irregularity():
-    base = record(1, 10, atr_stride_markers=["3f", "2f", "1f", "Fin."],
-        atr_stride_frequency_markers=["3f", "2f", "1f", "Fin."],
-        atr_stride_length=[24, 24, 24, 24], atr_stride_frequency=[2, 2.1, 2.2, 2.3])
-    frame = pd.DataFrame([base, {**base, "atr_stride_frequency": [2, 2.5, 1.8, 2.3]}])
-    result = derive_run_metrics(frame)
-    assert result.atr_rich_cadence_jitter_pct.iloc[0] == pytest.approx(0, abs=1e-12)
-    assert result.atr_rich_cadence_jitter_pct.iloc[1] > 5
-
-
-def test_consistency_needs_three_past_observations_and_excludes_current_values():
-    frame = pd.DataFrame([record(1, np.expm1(1)), record(5, np.expm1(2)),
-                          record(9, np.expm1(4)), record(13, 900), record(17, None)])
-    result = build_prior_features(frame)
-    name = "atr_rich_efficiency_mad_5"
-    assert result[name].iloc[:3].isna().all()
-    assert result[name].iloc[3] == pytest.approx(1)  # MAD of [1,2,4]
-    changed = frame.copy()
-    changed.loc[3, "atr_efficiency_score"] = .001
-    assert build_prior_features(changed)[name].iloc[3] == result[name].iloc[3]
-    assert set(CONSISTENCY).issubset(result.columns)
-
-
-def test_independent_cadence_curve_does_not_need_a_stride_length_curve():
-    frame = pd.DataFrame([record(1, 20, atr_stride_frequency=[2, 2.1, 2.2, 2.3],
-                                 atr_stride_frequency_markers=["3f", "2f", "1f", "Fin."])])
-    result = derive_run_metrics(frame).iloc[0]
-    assert np.isfinite(result.atr_rich_late_cadence_change_pct)
-    assert result.atr_rich_cadence_jitter_pct == pytest.approx(0, abs=1e-12)
-    assert np.isnan(result.atr_rich_late_stride_length_change_pct)
 
 
 def test_collection_guard_ignores_feature_edits_but_still_detects_source_edits(tmp_path, monkeypatch):

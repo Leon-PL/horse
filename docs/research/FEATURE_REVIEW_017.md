@@ -26,7 +26,7 @@ gap,not evidence that every Irish record has the wrong region contract.
 
 ## Implemented research features
 
-src/audited_surface_features.py computes true prior-day sire/damsireAW win/place
+src/audited_surface_features.py (renamed src/surface_features.py on 2026-11-07) computes true prior-day sire/damsireAW win/place
 rates,specialisation edges and support. The corrected sireAWedge changes707,048
 later input values. New current-surface and sire-sample-support inputs give the
 model context and a reliability signal. Six statistics match the native stage

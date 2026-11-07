@@ -1,9 +1,14 @@
 # CLAUDE.md
 
 Start with **[README.md](README.md)**, the current operating guide, then use
-**[the project inventory](docs/PROJECT_INVENTORY.md)** to find operational,
-maintenance and research tools. Run `scripts/project_status.py` for actual
+**[the project inventory](docs/PROJECT_INVENTORY.md)** to find the pipeline
+modules and operating commands. Run `scripts/project_status.py` for actual
 readiness; dated prose is not a substitute for that check.
+
+**Layout:** `src/` is pipeline code, `scripts/` operating commands only, and new
+experiments, screens and audits go in **[research/](research/README.md)**.
+Research may import `src`; nothing in `src/`, `scripts/` or `tests/` may import
+`research` (`tests/test_layout.py`). Earlier research code is in git at `26d1b6f`.
 
 **[CONTINUATION.md](CONTINUATION.md)** holds the current session handoff.
 **[Implementation progress](docs/MARKET_PERFORMANCE_PROGRESS.md)** and the
@@ -67,7 +72,7 @@ on the same bets).
 When comparing a selection rule to "no filter", compare against the **same
 universe the rule bets in**, not the whole band. A price-capped rule looks
 like a big win against an unrestricted baseline purely for avoiding long
-prices; `scripts/audit_selection_rule.py` reports both.
+prices. (The retired `scripts/audit_selection_rule.py`, commit `26d1b6f`, reported both.)
 
 ## Practical notes
 
@@ -86,6 +91,7 @@ prices; `scripts/audit_selection_rule.py` reports both.
 - **LightGBM** is the only model framework. XGBoost and CatBoost were
   removed on 2026-10-30; `RacePredictor` rejects any other framework.
 - `data/` and `models/` are gitignored and large; run snapshots are
-  pruned from the Experiments tab (Delete Runs → Disk Usage & Pruning).
+  pruned with `src.run_store.prune_runs` / `delete_run` (the Streamlit
+  apps were removed on 2026-11-07).
 - Performance: features are computed over hundreds of thousands of rows —
   prefer Numba/vectorised pandas over Python loops.

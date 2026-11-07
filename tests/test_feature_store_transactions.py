@@ -246,10 +246,11 @@ def test_incomplete_staging_cannot_replace_store(store):
 
 
 def test_batched_rebuild_failure_preserves_store(store, rows, monkeypatch):
-    from scripts import build_feature_store_batched as batched
+    from scripts import build_feature_store_batched as command
+    from src import store_build as batched
 
     original = _snapshot(store)
-    monkeypatch.setattr(batched, "FeatureStore", lambda: store)
+    monkeypatch.setattr(command, "FeatureStore", lambda: store)
     monkeypatch.setattr(batched, "process_data", lambda **kwargs: rows.copy())
     monkeypatch.setattr(batched, "engineer_features", feature_store.engineer_features)
     monkeypatch.setattr(batched, "fe_signature", lambda: "current-fe")
@@ -263,16 +264,17 @@ def test_batched_rebuild_failure_preserves_store(store, rows, monkeypatch):
             raise OSError("injected consolidation failure")
         patch.setattr(batched, "_finish_featured", broken)
         with pytest.raises(OSError, match="injected consolidation failure"):
-            batched.main()
+            command.main()
     assert _snapshot(store) == original
-    batched.main()
+    command.main()
     _assert_complete(store, rows)
     assert store.meta()["fe_signature"] == "current-fe"
     assert store.meta()["data_signature"] == "current-data"
 
 
 def test_batched_rebuild_can_use_separate_store(store, rows, monkeypatch, tmp_path):
-    from scripts import build_feature_store_batched as batched
+    from scripts import build_feature_store_batched as command
+    from src import store_build as batched
 
     original = _snapshot(store)
     destination = tmp_path / "candidate"
@@ -283,7 +285,7 @@ def test_batched_rebuild_can_use_separate_store(store, rows, monkeypatch, tmp_pa
     monkeypatch.setattr(batched, "atr_cache_signature", lambda cutoff: "same-atr")
     monkeypatch.setattr(batched, "rtv_cache_signature", lambda cutoff: {"runs": None})
     monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2", "--store-root", str(destination)])
-    batched.main()
+    command.main()
     assert _snapshot(store) == original
     candidate = FeatureStore(str(destination))
     _assert_complete(candidate, rows)
@@ -293,11 +295,12 @@ def test_batched_rebuild_can_use_separate_store(store, rows, monkeypatch, tmp_pa
 def test_batched_rebuild_refuses_to_stamp_code_that_changed_mid_build(store, rows, monkeypatch):
     """The store in use on 2026-10-12 was stamped after FE files were edited
     mid-build, so its signature matched neither generation (ledger 12)."""
-    from scripts import build_feature_store_batched as batched
+    from scripts import build_feature_store_batched as command
+    from src import store_build as batched
 
     original = _snapshot(store)
     signatures = iter(["code-at-start", "code-after-an-edit"])
-    monkeypatch.setattr(batched, "FeatureStore", lambda: store)
+    monkeypatch.setattr(command, "FeatureStore", lambda: store)
     monkeypatch.setattr(batched, "process_data", lambda **kwargs: rows.copy())
     monkeypatch.setattr(batched, "engineer_features", feature_store.engineer_features)
     monkeypatch.setattr(batched, "fe_signature", lambda: next(signatures))
@@ -307,7 +310,7 @@ def test_batched_rebuild_refuses_to_stamp_code_that_changed_mid_build(store, row
     monkeypatch.setattr("sys.argv", ["build_feature_store_batched.py", "--chunk-rows", "2"])
 
     with pytest.raises(RuntimeError, match="changed while the store was building"):
-        batched.main()
+        command.main()
     assert _snapshot(store) == original
 
 

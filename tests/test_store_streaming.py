@@ -10,8 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import config
-from scripts import build_feature_store_batched as batched
-from scripts.compare_feature_stores import state_differences
+from src import store_build as batched
 from src.data_processor import process_data
 from src.established_form_features import _log1p
 from src.feature_engineer import _with_columns, _without, add_race_relative_signal_features
@@ -20,6 +19,33 @@ from src.parquet_io import RollingParquetWriter, combine_parquet_parts
 from src.rtv_text import replaced_columns
 from src.runner_identity import identity_columns, join_runner_columns
 from tests.test_live_parity import _synthetic_raw
+
+
+def state_differences(left, right, *, limit=20) -> list[str]:
+    """Where two carried states differ. Python and numpy numbers may mix.
+
+    Copied from the retired scripts/compare_feature_stores.py (2026-11-07)."""
+    found: list[str] = []
+    stack = [(left, right, "state")]
+    while stack and len(found) < limit:
+        a, b, at = stack.pop()
+        if isinstance(a, dict) and isinstance(b, dict):
+            if a.keys() != b.keys():
+                found.append(f"{at}: {len(a.keys() ^ b.keys())} keys in only one state")
+            else:
+                stack.extend((a[key], b[key], f"{at}[{key!r}]") for key in a)
+        elif isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+            if len(a) != len(b):
+                found.append(f"{at}: lengths {len(a)} and {len(b)}")
+            else:
+                stack.extend((x, y, f"{at}[{i}]") for i, (x, y) in enumerate(zip(a, b)))
+        elif isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+            x, y = np.asarray(a), np.asarray(b)
+            if not np.array_equal(x, y, equal_nan=x.dtype.kind == "f" and y.dtype.kind == "f"):
+                found.append(f"{at}: arrays differ")
+        elif a != b and not (a != a and b != b):
+            found.append(f"{at}: {a!r} and {b!r}")
+    return found
 
 
 def test_frames_with_one_schema_stream_into_one_file(tmp_path):

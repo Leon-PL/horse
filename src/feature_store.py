@@ -5,8 +5,10 @@ carried pandas-stage state and metadata.
 
 Who writes it:
 
-  * ``scripts/build_feature_store_batched.py`` builds the real store in
-    date-ordered chunks, never holding more than one chunk in memory.
+  * ``src.store_build.build_store`` builds the real store in date-ordered
+    chunks, never holding more than one chunk in memory. Training runs it when
+    the store must be rebuilt; ``python -m scripts.build_feature_store_batched``
+    runs it on request.
   * ``src.store_refresh.append_current_store`` appends new race dates through
     :meth:`FeatureStore._fast_featurize`, seeded from the carried state, and
     returns False when the store must be rebuilt instead.

@@ -15,8 +15,7 @@ containing:
 - **processed_races.parquet** — the exact processed history used to train
     the saved model, when available.
 
-The module exposes a small set of functions that the Streamlit app
-(and nothing else) needs to call.
+Training, promotion and serving code call these functions; there is no UI.
 """
 
 from __future__ import annotations
