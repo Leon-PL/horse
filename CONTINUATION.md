@@ -113,8 +113,10 @@ or stops; a store without a recorded dataset rebuilds. On the frozen qualified d
 production outputs (processed frame, 1,233-column store, carried state, prices by ID and by
 name, CLV) were identical before and after. Tests now run against an explicit fixture dataset
 (`tests/conftest.py`). Merged with the layout cleanup and the BHA history
-features above, `fe_signature()` is now `7996b7d7a82c8f69`; the rebuild and refit already owed
-above cover it. The installed store records no dataset, so live prediction refuses
+features above. BHA now reads through the same helpers: it honours a dataset's own `root` and
+stops when no dataset is selected, instead of returning empty history (on the committed dataset
+it selects the same files as before). `fe_signature()` is now `5eaf59189052d233`; the rebuild and
+refit already owed above cover it. The installed store records no dataset, so live prediction refuses
 it until that rebuild. See [the qualification](docs/operations/SOURCE_PUBLICATION_2026-11-07.md#fallback-paths-removed).
 
 **Temporary-code cleanup, 6 November:** completed diagnosis, migration, restart

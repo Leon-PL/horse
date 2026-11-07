@@ -14,7 +14,7 @@ import pandas as pd
 import config
 from src.bha_events import build_observations, prepare_canonical, METRICS, GROUPS, CONTEXT
 from src.ingestion.storage import atomic_json, atomic_parquet, read_json, writer_lock
-from src.source_dataset import current_manifest, registry_root
+from src.source_dataset import committed_dataset, current_manifest, require_manifest, source_path, use_manifest
 
 RECENT_GROUPS = tuple(GROUPS) + ('breathing', 'lame', 'bled', 'interference_suffered', 'unsuited_going')
 FEATURES = tuple('bha_' + metric + suffix for metric in METRICS
@@ -44,18 +44,14 @@ def _available_times(events, recorded, policy):
 
 
 def source_paths():
-    manifest = current_manifest()
-    if manifest is None:
-        pointer = read_json(registry_root()/'datasets/latest.json')
-        manifest = read_json(registry_root()/'datasets'/(pointer['id']+'.json')) if pointer else {'sources': {}}
-    sources = manifest['sources']
+    """The selected dataset's results and BHA tables; None where it selects none."""
+    sources = require_manifest()['sources']
     paths = {}
     for provider, names in (('sl', ('results',)), ('bha', ('reports', 'documents', 'race_notes'))):
-        receipt = sources.get(provider)
+        selected = (sources.get(provider) or {}).get('tables', {})
         for name in names:
-            entry = (receipt or {}).get('tables', {}).get(name)
-            paths[provider+'/'+name] = (str(registry_root()/provider/receipt['version']/entry['file'])
-                                       if entry else None)
+            # source_path honours a dataset stored outside the shared registry.
+            paths[provider+'/'+name] = str(source_path(provider, name)) if name in selected else None
     return paths
 
 
@@ -230,7 +226,7 @@ def _withdrawal_features(output, horses, decisions, withdrawals, covered, *, pol
 
 
 def add_bha_features(frame):
-    bundle = load_bundle() if current_manifest() is not None else None
+    bundle = load_bundle()
     if bundle is None:
         features = pd.DataFrame(np.nan, index=frame.index, columns=FEATURES, dtype=np.float32)
         features[['bha_report_count_3', 'bha_report_count_5', 'bha_named_count_5']] = 0.
@@ -242,8 +238,6 @@ def add_bha_features(frame):
 
 def cache_signature(cutoff):
     """Only observations available through the stored history can stale it."""
-    if current_manifest() is None:
-        return {name: None for name in ('reports', 'documents', 'race_notes')}
     policy = availability_policy()
     paths = source_paths()
     end = pd.Timestamp(cutoff).normalize()
@@ -276,8 +270,12 @@ def main():
     parser.add_argument('--out', type=Path, default=Path(config.DATA_DIR)/'processed/bha_candidates')
     parser.add_argument('--historical', action='store_true', help='Also write all dated historical BHA candidate rows')
     args = parser.parse_args()
-    paths = source_paths()
-    bundle = load_bundle(paths)
+    manifest = current_manifest() or committed_dataset()
+    if manifest is None:
+        raise RuntimeError('No committed source dataset; publish sources first (python -m src.ingestion --publish-sources).')
+    with use_manifest(manifest):
+        paths = source_paths()
+        bundle = load_bundle(paths)
     if bundle is None:
         raise RuntimeError('No accepted BHA and canonical source versions are available')
     canonical, observations, withdrawals, audit = bundle
