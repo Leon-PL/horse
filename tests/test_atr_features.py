@@ -91,6 +91,32 @@ class TestRunScalars:
         row = self._row(atr_finishing_speed_pct=9999.0)
         assert np.isnan(af.compute_atr_run_features(pd.DataFrame([row])).iloc[0]["atr_finishing_speed_pct"])
 
+    @pytest.mark.parametrize("missing", [None, np.nan, "", "   "])
+    def test_no_comment_leaves_every_tag_unknown(self, missing):
+        row = self._row(atr_in_running_comment=missing)
+        out = af.compute_atr_run_features(pd.DataFrame([row])).iloc[0]
+        assert out[af.COMMENT_TAGS].isna().all()
+
+    def test_comment_without_the_phrase_is_a_real_zero(self):
+        row = self._row(atr_in_running_comment="prominent throughout")
+        out = af.compute_atr_run_features(pd.DataFrame([row])).iloc[0]
+        assert out["atr_cmt_trouble"] == 0.0
+
+    def test_mixed_rows_only_mask_the_rows_with_no_comment(self):
+        frame = pd.DataFrame([self._row(atr_in_running_comment="led"), self._row(atr_in_running_comment=None)])
+        tags = af.compute_atr_run_features(frame)["atr_cmt_front"]
+        assert tags.iloc[0] == 1.0
+        assert np.isnan(tags.iloc[1])
+
+    def test_no_comment_raises_no_gating_flag(self):
+        # With no comment there is no evidence of easing or of a genuine finish.
+        beaten = af.compute_atr_run_features(pd.DataFrame([self._row(atr_in_running_comment=None)])).iloc[0]
+        winner = af.compute_atr_run_features(
+            pd.DataFrame([self._row(atr_in_running_comment=None, won=1)])).iloc[0]
+        assert beaten["atr_upgrade_clean"] == pytest.approx(3.0)
+        assert np.isnan(beaten["atr_closing_in_hand"])
+        assert winner["atr_closing_in_hand"] == 101.0
+
 
 # ── Rolling / leakage wiring ───────────────────────────────────────────
 
@@ -139,6 +165,27 @@ def test_rolling_is_prior_only(monkeypatch):
     assert a3[1] == pytest.approx(100.0)
     assert a3[2] == pytest.approx(105.0)
     assert a3[3] == pytest.approx(110.0)
+
+
+def test_rates_skip_a_run_with_no_comment(monkeypatch):
+    df = _make_history(monkeypatch)
+    df.loc[df["race_id"] == "r1", "atr_in_running_comment"] = None
+    out = fe.add_atr_features(df).sort_values("race_date").reset_index(drop=True)
+    rate = out["atr_cmt_held_up_rate_5"].tolist()
+    # Both commented runs read "held up". The middle run must not dilute them.
+    assert np.isnan(rate[0])
+    assert rate[1:] == [1.0, 1.0, 1.0]
+
+
+def test_rates_stay_missing_with_no_comment_history(monkeypatch):
+    df = _make_history(monkeypatch)
+    df["atr_in_running_comment"] = None
+    out = fe.add_atr_features(df)
+    rates = [c for c in out.columns if c.startswith("atr_cmt_") and "_rate_" in c]
+    assert rates
+    assert out[rates].isna().all().all()
+    # Sectional history is a separate fact and survives missing comments.
+    assert out["atr_finishing_speed_pct_avg_3"].notna().sum() == 3
 
 
 def test_raw_and_perrun_dropped(monkeypatch):
