@@ -29,13 +29,13 @@ def append_current_store(processed, *, store=None):
             store._rebuild_reason = reason
             return False
         meta = store.meta()
-        from src.source_dataset import current_manifest
-        if meta.get("dataset_manifest") and current_manifest() is None:
-            return rebuild("unversioned_input_for_versioned_store")
         signature = fe_signature()
         if (not store.exists() or meta.get("schema_version") != STORE_SCHEMA_VERSION
                 or meta.get("fe_signature") != signature or not Path(store.counts_state_path).exists()):
             return rebuild("feature_code_or_store_schema_changed")
+        if not meta.get("dataset_manifest"):
+            # Built from collector caches before source publication existed.
+            return rebuild("store_predates_source_publication")
         last = store.last_date()
         if last is None or data_signature(processed, cutoff=last) != meta.get("data_signature"):
             return rebuild("processed_history_changed")
@@ -97,7 +97,7 @@ def get_training_dataset(*, processed=None, rebuild=False):
                     "reason": reason,
                     "previous_last_date": meta.get("last_date"),
                     "previous_manifest": (meta.get("dataset_manifest") or {}).get("id"),
-                    "dataset_manifest": (current_manifest() or {}).get("id")})
+                    "dataset_manifest": current_manifest().get("id")})
     atomic_json(path, {"builds": history[-1000:]})
     store = FeatureStore()
     with store._staged_update() as pending:

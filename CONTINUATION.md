@@ -18,6 +18,17 @@ is unchanged. See [operations and qualification](docs/operations/SOURCE_PUBLICAT
 Use `python -m src.ingestion --publish-sources` for local adoption and
 `--source-status` for accepted-data quality, separately from worker progress.
 
+**Fallback paths removed, 7 November (later):** processing, features, prices and CLV now read
+sources only through a selected dataset. The legacy routes are gone: the name-joined ATR merge,
+RTV snapshot name joins, native-cache path fallbacks, `compute_clv(bsp_path=...)` and the
+unversioned "direct-input" frames. A frame without a dataset ID uses the last committed dataset
+or stops; a store without a recorded dataset rebuilds. On the frozen qualified dataset the
+production outputs (processed frame, 1,233-column store, carried state, prices by ID and by
+name, CLV) were identical before and after. Tests now run against an explicit fixture dataset
+(`tests/conftest.py`). This moves `fe_signature()` to `5f1b9689bce1820e`; the rebuild and refit
+already owed above cover it. The installed store records no dataset, so live prediction refuses
+it until that rebuild. See [the qualification](docs/operations/SOURCE_PUBLICATION_2026-11-07.md#fallback-paths-removed).
+
 **Temporary-code cleanup, 6 November:** completed diagnosis, migration, restart
 and qualification helpers from the recent collection work have been removed.
 Audit results, code snapshots and database recovery checkpoints remain in place.

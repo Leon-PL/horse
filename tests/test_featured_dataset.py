@@ -15,6 +15,7 @@ import scripts.build_feature_store_batched as batched
 from src import store_refresh
 from src.feature_store import STORE_SCHEMA_VERSION
 from src.featured_dataset import data_signature, fe_signature
+from src.source_dataset import current_manifest
 from src.store_refresh import get_training_dataset
 
 
@@ -126,7 +127,8 @@ def _current_meta(proc, **overrides):
     last = proc["race_date"].max()
     meta = {"fe_signature": fe_signature(),
             "data_signature": data_signature(proc, cutoff=last),
-            "atr_signature": ATR_STAMP}
+            "atr_signature": ATR_STAMP,
+            "dataset_manifest": current_manifest()}
     meta.update(overrides)
     return {k: v for k, v in meta.items() if v is not None}
 
@@ -193,6 +195,13 @@ class TestBuildVsAppend:
                             lambda cutoff: {"cutoff": "2023-01-02", "sig": "before-backfill"})
         get_training_dataset(processed=proc)
         assert fake.calls == ["load"]
+
+    def test_store_built_before_source_publication_builds(self, patch_store):
+        proc = _toy(["2023-01-01", "2023-01-02"])
+        fake = patch_store(exists=True, last_date=proc["race_date"].max(),
+                           meta=_current_meta(proc, dataset_manifest=None))
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
 
     def test_store_without_an_atr_stamp_builds(self, patch_store):
         proc = _toy(["2023-01-01", "2023-01-02"])

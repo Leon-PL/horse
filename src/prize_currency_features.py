@@ -12,16 +12,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import config
 
 FEATURES = ("horse_max_prize_contested", "horse_avg_prize_contested", "prize_money_change_vs_avg")
 
 
 def _paths():
-    base = Path(config.BASE_DIR) / "reference"
+    """The selected dataset's currency units and ECB rates."""
     from src.source_dataset import source_path
-    return (source_path("fx", "units", base / "track_prize_currency.json"),
-            source_path("fx", "rates", base / "ecb_gbp_per_eur.csv"))
+    return source_path("fx", "units"), source_path("fx", "rates")
 
 
 @lru_cache(maxsize=8)

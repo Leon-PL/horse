@@ -80,10 +80,11 @@ storage is in `src/database.py`, and cleaning is in `src/data_processor.py`.
 application imports nothing from a collection script.
 
 ATR follows the same rule. `src/ingestion/atr_tabs.py` is its contract: the columns,
-the cache location and the cache reader, which collection and feature building both
-use. The join into feature building, `merge_atr_sectionals`, is in `src/atr_features.py`,
-so editing the join does not stop the worker. The worker's queue and raw response
-store are separate from the accepted feature cache.
+the cache location and the cache reader, used by collection and by source publication.
+Feature building never reads that cache. Publication links accepted ATR rows to
+canonical runners, and `published_atr_rolling` in `src/atr_features.py` reads the
+selected dataset's version, so editing feature code does not stop the worker. The
+worker's queue and raw response store are separate from the accepted cache.
 
 `src/trainer_locations.py`, `scripts/fetch_bha_going.py` and
 `scripts/fetch_forecast_previous_runs.py` are one-off research collectors outside the

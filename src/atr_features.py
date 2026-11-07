@@ -1,19 +1,19 @@
 """Pure per-run feature derivations from At The Races sectionals.
 
-These helpers turn one runner's *raw post-race* ATR sectional record (the
-columns added by :func:`merge_atr_sectionals`) into a
-set of **per-run scalars and tags**.  They describe how the horse ran in
-*that* race — they are NOT model features on their own.
+These helpers turn one runner's *raw post-race* ATR sectional record (a row
+of the selected dataset's ``atr/sectionals`` table) into a set of **per-run
+scalars and tags**.  They describe how the horse ran in *that* race — they
+are NOT model features on their own.
 
-``src.feature_engineer.add_atr_features`` consumes these, then rolls each one
-over a horse's *prior* runs (leakage-safe ``shift(1)``) to build the actual
-features.  Keeping the derivations here (pure, row-local, no history) makes
-them unit-testable in isolation and keeps the leakage boundary crisp.
+:func:`published_atr_rolling` joins those rows to the canonical results by
+their saved race and horse IDs, then rolls each one over a horse's *prior*
+starts that were available at the decision.  Keeping the derivations pure,
+row-local and history-free makes them unit-testable in isolation and keeps
+the leakage boundary crisp.
 """
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import json
 import logging
 import re
@@ -26,12 +26,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from src.ingestion.atr_tabs import ALL_ATR_COLS, load_atr_cache
-from src.utils import (
-    normalise_horse_key as _normalise_horse_key,
-    normalise_off_time_key as _normalise_off_time_key,
-    normalise_track_key as _normalise_track_key,
-)
+from src.ingestion.atr_tabs import ALL_ATR_COLS
+from src.utils import normalise_off_time_key as _normalise_off_time_key
 
 logger = logging.getLogger(__name__)
 
@@ -429,110 +425,8 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Join the accepted cache onto a race frame (used by feature_engineer)
+# Prior-run history from the selected dataset (used by feature_engineer)
 # ---------------------------------------------------------------------------
-
-_ATR_MERGE_KEYS = ["_rd", "_trk", "_ot", "_hn"]
-
-
-def _atr_merge_table(cache: pd.DataFrame) -> pd.DataFrame:
-    """The cache as unique merge keys plus every ATR column."""
-    cache = cache.copy()
-    cache["_rd"] = pd.to_datetime(cache["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    cache["_trk"] = cache["track"].map(_normalise_track_key)
-    cache["_ot"] = cache["off_time"].map(_normalise_off_time_key)
-    cache["_hn"] = cache["horse_name"].map(_normalise_horse_key)
-
-    for c in ALL_ATR_COLS:
-        if c not in cache.columns:
-            cache[c] = float("nan")
-
-    merge_cols = _ATR_MERGE_KEYS + ALL_ATR_COLS
-    keys = _ATR_MERGE_KEYS
-    cache_slim = cache[merge_cols].drop_duplicates(subset=keys+["atr_horse_id"], keep="last")
-    return cache_slim.loc[~cache_slim.duplicated(keys,keep=False)]
-
-
-_merge_table_scope: list | None = None
-
-
-@contextmanager
-def atr_merge_scope():
-    """Prepare the cache once for a build that merges it chunk by chunk."""
-    global _merge_table_scope
-    _merge_table_scope = []
-    try:
-        yield
-    finally:
-        _merge_table_scope = None
-
-
-def _merge_table() -> pd.DataFrame | None:
-    """The prepared cache, or None when there is nothing to join."""
-    if _merge_table_scope:
-        return _merge_table_scope[0]
-    from src.source_dataset import current_manifest, read_table
-    cache = read_table("atr", "sectionals", linked=True) if current_manifest() is not None else load_atr_cache()
-    table = None if cache.empty else _atr_merge_table(cache)
-    if _merge_table_scope is not None:
-        _merge_table_scope.append(table)
-    return table
-
-
-def merge_atr_sectionals(df: pd.DataFrame) -> pd.DataFrame:
-    """Left-join cached ATR sectionals onto a race DataFrame.
-
-    Matches on ``(race_date, track, off_time, horse_name)`` using the
-    shared normalisers.  All ATR columns are added (NaN where absent);
-    per-furlong series remain JSON strings (see :data:`ATR_ARRAY_COLS`).
-    Only the keys take part in the join, so a wide frame is not copied.
-    """
-    from src.source_dataset import current_manifest, read_table
-    if current_manifest() is not None:
-        cache = read_table("atr", "sectionals", linked=True)
-        cache = cache.loc[cache.match_status.eq("matched")] if "match_status" in cache else cache.iloc[:0]
-        keys = ["sl_race_id", "sl_horse_id"]
-        values = cache.reindex(columns=[*keys, *ALL_ATR_COLS])
-        if values.duplicated(keys).any():
-            raise ValueError("Accepted ATR identities are not unique")
-        left = pd.DataFrame({"sl_race_id": df.race_id.astype("string").str.replace(r"\.0$", "", regex=True),
-                             "sl_horse_id": df.horse_id.astype("string").str.replace(r"\.0$", "", regex=True)})
-        joined = left.merge(values, on=keys, how="left", validate="many_to_one")
-        joined.index = df.index
-        return pd.concat([df.drop(columns=[c for c in ALL_ATR_COLS if c in df]), joined.drop(columns=keys)], axis=1)
-    cache_slim = _merge_table()
-    if cache_slim is None:
-        for c in ALL_ATR_COLS:
-            df[c] = float("nan")
-        return df
-
-    keys = _ATR_MERGE_KEYS
-    df["_rd"] = pd.to_datetime(df["race_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-    df["_trk"] = df["track"].map(_normalise_track_key)
-    df["_ot"] = df["off_time"].map(_normalise_off_time_key)
-    df["_hn"] = df["horse_name"].map(_normalise_horse_key)
-    ambiguous_left = df.duplicated(keys,keep=False).to_numpy()
-
-    joined = df[keys].merge(
-        cache_slim.loc[cache_slim["_rd"].isin(df["_rd"].unique())],
-        on=keys, how="left", indicator="_atr_merge", validate="many_to_one",
-    )
-    merged = pd.concat(
-        [df.drop(columns=keys).reset_index(drop=True), joined.drop(columns=keys)], axis=1,
-    )
-
-    for c in ALL_ATR_COLS:
-        if c not in merged.columns:
-            merged[c] = float("nan")
-    merged.loc[ambiguous_left,ALL_ATR_COLS] = float("nan")
-
-    matched = (merged["_atr_merge"] == "both") & ~ambiguous_left
-    logger.info(
-        "ATR merge: key matches %d / %d (%.1f%%)",
-        int(matched.sum()), len(merged), 100 * matched.sum() / max(1, len(merged)),
-    )
-    return merged.drop(columns=["_atr_merge"], errors="ignore")
-
 
 @lru_cache(maxsize=1)
 def _published_history(results_version, atr_version):
@@ -557,6 +451,9 @@ def _published_history(results_version, atr_version):
     history["_event"] = pd.to_datetime(history.race_date.astype(str).str[:10] + " " + history.off_time.map(_normalise_off_time_key), utc=True)
     history = history.sort_values(["sl_horse_id", "_event", "sl_race_id"], kind="stable").reset_index(drop=True)
     history["_position"] = np.arange(len(history))
+    # Plain object IDs, like the target's, however the links were read back
+    # (a dataset whose ATR rows all failed to link keeps pandas strings here).
+    history[keys] = history[keys].astype(object)
     return history
 
 
@@ -566,8 +463,8 @@ def published_atr_rolling(frame):
     Windows retain untracked starts as missing slots. The full immutable scalar
     history is shared across chunks, so chunk boundaries cannot change support.
     """
-    from src.source_dataset import current_manifest
-    manifest = current_manifest()
+    from src.source_dataset import require_manifest
+    manifest = require_manifest()
     if "atr" not in manifest["sources"]:
         output = {}
         for metric, _ in RUN_METRICS:

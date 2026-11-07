@@ -127,28 +127,42 @@ def use_manifest(manifest):
         _current.reset(token)
 
 
-def source_path(provider, table, fallback=None):
+def require_manifest():
+    """The selected dataset. Processing, feature and price code read no source without one."""
     manifest = current_manifest()
     if manifest is None:
-        return Path(fallback) if fallback is not None else None
+        raise RuntimeError(
+            "No source dataset is selected. Pass a frame from process_data(), run inside "
+            "use_manifest(...), or publish sources first (python -m src.ingestion --publish-sources).")
+    return manifest
+
+
+def _root(manifest):
+    # A dataset may say where its versions are stored; normally the shared registry.
+    return Path(manifest["root"]) if manifest.get("root") else registry_root()
+
+
+def source_path(provider, table):
+    """Where the selected dataset keeps *table*; a selected absence stays absent."""
+    manifest = require_manifest()
     receipt = manifest["sources"].get(provider)
     if provider == "rtv" and table in {"pre", "links_pre", "observations_pre"}:
         receipt = manifest["sources"].get("rtv_snapshots", receipt)
     entry = receipt and receipt["tables"].get(table)
     if entry is None:
         # A selected missing input stays missing even if a collector creates it.
-        return registry_root() / "absent" / provider / (table + ".parquet")
-    return registry_root() / receipt["provider"] / receipt["version"] / entry["file"]
+        return _root(manifest) / "absent" / provider / (table + ".parquet")
+    return _root(manifest) / receipt["provider"] / receipt["version"] / entry["file"]
 
 
 def read_table(provider, table, *, linked=False):
     path = source_path(provider, table)
-    if path is None or not path.exists():
+    if not path.exists():
         return pd.DataFrame()
     frame = pd.read_parquet(path)
     if linked:
         links_path = source_path(provider, "links_" + table)
-        if links_path is not None and links_path.exists():
+        if links_path.exists():
             links = pd.read_parquet(links_path).sort_values("source_row")
             if links.source_row.tolist() != list(range(len(frame))):
                 raise ValueError("Source crosswalk does not describe the selected table")
@@ -157,9 +171,8 @@ def read_table(provider, table, *, linked=False):
     return frame
 
 
-def model_table(provider, table, path):
-    if current_manifest() is None:
-        return pd.read_parquet(path)
+def model_table(provider, table):
+    """Rows of a selected table whose runner link was accepted."""
     frame = read_table(provider, table, linked=True)
     if "match_status" in frame:
         frame = frame.loc[frame.match_status.eq("matched")].copy()
@@ -223,6 +236,12 @@ def select_dataset(*, include_prices=False):
     return capture_dataset(include_prices=include_prices)
 
 
+def committed_dataset():
+    """The last complete dataset commit, or None. Never publishes."""
+    pointer = read_json(registry_root() / "datasets" / "latest.json")
+    return load_manifest(pointer["id"]) if pointer else None
+
+
 def load_manifest(identifier):
     if len(identifier) != 64 or any(c not in "0123456789abcdef" for c in identifier):
         raise ValueError("Expected a dataset manifest ID")
@@ -238,8 +257,24 @@ def load_manifest(identifier):
     return manifest
 
 
+def _entry_dataset(frame):
+    """Inputs for an entry point called with no dataset selected.
+
+    A frame keeps the dataset it was processed from. A frame without one uses
+    the last committed dataset and never starts a publication. Without a frame,
+    a first installation may bootstrap once.
+    """
+    if frame is None:
+        return select_dataset()
+    manifest = frame_manifest(frame) or committed_dataset()
+    if manifest is None:
+        raise RuntimeError("No committed source dataset; publish sources first "
+                           "(python -m src.ingestion --publish-sources).")
+    return manifest
+
+
 def dataset_build(function):
-    """Public build entry points select inputs once; explicit test frames stay explicit."""
+    """Public build entry points select inputs once and pass them to every reader."""
     @wraps(function)
     def wrapped(*args, **kwargs):
         if current_manifest() is not None:
@@ -247,7 +282,7 @@ def dataset_build(function):
         processed = kwargs.get("processed", kwargs.get("df"))
         if processed is None and args and isinstance(args[0], pd.DataFrame):
             processed = args[0]
-        manifest = frame_manifest(processed) if processed is not None else select_dataset()
+        manifest = _entry_dataset(processed)
         with use_manifest(manifest):
             return _frame_result(function(*args, **kwargs), manifest)
     return wrapped
@@ -269,11 +304,14 @@ def frame_manifest(frame):
 def live_dataset(function):
     @wraps(function)
     def wrapped(*args, **kwargs):
+        if current_manifest() is not None:
+            return function(*args, **kwargs)
         from src.feature_store import FeatureStore
         store = kwargs.get("store") or FeatureStore()
         history_manifest = store.meta().get("dataset_manifest")
-        if current_manifest() is not None or not history_manifest:
-            return function(*args, **kwargs)
+        if not history_manifest:
+            raise RuntimeError("The feature store records no source dataset; build or rebuild it "
+                               "before live prediction.")
         # Serving reads the store's historical versions. Only expiring card
         # captures are published here; a prediction never runs a backfill or
         # republishes hundreds of thousands of historical observations.
@@ -294,7 +332,6 @@ def processing_inputs(function):
         frame = kwargs.get("df", args[0] if args else None)
         if current_manifest() is not None:
             return function(*args, **kwargs)
-        manifest = frame_manifest(frame) if frame is not None else select_dataset()
-        with use_manifest(manifest):
+        with use_manifest(_entry_dataset(frame)):
             return function(*args, **kwargs)
     return wrapped

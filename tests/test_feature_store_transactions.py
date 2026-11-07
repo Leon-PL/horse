@@ -17,11 +17,11 @@ from src.feature_store import FeatureStore
 
 
 @pytest.fixture(autouse=True)
-def isolated_source_adoption(monkeypatch):
-    # These tests inject synthetic processing/FE. Adoption is independently
-    # qualified against real stores and must not run against the user's data.
-    monkeypatch.setattr("src.source_dataset.capture_dataset", lambda **kwargs: None)
-    monkeypatch.setattr("src.source_dataset.select_dataset", lambda **kwargs: None)
+def isolated_source_adoption(monkeypatch, reference_dataset):
+    # These tests inject synthetic processing/FE. A build selects the small
+    # reference dataset; adoption must never run against the user's data.
+    monkeypatch.setattr("src.source_dataset.capture_dataset", lambda **kwargs: pytest.fail("Ran source adoption"))
+    monkeypatch.setattr("src.source_dataset.select_dataset", lambda **kwargs: reference_dataset)
 
 
 @pytest.fixture

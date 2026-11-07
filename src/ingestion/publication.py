@@ -228,11 +228,9 @@ def capture_sources(*, include_prices=False, canonical_cards=None):
     sources["weather"] = _publish("weather", {"races": weather},
         {"races": TableContract("race", ("race_id", "race_date"), ("race_id",), role="research")}, canonical)
     sources["atr"] = _adopt("atr", lambda: publish_atr(canonical), canonical=canonical)
-    from src.rtv_features import runs_path, pre_path, cards_path
-    from src.rtv_text import scores_path, text_path
-    from src.ingestion.rtv_storage import pin_generation
+    from src.ingestion.rtv_storage import FEATURE_TABLES, native_path, pin_generation
     with pin_generation():
-        paths = {"runs": runs_path(), "pre": pre_path(), "cards": cards_path(), "scores": scores_path(), "text": text_path()}
+        paths = {name: native_path(name) for name in FEATURE_TABLES}
     def publish_rtv():
         tables, contracts = {}, {}
         for name, path in paths.items():
@@ -244,12 +242,13 @@ def capture_sources(*, include_prices=False, canonical_cards=None):
                     role="snapshot" if snapshot else "history", delay_hours=48 if name == "runs" else 0)
         return _publish("rtv", tables, contracts, identity_reference, eligible=len(identity_reference))
     sources["rtv"] = _adopt("rtv", publish_rtv, canonical=identity_reference)
-    base = Path(config.BASE_DIR) / "reference"
+    from src.ingestion.fx import reference_paths
+    units_path, rates_path = reference_paths()
     def publish_fx():
-        rates = pd.read_csv(base/"ecb_gbp_per_eur.csv", parse_dates=["observation_date"], float_precision="round_trip")
+        rates = pd.read_csv(rates_path, parse_dates=["observation_date"], float_precision="round_trip")
         if not rates.observation_date.is_monotonic_increasing or not pd.to_numeric(rates.gbp_per_eur, errors="raise").gt(0).all():
             raise ValueError("FX rates must be ordered and positive")
-        mapping = read_json(base/"track_prize_currency.json")["currency_by_track"]
+        mapping = read_json(units_path)["currency_by_track"]
         units = pd.DataFrame({"track": list(mapping), "currency": list(mapping.values())})
         if not units.currency.isin(["GBP", "EUR"]).all():
             raise ValueError("Unrecognised prize currency")
@@ -261,8 +260,7 @@ def capture_sources(*, include_prices=False, canonical_cards=None):
         for name, frame in list(tables.items()):
             tables["observations_"+name] = observation_metadata(frame, contracts[name])
             contracts["observations_"+name] = SIDECAR
-        return publish_source("fx", tables, contracts=contracts, artifacts={
-            "units": base/"track_prize_currency.json", "rates": base/"ecb_gbp_per_eur.csv"})
+        return publish_source("fx", tables, contracts=contracts, artifacts={"units": units_path, "rates": rates_path})
     sources["fx"] = _adopt("fx", publish_fx, required=True)
     if include_prices:
         def publish_prices():
@@ -299,7 +297,8 @@ def latest_source_health(provider, attempt):
 
 def publish_live_snapshots(cards, sources):
     """Publish the small pre-race stream against historical and upcoming IDs."""
-    path = Path(getattr(config, "RTV_FEATURE_PRE", Path(config.DATA_DIR)/"rtv_cache/feature_pre.parquet"))
+    from src.ingestion.rtv_storage import native_path
+    path = native_path("pre")
     if not path.exists():
         return None
     frame = pd.read_parquet(path)

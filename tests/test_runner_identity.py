@@ -190,38 +190,39 @@ def test_result_settlement_associates_namesakes_with_their_own_outcomes():
     assert not unknown.is_settled.any()
 
 
-@pytest.mark.parametrize("side",["left","right","revision"])
-def test_atr_does_not_identify_distinct_horses_by_a_shared_display_name(monkeypatch,side):
-    from src import atr_features as atr
-    left=twins().assign(track="Kempton",off_time="12:00")
-    cached=left.iloc[:1].assign(atr_horse_id="atr-1",atr_final_time=100.)
-    if side != "left":
-        left=left.iloc[:1].copy()
-        other=cached.copy()
-        other["atr_horse_id"]="atr-2" if side=="right" else "atr-1"
-        other["atr_final_time"]=101.
-        cached=pd.concat([cached,other],ignore_index=True)
-    monkeypatch.setattr(atr,"load_atr_cache",lambda:cached)
-    joined=atr.merge_atr_sectionals(left)
-    assert len(joined)==len(left)
-    if side=="revision":
-        assert joined.atr_final_time.tolist()==[101.]
-    else:
-        assert joined.atr_final_time.isna().all()
+@pytest.mark.parametrize("rows",[1,2])
+def test_atr_does_not_identify_distinct_horses_by_a_shared_display_name(publish_dataset,rows):
+    from src.atr_features import _published_history, published_atr_rolling
+    from src.source_contracts import TableContract
+    from src.source_dataset import read_table
+    first=twins().assign(track="Kempton",off_time="12:00")
+    later=first.assign(race_id="124",race_date="2025-01-10")
+    sectionals=first.iloc[:rows].drop(columns=["race_id","horse_id"]).assign(
+        atr_raceid="atr-race",atr_horse_id=["atr-1","atr-2"][:rows],atr_finishing_speed_pct=[100.,101.][:rows])
+    _published_history.cache_clear()
+    publish_dataset(pd.concat([first,later],ignore_index=True),
+                    atr={"sectionals":(sectionals,TableContract("runner",(),delay_hours=48))})
+    linked=read_table("atr","sectionals",linked=True)
+    assert linked.match_status.eq("ambiguous").all() and linked.sl_horse_id.isna().all()
+    rolled=published_atr_rolling(later)
+    assert np.isnan(rolled["atr_finishing_speed_pct_avg_3"]).all()
+    assert (rolled["atr_observation_count_5"]==0).all()
 
 
-def test_rtv_name_snapshot_does_not_fill_both_namesakes():
+def test_rtv_name_snapshot_does_not_fill_both_namesakes(publish_dataset):
     from src import rtv_features as rtv
+    from src.source_contracts import TableContract
     frame=twins().assign(track="Kempton",off_time="12:00")
-    observation={"race_date":"2025-01-01","track_key":"kempton","off_key":"12:00","horse_key":"Sierra Nevada",
+    observation={"race_date":"2025-01-01","track":"Kempton","off_time":"12:00","horse_name":"Sierra Nevada",
                  "observed_at":"2025-01-01T11:50:00Z",**{name:1. for name in rtv.SNAPSHOT_FEATURES}}
-    result=rtv.add_pre_race_features(frame,observations=pd.DataFrame([observation]),as_of="2025-01-01T11:55:00Z")
+    contract=TableContract("runner snapshot",(),role="snapshot")
+    publish_dataset(frame,rtv_snapshots={"pre":(pd.DataFrame([observation]),contract)})
+    result=rtv.add_pre_race_features(frame,as_of="2025-01-01T11:55:00Z")
     assert result[list(rtv.SNAPSHOT_FEATURES)].isna().all().all()
 
 
 def test_feature_store_build_append_and_live_keep_namesakes_separate(tmp_path, monkeypatch):
     import config
-    from src import atr_features
     from src.data_processor import process_data
     from src.feature_store import FeatureStore
     from src.featured_dataset import _stamp, data_signature, fe_signature
@@ -229,7 +230,6 @@ def test_feature_store_build_append_and_live_keep_namesakes_separate(tmp_path, m
     from tests.test_live_parity import _synthetic_raw
 
     monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(atr_features, "load_atr_cache", pd.DataFrame)
     raw = _synthetic_raw(n_days=8, races_per_day=1, field=2)
     raw["horse_id"] = [1, 2]*8
     raw["horse_name"] = "Sierra Nevada"

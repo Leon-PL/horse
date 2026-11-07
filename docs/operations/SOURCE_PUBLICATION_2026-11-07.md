@@ -126,6 +126,63 @@ Concurrent app-removal and configuration edits were preserved. The feature-code
 signature was checked again against the current workspace and still matches the
 qualified signature above.
 
+## Fallback paths removed
+
+Later on 7 November the no-dataset branches were removed, so processing, feature
+building, store refresh, model-fitting prices and CLV read sources only through
+the selected dataset.
+
+- `source_dataset.source_path`, `read_table` and `model_table` take no fallback
+  path. With no dataset selected they raise, and `require_manifest()` says how
+  to select one.
+- An entry point given a frame without a dataset ID uses the last committed
+  dataset (`committed_dataset()`) and never publishes. With no committed dataset
+  it stops. Called without a frame, selection is unchanged.
+- ATR: the name-joined `merge_atr_sectionals`, its batch-wide scores and
+  `atr_merge_scope` are gone. `published_atr_rolling` is the only definition.
+- RTV: pre-race snapshots join by saved race and horse IDs only, and unlinked
+  snapshot rows raise. The collector's own files are located by
+  `ingestion.rtv_storage.native_path`, for publication only.
+- FX: `ingestion.fx` owns the reference file paths and no longer imports
+  feature code.
+- Prices: `source_prices` no longer falls back to `src.betfair`, and
+  `compute_clv` has no `bsp_path`. Bets with only names are resolved to
+  canonical IDs first.
+- Stores: every stamp records the dataset. A store without one is rebuilt
+  (`store_predates_source_publication`), and live prediction refuses it. The
+  installed store (`457c83789e6b29ab`) predates publication, so it needs the
+  rebuild already owed before it can serve again.
+- `project_status.py` and `select_features.py` compute fingerprints under the
+  committed dataset. With none, the status is BAD and names the publish command.
+
+Two dtype faults in the published path surfaced once it became the only path,
+and both are fixed: RTV snapshot links read back as pandas strings, and ATR
+history for a dataset whose ATR rows all failed to link. Neither changes the
+qualified output below.
+
+Qualification used the same frozen dataset
+`5fb184f9f1fc61ca470bd8aeac50af17c156c008d874a38aad5a7068fefaa786` and window
+(1 October to 4 November 2026, **13,293 runners**). The code before and after
+was run from separate copies against a private copy of the dataset. These were
+exactly equal, including column order and dtypes: the processed frame (97
+columns), the built store (13,293 × 1,233) and its processed table, the carried
+counts and ratings state, BSP attached by ID and by name, and the CLV summary.
+The data, ATR, RTV and FX signatures and the recorded manifest were also equal.
+Only `fe_signature()` moved, from `5d6eb8e0082a4d3a` to `5f1b9689bce1820e`. The
+comparison's own copies report other values, because configured paths are part
+of that hash.
+
+Tests select an explicit dataset (`tests/conftest.py`): the committed FX
+reference by default, or fixture sources published by the `publish_dataset` and
+`publish_prices` fixtures. No test reads a collector cache or the real data
+folder through the source layer. The full suite gave 2,011 passed, 10 failed
+and 3 skipped, against 2,013 / 7 / 3 before. Seven failures are unchanged. Two
+ATR efficiency tests that reuse the ATR fixture were then ported and pass alone.
+The last one, `test_independent_feature_benchmark`, drives
+`scripts/audit_atr_invariance.py`, which patches the removed merge. That
+script, its two siblings and the test are already deleted by the cleanup in
+progress in the main checkout, so they were left untouched.
+
 ## Scope
 
 This provides exact dataset-version lineage and stage input boundaries. It does

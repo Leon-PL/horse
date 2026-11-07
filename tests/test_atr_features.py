@@ -120,15 +120,24 @@ class TestRunScalars:
 
 # ── Rolling / leakage wiring ───────────────────────────────────────────
 
-def _make_history(monkeypatch):
-    """3 prior runs + 1 upcoming for one horse; merge is identity."""
+def _make_history(monkeypatch, publish_dataset, edit=None):
+    """3 prior runs + 1 upcoming for one horse, with ATR published for the runs.
+
+    *edit* may change the ATR rows before they are published.
+    """
+    from src.atr_features import _published_history
+    from src.source_contracts import TableContract
+
+    dates = ["2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01"]
+    canonical = pd.DataFrame(dict(
+        race_id=["r0", "r1", "r2", "r9"], race_date=dates, track="Kempton", off_time="14:00",
+        horse_name="Test Horse", horse_id="H1", won=[0, 0, 0, np.nan],
+        lengths_behind=[2.0, 2.0, 2.0, np.nan], num_runners=8))
     rows = []
-    fsp = [100.0, 110.0, 120.0]
-    for i, (d, f) in enumerate(zip(["2025-01-01", "2025-02-01", "2025-03-01"], fsp)):
+    for i, f in enumerate([100.0, 110.0, 120.0]):
         rows.append(dict(
-            race_id=f"r{i}", race_date=d, track="Kempton", off_time="14:00",
-            horse_name="Test Horse", horse_id="H1", won=0, lengths_behind=2.0,
-            num_runners=8,
+            race_date=dates[i], track="Kempton", off_time="14:00", horse_name="Test Horse",
+            atr_raceid=f"atr{i}", atr_horse_id="native1",
             atr_sectional_speeds=json.dumps([30.0 + i, 38.0, 36.0]),
             atr_energy_dist=json.dumps([90.0, 100.0]), atr_optimum_energy=json.dumps([92.0, 101.0]),
             atr_finishing_speed_pct=f, atr_efficiency_score=15.0 + i,
@@ -136,27 +145,18 @@ def _make_history(monkeypatch):
             atr_official_position=3, atr_adj_placing=3.0,
             atr_in_running_comment="held up, ran on",
         ))
-    # upcoming race (no ATR data yet for the current race)
-    rows.append(dict(
-        race_id="r9", race_date="2025-04-01", track="Kempton", off_time="14:00",
-        horse_name="Test Horse", horse_id="H1", won=np.nan, lengths_behind=np.nan,
-        num_runners=8,
-        atr_sectional_speeds=None, atr_energy_dist=None, atr_optimum_energy=None,
-        atr_finishing_speed_pct=np.nan, atr_efficiency_score=np.nan,
-        atr_peak_stride_length=np.nan, atr_peak_stride_freq=np.nan,
-        atr_official_position=np.nan, atr_adj_placing=np.nan,
-        atr_in_running_comment=None,
-    ))
-    df = pd.DataFrame(rows)
+    sectionals = pd.DataFrame(rows)
+    if edit is not None:
+        edit(sectionals)
+    # The upcoming race (r9) has no ATR row; its features come from history.
+    _published_history.cache_clear()
+    publish_dataset(canonical, atr={"sectionals": (sectionals, TableContract("runner", (), delay_hours=48))})
     monkeypatch.setattr(fe, "_COUNTS_STATE", None, raising=False)
-    # identity merge (df already carries the raw atr_* cols)
-    import src.atr_features as scr
-    monkeypatch.setattr(scr, "merge_atr_sectionals", lambda d: d)
-    return df
+    return canonical
 
 
-def test_rolling_is_prior_only(monkeypatch):
-    df = _make_history(monkeypatch)
+def test_rolling_is_prior_only(monkeypatch, publish_dataset):
+    df = _make_history(monkeypatch, publish_dataset)
     out = fe.add_atr_features(df).sort_values("race_date").reset_index(drop=True)
     a3 = out["atr_finishing_speed_pct_avg_3"].tolist()
     # race1: no prior -> NaN; race2: mean(100)=100; race3: mean(100,110)=105;
@@ -167,9 +167,10 @@ def test_rolling_is_prior_only(monkeypatch):
     assert a3[3] == pytest.approx(110.0)
 
 
-def test_rates_skip_a_run_with_no_comment(monkeypatch):
-    df = _make_history(monkeypatch)
-    df.loc[df["race_id"] == "r1", "atr_in_running_comment"] = None
+def test_rates_skip_a_run_with_no_comment(monkeypatch, publish_dataset):
+    def no_comment_on_r1(sectionals):
+        sectionals.loc[sectionals.race_date.eq("2025-02-01"), "atr_in_running_comment"] = None
+    df = _make_history(monkeypatch, publish_dataset, no_comment_on_r1)
     out = fe.add_atr_features(df).sort_values("race_date").reset_index(drop=True)
     rate = out["atr_cmt_held_up_rate_5"].tolist()
     # Both commented runs read "held up". The middle run must not dilute them.
@@ -177,9 +178,10 @@ def test_rates_skip_a_run_with_no_comment(monkeypatch):
     assert rate[1:] == [1.0, 1.0, 1.0]
 
 
-def test_rates_stay_missing_with_no_comment_history(monkeypatch):
-    df = _make_history(monkeypatch)
-    df["atr_in_running_comment"] = None
+def test_rates_stay_missing_with_no_comment_history(monkeypatch, publish_dataset):
+    def no_comments(sectionals):
+        sectionals["atr_in_running_comment"] = None
+    df = _make_history(monkeypatch, publish_dataset, no_comments)
     out = fe.add_atr_features(df)
     rates = [c for c in out.columns if c.startswith("atr_cmt_") and "_rate_" in c]
     assert rates
@@ -188,8 +190,11 @@ def test_rates_stay_missing_with_no_comment_history(monkeypatch):
     assert out["atr_finishing_speed_pct_avg_3"].notna().sum() == 3
 
 
-def test_raw_and_perrun_dropped(monkeypatch):
-    df = _make_history(monkeypatch)
+def test_raw_and_perrun_dropped(monkeypatch, publish_dataset):
+    df = _make_history(monkeypatch, publish_dataset)
+    # A frame that already carries this race's ATR record must not keep it.
+    df = df.assign(atr_sectional_speeds="[30.0]", atr_official_position=3, atr_in_running_comment="led",
+                   atr_finishing_speed_pct=100.0, atr_upgrade_clean=1.0, atr_cmt_trouble=0)
     out = fe.add_atr_features(df)
     # raw post-race + un-rolled per-run columns must not survive
     for leaked in ("atr_sectional_speeds", "atr_official_position", "atr_in_running_comment",
@@ -201,8 +206,8 @@ def test_raw_and_perrun_dropped(monkeypatch):
     assert "has_atr_history" in out.columns
 
 
-def test_upcoming_race_gets_history_features(monkeypatch):
-    df = _make_history(monkeypatch)
+def test_upcoming_race_gets_history_features(monkeypatch, publish_dataset):
+    df = _make_history(monkeypatch, publish_dataset)
     out = fe.add_atr_features(df)
     upcoming = out[out["race_id"] == "r9"].iloc[0]
     # the live/upcoming row has no own sectionals but inherits rolled history

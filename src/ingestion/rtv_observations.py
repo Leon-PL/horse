@@ -18,7 +18,7 @@ from src import rtv_text
 from src.ingestion.pipeline import match_runners, canonical_rows
 from src.utils import canonical_track_key, normalise_horse_key
 from src.wf_eval import purge_days
-from src.ingestion.rtv_storage import accepted_days, partition_paths
+from src.ingestion.rtv_storage import accepted_days, native_path, partition_paths
 from src.ingestion.storage import atomic_json, atomic_parquet, writer_lock
 
 logger = logging.getLogger(__name__)
@@ -131,17 +131,17 @@ def _refresh_run_observations(start, end, *, database=None, source_root=None, de
     path = Path(destination) if destination is not None else directory/"runs.parquet"
     card_path = (Path(cards_destination) if cards_destination is not None else
                  Path(destination).with_name(Path(destination).stem+"_cards.parquet") if destination is not None else directory/"cards.parquet")
-    output = _merge_dated(output, path, start, end, "run", previous_path=features.runs_path() if destination is None else path)
-    cards = _merge_dated(cards, card_path, start, end, "card", previous_path=features.cards_path() if destination is None and cards_destination is None else card_path)
+    output = _merge_dated(output, path, start, end, "run", previous_path=native_path("runs") if destination is None else path)
+    cards = _merge_dated(cards, card_path, start, end, "card", previous_path=native_path("cards") if destination is None and cards_destination is None else card_path)
     receipt = {"runs": len(output), "horses": int(output.horse_id.nunique()), "cards": len(cards), "path": str(path)}
     if destination is None:
         # Card text, then comment scores for the window; a new quarter's model is fitted once.
         text = rtv_text.build_text_observations(tables["races"], tables["runners"], links)
         text_path = directory/"text.parquet"
-        _merge_dated(text, text_path, start, end, "text", previous_path=rtv_text.text_path())
+        _merge_dated(text, text_path, start, end, "text", previous_path=native_path("text"))
         ensure_text_models(max(pd.Timestamp(end), pd.Timestamp(date.today())), database=database, text_source=text_path)
         receipt.update(refresh_text_scores(start, end, database=database, text_source=text_path,
-                                          destination=directory/"scores.parquet", previous_path=rtv_text.scores_path()))
+                                          destination=directory/"scores.parquet", previous_path=native_path("scores")))
         files = {name: (relative/(name+".parquet")).as_posix() for name in ("runs", "cards", "text", "scores")}
         receipt["files"] = files
         if publish:
@@ -166,7 +166,7 @@ def _starters(start, end, database=None):
 def _text_rows(start, end, database=None, *, text_source=None):
     """Every SL starter in [start, end] with its card text, prepared and sorted by date and race."""
     field = _starters(start, end, database)
-    path = Path(text_source or rtv_text.text_path())
+    path = Path(text_source or native_path("text"))
     columns = ["race_id", "horse_id", "tf_comment", "tf_verdict"]
     text = pd.read_parquet(path, filters=[("race_date", ">=", start), ("race_date", "<=", end)]) if path.exists() else pd.DataFrame(columns=columns+["race_date"])
     text = text.loc[text.race_date.between(start, end), columns]
@@ -220,7 +220,7 @@ def refresh_text_scores(start, end, *, database=None, text_source=None, destinat
             parts.append(rows.assign(rtv_text_logit=model.logits(rows),
                                      rtv_verdict_rank=rows.verdict_rank.astype("float64"))[columns])
     output = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
-    output = _merge_dated(output, Path(destination or rtv_text.scores_path()), start, end, "text score", previous_path=previous_path)
+    output = _merge_dated(output, Path(destination or native_path("scores")), start, end, "text score", previous_path=previous_path)
     return {"text_scores": len(output)}
 
 
@@ -234,7 +234,7 @@ def refresh_text_history(start=rtv_text.START, end=None, *, database=None, sourc
         links = match_runners(tables["races"], tables["runners"], canonical_rows(lo, hi, db_path=database))
         chunks.append(rtv_text.build_text_observations(tables["races"], tables["runners"], links))
         logger.info("Card text %s: %d linked starters", year, len(chunks[-1]))
-    text = _merge_dated(pd.concat(chunks, ignore_index=True), rtv_text.text_path(), start, end, "text")
+    text = _merge_dated(pd.concat(chunks, ignore_index=True), native_path("text"), start, end, "text")
     fitted = ensure_text_models(date.today(), database=database)
     return {"text": len(text), "models": fitted, **refresh_text_scores(start, end, database=database)}
 
@@ -313,7 +313,7 @@ def refresh_pre_observations(day=None, *, raw_path=None, destination=None):
         output = output.groupby(keys+["observed_at"], as_index=False)[snapshot].first()
         output = output.sort_values("observed_at", kind="stable")
         output[snapshot] = output.groupby(keys)[snapshot].ffill()
-    path = Path(destination or features.pre_path())
+    path = Path(destination or native_path("pre"))
     if day and path.exists():
         previous = pd.read_parquet(path)
         output = pd.concat([previous.loc[previous.race_date.ne(day)], output], ignore_index=True)

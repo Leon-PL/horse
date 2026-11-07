@@ -2511,144 +2511,43 @@ def add_atr_features(df: pd.DataFrame) -> pd.DataFrame:
     energy distribution, stride, sectional-adjusted placing and the in-running
     comment).  See :mod:`src.atr_features` for the per-run derivations.
 
-    **Leakage prevention**: the raw ``atr_*`` columns are
-    *post-race outcomes*.  We turn each run into per-run scalars/tags, roll
-    them over the horse's PRIOR runs only (``_rolling`` → ``shift(1)``), then
-    **drop every raw/per-run column** so nothing from the current race reaches
-    the model.
+    **Leakage prevention**: the selected dataset's ATR rows are *post-race
+    outcomes*.  :func:`src.atr_features.published_atr_rolling` turns each run
+    into per-run scalars and tags, joined by saved race and horse IDs, and
+    rolls them over the horse's PRIOR starts whose observations were
+    available at the decision.  Every raw/per-run column is then dropped, so
+    nothing from the current race reaches the model.
 
     Feature families: (1) in-running comment rates, (2) cleaned sectional
     upgrade, (3) early-pace / closing run-style (feeds ``add_pace_style``),
     (4) closing speed "in hand", (5) stride biomechanics + energy efficiency.
     """
-    from src.atr_features import merge_atr_sectionals, ALL_ATR_COLS
-    from src.atr_features import compute_atr_run_features, RUN_METRICS, COMMENT_TAGS
-    from src.source_dataset import current_manifest
-
-    if current_manifest() is not None:
-        from src.atr_features import published_atr_rolling
-        new = published_atr_rolling(df)
-        race_ids = df.race_id
-        for metric, _ in RUN_METRICS:
-            column = f"{metric}_avg_3"
-            if column in new:
-                values = pd.Series(new[column], index=df.index)
-                new[f"{column}_vs_field"] = (values - values.groupby(race_ids).transform("mean")).to_numpy()
-        # These unused legacy composites depended on batch-wide statistics.
-        # Field-relative scaling is causal and invariant to chunk boundaries.
-        zscores = []
-        for column in ("atr_max_speed_avg_3", "atr_finishing_speed_pct_avg_3"):
-            values = pd.Series(new.get(column, np.nan), index=df.index)
-            deviation = values.groupby(race_ids).transform("std")
-            zscores.append((values-values.groupby(race_ids).transform("mean")) / deviation.where(deviation.gt(0)))
-        new["atr_speed_score"] = ((zscores[0]+zscores[1])/2).to_numpy()
-        from src.track_config import get_track_config
-        circumference = pd.to_numeric(df.track.map(lambda track: get_track_config(track).get("circumference_f", np.nan)), errors="coerce")
-        # Circumference in miles is a fixed physical scale. Normalising a
-        # race's course against its own field would make every value missing.
-        new["atr_stride_x_gallop"] = np.asarray(new.get("atr_peak_stride_length_avg_3", np.nan)) * (circumference/8.).to_numpy()
-        new["has_atr_history"] = pd.notna(new.get("atr_finishing_speed_pct_avg_3", np.full(len(df), np.nan))).astype(np.int8)
-        raw = set(ALL_ATR_COLS) | {name for name, _ in RUN_METRICS} | set(COMMENT_TAGS) | {"atr_closing_in_hand"}
-        return _with_columns(_without(df, [c for c in raw if c in df]), pd.DataFrame(new, index=df.index))
+    from src.atr_features import ALL_ATR_COLS, COMMENT_TAGS, RUN_METRICS, published_atr_rolling
 
     logger.info("Engineering ATR sectional features...")
-
-    df = merge_atr_sectionals(df)
-
-    # ── Per-run scalars + comment tags (current race; rolled below) ──
-    # Concat in one shot, replacing the raw passthrough columns that
-    # compute_atr_run_features re-emits (avoids duplicate columns and the
-    # block-fragmentation that many single-column inserts would cause).
-    run = compute_atr_run_features(df)
-    df = _without(df, [c for c in run.columns if c in df.columns])
-    df = _with_columns(df, run)
-
-    hkey = _horse_key(df)
-    race_ids = df["race_id"] if "race_id" in df.columns else None
-    # Accumulate all output columns here, then attach in a single concat.
-    new: dict[str, np.ndarray] = {}
-
-    # ── Roll continuous ability/style metrics over prior runs ────
-    for metric, hib in RUN_METRICS:
-        if metric not in df.columns:
-            continue
-        short = metric.replace("atr_", "")
-        ops = [
-            (f"atr_{short}_avg_3", "mean", 3),
-            (f"atr_{short}_avg_5", "mean", 5),
-            (f"atr_{short}_best_3", "max" if hib else "min", 3),
-        ]
-        new.update(_rolling(df, hkey, metric, ops))
-        a3, a5 = f"atr_{short}_avg_3", f"atr_{short}_avg_5"
-        if a3 in new and a5 in new:
-            new[f"atr_{short}_trend"] = np.asarray(new[a3]) - np.asarray(new[a5])
-
-    # ── Closing speed "in hand" (gated finishing %) — recent average ──
-    if "atr_closing_in_hand" in df.columns:
-        new.update(_rolling(df, hkey, "atr_closing_in_hand", [
-            ("atr_closing_in_hand_avg_3", "mean", 3),
-            ("atr_closing_in_hand_avg_5", "mean", 5),
-        ]))
-
-    # ── In-running comment tag RATES over recent runs ────────────
-    # eased/comfortable are internal gating signals only, not features.
-    _internal_tags = {"atr_cmt_eased", "atr_cmt_comfortable"}
-    for tag in COMMENT_TAGS:
-        if tag not in df.columns or tag in _internal_tags:
-            continue
-        new.update(_rolling(df, hkey, tag, [
-            (f"{tag}_rate_3", "mean", 3), (f"{tag}_rate_5", "mean", 5),
-        ]))
-
-    # ── Race-relative (vs field): compares PRIOR-form averages ───
-    if race_ids is not None:
-        for metric, _hib in RUN_METRICS:
-            a3 = f"atr_{metric.replace('atr_', '')}_avg_3"
-            if a3 in new:
-                s = pd.Series(new[a3], index=df.index)
-                new[f"{a3}_vs_field"] = (s - s.groupby(race_ids).transform("mean")).to_numpy()
-
-    # ── Composite sectional speed score (z(top) + z(finish)) ─────
-    ms, fs = "atr_max_speed_avg_3", "atr_finishing_speed_pct_avg_3"
-    if ms in new and fs in new:
-        z = []
-        for c in (ms, fs):
-            s = pd.Series(new[c], index=df.index)
-            sd = s.std()
-            z.append(((s - s.mean()) / sd).to_numpy() if sd and sd > 0 else np.zeros(len(df)))
-        new["atr_speed_score"] = (z[0] + z[1]) / 2.0
-
-    # ── Family 5: long-strider × galloping-track interaction ─────
-    if "atr_peak_stride_length_avg_3" in new and "track" in df.columns:
-        try:
-            from src.track_config import get_track_config as _gtc
-            circ = pd.to_numeric(
-                df["track"].astype(str).map(lambda t: _gtc(t).get("circumference_f", np.nan)),
-                errors="coerce",
-            )
-            sd = circ.std()
-            cz = (circ - circ.mean()) / sd if sd and sd > 0 else circ * 0.0
-            new["atr_stride_x_gallop"] = (
-                pd.Series(new["atr_peak_stride_length_avg_3"], index=df.index) * cz
-            ).to_numpy()
-        except Exception:  # pragma: no cover - track config drift
-            pass
-
-    # ── Coverage flag ────────────────────────────────────────────
-    if "atr_finishing_speed_pct_avg_3" in new:
-        new["has_atr_history"] = (~pd.isna(new["atr_finishing_speed_pct_avg_3"])).astype(np.int8)
-    else:
-        new["has_atr_history"] = np.zeros(len(df), dtype=np.int8)
-
-    # Attach all new columns in one block, then drop raw/per-run (leakage).
-    if new:
-        df = _with_columns(df, pd.DataFrame(new, index=df.index))
-    drop = [c for c in ALL_ATR_COLS if c in df.columns]
-    drop += [m for m, _ in RUN_METRICS if m in df.columns]
-    drop += [c for c in ("atr_closing_in_hand", *COMMENT_TAGS) if c in df.columns]
-    df = _without(df, list(dict.fromkeys(drop)))
-
-    return df
+    new = published_atr_rolling(df)
+    race_ids = df.race_id
+    for metric, _ in RUN_METRICS:
+        column = f"{metric}_avg_3"
+        if column in new:
+            values = pd.Series(new[column], index=df.index)
+            new[f"{column}_vs_field"] = (values - values.groupby(race_ids).transform("mean")).to_numpy()
+    # These unused legacy composites depended on batch-wide statistics.
+    # Field-relative scaling is causal and invariant to chunk boundaries.
+    zscores = []
+    for column in ("atr_max_speed_avg_3", "atr_finishing_speed_pct_avg_3"):
+        values = pd.Series(new.get(column, np.nan), index=df.index)
+        deviation = values.groupby(race_ids).transform("std")
+        zscores.append((values-values.groupby(race_ids).transform("mean")) / deviation.where(deviation.gt(0)))
+    new["atr_speed_score"] = ((zscores[0]+zscores[1])/2).to_numpy()
+    from src.track_config import get_track_config
+    circumference = pd.to_numeric(df.track.map(lambda track: get_track_config(track).get("circumference_f", np.nan)), errors="coerce")
+    # Circumference in miles is a fixed physical scale. Normalising a
+    # race's course against its own field would make every value missing.
+    new["atr_stride_x_gallop"] = np.asarray(new.get("atr_peak_stride_length_avg_3", np.nan)) * (circumference/8.).to_numpy()
+    new["has_atr_history"] = pd.notna(new.get("atr_finishing_speed_pct_avg_3", np.full(len(df), np.nan))).astype(np.int8)
+    raw = set(ALL_ATR_COLS) | {name for name, _ in RUN_METRICS} | set(COMMENT_TAGS) | {"atr_closing_in_hand"}
+    return _with_columns(_without(df, [c for c in raw if c in df]), pd.DataFrame(new, index=df.index))
 
 
 def add_pace_style_features(df: pd.DataFrame) -> pd.DataFrame:

@@ -40,16 +40,10 @@ SNAPSHOT_FEATURES = ("rtv_text_logit", "rtv_verdict_rank")
 FEATURES = SNAPSHOT_FEATURES + ("rtv_text_prob",)
 
 
-def text_path():
-    from src.ingestion.rtv_storage import materialised_path
-    from src.source_dataset import source_path
-    return source_path("rtv", "text", Path(config.RTV_FEATURE_TEXT) if hasattr(config, "RTV_FEATURE_TEXT") else materialised_path("text", Path(config.DATA_DIR)/"rtv_cache/feature_text.parquet"))
-
-
 def scores_path():
-    from src.ingestion.rtv_storage import materialised_path
+    """The selected dataset's history comment scores."""
     from src.source_dataset import source_path
-    return source_path("rtv", "scores", Path(config.RTV_FEATURE_TEXT_SCORES) if hasattr(config, "RTV_FEATURE_TEXT_SCORES") else materialised_path("scores", Path(config.DATA_DIR)/"rtv_cache/feature_text_scores.parquet"))
+    return source_path("rtv", "scores")
 
 
 def models_dir():
@@ -288,8 +282,9 @@ def _scores_table(scores):
 
 @lru_cache(maxsize=2)
 def _cached_scores(path, modified, size):
+    # The path names one immutable version of the selected dataset's table.
     from src.source_dataset import model_table
-    return _scores_table(model_table("rtv", "scores", path))
+    return _scores_table(model_table("rtv", "scores"))
 
 
 def replaced_columns(frame, stale, output):

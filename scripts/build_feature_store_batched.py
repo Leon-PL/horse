@@ -53,7 +53,6 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config
-from src.atr_features import atr_merge_scope
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore, _stringify_objects
@@ -320,7 +319,7 @@ def _build(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processe
     rating_wait = 0.0
     finishing = None
     last_date = rd.max()
-    with _helper_processes(len(processed) >= HELPERS_MIN_ROWS) as (rater, finisher), atr_merge_scope(), \
+    with _helper_processes(len(processed) >= HELPERS_MIN_ROWS) as (rater, finisher), \
             closing(_StoreTail(parts_dir, counts_state)) as tail, \
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="store-inputs") as input_writer:
         saving_inputs = input_writer.submit(copy_context().run, _save_inputs, store, processed, last_date)
@@ -401,8 +400,7 @@ def _build(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processe
         "fe_signature": fe_sig_at_start,
         **input_signatures,
     }
-    if current_manifest() is not None:
-        meta["dataset_manifest"] = current_manifest()
+    meta["dataset_manifest"] = current_manifest()
     from src.prize_currency_features import reference_signature
     meta["prize_reference_signature"] = reference_signature()
     if reused_ratings:

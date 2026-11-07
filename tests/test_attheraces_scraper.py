@@ -295,8 +295,9 @@ class TestTrackExclusion:
         assert summary["fetched_races"] == 0
 
 
-class TestMerge:
-    def test_merge_round_trip(self, tmp_path, monkeypatch):
+class TestCacheAndPublication:
+    def test_cache_round_trip_and_publication_links_by_runner(self, tmp_path, monkeypatch, publish_dataset):
+        from src.source_dataset import read_table
         cache = pd.DataFrame([{
             "race_date": "2026-06-10", "track": "Kempton", "off_time": "18:10",
             "horse_name": "Moonshine", "atr_final_time": 72.98,
@@ -313,28 +314,25 @@ class TestMerge:
         reloaded = atr.load_atr_cache()
         assert reloaded["atr_split_times"].iloc[0] == json.dumps([14.68, 11.20])
 
-        results = pd.DataFrame([
-            {"race_date": "2026-06-10", "track": "kempton", "off_time": "1810",
-             "horse_name": "moonshine"},                       # normalises to match
-            {"race_date": "2026-06-10", "track": "Kempton", "off_time": "18:10",
-             "horse_name": "Ghost Runner"},                    # no match -> NaN
+        # Publication links the collector's name-keyed row to its canonical runner.
+        canonical = pd.DataFrame([
+            {"race_id": "r1", "horse_id": 1, "race_date": "2026-06-10", "track": "Kempton",
+             "off_time": "18:10", "horse_name": "Moonshine"},
+            {"race_id": "r1", "horse_id": 2, "race_date": "2026-06-10", "track": "Kempton",
+             "off_time": "18:10", "horse_name": "Ghost Runner"},
         ])
-        merged = atr_features.merge_atr_sectionals(results)
-        assert merged.loc[0, "atr_final_time"] == pytest.approx(72.98)
-        assert merged.loc[0, "atr_efficiency_grade"] == "C"
-        assert math.isnan(merged.loc[1, "atr_final_time"])
-        # Every advertised column is present after merge.
-        for col in atr.ALL_ATR_COLS:
-            assert col in merged.columns
+        publish_dataset(canonical, atr={"sectionals": reloaded})
+        linked = read_table("atr", "sectionals", linked=True)
+        assert linked.match_status.tolist() == ["matched"]
+        assert linked[["sl_race_id", "sl_horse_id"]].astype(str).values.tolist() == [["r1", "1"]]
+        assert linked.loc[0, "atr_final_time"] == pytest.approx(72.98)
+        assert linked.loc[0, "atr_efficiency_grade"] == "C"
 
-    def test_merge_empty_cache(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(atr, "ATR_CACHE_FILE", str(tmp_path / "missing.parquet"))
-        monkeypatch.setattr(atr_tabs, 'ATR_CACHE_FILE', str(tmp_path / "missing.parquet"))
+    def test_dataset_without_atr_gives_missing_history(self):
         results = pd.DataFrame([
-            {"race_date": "2026-06-10", "track": "Kempton", "off_time": "18:10",
-             "horse_name": "Moonshine"},
+            {"race_id": "r1", "horse_id": 1, "race_date": "2026-06-10", "track": "Kempton",
+             "off_time": "18:10", "horse_name": "Moonshine"},
         ])
-        merged = atr_features.merge_atr_sectionals(results)
-        for col in atr.ALL_ATR_COLS:
-            assert col in merged.columns
-        assert math.isnan(merged.loc[0, "atr_final_time"])
+        rolled = atr_features.published_atr_rolling(results)
+        assert math.isnan(rolled["atr_finishing_speed_pct_avg_3"][0])
+        assert rolled["atr_observation_count_5"][0] == 0

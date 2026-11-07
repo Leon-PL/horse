@@ -151,20 +151,29 @@ def _feature_store(deep: bool = True) -> dict:
         db_latest = get_latest_date()
     except Exception:  # pragma: no cover - reported by the database probe
         pass
-    if deep and meta.get("last_date"):
-        # Recompute from the database: catches a backfill beneath the store.
-        # process_data() alone reads the published snapshot, which can still be old
-        # after a DB repair or an interrupted snapshot publication.
-        from src.data_processor import load_database_history, process_data
-        live_data_sig = data_signature(process_data(df=load_database_history()), cutoff=meta["last_date"])
-    atr = meta.get("atr_signature")
-    if isinstance(atr, dict) and atr.get("cutoff"):
-        from src.feature_inputs import atr_cache_signature
-        atr_now = atr_cache_signature(atr["cutoff"])
-    from src.featured_dataset import _rtv_signature
-    rtv_now = _rtv_signature(meta["last_date"]) if meta.get("last_date") else None
+    # Compare against the dataset the next refresh would select.
+    from src.source_dataset import committed_dataset, use_manifest
+    dataset = committed_dataset()
+    rtv_now = None
+    if dataset is not None:
+        with use_manifest(dataset):
+            if deep and meta.get("last_date"):
+                # Recompute from the database: catches a backfill beneath the store.
+                # process_data() alone reads the published snapshot, which can still be old
+                # after a DB repair or an interrupted snapshot publication.
+                from src.data_processor import load_database_history, process_data
+                live_data_sig = data_signature(process_data(df=load_database_history()), cutoff=meta["last_date"])
+            atr = meta.get("atr_signature")
+            if isinstance(atr, dict) and atr.get("cutoff"):
+                from src.feature_inputs import atr_cache_signature
+                atr_now = atr_cache_signature(atr["cutoff"])
+            from src.featured_dataset import _rtv_signature
+            rtv_now = _rtv_signature(meta["last_date"]) if meta.get("last_date") else None
     state, notes = store_findings(meta, live_fe_sig=live_sig, db_latest=db_latest,
                                   live_data_sig=live_data_sig, atr_now=atr_now, rtv_now=rtv_now)
+    if dataset is None:
+        state = BAD
+        notes.append("no committed source dataset -> python -m src.ingestion --publish-sources")
     behind = _days_behind(meta.get("last_date"))
     return {
         "state": state,

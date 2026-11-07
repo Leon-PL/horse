@@ -68,12 +68,18 @@ def prepare(_args, only: list[str] | None = None) -> None:
     stale = []
     if meta["fe_signature"] != fe_signature():
         stale.append("FE code")
-    atr = meta.get("atr_signature")
-    if isinstance(atr, dict) and atr.get("cutoff") and _atr_signature(atr["cutoff"])["sig"] != atr.get("sig"):
-        stale.append("ATR sectional cache")
-    rtv, current_rtv = meta.get("rtv_signature"), _rtv_signature(meta["last_date"])
-    if (rtv is not None or any(current_rtv["sig"].values())) and rtv != current_rtv:
-        stale.append("RTV observation/card cache")
+    # Compare against the dataset the next refresh would select.
+    from src.source_dataset import committed_dataset, use_manifest
+    dataset = committed_dataset() or meta.get("dataset_manifest")
+    if not meta.get("dataset_manifest") or dataset is None:
+        stale.append("store predates source publication")
+    with use_manifest(dataset or {"sources": {}}):
+        atr = meta.get("atr_signature")
+        if isinstance(atr, dict) and atr.get("cutoff") and _atr_signature(atr["cutoff"])["sig"] != atr.get("sig"):
+            stale.append("ATR sectional table")
+        rtv, current_rtv = meta.get("rtv_signature"), _rtv_signature(meta["last_date"])
+        if (rtv is not None or any(current_rtv["sig"].values())) and rtv != current_rtv:
+            stale.append("RTV observation/card table")
     if stale:
         raise SystemExit(f"The feature store is stale ({', '.join(stale)} changed beneath it); rebuild "
                          "it first (python -m scripts.build_feature_store_batched).")

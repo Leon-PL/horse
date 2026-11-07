@@ -53,14 +53,14 @@ def _off_time_to_seconds(off_time: pd.Series) -> pd.Series:
 
 
 def load_raw_data() -> pd.DataFrame:
-    """Load the published results snapshot."""
-    from src.database import read_results_snapshot, results_snapshot_path
+    """Load the selected dataset's accepted results."""
+    from src.database import read_results_snapshot
     from src.source_dataset import source_path
-    path = source_path("sl", "results", results_snapshot_path())
+    path = source_path("sl", "results")
     if not path.exists():
         raise FileNotFoundError(
-            f"No data file found at {path}. "
-            "Run data collection first: python -m src.ingestion --sync 14"
+            f"The selected source dataset has no results at {path}. "
+            "Collect and publish first: python -m src.ingestion --sync 14"
         )
 
     df = read_results_snapshot(path)
@@ -79,12 +79,11 @@ def load_database_history() -> pd.DataFrame:
 
 
 def apply_pedigree(df: pd.DataFrame) -> pd.DataFrame:
-    """Fill sire/dam/damsire (and foaled) on a results frame from the cache."""
+    """Fill sire/dam/damsire (and foaled) from the selected dataset's pedigree."""
     if "horse_id" not in df.columns:
         return df
-    from src.database import load_pedigree
-    from src.source_dataset import current_manifest, read_table
-    ped = read_table("pedigree", "horses") if current_manifest() is not None else load_pedigree()
+    from src.source_dataset import read_table
+    ped = read_table("pedigree", "horses")
     if ped.empty:
         return df
     ped["horse_id"] = ped["horse_id"].astype(str)
@@ -530,15 +529,10 @@ def process_data(df: pd.DataFrame = None) -> pd.DataFrame:
     if df is None:
         df = load_raw_data()
 
-    # Results/racecard APIs never carry breeding; fill sire/dam/damsire
-    # from the horse_pedigree backfill cache (no-op when cache is empty).
-    try:
-        df = apply_pedigree(df)
-    except Exception:
-        from src.source_dataset import current_manifest
-        if current_manifest() is not None:
-            raise  # A selected accepted input must never silently disappear.
-        logger.warning("Pedigree cache unavailable; sire/dam left as-is", exc_info=True)
+    # Results/racecard APIs never carry breeding; fill sire/dam/damsire from
+    # the selected pedigree (no-op when the dataset has none). A selected
+    # accepted input must never silently disappear, so errors propagate.
+    df = apply_pedigree(df)
 
     df = clean_data(df)
 
@@ -557,7 +551,8 @@ def process_data(df: pd.DataFrame = None) -> pd.DataFrame:
     df = encode_categorical(df)
     df = df.drop(columns=["_event_dt"], errors="ignore")
 
-    from src.source_dataset import current_manifest
-    if current_manifest() is not None:
-        df.attrs["dataset_manifest_id"] = current_manifest()["id"]
+    from src.source_dataset import require_manifest
+    manifest = require_manifest()
+    if manifest.get("id"):
+        df.attrs["dataset_manifest_id"] = manifest["id"]
     return df

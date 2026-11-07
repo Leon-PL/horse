@@ -34,20 +34,10 @@ def test_training_cli_reports_promotion_result_and_calendar_setting(monkeypatch,
 
 
 # ── CLV vs BSP ────────────────────────────────────────────────────────
-def test_compute_clv_basic(tmp_path):
+def test_compute_clv_basic(publish_prices):
     from src.clv import compute_clv
-    from src.betfair import bf_horse_key
-    from src.utils import normalise_track_key, normalise_off_time_key
 
-    bsp = pd.DataFrame({
-        "race_date": ["2025-01-01", "2025-01-01"],
-        "track_key": [normalise_track_key("Ascot"), normalise_track_key("Ascot")],
-        "off_key": [normalise_off_time_key("14:30"), normalise_off_time_key("14:30")],
-        "horse_key": [bf_horse_key("Alpha"), bf_horse_key("Bravo")],
-        "bsp": [4.0, 2.0],
-    })
-    p = tmp_path / "bsp.parquet"
-    bsp.to_parquet(p, index=False)
+    publish_prices(["Alpha", "Bravo"], [4.0, 2.0])
 
     bets = pd.DataFrame({
         "race_date": ["2025-01-01", "2025-01-01"],
@@ -57,7 +47,7 @@ def test_compute_clv_basic(tmp_path):
         "odds": [5.0, 2.0],          # Alpha beat the close (5>4); Bravo matched (2==2)
         "strategy": ["value", "value"],
     })
-    out = compute_clv(bets, bsp_path=str(p))
+    out = compute_clv(bets)
     assert out["n_matched"] == 2
     assert out["coverage"] == 1.0
     # mean CLV = mean(5/4, 2/2) = mean(1.25, 1.0) = 1.125
@@ -65,11 +55,11 @@ def test_compute_clv_basic(tmp_path):
     assert out["overall"]["pct_beat_close"] == pytest.approx(0.5)
 
 
-def test_compute_clv_no_bsp_file(tmp_path):
+def test_compute_clv_without_prices_in_the_dataset():
     from src.clv import compute_clv
     bets = pd.DataFrame({"race_date": ["2025-01-01"], "track": ["Ascot"],
                          "off_time": ["14:30"], "horse_name": ["X"], "odds": [3.0]})
-    out = compute_clv(bets, bsp_path=str(tmp_path / "missing.parquet"))
+    out = compute_clv(bets)
     assert out["bsp_available"] is False
     assert out["n_matched"] == 0
 

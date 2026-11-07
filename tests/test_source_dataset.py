@@ -67,9 +67,10 @@ def test_write_failure_keeps_pointer_and_prior_observations(sources, monkeypatch
 
 def test_missing_selected_source_stays_missing(sources):
     with datasets.use_manifest(datasets.save_manifest({})):
-        fallback = sources/"late.parquet"
-        pd.DataFrame({"value": [99]}).to_parquet(fallback)
-        assert not datasets.source_path("rtv", "runs", fallback).exists()
+        assert not datasets.source_path("rtv", "runs").exists()
+        assert datasets.read_table("rtv", "runs").empty
+    with pytest.raises(RuntimeError, match="No source dataset is selected"):
+        datasets.source_path("rtv", "runs")
 
 
 def test_parent_and_spawned_workers_read_the_same_version(sources):
@@ -190,8 +191,8 @@ def test_failed_optional_adoption_preserves_accepted_version(sources):
 
 
 def test_missing_frozen_prices_never_fall_back_to_live_cache(sources, monkeypatch):
-    from src import source_prices
-    monkeypatch.setattr(source_prices, "native_load_bsp", lambda *a: pytest.fail("Read live prices"))
+    from src import betfair, source_prices
+    monkeypatch.setattr(betfair, "load_bsp", lambda *a: pytest.fail("Read live prices"))
     with datasets.use_manifest(datasets.save_manifest({})):
         result = source_prices.attach_bsp(canonical(), cols=("bsp",))
     assert result.bsp.isna().all()
@@ -280,12 +281,16 @@ def test_frame_id_selects_inputs_for_direct_feature_or_append_calls(sources, mon
     assert datasets.current_manifest() is None
 
 
-def test_explicit_unversioned_frames_do_not_start_collection(sources, monkeypatch):
+def test_explicit_unversioned_frames_use_the_committed_dataset_without_collection(sources, monkeypatch):
     monkeypatch.setattr(datasets, "capture_dataset", lambda **kwargs: pytest.fail("Captured a research frame"))
     @datasets.dataset_build
     def consume(df):
         return datasets.current_manifest()
-    assert consume(pd.DataFrame({"value": [1]})) is None
+    with pytest.raises(RuntimeError, match="No committed source dataset"):
+        consume(pd.DataFrame({"value": [1]}))
+    manifest = datasets.save_manifest(committed_sources())
+    assert consume(pd.DataFrame({"value": [1]}))["id"] == manifest["id"]
+    assert datasets.current_manifest() is None
 
 
 def committed_sources():
@@ -331,28 +336,25 @@ def test_retained_observations_are_relinked_after_canonical_namesake_repair(sour
     assert kept.sl_horse_id.isna().all()
 
 
-def test_versioned_store_refuses_an_unversioned_direct_append(sources):
+def test_direct_append_without_a_committed_dataset_changes_nothing(sources):
     from src.feature_store import FeatureStore
     from src.store_refresh import append_current_store
     store = FeatureStore(str(sources/"store"))
     path = sources/"store/meta.json"
     path.write_text(json.dumps({"dataset_manifest": {"id": "prior-version"}}))
     original = path.read_bytes()
-    assert not append_current_store(canonical(), store=store)
-    assert store._rebuild_reason == "unversioned_input_for_versioned_store"
+    with pytest.raises(RuntimeError, match="No committed source dataset"):
+        append_current_store(canonical(), store=store)
     assert path.read_bytes() == original
 
 
-def test_invalid_prices_do_not_inflate_clv_coverage(sources):
+def test_invalid_prices_do_not_inflate_clv_coverage(sources, publish_prices):
     from src.clv import compute_clv
     names = ["Alpha", "Bravo", "Charlie", "Delta"]
-    prices = pd.DataFrame({"race_date": ["2025-01-01"]*4, "track_key": ["ascot"]*4,
-        "off_key": ["12:00"]*4, "horse_key": [name.lower() for name in names], "bsp": ["4", "bad", "0", "inf"]})
-    path = sources/"prices.parquet"
-    prices.to_parquet(path)
+    publish_prices(names, ["4", "bad", "0", "inf"], off_time="12:00")
     bets = pd.DataFrame({"race_date": ["2025-01-01"]*4, "track": ["Ascot"]*4,
         "off_time": ["12:00"]*4, "horse_name": names, "odds": [5., 2., 3., 4.]})
-    result = compute_clv(bets, bsp_path=str(path))
+    result = compute_clv(bets)
     assert result["n_matched"] == 1
     assert result["coverage"] == 0.25
 

@@ -41,6 +41,23 @@ def materialised_path(name, fallback):
     return base/relative if relative else Path(fallback)
 
 
+#: Materialised tables that source publication adopts as the ``rtv`` source.
+FEATURE_TABLES = ("runs", "pre", "cards", "scores", "text")
+_OVERRIDES = {"runs": "RTV_FEATURE_RUNS", "pre": "RTV_FEATURE_PRE", "cards": "RTV_FEATURE_CARDS",
+              "scores": "RTV_FEATURE_TEXT_SCORES", "text": "RTV_FEATURE_TEXT"}
+_DEFAULTS = {"runs": "feature_runs.parquet", "pre": "feature_pre.parquet", "cards": "feature_cards.parquet",
+             "scores": "feature_text_scores.parquet", "text": "feature_text.parquet"}
+
+
+def native_path(name):
+    """The collector's copy of one materialised table. Features read its published version."""
+    if hasattr(config, _OVERRIDES[name]):
+        return Path(getattr(config, _OVERRIDES[name]))
+    default = root()/_DEFAULTS[name]
+    # Pre-race snapshots are appended in place; the others belong to a generation.
+    return default if name == "pre" else materialised_path(name, default)
+
+
 def partition_paths(directory, start=None, end=None):
     """Read old explicit ranges as well as quarters, newest replacement first."""
     paths = []

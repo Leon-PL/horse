@@ -8,9 +8,9 @@ for a real, durable edge, so the training pipeline reports CLV alongside
 calibration (Brier/log-loss) and backtest ROI.
 
 ``compute_clv`` takes a bets frame (as produced by ``bet_analysis.analyse_test_
-set``) and joins it to ``data/processed/betfair_bsp.parquet`` on the shared
-merge keys (``src/utils`` track/off-time keys + ``src/betfair`` horse key), then
-summarises CLV overall and per strategy. Bets whose race has no BSP row (e.g.
+set``) and joins it to the selected dataset's ``betfair/bsp`` table through
+``src.source_prices`` (saved canonical IDs; one shared rule for runners that
+only have names), then summarises CLV overall and per strategy. Bets whose race has no BSP row (e.g.
 Irish-only races, or dates beyond BSP coverage) are excluded from the CLV
 denominator and reported as ``coverage``.
 """
@@ -18,23 +18,11 @@ denominator and reported as ``coverage``.
 from __future__ import annotations
 
 import logging
-import os
 
 import numpy as np
 import pandas as pd
 
-import config
-from src.betfair import bf_horse_key
-from src.utils import normalise_off_time_key, normalise_track_key
-
 logger = logging.getLogger(__name__)
-
-BSP_PATH = os.path.join(config.PROCESSED_DATA_DIR, "betfair_bsp.parquet")
-
-
-def _race_date_str(s: pd.Series) -> pd.Series:
-    dt = pd.to_datetime(s, errors="coerce")
-    return dt.dt.strftime("%Y-%m-%d")
 
 
 def summarise_clv(clv) -> dict:
@@ -75,57 +63,39 @@ def summarise_clv(clv) -> dict:
 _summarise = summarise_clv
 
 
-def compute_clv(
-    bets: pd.DataFrame,
-    ref_df: pd.DataFrame | None = None,
-    *,
-    bsp_path: str | None = None,
-) -> dict:
-    """Summarise closing-line value of *bets* against Betfair BSP.
+def compute_clv(bets: pd.DataFrame, ref_df: pd.DataFrame | None = None) -> dict:
+    """Summarise closing-line value of *bets* against the selected dataset's BSP.
 
     Args:
-        bets: bets frame with at least ``race_date``, ``horse_name``, ``odds``
-            and (``track`` or ``track_key``); ``strategy`` and ``off_time`` are
-            used when present. ``race_id`` lets us recover ``off_time`` from
-            *ref_df* when the bets frame lacks it.
+        bets: bets frame with ``odds`` and either ``race_id`` + ``horse_id``
+            or ``race_date``, ``horse_name``, ``off_time`` and (``track`` or
+            ``track_key``); ``strategy`` is used when present. ``race_id`` lets
+            us recover ``off_time`` from *ref_df* when the bets frame lacks it.
         ref_df: optional frame (e.g. the featured/test set) carrying
             ``race_id`` + ``off_time`` so the off-time key can be filled in.
-        bsp_path: override the BSP parquet location (defaults to the store).
 
     Returns:
         ``{"overall": {...}, "by_strategy": {name: {...}}, "coverage": float,
         "n_bets": int, "n_matched": int, "bsp_available": bool}``.
     """
-    from src.source_dataset import source_path
-    path = bsp_path or source_path("betfair", "bsp", BSP_PATH)
+    from src.source_dataset import read_table, source_path
+    from src.source_prices import attach_bsp
     out: dict = {"n_bets": int(len(bets)), "n_matched": 0, "coverage": 0.0,
-                 "bsp_available": os.path.exists(path), "overall": {}, "by_strategy": {}}
+                 "bsp_available": source_path("betfair", "bsp").exists(), "overall": {}, "by_strategy": {}}
     if bets is None or bets.empty or not out["bsp_available"] or "odds" not in bets.columns:
         return out
 
     b = bets.copy()
-    b["_rd"] = _race_date_str(b["race_date"])
-
     # off_time: prefer the bets frame, else map race_id -> off_time from ref_df.
     if "off_time" not in b.columns and ref_df is not None and "off_time" in ref_df.columns \
             and "race_id" in b.columns and "race_id" in ref_df.columns:
         off_map = ref_df.drop_duplicates("race_id").set_index("race_id")["off_time"]
         b["off_time"] = b["race_id"].map(off_map)
-
-    b["_tk"] = b["track_key"] if "track_key" in b.columns else b.get("track", "").map(normalise_track_key)
-    b["_ok"] = b["off_time"].map(normalise_off_time_key) if "off_time" in b.columns else ""
-    b["_hk"] = b["horse_name"].map(bf_horse_key)
-
-    from src.source_dataset import current_manifest, read_table
-    from src.source_prices import attach_bsp
-    bsp = (read_table("betfair", "bsp", linked=True) if current_manifest() is not None and bsp_path is None
-           else pd.read_parquet(path))
-    if "track" not in bsp and "track_key" in bsp:
-        bsp["track"] = bsp.track_key
     if "track" not in b:
         b["track"] = b["track_key"]
     if "off_time" not in b:
         b["off_time"] = ""
+    bsp = read_table("betfair", "bsp", linked=True)
     merged = attach_bsp(b.drop(columns="bsp", errors="ignore"), bsp, cols=("bsp",))
     numeric_bsp = pd.to_numeric(merged.bsp, errors="coerce")
     merged["bsp"] = numeric_bsp.where(np.isfinite(numeric_bsp) & numeric_bsp.gt(1.0))

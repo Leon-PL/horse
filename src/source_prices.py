@@ -1,21 +1,24 @@
-"""Evaluation prices selected by the training manifest, with persisted links.
+"""Evaluation prices from the selected dataset, attached by saved runner links.
 
-The collector's native price matcher stays unchanged while its backfill runs.
-Research callers without a manifest retain the explicit native-cache interface.
+Model fitting (the BSP teacher) and CLV read only the selected dataset's
+``betfair`` tables. Prices join by canonical race and horse ID; a target with
+only names is first resolved to IDs by the shared identity rule. The
+collector's own name matcher (``src.betfair.attach_bsp``) is not used here.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from src.betfair import attach_bsp as native_attach_bsp, load_bsp as native_load_bsp
 from src.source_dataset import current_manifest, read_table, source_path
 from src.source_contracts import _ids, resolve_runners
 
+PRICE_COLUMNS = ("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_last")
+_LINKS = ("sl_race_id", "sl_horse_id", "match_status")
 
-def load_bsp(path=None):
-    if path is not None or current_manifest() is None:
-        return native_load_bsp(path)
+
+def load_bsp():
+    """The selected dataset's linked BSP rows, or None when it has none."""
     frame = read_table("betfair", "bsp", linked=True)
     return frame if not frame.empty else None
 
@@ -45,19 +48,22 @@ def _canonical_target_keys(frame, options):
     return resolved
 
 
-def attach_bsp(df, bsp=None, *, cols=("bsp", "ltp_preoff", "ltp_60s", "ltp_300s", "ltp_last"), overwrite=False, **kwargs):
+def attach_bsp(df, bsp=None, *, cols=PRICE_COLUMNS, overwrite=False, **kwargs):
+    """Add *cols* from linked price rows; unmatched runners get NaN.
+
+    *bsp* defaults to the selected dataset's BSP table. A supplied frame must
+    carry its saved links (``sl_race_id``, ``sl_horse_id``, ``match_status``).
+    """
+    if not overwrite and set(cols) & set(df):
+        raise ValueError("attach_bsp would replace existing columns")
     bsp = load_bsp() if bsp is None else bsp
-    if bsp is None and current_manifest() is not None:
-        if not overwrite and set(cols) & set(df):
-            raise ValueError("attach_bsp would replace existing columns")
-        out = df.copy()
+    out = df.copy()
+    if bsp is None or bsp.empty:
         for column in cols:
             out[column] = np.nan
         return out
-    if bsp is None or not {"sl_race_id", "sl_horse_id", "match_status"}.issubset(bsp):
-        return native_attach_bsp(df, bsp, cols=cols, overwrite=overwrite, **kwargs)
-    if not overwrite and set(cols) & set(df):
-        raise ValueError("attach_bsp would replace existing columns")
+    if not set(_LINKS).issubset(bsp):
+        raise ValueError("Prices must carry their saved runner links (sl_race_id, sl_horse_id, match_status)")
     source = bsp.loc[bsp.match_status.eq("matched"), ["sl_race_id", "sl_horse_id", *cols]].copy()
     keys = ["sl_race_id", "sl_horse_id"]
     for key in keys:
@@ -70,9 +76,10 @@ def attach_bsp(df, bsp=None, *, cols=("bsp", "ltp_preoff", "ltp_60s", "ltp_300s"
     else:
         left = _canonical_target_keys(df, kwargs)
         if left is None:
-            return native_attach_bsp(df, pd.DataFrame(), cols=cols, overwrite=overwrite, **kwargs)
+            for column in cols:
+                out[column] = np.nan
+            return out
     joined = left.merge(source, on=keys, how="left", validate="many_to_one")
-    out = df.copy()
     for column in cols:
         out[column] = joined[column].to_numpy() if column in joined else np.nan
     return out

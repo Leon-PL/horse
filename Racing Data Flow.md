@@ -44,9 +44,14 @@ Their publication and consumer-selection rules are shared.
 | Fit and evaluate | src/training.py, src/source_prices.py, src/clv.py | Candidate run with exact feature-source and Betfair versions |
 | Predict | src/live_prediction.py | Selected inputs for the whole card calculation; decision-time snapshot checks |
 
-Explicitly supplied research/test frames retain their direct-input interface.
-Ordinary processing without a supplied frame, training refreshes and the full
-builder use manifests. The small in-memory FeatureStore.build remains a
+Every processing, feature and price read goes through a selected dataset. No
+route reads a collector's own cache, and there is no name-joined fallback. A
+frame from `process_data()` carries its dataset ID and is replayed against it.
+A research frame without one uses the last committed dataset and never starts a
+publication; with no committed dataset the call stops and says to publish
+sources. A store built before source publication records no dataset and is
+rebuilt; live prediction refuses such a store. Tests select a small explicit
+dataset (`tests/conftest.py`). The in-memory FeatureStore.build remains a
 reference implementation for tests; the production full-build route is batched.
 
 ## Each source
@@ -104,9 +109,11 @@ back to a name.
 
 Ambiguous and unmatched observations remain available for review but supply no
 model value. Duplicate declared native identities fail validation of the
-affected candidate. Downstream ATR and ordinary training-price joins use saved
-canonical links. CLV shares the price matcher and cannot multiply bets through
-ambiguous names.
+affected candidate. Downstream ATR, RTV snapshot, training-price and CLV joins
+use saved canonical links only. A bet or target that has only names is first
+resolved to canonical IDs by the same identity rule, so CLV cannot multiply bets
+through ambiguous names. The collector's own name matcher (`src.betfair`) remains
+for collection and for research scripts that have not yet moved to IDs.
 
 ## ATR promotion
 

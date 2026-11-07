@@ -87,7 +87,8 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "ingestion.storage": "source locking, raw retention and atomic publication only",
     "ingestion.attheraces": "raw ATR collector only; observations covered by ATR content signatures",
     "ingestion.atr_jumps": "raw jumps collection only; observations covered by ATR content signatures",
-    "ingestion.rtv_storage": "resolves published source generations covered by rtv_cache_signature",
+    "ingestion.rtv_storage": "locates the collector's own RTV files for publication; features read published versions covered by rtv_cache_signature",
+    "ingestion.fx": "refreshes the committed exchange-rate reference; published FX files covered by prize_reference_signature",
     "ingestion.sporting_life": "raw-data access only; accepted observations covered by data_signature",
     "ingestion.racing_tv": "collects raw RTV payloads; published observations covered by rtv_cache_signature",
     "ingestion.betfair_history": "collects historical market files; accepted prices are raw observations fingerprinted by training/evaluation",
@@ -277,9 +278,8 @@ def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
         m = store.meta()
         m["fe_signature"] = fe_sig
         m["data_signature"] = data_sig
-        from src.source_dataset import current_manifest
-        if current_manifest() is not None:
-            m["dataset_manifest"] = current_manifest()
+        from src.source_dataset import require_manifest
+        m["dataset_manifest"] = require_manifest()
         from src.prize_currency_features import reference_signature
         m["prize_reference_signature"] = reference_signature()
         last = store.last_date()

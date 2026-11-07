@@ -1,40 +1,36 @@
-"""Fingerprints of feature inputs that live outside the results database.
+"""Fingerprints of the selected dataset's ATR and Racing TV tables.
 
-``data_signature`` hashes the processed frame, which is built from
-``data/races.db``. The ATR sectional cache (``data/atr_cache/
-atr_sectionals.parquet``) is read *inside* feature engineering instead
-(``add_atr_features`` -> ``merge_atr_sectionals``), so neither the data nor
-the FE signature saw it: a sectional backfill for dates already in the store
-left those rows' features stale with nothing reporting it - the failure class
-that produced the phantom +15% place edge (ledger 1, 13).
+``data_signature`` hashes the processed frame (results, pedigree, FX). ATR
+and Racing TV observations are read *inside* feature engineering, so neither
+that nor the FE signature saw them: a sectional backfill for dates already in
+the store left those rows' features stale with nothing reporting it - the
+failure class that produced the phantom +15% place edge (ledger 1, 13).
 
-The store's meta records ``atr_signature = {"cutoff", "sig"}`` when it is
-built, and ``scripts/project_status.py`` recomputes it. This module is
-deliberately outside the FE import graph, so it does not move
-``fe_signature``. The training refresh, ``src.store_refresh``, compares it
-before appending.
+These hash the selected dataset's tables, and their identity and timing
+sidecars, up to a cutoff. The store's meta records them when it is built;
+``src.store_refresh`` compares them before appending and
+``scripts/project_status.py`` against the last committed dataset. This module
+is deliberately outside the FE import graph, so it does not move
+``fe_signature``.
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
 from functools import lru_cache
 
 import pandas as pd
-
-import config
 
 
 def _sidecar_signature(provider, table, cutoff):
     from src.source_dataset import source_path
     path = source_path(provider, table)
-    if path is None or not path.exists():
+    if not path.exists():
         return None
     files = []
     for name in ("links_"+table, "observations_"+table):
         candidate = source_path(provider, name)
-        if candidate is not None and candidate.exists():
+        if candidate.exists():
             stat = candidate.stat()
             files.append((str(candidate), stat.st_mtime_ns, stat.st_size))
     if not files:
@@ -80,18 +76,8 @@ def rtv_cache_signature(cutoff=None) -> dict:
     """Hash only values available to the dated history; include snapshots causally."""
     from src.rtv_features import runs_path, pre_path, cards_path
     from src.rtv_text import scores_path
-    from src.ingestion.rtv_storage import pin_generation
-    from src.source_dataset import current_manifest, registry_root, use_manifest
-    from src.ingestion.storage import read_json
-    overrides = ("RTV_FEATURE_RUNS", "RTV_FEATURE_PRE", "RTV_FEATURE_CARDS", "RTV_FEATURE_TEXT_SCORES")
-    if current_manifest() is None and not any(hasattr(config, name) for name in overrides):
-        receipt = read_json(registry_root()/"rtv/latest.json")
-        if receipt:
-            with use_manifest({"sources": {"rtv": receipt}}):
-                return rtv_cache_signature(cutoff)
     output = {}
-    with pin_generation():
-        paths = (("runs", runs_path()), ("pre", pre_path()), ("cards", cards_path()), ("text", scores_path()))
+    paths = (("runs", runs_path()), ("pre", pre_path()), ("cards", cards_path()), ("text", scores_path()))
     # Cards and comment scores describe their own race, so they are hashed by race date.
     for name, path in paths:
         if not path.exists():
@@ -105,29 +91,18 @@ def rtv_cache_signature(cutoff=None) -> dict:
             output[name+"_identity_timing"] = sidecar
     return output
 
-ATR_CACHE_FILE = os.path.join(config.DATA_DIR, "atr_cache", "atr_sectionals.parquet")
-
-
-def atr_cache_signature(cutoff, path: str = ATR_CACHE_FILE) -> str | None:
-    """Content hash of the sectional cache rows dated on or before *cutoff*.
+def atr_cache_signature(cutoff) -> str | None:
+    """Content hash of the selected ATR rows dated on or before *cutoff*.
 
     Row order and column order are normalised, so rewriting the same data
     does not change it; any added, removed or edited row at or before the
-    cutoff does. ``None`` when the cache does not exist.
+    cutoff does. ``None`` when the selected dataset has no ATR table.
     """
     from src.source_dataset import source_path
-    path = source_path("atr", "sectionals", path)
-    from src.source_dataset import current_manifest, registry_root
-    from src.ingestion.storage import read_json
-    if current_manifest() is None and str(path) == ATR_CACHE_FILE:
-        receipt = read_json(registry_root()/"atr/latest.json")
-        if receipt and "sectionals" in receipt["tables"]:
-            from src.source_dataset import use_manifest
-            with use_manifest({"sources": {"atr": receipt}}):
-                return atr_cache_signature(cutoff)
-    if not os.path.exists(path):
+    path = source_path("atr", "sectionals")
+    if not path.exists():
         return None
-    stat = os.stat(path)
+    stat = path.stat()
     sidecar = _sidecar_signature("atr", "sectionals", cutoff)
     return _atr_content_signature(str(path), stat.st_mtime_ns, stat.st_size, str(cutoff), sidecar)
 

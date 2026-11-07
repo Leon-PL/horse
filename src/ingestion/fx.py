@@ -18,10 +18,19 @@ import numpy as np
 import pandas as pd
 
 import config
-from src.prize_currency_features import _paths, _read_rates
 
 logger = logging.getLogger(__name__)
 ECB_URL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.xml"
+
+
+def reference_paths():
+    """The collected reference files. Features read their published copies."""
+    base = Path(config.BASE_DIR) / "reference"
+    return base / "track_prize_currency.json", base / "ecb_gbp_per_eur.csv"
+
+
+def _read_rates(path):
+    return pd.read_csv(path, parse_dates=["observation_date"], float_precision="round_trip")
 
 
 def _atomic_text(path, text):
@@ -37,9 +46,8 @@ def _atomic_text(path, text):
 
 def _update_rates(today):
     """Fetch the public history at most once a day, when a newer rate can exist."""
-    _, path = _paths()
-    stat = path.stat()
-    rates = _read_rates(str(path), stat.st_mtime_ns, stat.st_size)
+    _, path = reference_paths()
+    rates = _read_rates(path)
     # Weekends may add no observation.
     needed = today-pd.Timedelta(days=1)
     receipt_path = Path(config.DATA_DIR) / "reference/ecb_checked.json"
@@ -68,7 +76,7 @@ def _update_rates(today):
             _atomic_text(path, fresh.to_csv(index=False, date_format="%Y-%m-%d", float_format="%.17g"))
             _atomic_text(receipt_path, json.dumps({"date": checked_day, "source_url": ECB_URL,
                 "checked_at_utc": datetime.now(timezone.utc).isoformat()}))
-            stat = path.stat(); rates = _read_rates(str(path), stat.st_mtime_ns, stat.st_size)
+            rates = _read_rates(path)
         except Exception as error:
             logger.warning("ECB update unavailable; retaining dated known reference rates: %s", error)
     return rates

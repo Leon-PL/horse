@@ -53,20 +53,32 @@ def test_full_prefix_subset_and_append_match_without_cross_horse_state():
         pd.testing.assert_frame_equal(subset[list(rtv.HISTORY_FEATURES)], full.iloc[indexes][list(rtv.HISTORY_FEATURES)], check_exact=True)
 
 
-def test_snapshot_requires_matching_event_and_pre_decision_timestamp():
-    frame = pd.DataFrame({"race_id": ["x"], "race_date": ["2025-01-03"], "track": ["Kempton Park"],
+def linked_snapshots(race_ids, horse_ids, observed_at, status="matched"):
+    """Snapshot rows as the selected dataset serves them: with their saved links."""
+    return pd.DataFrame({"sl_race_id": pd.array(race_ids, dtype="string"),
+        "sl_horse_id": pd.array(horse_ids, dtype="string"), "match_status": status, "observed_at": observed_at})
+
+
+def test_snapshot_requires_matching_runner_and_pre_decision_timestamp():
+    frame = pd.DataFrame({"race_id": ["x"], "horse_id": [1], "race_date": ["2025-01-03"], "track": ["Kempton Park"],
         "off_time": ["13:00"], "horse_name": ["Test Horse"]})
-    source = pd.DataFrame({"race_date": ["2025-01-03"]*3, "track_key": ["kempton"]*3,
-        "off_key": ["13:00"]*3, "horse_key": ["Test Horse"]*3,
-        "observed_at": ["2025-01-03T10:00:00Z", "2025-01-03T12:54:00Z", "2025-01-03T12:56:00Z"]})
+    source = linked_snapshots(["x"]*3, ["1"]*3,
+        ["2025-01-03T10:00:00Z", "2025-01-03T12:54:00Z", "2025-01-03T12:56:00Z"])
     for col in rtv.PRE_FEATURES:
         source[col] = [5., 10., 999.]
     out = rtv.add_pre_race_features(frame, observations=source, as_of="2025-01-03T12:55:00Z")
     assert out.rtv_pre_pace_position.iloc[0] == 10
     early = rtv.add_pre_race_features(frame, observations=source, as_of="2025-01-03T11:00:00Z")
     assert early.rtv_pre_pace_position.iloc[0] == 5
-    wrong = rtv.add_pre_race_features(frame.assign(off_time="14:00"), observations=source, as_of="2025-01-03T12:55:00Z")
-    assert wrong[list(rtv.PRE_FEATURES)].isna().all().all()
+    for wrong in (frame.assign(race_id="y"), frame.assign(horse_id=2)):
+        result = rtv.add_pre_race_features(wrong, observations=source, as_of="2025-01-03T12:55:00Z")
+        assert result[list(rtv.PRE_FEATURES)].isna().all().all()
+    # A snapshot whose link was not accepted supplies nothing, even by name.
+    ambiguous = source.assign(match_status="ambiguous")
+    result = rtv.add_pre_race_features(frame, observations=ambiguous, as_of="2025-01-03T12:55:00Z")
+    assert result[list(rtv.PRE_FEATURES)].isna().all().all()
+    with pytest.raises(ValueError, match="canonical links"):
+        rtv.add_pre_race_features(frame, observations=source.drop(columns="match_status"), as_of="2025-01-03T12:55:00Z")
     with pytest.raises(ValueError, match="timezone"):
         rtv.add_pre_race_features(frame, observations=source, as_of="2025-01-03 12:55")
 
@@ -102,20 +114,23 @@ def test_complete_sectionals_and_flagged_or_missing_sectors():
     assert np.isnan(incomplete.late_speed_ratio.iloc[0])
 
 
-def test_external_fingerprint_uses_availability_date_and_detects_historical_edits(tmp_path, monkeypatch):
+def select_rtv(publish_dataset, **tables):
+    """Publish Racing TV history tables (already keyed by SL IDs) and select them."""
+    from src.source_contracts import TableContract
+    return publish_dataset(rtv={name: (frame, TableContract("rtv history", ())) for name, frame in tables.items()})
+
+
+def test_external_fingerprint_uses_availability_date_and_detects_historical_edits(publish_dataset):
     from src.feature_inputs import rtv_cache_signature
-    path = tmp_path/"runs.parquet"
-    monkeypatch.setattr(rtv.config, "RTV_FEATURE_RUNS", str(path), raising=False)
-    monkeypatch.setattr(rtv.config, "RTV_FEATURE_PRE", str(tmp_path/"missing.parquet"), raising=False)
-    monkeypatch.setattr(rtv.config, "RTV_FEATURE_CARDS", str(tmp_path/"missing.parquet"), raising=False)
     runs = observations()
-    runs.to_parquet(path, index=False)
+    select_rtv(publish_dataset, runs=runs)
     first = rtv_cache_signature("2025-01-11")
+    assert first["runs"] is not None and first["pre"] is None
     runs.loc[runs.race_date.eq("2025-01-10"), "fsp"] = 999.
-    runs.to_parquet(path, index=False)
+    select_rtv(publish_dataset, runs=runs)
     assert rtv_cache_signature("2025-01-11") == first
     runs.loc[runs.race_date.eq("2025-01-01"), "fsp"] = 999.
-    runs.to_parquet(path, index=False)
+    select_rtv(publish_dataset, runs=runs)
     assert rtv_cache_signature("2025-01-11") != first
 
 
@@ -195,8 +210,7 @@ def test_card_values_parse_symbols_and_unrated_cards():
 def test_card_snapshot_wins_and_backfill_fills_only_unsnapshotted_rows():
     frame = pd.DataFrame({"race_id": ["x", "x", "live"], "horse_id": [1, 2, 3], "race_date": ["2025-01-03"]*3,
         "track": ["Kempton Park"]*3, "off_time": ["13:00"]*3, "horse_name": ["Test Horse", "Other", "Third"]})
-    snapshot = pd.DataFrame({"race_date": ["2025-01-03"], "track_key": ["kempton"], "off_key": ["13:00"],
-        "horse_key": ["Test Horse"], "observed_at": ["2025-01-03T10:00:00Z"]})
+    snapshot = linked_snapshots(["x"], ["1"], ["2025-01-03T10:00:00Z"])
     for col in rtv.SNAPSHOT_FEATURES:
         snapshot[col] = 5.
     backfill = pd.DataFrame({"race_id": ["x", "x"], "horse_id": [1, 2], "race_date": pd.to_datetime(["2025-01-03"]*2)})
@@ -213,20 +227,17 @@ def test_card_snapshot_wins_and_backfill_fills_only_unsnapshotted_rows():
     assert old.rtv_pre_pace_position.iloc[0] == 5 and old[list(rtv.CARD_FEATURES)].isna().all().all()
 
 
-def test_card_fingerprint_covers_the_race_date_itself(tmp_path, monkeypatch):
+def test_card_fingerprint_covers_the_race_date_itself(publish_dataset):
     from src.feature_inputs import rtv_cache_signature
-    path = tmp_path/"cards.parquet"
-    monkeypatch.setattr(rtv.config, "RTV_FEATURE_RUNS", str(tmp_path/"missing.parquet"), raising=False)
-    monkeypatch.setattr(rtv.config, "RTV_FEATURE_PRE", str(tmp_path/"missing.parquet"), raising=False)
-    monkeypatch.setattr(rtv.config, "RTV_FEATURE_CARDS", str(path), raising=False)
     cards = pd.DataFrame({"race_id": ["a", "b"], "horse_id": [1, 1], "race_date": pd.to_datetime(["2025-01-10", "2025-01-12"])})
     for col in rtv.CARD_FEATURES:
         cards[col] = 1.
-    cards.to_parquet(path, index=False)
+    select_rtv(publish_dataset, cards=cards)
     first = rtv_cache_signature("2025-01-10")
+    assert first["cards"] is not None and first["runs"] is None
     cards.loc[1, "rtv_card_tf_rating"] = 99.
-    cards.to_parquet(path, index=False)
+    select_rtv(publish_dataset, cards=cards)
     assert rtv_cache_signature("2025-01-10") == first
     cards.loc[0, "rtv_card_tf_rating"] = 99.
-    cards.to_parquet(path, index=False)
+    select_rtv(publish_dataset, cards=cards)
     assert rtv_cache_signature("2025-01-10") != first

@@ -8,12 +8,15 @@ from src.research.atr_rich_features import derive_run_metrics, build_prior_featu
 from test_atr_features import _make_history
 
 
-def test_efficiency_keeps_poor_finite_runs_and_selects_lowest_as_best(monkeypatch):
+def test_efficiency_keeps_poor_finite_runs_and_selects_lowest_as_best(monkeypatch, publish_dataset):
     from src import feature_engineer as fe
-    frame = _make_history(monkeypatch)
-    frame["atr_efficiency_score"] = [147., 72.7, 5.4, np.nan]
-    computed = af.compute_atr_run_features(frame)
-    assert computed.atr_efficiency_score.iloc[:3].tolist() == [147., 72.7, 5.4]
+    from src.source_dataset import read_table
+
+    def poor_runs(sectionals):
+        sectionals["atr_efficiency_score"] = [147., 72.7, 5.4]
+    frame = _make_history(monkeypatch, publish_dataset, poor_runs)
+    computed = af.compute_atr_run_features(read_table("atr", "sectionals").assign(won=0, lengths_behind=2.0))
+    assert computed.atr_efficiency_score.tolist() == [147., 72.7, 5.4]
     features = fe.add_atr_features(frame)
     latest = features.iloc[-1]
     assert latest.atr_efficiency_score_best_3 == 5.4
@@ -21,11 +24,11 @@ def test_efficiency_keeps_poor_finite_runs_and_selects_lowest_as_best(monkeypatc
     assert dict(af.RUN_METRICS)["atr_efficiency_score"] is False
 
 
-def test_efficiency_invalid_scores_and_unrated_zero_placeholders_are_unknown(monkeypatch):
-    frame = _make_history(monkeypatch)
-    frame["atr_efficiency_score"] = [0., -1., np.inf, 0.]
-    frame["atr_efficiency_grade"] = ["A++", "A", "F", None]
-    frame.loc[3, ["atr_energy_dist", "atr_optimum_energy"]] = None
+def test_efficiency_invalid_scores_and_unrated_zero_placeholders_are_unknown():
+    import pandas
+    frame = pandas.DataFrame({"atr_efficiency_score": [0., -1., np.inf, 0.],
+        "atr_efficiency_grade": ["A++", "A", "F", None],
+        "atr_energy_dist": ["[90.0, 100.0]"]*3 + [None], "atr_optimum_energy": ["[92.0, 101.0]"]*3 + [None]})
     values = af.efficiency_error_scores(frame)
     assert values[0] == 0
     assert np.isnan(values[1:]).all()

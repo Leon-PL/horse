@@ -14,15 +14,13 @@ information beyond the T-5 market (ledger 046).
 from __future__ import annotations
 
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import numba as nb
 
-import config
 from src import rtv_text
-from src.utils import canonical_track_key, normalise_horse_key, normalise_off_time_key
+from src.utils import normalise_off_time_key
 
 RUN_METRICS = ("fsp", "top_speed", "acceleration", "avg_length", "avg_frequency", "stride_range",
     "jump_index", "lengths_gained_jumping", "speed_lost", "recovery_time", "positive_jump_percentage",
@@ -61,20 +59,21 @@ SECTIONAL_BAD = {"sector_count_vs_distance", "sector_glitch", "cumulative_mismat
 
 
 def runs_path():
-    from src.ingestion.rtv_storage import materialised_path
+    """The selected dataset's prior-run observations."""
     from src.source_dataset import source_path
-    return source_path("rtv", "runs", Path(config.RTV_FEATURE_RUNS) if hasattr(config, "RTV_FEATURE_RUNS") else materialised_path("runs", Path(config.DATA_DIR)/"rtv_cache/feature_runs.parquet"))
+    return source_path("rtv", "runs")
 
 
 def pre_path():
+    """The selected dataset's pre-race snapshots."""
     from src.source_dataset import source_path
-    return source_path("rtv", "pre", Path(getattr(config, "RTV_FEATURE_PRE", Path(config.DATA_DIR)/"rtv_cache/feature_pre.parquet")))
+    return source_path("rtv", "pre")
 
 
 def cards_path():
-    from src.ingestion.rtv_storage import materialised_path
+    """The selected dataset's backfilled cards."""
     from src.source_dataset import source_path
-    return source_path("rtv", "cards", Path(config.RTV_FEATURE_CARDS) if hasattr(config, "RTV_FEATURE_CARDS") else materialised_path("cards", Path(config.DATA_DIR)/"rtv_cache/feature_cards.parquet"))
+    return source_path("rtv", "cards")
 
 
 def _number(frame, name):
@@ -363,8 +362,9 @@ def _history_observations(runs):
 
 @lru_cache(maxsize=2)
 def _cached_history(path, modified, size):
+    # The path names one immutable version of the selected dataset's table.
     from src.source_dataset import model_table
-    return _history_observations(model_table("rtv", "runs", path))
+    return _history_observations(model_table("rtv", "runs"))
 
 
 def add_history_features(frame, *, runs=None):
@@ -393,31 +393,32 @@ def add_history_features(frame, *, runs=None):
     return rtv_text.replaced_columns(frame, FEATURES, output)
 
 
-@lru_cache(maxsize=2)
-def _cached_snapshots(path, modified, size):
-    return pd.read_parquet(path)
-
-
 def add_pre_race_features(frame, *, observations=None, as_of=None):
+    """The latest snapshot captured before each runner's decision cutoff.
+
+    Snapshots join by their saved canonical race and horse IDs only. Ambiguous
+    or unmatched snapshots, and rows without IDs, supply nothing.
+    """
     output = pd.DataFrame(np.nan, index=pd.RangeIndex(len(frame)), columns=SNAPSHOT_FEATURES)
-    path = pre_path()
-    from src.source_dataset import current_manifest, read_table
-    if observations is not None:
-        observations = observations.copy()
-    elif current_manifest() is not None:
+    if observations is None:
+        from src.source_dataset import read_table
         observations = read_table("rtv", "pre", linked=True)
-    elif path.exists():
-        stat = path.stat()
-        observations = _cached_snapshots(str(path.resolve()), stat.st_mtime_ns, stat.st_size).copy(deep=False)
     else:
-        observations = pd.DataFrame()
-    required = {"track", "off_time", "horse_name", "race_date"}
+        observations = observations.copy()
+    keys = ["sl_race_id", "sl_horse_id"]
+    if not observations.empty and not {*keys, "match_status"}.issubset(observations):
+        raise ValueError("RTV snapshots must carry their canonical links (sl_race_id, sl_horse_id, match_status)")
+    required = {"race_id", "horse_id", "off_time", "race_date"}
     if not observations.empty and required.issubset(frame):
+        observations = observations.loc[observations.match_status.eq("matched")].copy()
+        for key in keys:
+            # Saved links may come back as object or pandas string columns.
+            observations[key] = observations[key].astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
         target = pd.DataFrame({"_row": np.arange(len(frame))})
         target["race_date"] = pd.to_datetime(frame.race_date).dt.strftime("%Y-%m-%d").to_numpy()
-        target["track_key"] = frame.track.map(canonical_track_key).to_numpy()
         target["off_key"] = frame.off_time.map(normalise_off_time_key).to_numpy()
-        target["horse_key"] = frame.horse_name.map(normalise_horse_key).to_numpy()
+        target["sl_race_id"] = frame.race_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
+        target["sl_horse_id"] = frame.horse_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
         cutoff = pd.to_datetime(target.race_date+" "+target.off_key, utc=True, errors="coerce")-pd.Timedelta(minutes=5)
         if "prediction_as_of" in frame:
             moment = pd.to_datetime(frame.prediction_as_of, utc=True, errors="raise").reset_index(drop=True)
@@ -427,12 +428,6 @@ def add_pre_race_features(frame, *, observations=None, as_of=None):
             raise ValueError("RTV snapshot cutoff must include a timezone")
         target["_cutoff"] = cutoff.where(cutoff.le(ceiling), ceiling)
         observations["observed_at"] = pd.to_datetime(observations.observed_at, utc=True, errors="raise")
-        keys = ["race_date", "track_key", "off_key", "horse_key"]
-        if {"sl_race_id", "sl_horse_id", "match_status"}.issubset(observations) and {"race_id", "horse_id"}.issubset(frame):
-            observations = observations.loc[observations.match_status.eq("matched")].copy()
-            target["sl_race_id"] = frame.race_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
-            target["sl_horse_id"] = frame.horse_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
-            keys = ["sl_race_id", "sl_horse_id"]
         observations = observations.loc[~observations.duplicated(keys+["observed_at"], keep=False)]
         target = target.loc[target._cutoff.notna() & ~target.duplicated(keys,keep=False)]
         joined = pd.merge_asof(target.sort_values("_cutoff"), observations.sort_values("observed_at"),
@@ -451,8 +446,9 @@ def _card_table(cards):
 
 @lru_cache(maxsize=2)
 def _cached_cards(path, modified, size):
+    # The path names one immutable version of the selected dataset's table.
     from src.source_dataset import model_table
-    return _card_table(model_table("rtv", "cards", path))
+    return _card_table(model_table("rtv", "cards"))
 
 
 def add_card_features(frame, *, cards=None):

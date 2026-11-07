@@ -243,9 +243,9 @@ def test_source_readiness_requires_all_sources_in_a_fresh_current_report(status,
     assert status._source_refresh()["state"] == (status.OK if problem is None else status.BAD)
 
 
-def test_deep_probe_fingerprints_database_even_if_snapshot_is_stale(status, monkeypatch):
+def test_deep_probe_fingerprints_database_even_if_snapshot_is_stale(status, monkeypatch, selected_dataset):
     import pandas as pd
-    from src import database, data_processor, feature_inputs, feature_store, featured_dataset
+    from src import database, data_processor, feature_inputs, feature_store, featured_dataset, source_dataset
 
     live = pd.DataFrame({name: [None] for name in database.RESULTS_SNAPSHOT_COLUMNS})
     live = live.assign(race_id="123", horse_id="456", jockey="")
@@ -273,7 +273,27 @@ def test_deep_probe_fingerprints_database_even_if_snapshot_is_stale(status, monk
     monkeypatch.setattr(data_processor, "process_data", process)
     monkeypatch.setattr(featured_dataset, "data_signature", lambda frame, cutoff: "corrected-db")
     monkeypatch.setattr(feature_inputs, "atr_cache_signature", lambda cutoff: "a1")
+    monkeypatch.setattr(source_dataset, "committed_dataset", lambda: selected_dataset)
     result = status._feature_store(deep=True)
     assert captured["processed"]
     assert result["state"] == status.BAD
     assert "data_signature" in result["detail"]
+
+
+def test_store_probe_without_a_committed_dataset_is_bad(status, monkeypatch):
+    from src import database, feature_store, featured_dataset, source_dataset
+
+    class Store:
+        def exists(self):
+            return True
+
+        def meta(self):
+            return TestStoreFindings.META.copy()
+
+    monkeypatch.setattr(feature_store, "FeatureStore", Store)
+    monkeypatch.setattr(featured_dataset, "fe_signature", lambda: "fe1")
+    monkeypatch.setattr(database, "get_latest_date", lambda: "2026-10-12")
+    monkeypatch.setattr(source_dataset, "committed_dataset", lambda: None)
+    result = status._feature_store(deep=True)
+    assert result["state"] == status.BAD
+    assert "publish-sources" in result["detail"]

@@ -204,16 +204,15 @@ def test_old_range_parts_are_readable_and_overlap_does_not_duplicate_races(tmp_p
 
 
 def test_readers_pin_one_rtv_generation(tmp_path, monkeypatch):
-    from src import rtv_features
     from src.ingestion import rtv_storage
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
     pointer = tmp_path/"rtv_cache/pipeline/generation.json"
     atomic_json(pointer, {"files": {"runs": "first/runs.parquet", "cards": "first/cards.parquet"}})
     with rtv_storage.pin_generation():
-        assert "first" in str(rtv_features.runs_path())
+        assert "first" in str(rtv_storage.native_path("runs"))
         atomic_json(pointer, {"files": {"runs": "second/runs.parquet", "cards": "second/cards.parquet"}})
-        assert "first" in str(rtv_features.cards_path())
-    assert "second" in str(rtv_features.cards_path())
+        assert "first" in str(rtv_storage.native_path("cards"))
+    assert "second" in str(rtv_storage.native_path("cards"))
 
 
 def test_failed_source_is_returned_and_saved_as_partial(tmp_path, monkeypatch):
@@ -267,7 +266,7 @@ def test_exchange_rate_refresh_fetches_once_a_day_and_publishes(tmp_path, monkey
         def __exit__(self, *args):
             return False
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(fx, "_paths", lambda: (tmp_path/"units.json", path))
+    monkeypatch.setattr(fx, "reference_paths", lambda: (tmp_path/"units.json", path))
     monkeypatch.setattr(fx, "urlopen", lambda url, timeout: requests.append(url) or Reply(document))
     report = fx.refresh_prize_references()
     assert report == {"state": "ok", "latest_observation": latest, "checked_today": True}
@@ -279,6 +278,7 @@ def test_exchange_rate_refresh_fetches_once_a_day_and_publishes(tmp_path, monkey
 def test_partial_materialisation_never_overwrites_accepted_files(tmp_path, monkeypatch):
     from src import rtv_features, rtv_text
     from src.ingestion import rtv_observations as collection
+    from src.ingestion.rtv_storage import native_path
     monkeypatch.setattr(sources.config, "DATA_DIR", str(tmp_path))
     base = tmp_path/"rtv_cache"
     base.mkdir()
@@ -302,13 +302,13 @@ def test_partial_materialisation_never_overwrites_accepted_files(tmp_path, monke
     monkeypatch.setattr(collection, "refresh_text_scores", fail)
     with pytest.raises(RuntimeError, match="interrupted"):
         collection.refresh_run_observations("2026-10-29", "2026-10-29")
-    assert pd.read_parquet(rtv_features.runs_path()).value.tolist() == [1.]
-    assert pd.read_parquet(rtv_features.cards_path()).value.tolist() == [1.]
-    assert pd.read_parquet(rtv_text.text_path()).tf_comment.tolist() == ["old"]
+    assert pd.read_parquet(native_path("runs")).value.tolist() == [1.]
+    assert pd.read_parquet(native_path("cards")).value.tolist() == [1.]
+    assert pd.read_parquet(native_path("text")).tf_comment.tolist() == ["old"]
     def finish(start, end, *, destination, **kw):
         values.assign(value=2.).to_parquet(destination, index=False)
         return {"text_scores": 1}
     monkeypatch.setattr(collection, "refresh_text_scores", finish)
     collection.refresh_run_observations("2026-10-29", "2026-10-29")
-    assert pd.read_parquet(rtv_features.runs_path()).value.tolist() == [2.]
-    assert pd.read_parquet(rtv_text.text_path()).tf_comment.tolist() == ["new"]
+    assert pd.read_parquet(native_path("runs")).value.tolist() == [2.]
+    assert pd.read_parquet(native_path("text")).tf_comment.tolist() == ["new"]
