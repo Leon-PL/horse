@@ -179,11 +179,31 @@ def test_missing_selected_source_cannot_fall_back_to_collectors(monkeypatch):
     assert values.bha_report_count_5.iloc[0] == 0 and np.isnan(values.bha_lame_last.iloc[0])
 
 
-def test_explicit_unversioned_frames_do_not_silently_read_new_sources(monkeypatch):
-    monkeypatch.setattr(features, 'load_bundle', lambda: pytest.fail('Unpinned BHA source read'))
-    with use_manifest(None):
-        values = features.add_bha_features(target())
-    assert set(features.FEATURES).issubset(values)
+def test_without_a_selected_dataset_bha_stops_instead_of_returning_empty_history(monkeypatch):
+    monkeypatch.setattr(pd, 'read_parquet', lambda *a, **k: pytest.fail('Unpinned BHA source read'))
+    with use_manifest(None), pytest.raises(RuntimeError, match='No source dataset is selected'):
+        features.add_bha_features(target())
+    with use_manifest(None), pytest.raises(RuntimeError, match='No source dataset is selected'):
+        features.cache_signature('2026-06-03')
+
+
+def test_reads_a_dataset_stored_outside_the_shared_registry(tmp_path, monkeypatch):
+    import config
+    monkeypatch.setattr(config, 'DATA_DIR', str(tmp_path/'dataset'))
+    key = ('race_id', 'horse_id')
+    sl = publish_source('sl', {'results': canonical()},
+                        contracts={'results': TableContract('canonical runner', key, key)})
+    bha = publish_source('bha', {'reports': pd.DataFrame([report()])}, contracts={'reports':
+                         TableContract('fixture report', ('report_key', 'available_at'), ('report_key',))})
+    monkeypatch.setattr(config, 'DATA_DIR', str(tmp_path/'shared'))
+    manifest = {'root': str(tmp_path/'dataset'/'sources'), 'sources': {'sl': sl, 'bha': bha}}
+    with use_manifest(manifest):
+        assert all(path is None or path.startswith(manifest['root'])
+                   for path in features.source_paths().values())
+        values = features.add_bha_features(target(3))
+        signature = features.cache_signature('2026-06-03')
+    assert values.bha_breathing_last.iloc[0] == 1 and values.bha_report_count_5.iloc[0] == 1
+    assert signature['reports'] is not None and signature['documents'] is None
 
 
 def test_candidate_discovery_uses_new_columns_without_changing_the_live_allowlist(monkeypatch):
