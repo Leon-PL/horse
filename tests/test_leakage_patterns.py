@@ -18,9 +18,9 @@ Three things matter beyond the single documented spelling:
   The previous version of this lint skipped every line containing the word
   ``transform``, which made the first of those invisible to it.
 * **Research scripts count.** Every phantom edge this project has chased was
-  measured by a script in ``scripts/``, not by ``src/``. A leak there does not
+  measured by a research script, not by ``src/``. A leak there does not
   ship, but it does burn weeks and can get a dead idea promoted, so the scan
-  covers the scripts and the Streamlit apps too.
+  covers ``scripts/`` and every file under ``research/`` too.
 * **The check reads the syntax tree, not the text.** Telling the safe form
   from the broken one means knowing whether the ``.shift`` sits inside the
   per-group callable — which is a question about nesting that no regex over a
@@ -36,8 +36,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: Directories scanned, in addition to the project-root ``*.py`` apps.
+#: Directories scanned, in addition to the project-root ``*.py`` files.
 SCAN_DIRS = ("src", "scripts")
+#: Scanned with subfolders: experiments live in their own folders under research/.
+RECURSIVE_SCAN_DIRS = ("research",)
 
 #: Per-group cumulative/window operations. A global ``.shift`` applied to the
 #: result of any of these, on a grouped object, crosses group boundaries.
@@ -109,6 +111,8 @@ def _offenders_in_source(source: str, label: str) -> list[str]:
 def _scanned_files(root: Path):
     for name in SCAN_DIRS:
         yield from sorted((root / name).glob("*.py"))
+    for name in RECURSIVE_SCAN_DIRS:
+        yield from sorted((root / name).rglob("*.py"))
     yield from sorted(root.glob("*.py"))
 
 

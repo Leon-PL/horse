@@ -1,5 +1,11 @@
 # ATR tab coverage and catch-up — 6 November 2026
 
+**7 November update:** the five-tab contract is unchanged. Daily ID persistence,
+legacy hint repair, export recovery and queue performance were improved in
+[the ID and speed deployment](ATR_SPEED_AND_IDS_2026-11-07.md). That deployment
+adds `atr_ids.py` to the fingerprint, bringing the current pin set to five modules;
+the four-file list below describes the earlier checkpoint.
+
 The main collector and the running historical worker now use a **five-tab
 collection contract**. The earlier jumps-only pilot was not connected to the
 worker; this deployment fixes that gap and a second missed endpoint, Distance Ran.

@@ -180,16 +180,6 @@ def test_legacy_append_stays_idempotent_for_duplicate_input_rows(isolated):
     assert database.insert_results(pd.concat([legacy,legacy],ignore_index=True))==0
 
 
-def test_result_settlement_associates_namesakes_with_their_own_outcomes():
-    from src.app_helpers import attach_result_outcomes
-    frame=twins()
-    predictions=frame[["race_id","horse_name","horse_id"]].iloc[::-1]
-    settled=attach_result_outcomes(predictions,frame)
-    assert settled.result_won.tolist()==[0,1] and settled.is_settled.all()
-    unknown=attach_result_outcomes(predictions.drop(columns="horse_id"),frame)
-    assert not unknown.is_settled.any()
-
-
 @pytest.mark.parametrize("side",["left","right","revision"])
 def test_atr_does_not_identify_distinct_horses_by_a_shared_display_name(monkeypatch,side):
     from src import atr_features as atr

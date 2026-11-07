@@ -1,8 +1,8 @@
-"""Callable training core — one code path for the CLI and the training app.
+"""Callable training core — one code path for the CLI and research scripts.
 ============================================================================
 
-Historically "train a model" was implemented three times (``train.py``, the
-Streamlit Train & Tune page), which
+Historically "train a model" was implemented more than once (``train.py`` and
+the former Streamlit Train & Tune page), which
 drifted apart. This module is the single entry point: a typed
 :class:`TrainingConfig` plus :func:`train_run`, which runs the real flow
 

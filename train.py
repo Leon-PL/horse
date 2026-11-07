@@ -2,7 +2,7 @@
 ================================================================
 
 This is now a *shell*: all real logic lives in :mod:`src.training` so the CLI
-and the Streamlit training app share one code path. It builds a
+and research scripts share one code path. It builds a
 :class:`TrainingConfig` from the arguments, runs the pipeline, and prints the
 headline metrics (calibration + backtest ROI + CLV vs BSP).
 

@@ -6,7 +6,7 @@ from src.data_processor import process_data
 from src.feature_engineer import (
     _PRIOR_MARKET_STATE_KEY, add_prior_market_features, counts_state_scope, engineer_features,
 )
-from src.prior_market_research import FEATURES, prior_market_features
+from src.prior_market_features import FEATURES, prior_market_features
 from src.result_status import pending_card
 from tests.test_live_parity import _synthetic_raw
 

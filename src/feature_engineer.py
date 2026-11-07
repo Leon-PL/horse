@@ -1535,7 +1535,7 @@ _PRIOR_MARKET_STATE_KEY = "prior_market::v1"
 
 def add_prior_market_features(df: pd.DataFrame) -> pd.DataFrame:
     """Earlier market opinions and rated opposition, with no current-price input."""
-    from src.prior_market_research import FEATURES, prior_market_features
+    from src.prior_market_features import FEATURES, prior_market_features
     seed = _COUNTS_STATE.get(_PRIOR_MARKET_STATE_KEY) if _COUNTS_STATE is not None else None
     # Direct minimal-frame callers can lack measurements. Keep those unknown;
     # do not add fabricated measurement columns to the caller's dataframe.
@@ -3236,7 +3236,7 @@ def add_pedigree_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Pre-compute condition masks for specialty pedigree features
     is_soft = df["going"].fillna("Good").isin(["Soft", "Heavy", "Yielding"])
-    from src.audited_surface_features import synthetic_surface
+    from src.surface_features import synthetic_surface
     is_aw = synthetic_surface(df["surface"]).eq(1)
     dist_f = df["distance_furlongs"].fillna(8.0)
     is_sprint = dist_f <= 7.0

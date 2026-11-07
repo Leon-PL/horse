@@ -5,7 +5,6 @@ Single source of truth for the betting-strategy rules shared by:
 
 - the test-set betting simulation     (src/bet_analysis.py : analyse_test_set)
 - the walk-forward backtester         (src/backtester.py : walk_forward_validation)
-- the live Today's Picks settlement   (picks_app.py)
 - each-way pick filtering             (src/each_way.py : ew_value_bets)
 
 Strategies

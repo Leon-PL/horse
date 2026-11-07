@@ -29,18 +29,23 @@ Official references:
 
 ## One-time setup
 
-Open `training_app.py`, then **Data → Historical exchange data**.
+This installation is already connected (see the live verification below). The
+setup and catch-up controls lived on the **Data** page of `training_app.py`,
+which was removed with the other Streamlit code on 2026-11-07. There is no UI
+for these steps now; they are Python calls.
 
-1. Create a login certificate if one is not already present. On this installation
+1. Create a login certificate if one is not already present
+   (`scripts/setup_betfair_history.ps1 -CreateCertificate`). On this installation
    it has already been prepared under `data/betfair/auth/`.
-2. Save the **public certificate** using the button. Upload that file in
+2. Upload the **public certificate** (`data/betfair/auth/client.crt`) in
    [Betfair account security](https://myaccount.betfair.com/accountdetails/mysecurity?showAPI=1),
    under **Automated Betting Program Access**. Keep the private `.key` file local.
-3. Enter your Betfair username and password in the application's connection form.
-   The app checks certificate login and historical access before saving anything.
+3. Call `src.ingestion.betfair_history.connect_account(username, password, cert, key)`
+   with the paths from `src.ingestion.betfair_credentials.certificate_paths()`.
+   It checks certificate login and historical access before saving anything.
    Saved login settings use Windows account encryption and stay outside Git.
 
-If connection fails, the form now identifies the failed step: Betfair sign-in,
+If connection fails, the result identifies the failed step: Betfair sign-in,
 historical-data access, or encrypted settings storage. Recognised Betfair login
 codes are paired with a specific action. Missing Horse Racing BASIC months are
 reported as a successful sign-in with missing data access, with a link to My Data.
@@ -50,10 +55,10 @@ The live service requires GET for `GetMyData` (POST returns HTTP 405). Filtered
 file listings use POST; individual market downloads use GET. The initial live
 connection confirmed certificate sign-in before identifying this method mismatch.
 
-After connecting, ordinary **Scrape recent days** source refreshes fetch
-available full historical markets. Missing login, a catch-up backlog, and a
-publication delay are reported explicitly by the main `betfair` source.
-Use **Download and import missing markets** for a longer initial catch-up.
+After connecting, ordinary source refreshes fetch available full historical
+markets. Missing login, a catch-up backlog, and a publication delay are
+reported explicitly by the main `betfair` source. For a longer catch-up run
+`python -m src.ingestion.betfair_history --start YYYY-MM-DD --drain`.
 It resumes saved work and skips already imported market files.
 
 Betfair publishes historical files five days after event settlement, which can
@@ -149,7 +154,7 @@ reconstructed from BASIC, which has no traded volume; see the
 
 ## CLI and environment setup
 
-The Data page is the usual setup route. An alternative is the local `.env`
+`connect_account` (see One-time setup) is the usual setup route. An alternative is the local `.env`
 configuration described in `.env.example`, using certificate paths and credentials.
 A temporary `BETFAIR_SESSION_TOKEN` also works, but cannot provide lasting unattended login.
 

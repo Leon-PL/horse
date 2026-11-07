@@ -13,8 +13,8 @@ The project has four stages:
    and evaluation modules produce candidate runs. `src/run_store.py` records
    results and the explicit selected-run pointer.
 4. **Predict:** `src/live_prediction.py` uses today's cards and compatible
-   historical features. `picks_app.py` presents forecasts; `training_app.py`
-   handles maintenance and research.
+   historical features. There is no UI: the Streamlit apps were removed on
+   2026-11-07.
 
 See the [directory and dependency map](docs/architecture/PROJECT_STRUCTURE.md)
 for code ownership, the [operating guide](README.md) for commands, and the

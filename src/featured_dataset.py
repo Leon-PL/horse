@@ -5,7 +5,7 @@ the processed history, and the ATR and Racing TV helpers the caches that feature
 stages read directly. ``_stamp`` records them in the store's metadata.
 
 The training refresh (``src.store_refresh.get_training_dataset``) and the
-batched builder (``scripts/build_feature_store_batched.py``) use them to decide
+batched builder (``src/store_build.py``) use them to decide
 between appending new dates and rebuilding. The older in-memory entry point,
 ``get_featured_dataset``, was retired on 2026-11-07. See
 ``docs/architecture/FE_TAXONOMY.md``.
@@ -59,10 +59,10 @@ _FE_SOURCE_FILES = (
     "src/trueskill_kernel.py",
     "src/result_margins.py", "src/runner_identity.py",
     "src/result_status.py", "src/rating_reuse.py",
-    "src/feature_semantics.py", "src/audited_surface_features.py",
+    "src/feature_semantics.py", "src/surface_features.py",
     "src/established_form_features.py",
-    "src/prior_market_research.py", "src/forecast_evaluation.py",
-    "scripts/build_feature_store_batched.py",
+    "src/prior_market_features.py", "src/forecast_evaluation.py",
+    "src/store_build.py",
     "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
     "src/atr_features.py",
     "src/rtv_features.py", "src/rtv_text.py",

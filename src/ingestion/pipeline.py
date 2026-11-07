@@ -27,7 +27,7 @@ from src.ingestion.rtv_storage import history_manifest, generation, accepted_day
 from src.ingestion.storage import writer_lock, atomic_json
 
 logger = logging.getLogger(__name__)
-DEFAULT_SOURCES = ("sl", "rtv", "atr", "betfair", "fx")
+DEFAULT_SOURCES = ("sl", "rtv", "atr", "betfair", "fx", "bha")
 
 
 def pipeline_dir():
@@ -283,9 +283,10 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
     from src.ingestion import results
     from src.ingestion.auxiliary import refresh_atr, refresh_betfair
     from src.ingestion.fx import refresh_prize_references
-    allowed = {"sl", "rtv", "atr", "betfair", "fx"}
+    from src.ingestion.bha_stewards import refresh_reports
+    allowed = set(DEFAULT_SOURCES)
     if days_back < 0 or set(sources)-allowed or not sources:
-        raise ValueError("Choose nonnegative days and sources from sl, rtv, atr, betfair, fx")
+        raise ValueError("Choose nonnegative days and sources from sl, rtv, atr, betfair, fx, bha")
     if atr_max_races < 1 or pedigree_limit < 1:
         raise ValueError("ATR and pedigree budgets must be positive")
     if max_source_workers < 1:
@@ -318,6 +319,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
             "atr": lambda: refresh_atr(first.isoformat(), last.isoformat(), max_races=atr_max_races),
             "betfair": lambda: refresh_betfair(first.isoformat(), last.isoformat()),
             "fx": refresh_prize_references,
+            "bha": lambda: refresh_reports(first.isoformat(), last.isoformat(), recheck=recheck),
         }
         def execute(source):
             source_started = time.monotonic()
@@ -349,7 +351,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
         if "sl" in sources:
             record("sl", {"state": "running"})
             record("sl", execute("sl"))
-        independent = [name for name in ("fx", "betfair", "rtv", "atr") if name in sources]
+        independent = [name for name in ("fx", "betfair", "rtv", "atr", "bha") if name in sources]
         if independent:
             with ThreadPoolExecutor(max_workers=min(max_source_workers, len(independent))) as pool:
                 jobs = {}
@@ -389,7 +391,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
 
 
 def refresh_summary(report):
-    labels = {"sl": "Sporting Life", "rtv": "Racing TV", "atr": "ATR", "betfair": "Betfair archives", "fx": "Exchange rates"}
+    labels = {"sl": "Sporting Life", "rtv": "Racing TV", "atr": "ATR", "betfair": "Betfair archives", "fx": "Exchange rates", "bha": "BHA stewards"}
     values = [f"{labels.get(name, name)}: {value.get('state', 'unknown')}" for name, value in report.get("sources", {}).items()]
     return f"Source refresh {report['state']} — " + "; ".join(values)
 

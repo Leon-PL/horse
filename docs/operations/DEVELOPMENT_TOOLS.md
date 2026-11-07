@@ -75,11 +75,11 @@ are retained except that the old `llvmlite==0.46.0b1` was unavailable from the
 package index; the isolated environment uses published `0.46.0`. Transitive
 dependencies are resolved and locked separately.
 
-SHAP (race explanations in the picks app) is locked at `0.54.1`, the first
+SHAP (race explanations in `src/model.py`) is locked at `0.54.1`, the first
 release that resolves with `numba==0.64.0`; the live installation's `0.50.0`
 pins an unavailable numba prerelease on Python 3.14 and cannot be locked.
-`psutil` is a runtime dependency because `build_feature_store_batched.py`
-imports it.
+`psutil` is a runtime dependency: `src/store_build.py` reports the build's
+memory with it when present, and `scripts/benchmark_data_queries.py` requires it.
 
 On 2026-10-30 every direct dependency was checked against the project's
 imports. XGBoost, CatBoost and lxml had no remaining use and were removed with

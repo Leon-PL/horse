@@ -21,7 +21,8 @@ For current collection work, read the [consolidation report](operations/PRE_FEAT
 the [automatic Betfair archive setup](operations/BETFAIR_HISTORY_AUTOMATION.md),
 the [Betfair import speed measurements](operations/BETFAIR_IMPORT_SPEED_2026-11-06.md),
 the [Betfair runner identity recovery](operations/BETFAIR_RUNNER_IDENTITY_2026-11-06.md),
-the [ATR backfill guide](operations/ATR_REBUILD_2026-11-05.md), and the
+the [ATR backfill guide](operations/ATR_REBUILD_2026-11-05.md),
+the [ATR ID repair and speed report](operations/ATR_SPEED_AND_IDS_2026-11-07.md), and the
 [source implementation notes](operations/STAGE1_IMPLEMENTATION_2026-11-04.md).
 Historical reports describe the state at their recorded date. Use the runtime
 status command for current data and model compatibility.

@@ -84,10 +84,10 @@ def get_training_dataset(*, processed=None, rebuild=False):
             if append_current_store(processed, store=store):
                 return store.load_featured(columns=_model_load_columns(store))
             reason = store._rebuild_reason
-    # All CLI/UI training uses the same corrected builder. A new definition
+    # All training uses the same corrected builder. A new definition
     # must rebuild every carried history, without materialising 1,000+ full
     # feature columns at once on this machine.
-    from scripts.build_feature_store_batched import _build
+    from src.store_build import build_store
     from src.ingestion.storage import atomic_json, read_json
     from src.source_dataset import registry_root, current_manifest
     path = registry_root() / "builds.json"
@@ -101,5 +101,5 @@ def get_training_dataset(*, processed=None, rebuild=False):
     atomic_json(path, {"builds": history[-1000:]})
     store = FeatureStore()
     with store._staged_update() as pending:
-        _build(pending, 60_000, processed=processed)
+        build_store(pending, 60_000, processed=processed)
     return store.load_featured(columns=_model_load_columns(store))

@@ -2,18 +2,8 @@
 #    uv export --frozen --no-dev --no-group tooling --no-hashes --no-emit-project --output-file requirements.lock
 alembic==1.20.1 ; sys_platform == 'win32'
     # via optuna
-altair==6.3.0 ; sys_platform == 'win32'
-    # via streamlit
-attrs==26.1.0 ; sys_platform == 'win32'
-    # via
-    #   jsonschema
-    #   referencing
 beautifulsoup4==4.14.3 ; sys_platform == 'win32'
     # via horse-racing-probabilities
-blinker==1.9.0 ; sys_platform == 'win32'
-    # via streamlit
-cachetools==6.2.6 ; sys_platform == 'win32'
-    # via streamlit
 certifi==2026.10.23 ; sys_platform == 'win32'
     # via
     #   curl-cffi
@@ -22,8 +12,6 @@ cffi==2.1.1 ; sys_platform == 'win32'
     # via curl-cffi
 charset-normalizer==3.5.2 ; sys_platform == 'win32'
     # via requests
-click==8.5.0 ; sys_platform == 'win32'
-    # via streamlit
 cloudpickle==3.1.2 ; sys_platform == 'win32'
     # via shap
 colorama==0.4.6 ; sys_platform == 'win32'
@@ -34,24 +22,12 @@ colorlog==6.12.0 ; sys_platform == 'win32'
     # via optuna
 curl-cffi==0.15.0 ; sys_platform == 'win32'
     # via horse-racing-probabilities
-gitdb==4.0.12 ; sys_platform == 'win32'
-    # via gitpython
-gitpython==3.2.1 ; sys_platform == 'win32'
-    # via streamlit
 idna==3.20 ; sys_platform == 'win32'
     # via requests
-jinja2==3.1.6 ; sys_platform == 'win32'
-    # via
-    #   altair
-    #   pydeck
 joblib==1.5.3 ; sys_platform == 'win32'
     # via
     #   horse-racing-probabilities
     #   scikit-learn
-jsonschema==4.26.0 ; sys_platform == 'win32'
-    # via altair
-jsonschema-specifications==2025.9.1 ; sys_platform == 'win32'
-    # via jsonschema
 lightgbm==4.6.0 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 llvmlite==0.46.0 ; sys_platform == 'win32'
@@ -61,15 +37,9 @@ mako==1.4.3 ; sys_platform == 'win32'
 markdown-it-py==4.2.0 ; sys_platform == 'win32'
     # via rich
 markupsafe==3.0.4 ; sys_platform == 'win32'
-    # via
-    #   jinja2
-    #   mako
+    # via mako
 mdurl==0.1.2 ; sys_platform == 'win32'
     # via markdown-it-py
-narwhals==2.28.0 ; sys_platform == 'win32'
-    # via
-    #   altair
-    #   plotly
 numba==0.64.0 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 numpy==2.4.2 ; sys_platform == 'win32'
@@ -79,43 +49,29 @@ numpy==2.4.2 ; sys_platform == 'win32'
     #   numba
     #   optuna
     #   pandas
-    #   pydeck
     #   scikit-learn
     #   scipy
     #   shap
-    #   streamlit
 optuna==4.7.0 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 packaging==26.3 ; sys_platform == 'win32'
     # via
-    #   altair
     #   optuna
-    #   plotly
     #   shap
-    #   streamlit
 pandas==2.3.3 ; sys_platform == 'win32'
     # via
     #   horse-racing-probabilities
     #   shap
-    #   streamlit
-pillow==12.3.0 ; sys_platform == 'win32'
-    # via streamlit
-plotly==6.5.2 ; sys_platform == 'win32'
-    # via horse-racing-probabilities
-protobuf==6.33.6 ; sys_platform == 'win32'
-    # via streamlit
 psutil==7.2.2 ; sys_platform == 'win32'
     # via horse-racing-probabilities
 pyarrow==23.0.1 ; sys_platform == 'win32'
-    # via
-    #   horse-racing-probabilities
-    #   streamlit
+    # via horse-racing-probabilities
 pycparser==3.12 ; implementation_name != 'PyPy' and sys_platform == 'win32'
     # via cffi
-pydeck==0.9.3 ; sys_platform == 'win32'
-    # via streamlit
 pygments==2.21.0 ; sys_platform == 'win32'
     # via rich
+pypdf==6.21.4 ; sys_platform == 'win32'
+    # via horse-racing-probabilities
 python-dateutil==3.0.0 ; sys_platform == 'win32'
     # via pandas
 python-dotenv==1.2.2 ; sys_platform == 'win32'
@@ -124,20 +80,10 @@ pytz==2026.6 ; sys_platform == 'win32'
     # via pandas
 pyyaml==6.0.3 ; sys_platform == 'win32'
     # via optuna
-referencing==0.37.0 ; sys_platform == 'win32'
-    # via
-    #   jsonschema
-    #   jsonschema-specifications
 requests==2.32.5 ; sys_platform == 'win32'
-    # via
-    #   horse-racing-probabilities
-    #   streamlit
+    # via horse-racing-probabilities
 rich==15.0.0 ; sys_platform == 'win32'
     # via curl-cffi
-rpds-py==2026.9.1 ; sys_platform == 'win32'
-    # via
-    #   jsonschema
-    #   referencing
 scikit-learn==1.8.0 ; sys_platform == 'win32'
     # via
     #   horse-racing-probabilities
@@ -156,24 +102,14 @@ six==1.17.0 ; sys_platform == 'win32'
     #   trueskill
 slicer==0.0.8 ; sys_platform == 'win32'
     # via shap
-smmap==5.0.3 ; sys_platform == 'win32'
-    # via gitdb
 soupsieve==3.0.4 ; sys_platform == 'win32'
     # via beautifulsoup4
 sqlalchemy==2.1.6 ; sys_platform == 'win32'
     # via
     #   alembic
     #   optuna
-streamlit==1.54.0 ; sys_platform == 'win32'
-    # via horse-racing-probabilities
-tenacity==9.2.1 ; sys_platform == 'win32'
-    # via streamlit
 threadpoolctl==3.7.0 ; sys_platform == 'win32'
     # via scikit-learn
-toml==0.10.2 ; sys_platform == 'win32'
-    # via streamlit
-tornado==6.6 ; sys_platform == 'win32'
-    # via streamlit
 tqdm==4.70.1 ; sys_platform == 'win32'
     # via
     #   optuna
@@ -183,15 +119,11 @@ trueskill==0.4.5 ; sys_platform == 'win32'
 typing-extensions==4.16.0 ; sys_platform == 'win32'
     # via
     #   alembic
-    #   altair
     #   beautifulsoup4
     #   sqlalchemy
-    #   streamlit
 tzdata==2026.6 ; sys_platform == 'win32'
     # via
     #   pandas
     #   python-dateutil
 urllib3==2.8.0 ; sys_platform == 'win32'
     # via requests
-watchdog==6.0.0 ; sys_platform == 'win32'
-    # via streamlit
