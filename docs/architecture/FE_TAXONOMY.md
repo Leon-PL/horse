@@ -1,8 +1,19 @@
 # Feature-Engineering Taxonomy
 
-A map of every `engineer_features` stage (`src/feature_engineer.py`) by **how it
-computes**, because that — not what it means — determines what an *append* needs
-and whether "build once, append forever" is possible.
+A map of every `engineer_features` stage by **how it computes**, because that —
+not what it means — determines what an *append* needs and whether "build once,
+append forever" is possible.
+
+`src/feature_engineer.py` owns only the stage order. Since 2026-11-07 (research
+065) the stages live in `src/features/`, one module per family: `horse`,
+`connections` (jockey and trainer), `pedigree`, `sectionals` (ATR), `race`
+(market, field, draw, venue, course dynamics, interactions, masks) and
+`relative` (declared within-race transforms). `history` holds the grouped
+rolling, cumulative, lag and time-window primitives that resume from carried
+state (`counts_state_scope`); stage modules read and write that state through
+`_carried` / `_carry`, never by importing `_COUNTS_STATE`. `common` holds the
+event order, `_horse_key` (always `horse_id`), `dist_category` and the rate
+helpers.
 
 This is the reference that makes the incremental migration estimable: convert
 stages in class order, cheapest first, each behind a parity test.
@@ -30,41 +41,49 @@ append-safety test). Keep it that way.
 Pipeline order (per `engineer_features` `stages` list). "Classes" lists every
 pattern the stage uses; the **first** is dominant.
 
-| Stage | Classes | Incremental state to carry |
-|---|---|---|
-| `add_horse_features` | C, B | per-horse: career counts/wins/places/pos-sum; rolling-N form buffer |
-| `add_pedigree_features` | C | per-sire/dam/damsire: runs/wins/places (race-safe) |
-| `add_medical_features` | L | per-horse: last gelding flag |
-| `add_prize_money_features` | C | per-horse: cum prize, running-max prize |
-| `add_collateral_form_features` | **F** | bounded history (rivals' next-out, date-guarded); *off by default* |
-| `add_jockey_features` | C, B | per-jockey: career counts; rolling-N + 14/30d calendar buffers |
-| `add_trainer_features` | C, B | per-trainer: race-safe counts; rolling-N + 14/30d buffers |
-| `add_jockey_trainer_features` | C | per-(jockey×trainer) and per-trainer combo counts |
-| `add_jockey_track_features` | C | per-(jockey×track) counts |
-| `add_track_features` | C | per-(horse×track / horse×dist / horse×going) counts |
-| `add_course_distance_features` | C | per-(horse×track×dist) counts |
-| `add_class_change_features` | L | per-horse: previous class |
-| `add_distance_change_features` | C, L | per-(horse×dist-cat) counts + running-max; prev distance |
-| `add_target_encoded_features` | C, B | per-entity TE accumulators (lifetime) + 365d/EWMA buffers |
-| `add_cross_entity_features` | C | per-(jockey×going, horse×going, trainer×class…) counts |
-| `compute_elo_features` | C | per-horse Elo state — **already incremental** (`return_state`) |
-| `compute_glicko_features` | C | per-horse Glicko/TrueSkill state — **already incremental** |
-| `add_opposition_strength_features` | W, B | within-race elo aggregates; per-horse rolling of opposition |
-| `add_headgear_features` | C, L | per-horse: ever-had-headgear; prev headgear |
-| `add_surface_features` | C, L | per-(horse×surface) counts; prev surface |
-| `add_trainer_specialisation_features` | C | per-(trainer×dist-cat, trainer×going) counts |
-| `add_speed_figure_features` | B, W | per-horse rolling speed; within-race + per-class(backward) medians |
-| `add_market_features` | R, W | none (odds math + per-race normalisation) |
-| `add_trainer_runner_intent_features` | W | none (per-(race×trainer) stable pecking order) |
-| `add_jockey_intent_features` | L | per-horse: prev jockey/elo/favourite/result |
-| `add_race_context_features` | W, C, R | within-race ranks; per-(track×draw-third) counts; draw_pct |
-| `add_pace_style_features` | W, B | within-race pace aggregates; per-horse weighted history |
-| `add_field_quality_features` | W | none (field OR/Elo aggregates) |
-| `add_track_config_features` | R | none (static venue reference + draw interactions) |
-| `add_supplementary_features` | B, C, L | per-horse rolling consistency/class; best-class cummin; prev trainer |
-| `add_race_relative_signal_features` | W | none (within-race relative families of base signals) |
-| `add_interaction_features` | R, W | none (products of existing cols + a race avg) |
-| `apply_conditional_feature_masks` | R | none (zero-out irrelevant features row-wise) |
+| Stage | Module | Classes | Incremental state to carry |
+|---|---|---|---|
+| `add_horse_features` | horse | C, B | per-horse: career counts/wins/places/pos-sum; rolling-N form buffer |
+| `add_established_form_features` | horse | C, B | per-horse marks by discipline (`established_form_features`) |
+| `add_hidden_form_features` | horse | R | none (pre-race form string vs DB runs) |
+| `add_pedigree_features` | pedigree | C | per-sire/dam/damsire: runs/wins/places (race-safe) |
+| `add_prize_money_features` | horse | C | per-horse: cum prize, running-max prize |
+| `add_collateral_form_features` | horse | **F** | bounded history (rivals' next-out, date-guarded); *off by default* |
+| `add_jockey_features` | connections | C, B | per-jockey: career counts; rolling-N + 14/30d calendar buffers |
+| `add_trainer_features` | connections | C, B | per-trainer: race-safe counts (incl. `trainer_freq`); rolling-N + 14/30d buffers |
+| `add_jockey_trainer_features` | connections | C | per-(jockey×trainer) and per-trainer combo counts |
+| `add_jockey_track_features` | connections | C | per-(jockey×track) counts |
+| `add_track_features` | horse | C | per-(horse×track / horse×dist / horse×going) counts |
+| `add_course_distance_features` | horse | C | per-(horse×track×dist) counts |
+| `add_class_change_features` | horse | L | per-horse: previous class |
+| `add_distance_change_features` | horse | C, L | per-(horse×dist-cat) counts + running-max; prev distance |
+| `add_target_encoded_features` | connections | C, B | per-entity TE accumulators (lifetime) + 365d/EWMA buffers |
+| `add_cross_entity_features` | connections | C | per-(jockey×going, horse×going, trainer×class…) counts |
+| `compute_elo_features` | `src/ratings.py` | C | per-horse Elo state — **already incremental** (`return_state`) |
+| `compute_glicko_features` | `src/ratings.py` | C | per-horse Glicko/TrueSkill state — **already incremental** |
+| `add_opposition_strength_features` | race | W, B | within-race elo aggregates; per-horse rolling of opposition |
+| `add_headgear_features` | horse | C, L | per-horse: ever-had-headgear; prev headgear |
+| `add_surface_features` | horse | C, L | per-(horse×surface) counts; prev surface |
+| `add_trainer_specialisation_features` | connections | C | per-(trainer×dist-cat, trainer×going) counts |
+| `add_speed_figure_features` | horse | B, W | per-horse rolling speed; within-race + per-class(backward) medians |
+| `add_atr_features` | sectionals | B | per-horse rolling sectional/comment history (`atr_features`) |
+| `add_market_features` | race | R, W | none (odds math + per-race normalisation) |
+| `add_trainer_runner_intent_features` | connections | W | none (per-(race×trainer) stable pecking order) |
+| `add_jockey_intent_features` | connections | L | per-horse: prev jockey/elo/favourite/result |
+| `add_race_context_features` | race | W, C, R | within-race ranks; per-(track×draw-third) counts; draw_pct |
+| `add_field_quality_features` | race | W | none (field OR/Elo aggregates) |
+| `add_track_config_features` | race | R | none (static venue reference + draw interactions) |
+| `add_course_dynamics_features` | race | R, W, L | none beyond the lag (quirk score, course experience, travel) |
+| `add_supplementary_features` | horse | B, C, L | per-horse rolling consistency/class; best-class cummin; prev trainer |
+| `add_race_relative_signal_features` | relative | W | none (declared `_RACE_RELATIVE` table of base signals) |
+| `add_interaction_features` | race | R, W | none (products of existing cols + a race avg) |
+| `apply_conditional_feature_masks` | race | R | none (zero-out irrelevant features row-wise) |
+| `add_prior_market_features` | horse | C, B | per-horse prior market opinions (`prior_market_features`) |
+| `add_rtv_features` | `src/rtv_features.py` | B | per-horse mature prior runs |
+| `add_bha_features` | `src/bha_features.py` | B | prior BHA reports |
+
+`add_medical_features` (wind surgery) and `add_pace_style_features` were
+removed on 2026-11-07: no recorded recipe used them.
 
 ## What this implies for the migration
 

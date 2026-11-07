@@ -61,7 +61,9 @@ import pandas as pd
 
 import config
 from src.runner_identity import identity_columns, join_runner_columns
+from src.data_processor import indicator_columns
 from src.feature_engineer import engineer_features
+from src.features.common import dist_category
 from src.ratings import compute_elo_features, compute_glicko_features
 
 logger = logging.getLogger(__name__)
@@ -266,20 +268,14 @@ class FeatureStore:
     # ── persistence helpers ───────────────────────────────────────────
     @staticmethod
     def _with_dist_category(df: pd.DataFrame) -> pd.DataFrame:
-        """Add ``dist_category`` (a pure bin of distance_furlongs).
+        """Add ``dist_category`` for a standalone rating sweep.
 
-        The rating sweeps read it, but in the full pipeline it is added
-        mid-way by ``add_course_distance_features``. Mirror that one-liner
-        so a standalone rating sweep produces identical dimensional Elo.
+        The rating sweeps read it; in the full pipeline the horse distance
+        stage adds it first. Both use ``src.features.common.dist_category``.
         """
         if "distance_furlongs" in df.columns and "dist_category" not in df.columns:
             df = df.copy()
-            df["dist_category"] = (
-                pd.cut(
-                    df["distance_furlongs"], bins=[0, 6.5, 8.5, 11.5, 50],
-                    labels=[0, 1, 2, 3], include_lowest=True,
-                ).astype(float).fillna(1)
-            )
+            df["dist_category"] = dist_category(df["distance_furlongs"])
         return df
 
     def _seeded_rating_frame(
@@ -403,35 +399,6 @@ class FeatureStore:
         # the matching rows and ratings, never before parquet writes succeed.
         return featured_new, advanced, counts_state
 
-    # Entity → its expanding-frequency column (data_processor.encode_categoricals:
-    # ``cumcount()+1`` over the full frame; ``track`` is collapsed to a per-race min).
-    _FREQ_COLS = {"horse_name": "horse_name_freq", "jockey": "jockey_freq",
-                  "trainer": "trainer_freq", "track": "track_freq"}
-
-    def _continue_freq_counts(self, card: pd.DataFrame) -> pd.DataFrame:
-        """Continue the cumulative ``*_freq`` counts from full history.
-
-        ``encode_categoricals`` builds ``*_freq`` as a per-frame ``cumcount``; on a
-        card processed alone each entity restarts at 1, leaving e.g.
-        ``trainer_freq`` (and its race-relative derivatives) on the wrong scale vs
-        training. Offset the card's per-entity freq by that entity's historical
-        appearance count (from the store's processed history) so the count resumes
-        where training left off. Read-only."""
-        present = {e: f for e, f in self._FREQ_COLS.items()
-                   if e in card.columns and f in card.columns}
-        if not present:
-            return card
-        card = card.copy()
-        hist = pd.read_parquet(self.processed_path, columns=list(present))
-        for ent, fcol in present.items():
-            prior = hist[ent].value_counts()  # historical appearances per entity
-            card[fcol] = pd.to_numeric(card[fcol], errors="coerce").fillna(0) \
-                + card[ent].map(prior).fillna(0)
-            card[fcol] = card[fcol].astype(int)
-        if "track" in present and "race_id" in card.columns:  # race-level: per-race min
-            card["track_freq"] = card.groupby("race_id")["track_freq"].transform("min")
-        return card
-
     @_locked
     def featurize_live(self, card: pd.DataFrame) -> pd.DataFrame:
         """Feature-engineer an UNSETTLED future *card* against the store's
@@ -457,7 +424,7 @@ class FeatureStore:
                 "FeatureStore lacks carried state (pre-flip store); rebuild it with "
                 "`python -m scripts.build_feature_store_batched` before live featurisation.")
         from src.result_status import pending_card
-        card = self._continue_freq_counts(pending_card(card))
+        card = pending_card(card)
         seed = self.load_state()
         keyed_ratings, _rating_cols, _advanced = self._seeded_rating_frame(card, seed)
         card_rated = join_runner_columns(card, keyed_ratings, _rating_cols)
@@ -466,17 +433,11 @@ class FeatureStore:
         featured = engineer_features(
             card_rated, save=False, skip_ratings=True, counts_state=counts_state)
 
-        # Complete the one-hot categorical schema to the TRAINING category domain.
-        # get_dummies only emits columns for categories present in the card, so a
-        # category absent today (e.g. no 'H' entire horse → no sex_H, a card with
-        # no chases → no race_type_Chase) is silently missing. Such a column is a
-        # genuine all-zero (none of these runners is in that category), not an
-        # imputation — add any one-hot column the store has but the card lacks,
-        # using the store schema as the authoritative category set.
-        oh_prefixes = ("going_", "race_class_", "race_type_", "region_",
-                       "sex_", "surface_", "season_")
-        have = set(featured.columns)
-        for col in self.featured_schema_names():
-            if col.startswith(oh_prefixes) and col not in have:
+        # Processing emits every declared one-hot indicator, so a card always
+        # has the full category schema. Only a card that lacked the source
+        # column altogether can miss one; complete exactly those declared
+        # names. Any other absent column stays absent and prediction refuses it.
+        for col in indicator_columns():
+            if col not in featured.columns:
                 featured[col] = 0
         return featured

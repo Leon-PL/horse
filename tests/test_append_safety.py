@@ -16,7 +16,8 @@ from pathlib import Path
 import config
 from src.featured_dataset import fe_signature
 
-FE_SRC = Path(__file__).resolve().parent.parent / "src" / "feature_engineer.py"
+SRC = Path(__file__).resolve().parent.parent / "src"
+FE_SOURCES = (SRC / "feature_engineer.py", *sorted((SRC / "features").glob("*.py")))
 
 # The only stage allowed a forward shift — it date-guards (next_date < cur_date),
 # so it stays a pure function of the past (taxonomy class F).
@@ -41,14 +42,20 @@ def _function_span(text: str, fn_name: str) -> tuple[int, int]:
 
 
 def test_no_unguarded_forward_shift():
-    text = FE_SRC.read_text(encoding="utf-8")
-    lo, hi = _function_span(text, _ALLOWED_FORWARD_SHIFT_FN)
     offenders = []
-    for n, line in enumerate(text.splitlines(), 1):
-        if line.lstrip().startswith("#"):
-            continue
-        if ".shift(-1)" in line and not (lo <= n <= hi):
-            offenders.append(f"feature_engineer.py:{n}: {line.strip()[:100]}")
+    allowed_found = False
+    for path in FE_SOURCES:
+        text = path.read_text(encoding="utf-8")
+        lo, hi = 0, -1
+        if any(line.startswith(f"def {_ALLOWED_FORWARD_SHIFT_FN}(") for line in text.splitlines()):
+            lo, hi = _function_span(text, _ALLOWED_FORWARD_SHIFT_FN)
+            allowed_found = True
+        for n, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):
+                continue
+            if ".shift(-1)" in line and not (lo <= n <= hi):
+                offenders.append(f"{path.relative_to(SRC)}:{n}: {line.strip()[:100]}")
+    assert allowed_found, f"{_ALLOWED_FORWARD_SHIFT_FN} not found in the FE sources"
     assert not offenders, (
         "Un-guarded forward reference (shift(-1)) outside "
         f"{_ALLOWED_FORWARD_SHIFT_FN} — this breaks append-only/leakage. "

@@ -116,7 +116,9 @@ def native_prize_history(frame, prizes):
     cold-start values and missing-value treatment to isolate the currency fix.
     It neither reads odds nor updates the installed incremental history state.
     """
-    from src.feature_engineer import _event_sort_key, add_prize_money_features, counts_state_scope
+    from src.features.common import _event_sort_key
+    from src.features.history import counts_state_scope
+    from src.features.horse import add_prize_money_features
     if not frame.index.is_unique or len(prizes) != len(frame):
         raise ValueError("Expected uniquely aligned runner inputs")
     columns = ["race_id", "race_date", "horse_id", "horse_name", "horse_prev_races"]

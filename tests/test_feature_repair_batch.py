@@ -4,12 +4,13 @@ import pandas as pd
 import pytest
 
 from src.data_processor import clean_data, process_data
-from src.feature_engineer import (
-    _add_result_history_flags, add_class_change_features, add_pedigree_features,
-    add_race_context_features, add_race_relative_signal_features,
-    add_speed_figure_features, apply_conditional_feature_masks, counts_state_scope,
-    engineer_features,
-)
+from src.feature_engineer import engineer_features
+from src.features.common import _add_result_history_flags
+from src.features.history import counts_state_scope
+from src.features.horse import add_class_change_features, add_speed_figure_features
+from src.features.pedigree import add_pedigree_features
+from src.features.race import add_race_context_features, apply_conditional_feature_masks
+from src.features.relative import add_race_relative_signal_features
 from src.live_prediction import feature_engineer_with_history_core
 from tests.test_live_parity import _synthetic_raw
 

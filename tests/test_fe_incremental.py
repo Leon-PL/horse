@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import src.feature_engineer as fe
-from src.feature_engineer import _race_safe_cumsum
+import src.features.history as history
+from src.features.history import _race_safe_cumsum
 from src.fe_incremental import (
     CountsAccumulator,
     PlainCountsAccumulator,
@@ -25,25 +25,25 @@ class TestStateThreading:
     """The mechanism that lets class-C stages seed from / write back state."""
 
     def test_scope_sets_and_restores(self):
-        assert fe._COUNTS_STATE is None
-        with fe.counts_state_scope({"m": {}}):
-            assert fe._COUNTS_STATE == {"m": {}}
-        assert fe._COUNTS_STATE is None
+        assert history._COUNTS_STATE is None
+        with history.counts_state_scope({"m": {}}):
+            assert history._COUNTS_STATE == {"m": {}}
+        assert history._COUNTS_STATE is None
 
     def test_cumulative_full_build_when_no_scope(self):
         keys = np.array(["A", "A", "B"]); races = np.array(["r1", "r2", "r3"])
-        out = fe._cumulative(keys, races, {"m": np.array([1.0, 1.0, 1.0])})
+        out = history._cumulative(keys, races, {"m": np.array([1.0, 1.0, 1.0])})
         assert list(out["m"]) == [0.0, 1.0, 0.0]      # prior-to-race totals
 
     def test_cumulative_seeds_and_writes_back(self):
         keys = np.array(["A", "A", "B"]); races = np.array(["r1", "r2", "r3"])
         state: dict = {}
-        with fe.counts_state_scope(state):
-            fe._cumulative(keys, races, {"m": np.array([1.0, 1.0, 1.0])})
+        with history.counts_state_scope(state):
+            history._cumulative(keys, races, {"m": np.array([1.0, 1.0, 1.0])})
         assert state["m"]["A"] == 2.0 and state["m"]["B"] == 1.0   # written back
 
-        with fe.counts_state_scope({"m": {"A": 5.0}}):              # seeded
-            out = fe._cumulative(np.array(["A"]), np.array(["r9"]), {"m": np.array([1.0])})
+        with history.counts_state_scope({"m": {"A": 5.0}}):              # seeded
+            out = history._cumulative(np.array(["A"]), np.array(["r9"]), {"m": np.array([1.0])})
         assert out["m"][0] == 5.0
 
 
@@ -207,15 +207,15 @@ def test_rolling_seeded_append_matches_full():
     ops = [("m", "mean", 3), ("s", "sum", 5), ("mn", "min", 5),
            ("mx", "max", 5), ("sd", "std", 5), ("e", "ewma", 0.3)]
 
-    full = fe._fast_grouped_rolling_core(df, "horse", "v", ops)
+    full = history._fast_grouped_rolling_core(df, "horse", "v", ops)
     rids = sorted(df["race_id"].unique())
     cut = rids[len(rids) // 2]
     hist = df[df["race_id"] <= cut]
     new = df[df["race_id"] > cut]
     newmask = (df["race_id"] > cut).to_numpy()
 
-    _, state = fe._rolling_with_seed(hist, "horse", "v", ops, {})
-    new_res, _ = fe._rolling_with_seed(new, "horse", "v", ops, state)
+    _, state = history._rolling_with_seed(hist, "horse", "v", ops, {})
+    new_res, _ = history._rolling_with_seed(new, "horse", "v", ops, state)
     for k in ["m", "s", "mn", "mx", "sd", "e"]:
         a = new_res[k]
         b = full[k][newmask]
@@ -240,15 +240,15 @@ def test_time_window_seeded_append_matches_full():
                     "v": float(rng.integers(0, 2)),
                 })
     df = pd.DataFrame(rows)
-    vs_full, vc_full = fe._time_window_stats_core(df, "trainer", "race_date", "v", 30)
+    vs_full, vc_full = history._time_window_stats_core(df, "trainer", "race_date", "v", 30)
 
     boundary = pd.Timestamp("2024-01-31")
     hist = df[df["race_date"] <= boundary]
     new = df[df["race_date"] > boundary]
     newmask = (df["race_date"] > boundary).to_numpy()
 
-    _, state = fe._time_window_with_seed(hist, "trainer", "race_date", "v", 30, {})
-    (vs, vc), _ = fe._time_window_with_seed(new, "trainer", "race_date", "v", 30, state)
+    _, state = history._time_window_with_seed(hist, "trainer", "race_date", "v", 30, {})
+    (vs, vc), _ = history._time_window_with_seed(new, "trainer", "race_date", "v", 30, state)
     assert np.allclose(vs, vs_full[newmask])
     assert np.allclose(vc, vc_full[newmask])
 
@@ -274,10 +274,10 @@ def test_lag_seeded_append_matches_full():
     newmask = (df["race_id"] > cut).to_numpy()
 
     state: dict = {}
-    with fe.counts_state_scope(state):
-        fe._lag(hist, "horse", "v")
-    with fe.counts_state_scope(state):
-        got = fe._lag(new, "horse", "v").to_numpy()
+    with history.counts_state_scope(state):
+        history._lag(hist, "horse", "v")
+    with history.counts_state_scope(state):
+        got = history._lag(new, "horse", "v").to_numpy()
     a, b = got, full[newmask]
     both_nan = np.isnan(a) & np.isnan(b)
     assert np.all(np.isclose(a, b, equal_nan=False) | both_nan)
@@ -304,12 +304,12 @@ def test_running_extreme_seeded_matches_full():
     cut = rids[len(rids) // 2]
     nm = (df["race_id"] > cut).to_numpy()
     for kind, prev in [("max", True), ("max", False), ("min", False)]:
-        full = fe._running_extreme(df, "horse", "v", kind=kind, prev=prev).to_numpy()
+        full = history._running_extreme(df, "horse", "v", kind=kind, prev=prev).to_numpy()
         st: dict = {}
-        with fe.counts_state_scope(st):
-            fe._running_extreme(df[df["race_id"] <= cut], "horse", "v", kind=kind, prev=prev)
-        with fe.counts_state_scope(st):
-            got = fe._running_extreme(df[df["race_id"] > cut], "horse", "v", kind=kind, prev=prev).to_numpy()
+        with history.counts_state_scope(st):
+            history._running_extreme(df[df["race_id"] <= cut], "horse", "v", kind=kind, prev=prev)
+        with history.counts_state_scope(st):
+            got = history._running_extreme(df[df["race_id"] > cut], "horse", "v", kind=kind, prev=prev).to_numpy()
         a, b = got, full[nm]
         bn = np.isnan(a) & np.isnan(b)
         assert np.all(np.isclose(a, b) | bn), (kind, prev)
@@ -321,12 +321,12 @@ def test_ffill_prev_seeded_matches_full():
     rids = sorted(df["race_id"].unique())
     cut = rids[len(rids) // 2]
     nm = (df["race_id"] > cut).to_numpy()
-    full = fe._ffill_prev(df, "horse", "v").to_numpy()
+    full = history._ffill_prev(df, "horse", "v").to_numpy()
     st: dict = {}
-    with fe.counts_state_scope(st):
-        fe._ffill_prev(df[df["race_id"] <= cut], "horse", "v")
-    with fe.counts_state_scope(st):
-        got = fe._ffill_prev(df[df["race_id"] > cut], "horse", "v").to_numpy()
+    with history.counts_state_scope(st):
+        history._ffill_prev(df[df["race_id"] <= cut], "horse", "v")
+    with history.counts_state_scope(st):
+        got = history._ffill_prev(df[df["race_id"] > cut], "horse", "v").to_numpy()
     a, b = got, full[nm]
     bn = np.isnan(a) & np.isnan(b)
     assert np.all(np.isclose(a, b) | bn)
@@ -338,14 +338,14 @@ def test_expanding_prev_seeded_matches_full():
         "k": [f"C{int(rng.integers(0, 4))}" for _ in range(400)],
         "v": rng.normal(size=400),
     })
-    full = fe._expanding_prev(df, "k", "v", ["median", "std"])
+    full = history._expanding_prev(df, "k", "v", ["median", "std"])
     half = len(df) // 2
     hist, new = df.iloc[:half], df.iloc[half:]
     st: dict = {}
-    with fe.counts_state_scope(st):
-        fe._expanding_prev(hist, "k", "v", ["median", "std"])
-    with fe.counts_state_scope(st):
-        got = fe._expanding_prev(new, "k", "v", ["median", "std"])
+    with history.counts_state_scope(st):
+        history._expanding_prev(hist, "k", "v", ["median", "std"])
+    with history.counts_state_scope(st):
+        got = history._expanding_prev(new, "k", "v", ["median", "std"])
     for s in ("median", "std"):
         a = got[s].to_numpy()
         b = full[s].to_numpy()[half:]

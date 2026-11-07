@@ -3,7 +3,8 @@ import pandas as pd
 
 from src import database
 from src.data_processor import clean_data
-from src.feature_engineer import _add_result_history_flags, add_horse_features
+from src.features.common import _add_result_history_flags
+from src.features.horse import add_horse_features
 from src.result_status import result_labels, pending_card
 
 
@@ -41,6 +42,7 @@ def test_prior_noncompletion_is_a_start_and_a_loss_not_an_unknown_card():
     f["race_date"] = pd.to_datetime(["2025-01-01"]*3 + ["2025-01-02"]*3)
     f["won"] = f.finish_position.eq(1).astype(int)
     f["lengths_behind"] = np.where(f.finish_position.eq(0), np.nan, f.finish_position - 1.)
+    f["horse_id"] = f.horse_name.str[1:].astype(int) + 100
     out = add_horse_features(_add_result_history_flags(clean_data(f)))
     next_start = out.loc[out.race_id.eq(2) & out.horse_name.eq("H1")].iloc[0]
     assert next_start.horse_prev_races == 1

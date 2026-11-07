@@ -1,7 +1,7 @@
-"""Tests for add_course_dynamics_features (src/feature_engineer.py).
+"""Tests for add_course_dynamics_features (src/features/race.py).
 
-Covers the course-experience / handedness / pace-bias / travel / going-at-course
-features. The stage is called in isolation on a hand-built frame (real track
+Covers the course-experience and travel features (handedness, pace-bias and
+going-at-course were retired on 2026-11-07, research 065). The stage is called in isolation on a hand-built frame (real track
 names so the static config lookup yields meaningful quirk scores and lat/lon).
 All features must be race-safe: each row sees only the horse's PRIOR runs.
 """
@@ -9,7 +9,7 @@ All features must be race-safe: each row sees only the horse's PRIOR runs.
 import numpy as np
 import pandas as pd
 
-from src.feature_engineer import add_course_dynamics_features, _haversine_km
+from src.features.race import add_course_dynamics_features, _haversine_km
 
 
 def _frame():
@@ -31,44 +31,28 @@ def _frame():
     ])
     df["_result_start"] = 1.0
     df["_won_for_history"] = 0.0
-    df["going"] = "Good"
-    df["pace_style_index"] = [0.5, -0.3, 0.8, 0.0, 0.2]
-    df["pace_front_runner_flag"] = [1, 0, 1, 0, 0]
     return df
 
 
 def test_static_scores_in_unit_range():
     out = add_course_dynamics_features(_frame())
-    for col in ("course_quirk_score", "course_favours_leaders"):
-        assert out[col].between(0.0, 1.0).all()
+    assert out["course_quirk_score"].between(0.0, 1.0).all()
     # Chester (tight, draw_bias 2, short circuit) is quirkier than Ascot (galloping).
     chester = out.loc[out["track"] == "Chester", "course_quirk_score"].iloc[0]
     ascot = out.loc[out["track"] == "Ascot", "course_quirk_score"].iloc[0]
     assert chester > ascot
 
 
-def test_first_time_at_course_matches_prior_runs():
+def test_course_experience_and_form_x_quirk():
     out = add_course_dynamics_features(_frame())
-    expected = (out["horse_track_runs"] == 0).astype(int)
-    assert (out["first_time_at_course"] == expected).all()
+    # Field-relative course experience: prior course runs minus the race mean.
+    expected = out["horse_track_runs"] - out.groupby("race_id")["horse_track_runs"].transform("mean")
+    np.testing.assert_allclose(out["course_exp_vs_field"].to_numpy(), expected.to_numpy())
     # course_form_x_quirk is the product of proven course form and quirk.
     np.testing.assert_allclose(
         out["course_form_x_quirk"].to_numpy(),
         (out["horse_track_wr_shrunk"] * out["course_quirk_score"]).to_numpy(),
     )
-
-
-def test_handedness_is_race_safe():
-    out = add_course_dynamics_features(_frame()).set_index("race_id")
-    # Horse A's direction history: Right, Left, Left -> curdir prior counts 0,0,1.
-    assert out.loc["rA1", "horse_curdir_runs"] == 0
-    assert out.loc["rA2", "horse_curdir_runs"] == 0
-    assert out.loc["rA3", "horse_curdir_runs"] == 1
-    # Switching to an unfamiliar hand: A's 2nd run is its first ever left-handed
-    # outing (career_runs=1>0, curdir_runs=0) -> flagged; debut & repeat are not.
-    assert out.loc["rA1", "first_time_this_hand"] == 0   # career debut, not a switch
-    assert out.loc["rA2", "first_time_this_hand"] == 1   # right -> left switch
-    assert out.loc["rA3", "first_time_this_hand"] == 0   # already raced left
 
 
 def test_travel_from_last_run():
@@ -77,16 +61,9 @@ def test_travel_from_last_run():
     assert np.isnan(out.loc["rA1", "travel_from_last_km"])
     # Ascot -> Chester is a long haul (>200 km); Chester -> Chester is ~0.
     assert out.loc["rA2", "travel_from_last_km"] > 200.0
-    assert out.loc["rA2", "is_long_haul"] == 1
     assert out.loc["rA3", "travel_from_last_km"] < 1.0
-    assert out.loc["rA3", "is_long_haul"] == 0
-
-
-def test_going_at_course_race_safe():
-    out = add_course_dynamics_features(_frame()).set_index("race_id")
-    # Horse A runs Good ground at Chester twice: 2nd Chester run has 1 prior C+G.
-    assert out.loc["rA2", "horse_track_going_runs"] == 0
-    assert out.loc["rA3", "horse_track_going_runs"] == 1
+    # Helper columns do not leak into the output.
+    assert not {"track_lat", "track_lon"} & set(out.columns)
 
 
 def test_haversine_known_distance():

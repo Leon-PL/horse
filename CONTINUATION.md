@@ -4,7 +4,32 @@ Start with [README](README.md), the [project structure](docs/architecture/PROJEC
 and [project inventory](docs/PROJECT_INVENTORY.md). Earlier handoff notes are
 preserved in [the archive](docs/archive/CONTINUATION_before_cleanup_2026-11-05.md).
 
-## Layout cleanup, 7 November
+## Feature-engineering consolidation, 7 November (research 065)
+
+Branch `claude/fe-consolidation`. Each structural step was proven
+column-for-column identical on the 2026 slice (103,128 rows); see
+[research/fe_consolidation_065](research/fe_consolidation_065/README.md).
+
+- **Schema guards.** One-hot domains are declared
+  (`data_processor.INDICATOR_DOMAINS`) and shared by processing, live cards
+  and `data_signature`. `get_feature_columns` raises when a feature list names
+  a column the frame lacks. Seven older recipes (030-035,
+  `research_win_with_atr`) already named such columns and now raise.
+- **465 unused columns removed** (none is in any `feature_sets/*.txt`;
+  [list](research/fe_consolidation_065/removed_columns.txt)); 929 remain.
+  Race-relative transforms are a declared table (`src/features/relative.py`).
+- **Split.** `src/feature_engineer.py` keeps only stage order; the stages are
+  in `src/features/` (`horse`, `connections`, `pedigree`, `sectionals`,
+  `race`, `relative`, plus `history` and `common`). All are registered in
+  `_FE_SOURCE_FILES`.
+- **Semantic fixes (values change):** `trainer_freq` is counted in the trainer
+  stage on carried state (the horse/jockey/track counts and the live catch-up
+  are gone); the Elo sweep no longer deletes `_event_dt`, so later stages use
+  off-time order in every path; one `dist_category` and one event sort key;
+  no weather placeholders; `_horse_key` requires `horse_id`.
+- **Store needs a rebuild** before any training or measurement on this code;
+  `fe_signature` changed. No model was refit.
+
 
 - **No UI.** The Streamlit apps (`picks_app.py`, `training_app.py`), their helper
   modules and the app-only Matchbook/paper-trade/autotune modules were removed,

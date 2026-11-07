@@ -9,7 +9,7 @@ first (race-excluded) row across the whole block.
 import numpy as np
 import pandas as pd
 
-from src.feature_engineer import _fast_grouped_rolling_core
+from src.features.history import _fast_grouped_rolling_core
 
 
 def _df():

@@ -13,7 +13,8 @@ import config
 from src import store_build as batched
 from src.data_processor import process_data
 from src.established_form_features import _log1p
-from src.feature_engineer import _with_columns, _without, add_race_relative_signal_features
+from src.features.common import _with_columns, _without
+from src.features.relative import add_race_relative_signal_features
 from src.feature_store import FeatureStore
 from src.parquet_io import RollingParquetWriter, combine_parquet_parts
 from src.rtv_text import replaced_columns
@@ -206,10 +207,10 @@ def test_replaced_columns_keeps_order_and_leaves_the_input_alone():
 def test_margin_over_the_best_rival_is_a_float_in_every_chunk():
     # Whole-number bases gave integers in some chunks and floats in others,
     # which made the chunks' parquet schemas differ for no reason.
-    frame = pd.DataFrame({"race_id": [1, 1, 2, 2], "horse_prev_races": [3, 5, 4, 4]})
+    frame = pd.DataFrame({"race_id": [1, 1, 2, 2], "trainer_freq": [3, 5, 4, 4]})
     out = add_race_relative_signal_features(frame)
-    assert out["horse_prev_races_vs_best_in_race"].dtype == np.float64
-    assert out["horse_prev_races_vs_best_in_race"].tolist() == [-2.0, 2.0, 0.0, 0.0]
+    assert out["trainer_freq_vs_best_in_race"].dtype == np.float64
+    assert out["trainer_freq_vs_best_in_race"].tolist() == [-2.0, 2.0, 0.0, 0.0]
 
 
 @pytest.mark.parametrize("value", [0, 1, 7, 365, (1 << 15) - 1, 1 << 15, 40_000])

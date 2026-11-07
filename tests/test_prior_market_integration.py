@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 
 from src.data_processor import process_data
-from src.feature_engineer import (
-    _PRIOR_MARKET_STATE_KEY, add_prior_market_features, counts_state_scope, engineer_features,
-)
+from src.feature_engineer import engineer_features
+from src.features.history import counts_state_scope
+from src.features.horse import _PRIOR_MARKET_STATE_KEY, add_prior_market_features
 from src.prior_market_features import FEATURES, prior_market_features
 from src.result_status import pending_card
 from tests.test_live_parity import _synthetic_raw

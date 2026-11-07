@@ -31,7 +31,7 @@ def pedigree_surface_history(cards, history, *, entities=("sire", "damsire")):
     current calendar date entirely. NR/withdrawals and pending cards are not
     losses; recognised non-finishers are starts and losses.
     """
-    from src.feature_engineer import _add_result_history_flags
+    from src.features.common import _add_result_history_flags
 
     result = pd.DataFrame(index=cards.index)
     result["race_is_synthetic"] = synthetic_surface(cards.surface).to_numpy()

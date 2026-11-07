@@ -52,7 +52,8 @@ def test_card_results_future_results_same_day_and_row_order_cannot_change_inputs
 
 
 def test_corrected_counters_match_native_stage_with_recognised_surface_labels():
-    from src.feature_engineer import _add_result_history_flags, add_pedigree_features
+    from src.features.common import _add_result_history_flags
+    from src.features.pedigree import add_pedigree_features
     history=fixture()
     expected=pedigree_surface_history(history,history,entities=("sire",))
     canonical=history.copy()

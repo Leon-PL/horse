@@ -6,7 +6,7 @@ import pytest
 from src.fe_incremental import (
     CountsAccumulator, PlainCountsAccumulator, _group_totals, _nb_group_cumsum,
 )
-from src.feature_engineer import _nb_expanding_prior
+from src.features.history import _nb_expanding_prior
 
 
 def noisy(rng, n):

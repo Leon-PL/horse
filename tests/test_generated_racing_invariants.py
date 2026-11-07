@@ -7,7 +7,7 @@ pytest.importorskip("hypothesis")
 from hypothesis import given, settings, strategies as st  # noqa: E402
 
 from src.each_way import adjust_place_probs_for_race  # noqa: E402
-from src.feature_engineer import _fast_grouped_rolling_core, _rolling_with_seed  # noqa: E402
+from src.features.history import _fast_grouped_rolling_core, _rolling_with_seed
 from src.forecast_evaluation import valid_race_mask  # noqa: E402
 from src.result_status import pending_card, result_labels  # noqa: E402
 

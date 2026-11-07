@@ -7,7 +7,7 @@ from test_atr_features import _make_history
 
 
 def test_efficiency_keeps_poor_finite_runs_and_selects_lowest_as_best(monkeypatch, publish_dataset):
-    from src import feature_engineer as fe
+    from src.features import sectionals
     from src.source_dataset import read_table
 
     def poor_runs(sectionals):
@@ -15,7 +15,7 @@ def test_efficiency_keeps_poor_finite_runs_and_selects_lowest_as_best(monkeypatc
     frame = _make_history(monkeypatch, publish_dataset, poor_runs)
     computed = af.compute_atr_run_features(read_table("atr", "sectionals").assign(won=0, lengths_behind=2.0))
     assert computed.atr_efficiency_score.tolist() == [147., 72.7, 5.4]
-    features = fe.add_atr_features(frame)
+    features = sectionals.add_atr_features(frame)
     latest = features.iloc[-1]
     assert latest.atr_efficiency_score_best_3 == 5.4
     assert latest.atr_efficiency_score_avg_3 == pytest.approx((147+72.7+5.4)/3)

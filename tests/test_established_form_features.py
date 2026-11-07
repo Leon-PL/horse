@@ -6,7 +6,8 @@ import pandas as pd
 import pytest
 
 from src.established_form_features import FEATURES, STATE_KEY, established_form_features, mark_scale, race_discipline
-from src.feature_engineer import add_established_form_features, counts_state_scope
+from src.features.history import counts_state_scope
+from src.features.horse import add_established_form_features
 
 
 def frame(rows):

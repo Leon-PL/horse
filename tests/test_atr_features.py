@@ -1,7 +1,7 @@
 """Tests for ATR sectional feature derivation + leakage-safe rolling.
 
 Covers the pure per-run helpers in ``src.atr_features`` and the rolling
-wiring in ``src.feature_engineer.add_atr_features`` — in particular the
+wiring in ``src.features.sectionals.add_atr_features`` — in particular the
 contract that a horse's feature at race N uses only races < N.
 """
 
@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from src import atr_features as af
-from src import feature_engineer as fe
+from src.features import history, sectionals
 
 
 # ── Pure helpers ───────────────────────────────────────────────────────
@@ -151,13 +151,13 @@ def _make_history(monkeypatch, publish_dataset, edit=None):
     # The upcoming race (r9) has no ATR row; its features come from history.
     _published_history.cache_clear()
     publish_dataset(canonical, atr={"sectionals": (sectionals, TableContract("runner", (), delay_hours=48))})
-    monkeypatch.setattr(fe, "_COUNTS_STATE", None, raising=False)
+    monkeypatch.setattr(history, "_COUNTS_STATE", None, raising=False)
     return canonical
 
 
 def test_rolling_is_prior_only(monkeypatch, publish_dataset):
     df = _make_history(monkeypatch, publish_dataset)
-    out = fe.add_atr_features(df).sort_values("race_date").reset_index(drop=True)
+    out = sectionals.add_atr_features(df).sort_values("race_date").reset_index(drop=True)
     a3 = out["atr_finishing_speed_pct_avg_3"].tolist()
     # race1: no prior -> NaN; race2: mean(100)=100; race3: mean(100,110)=105;
     # upcoming(r9): mean(100,110,120)=110 (history only, never its own race)
@@ -171,7 +171,7 @@ def test_rates_skip_a_run_with_no_comment(monkeypatch, publish_dataset):
     def no_comment_on_r1(sectionals):
         sectionals.loc[sectionals.race_date.eq("2025-02-01"), "atr_in_running_comment"] = None
     df = _make_history(monkeypatch, publish_dataset, no_comment_on_r1)
-    out = fe.add_atr_features(df).sort_values("race_date").reset_index(drop=True)
+    out = sectionals.add_atr_features(df).sort_values("race_date").reset_index(drop=True)
     rate = out["atr_cmt_held_up_rate_5"].tolist()
     # Both commented runs read "held up". The middle run must not dilute them.
     assert np.isnan(rate[0])
@@ -182,7 +182,7 @@ def test_rates_stay_missing_with_no_comment_history(monkeypatch, publish_dataset
     def no_comments(sectionals):
         sectionals["atr_in_running_comment"] = None
     df = _make_history(monkeypatch, publish_dataset, no_comments)
-    out = fe.add_atr_features(df)
+    out = sectionals.add_atr_features(df)
     rates = [c for c in out.columns if c.startswith("atr_cmt_") and "_rate_" in c]
     assert rates
     assert out[rates].isna().all().all()
@@ -195,21 +195,19 @@ def test_raw_and_perrun_dropped(monkeypatch, publish_dataset):
     # A frame that already carries this race's ATR record must not keep it.
     df = df.assign(atr_sectional_speeds="[30.0]", atr_official_position=3, atr_in_running_comment="led",
                    atr_finishing_speed_pct=100.0, atr_upgrade_clean=1.0, atr_cmt_trouble=0)
-    out = fe.add_atr_features(df)
+    out = sectionals.add_atr_features(df)
     # raw post-race + un-rolled per-run columns must not survive
     for leaked in ("atr_sectional_speeds", "atr_official_position", "atr_in_running_comment",
                    "atr_finishing_speed_pct", "atr_upgrade_clean", "atr_cmt_trouble"):
         assert leaked not in out.columns
-    # rolled features + coverage flag must exist
+    # rolled features must exist
     assert "atr_finishing_speed_pct_avg_3" in out.columns
     assert "atr_cmt_trouble_rate_5" in out.columns
-    assert "has_atr_history" in out.columns
 
 
 def test_upcoming_race_gets_history_features(monkeypatch, publish_dataset):
     df = _make_history(monkeypatch, publish_dataset)
-    out = fe.add_atr_features(df)
+    out = sectionals.add_atr_features(df)
     upcoming = out[out["race_id"] == "r9"].iloc[0]
     # the live/upcoming row has no own sectionals but inherits rolled history
-    assert upcoming["has_atr_history"] == 1
     assert upcoming["atr_finishing_speed_pct_avg_3"] == pytest.approx(110.0)

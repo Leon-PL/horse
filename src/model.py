@@ -434,12 +434,9 @@ EXCLUDE_COLUMNS = [
     "horse_runs",
     "horse_wins",
     "horse_places",
-    # Raw cumulative entity counts remain excluded. Causal race-relative
-    # variants may be selected separately.
-    "horse_name_freq",
-    "jockey_freq",
+    # The raw cumulative trainer count drifts with calendar time; only its
+    # within-race relatives may be selected.
     "trainer_freq",
-    "track_freq",
 ]
 
 # Market/odds-derived columns. Policy: market information is NEVER fed to
@@ -684,7 +681,11 @@ def get_feature_columns(df: pd.DataFrame, *, apply_allowlist=True) -> list[str]:
     age, draw, handicap, pace/equipment flags ...) from the model.
 
     When ``config.FEATURE_ALLOWLIST`` is set, the result is further
-    restricted to those names (a deterministic, reproducible cut).
+    restricted to those names (a deterministic, reproducible cut). Every listed
+    name must be a column of *df*: a feature the build did not produce fails
+    here instead of quietly shrinking the model's inputs. Listed names that are
+    present but excluded by policy (targets, prices, leaking composites) are
+    still dropped.
     """
     cols = [
         col
@@ -695,17 +696,18 @@ def get_feature_columns(df: pd.DataFrame, *, apply_allowlist=True) -> list[str]:
     ]
     allow = _resolve_feature_allowlist() if apply_allowlist else None
     if allow is not None:
+        absent = sorted(allow.difference(df.columns))
+        if absent:
+            raise ValueError(
+                f"FEATURE_ALLOWLIST names {len(absent)} feature(s) this frame does not have: "
+                f"{absent[:10]}{' ...' if len(absent) > 10 else ''}. Rebuild the features or "
+                "correct the list."
+            )
         kept = [c for c in cols if c in allow]
         if not kept:
             raise ValueError(
                 f"FEATURE_ALLOWLIST matched none of {len(cols)} eligible numeric feature columns. "
                 "Check the feature names or use None to select all eligible features."
-            )
-        n_missing = len(allow) - len(kept)
-        if n_missing > 0:
-            logger.info(
-                "FEATURE_ALLOWLIST: kept %d features; %d list entries not present "
-                "in this frame.", len(kept), n_missing,
             )
         return kept
     return cols

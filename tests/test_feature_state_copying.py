@@ -6,7 +6,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src import feature_engineer as fe, feature_store
+from src import feature_store
+from src.features import history
 from src.feature_store import FeatureStore
 
 
@@ -66,16 +67,16 @@ def test_live_store_without_carried_state_still_requires_rebuild(tmp_path):
 def test_expanding_updates_preserve_seed_and_match_full_history():
     frame = pd.DataFrame({"k": ["A", "B", "A", "B", "A", "C", "A", "B"],
                           "v": [1., 9., np.nan, 4., 3., 8., 5., 7.]})
-    expected = fe._expanding_prev(frame, "k", "v", ["median", "std"])
+    expected = history._expanding_prev(frame, "k", "v", ["median", "std"])
     state = {}
-    with fe.counts_state_scope(state):
-        fe._expanding_prev(frame.iloc[:4], "k", "v", ["median", "std"])
+    with history.counts_state_scope(state):
+        history._expanding_prev(frame.iloc[:4], "k", "v", ["median", "std"])
     seed = state["exp::k::v"]
     before = pickle.dumps(seed)
     pieces = []
     for lo, hi in ((4, 6), (6, 8)):
-        with fe.counts_state_scope(state):
-            pieces.append(fe._expanding_prev(frame.iloc[lo:hi], "k", "v", ["median", "std"]))
+        with history.counts_state_scope(state):
+            pieces.append(history._expanding_prev(frame.iloc[lo:hi], "k", "v", ["median", "std"]))
     assert pickle.dumps(seed) == before
     for stat in expected:
         pd.testing.assert_series_equal(pd.concat([part[stat] for part in pieces]),
@@ -88,16 +89,16 @@ def test_distinct_updates_preserve_seed_and_match_full_history():
                           "value": ["X", "Y", "X", "Z", None, "Z", "W", "Y"],
                           "race_date": pd.date_range("2026-01-01", periods=8),
                           "race_id": [f"r{i}" for i in range(8)]})
-    expected = fe._distinct_count(frame, "entity", "value")
+    expected = history._distinct_count(frame, "entity", "value")
     state = {}
-    with fe.counts_state_scope(state):
-        fe._distinct_count(frame.iloc[:4], "entity", "value")
+    with history.counts_state_scope(state):
+        history._distinct_count(frame.iloc[:4], "entity", "value")
     seed = state["nuniq::entity::value"]
     before = pickle.dumps(seed)
     pieces = []
     for lo, hi in ((4, 6), (6, 8)):
-        with fe.counts_state_scope(state):
-            pieces.append(fe._distinct_count(frame.iloc[lo:hi], "entity", "value"))
+        with history.counts_state_scope(state):
+            pieces.append(history._distinct_count(frame.iloc[lo:hi], "entity", "value"))
     assert pickle.dumps(seed) == before
     pd.testing.assert_series_equal(pd.concat(pieces), expected.iloc[4:], check_exact=True)
     assert state["nuniq::entity::value"] == {"A": {"X", "W"}, "B": {"Y", "Z"}, "C": {"Z"}}

@@ -37,12 +37,12 @@ def stable_card_indicators(processed: pd.DataFrame) -> pd.DataFrame:
     Completing these inputs before FE also preserves derived jumps/draw
     interactions. Filling absent indicator columns after FE is too late.
     """
+    from src.data_processor import INDICATOR_DOMAINS, encode_indicators
     result = processed.copy()
-    categories = {"race_type": ("Flat", "Hurdle", "Chase"), "sex": ("Male", "Female")}
-    for name, labels in categories.items():
+    for name in INDICATOR_DOMAINS:
         if name in result:
-            for label in labels:
-                result[f"{name}_{label}"] = result[name].eq(label).fillna(False).astype("int8")
+            encoded = encode_indicators(result[name], name)
+            result[list(encoded.columns)] = encoded
     return result
 
 
@@ -140,41 +140,13 @@ def feature_engineer_with_history_core(
         if converted.notna().sum() > non_null * 0.5:
             combined[col] = converted
 
-    # Mirror data_processor.encode_categorical EXACTLY (training/serving parity):
-    # collapse each freq per (race, entity) min so a multi-runner trainer's
-    # stablemates share one pre-race count instead of leaking finish order via
-    # sequential cumcounts. race-level vars collapse per race.
-    race_level_vars = {"track"}
-    for col, freq_col in [
-        ("horse_name", "horse_name_freq"),
-        ("jockey", "jockey_freq"),
-        ("trainer", "trainer_freq"),
-        ("track", "track_freq"),
-    ]:
-        if col in combined.columns:
-            combined[freq_col] = combined.groupby(col).cumcount() + 1
-            if "race_id" in combined.columns:
-                grp = "race_id" if col in race_level_vars else ["race_id", col]
-                combined[freq_col] = combined.groupby(grp)[freq_col].transform("min")
-
     # Unknown measurements retain the missing-value branches learned during
-    # training. Only structural one-hot absences have a zero interpretation.
-    # add_time_features drops its temporary season label after encoding it.
-    # Include that explicit domain even when concatenation cannot recover it.
-    supported = {"race_type": ("Flat", "Hurdle", "Chase"), "sex": ("Male", "Female"),
-                 "season": ("Winter", "Spring", "Summer", "Autumn")}
-    for category in ("going", "race_class", "race_type", "region", "sex", "surface", "season"):
-        labels = set(supported.get(category, ()))
-        if category in combined:
-            labels.update(combined[category].dropna().unique())
-        # Match actual encoded category names. A numeric measurement such as
-        # going_numeric is not a dummy merely because its observed range is0/1.
-        for label in labels:
-            column = f"{category}_{label}"
-            if column in combined and pd.api.types.is_numeric_dtype(combined[column]):
-                observed = combined[column].dropna()
-                if observed.isin([0, 1]).all():
-                    combined[column] = combined[column].fillna(0)
+    # training. Only the declared one-hot indicators have a zero
+    # interpretation when a concatenated frame lacks them.
+    from src.data_processor import indicator_columns
+    for column in indicator_columns():
+        if column in combined:
+            combined[column] = combined[column].fillna(0)
 
     logger.info(
         "Feature engineering with history: %s historical + %s live = %s total rows",

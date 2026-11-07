@@ -52,43 +52,11 @@ import numpy as np
 import pandas as pd
 
 import config
+from src.features.common import _event_sort_key
 from src.trueskill_kernel import rate_races
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-def _off_time_to_seconds(off_time: pd.Series) -> pd.Series:
-    """Parse off-time strings to seconds after midnight with safe fallbacks."""
-    s = off_time.astype(str).str.strip()
-    parts = s.str.extract(r"(?P<h>\d{1,2}):(?P<m>\d{2})(?::(?P<s>\d{2}))?")
-    h = pd.to_numeric(parts["h"], errors="coerce")
-    m = pd.to_numeric(parts["m"], errors="coerce")
-    sec = pd.to_numeric(parts["s"], errors="coerce").fillna(0)
-
-    bad = h.isna() | m.isna()
-    if bad.any():
-        try:
-            dt = pd.to_datetime(s[bad], errors="coerce", format="mixed")
-        except TypeError:
-            dt = pd.to_datetime(s[bad], errors="coerce")
-        h.loc[bad] = dt.dt.hour
-        m.loc[bad] = dt.dt.minute
-        sec.loc[bad] = dt.dt.second
-
-    h = h.fillna(12).clip(0, 23)
-    m = m.fillna(0).clip(0, 59)
-    sec = sec.fillna(0).clip(0, 59)
-    return h * 3600 + m * 60 + sec
-
-
-def _event_sort_key(df: pd.DataFrame) -> pd.Series:
-    """Build event-time key using race_date + off_time when available."""
-    race_dt = pd.to_datetime(df["race_date"], errors="coerce")
-    if "off_time" not in df.columns:
-        return race_dt
-    off_secs = _off_time_to_seconds(df["off_time"]).astype(float)
-    return race_dt + pd.to_timedelta(off_secs, unit="s")
-
 
 def _entity_keys(
     df: pd.DataFrame,
@@ -404,11 +372,12 @@ def compute_elo_features(
 
     # The outer feature-engineering pipeline already sorts by _event_dt + race_id.
     # Reuse that order when available to avoid an extra full-frame sort/copy.
-    if "_event_dt" in df.columns:
-        event_dt = pd.to_datetime(df["_event_dt"], errors="coerce")
-    else:
-        event_dt = _event_sort_key(df)
-        df["_event_dt"] = event_dt
+    # A key this function adds for its own sort is removed again; a caller's
+    # key is left in place for the stages after it.
+    added_event_dt = "_event_dt" not in df.columns
+    if added_event_dt:
+        df["_event_dt"] = _event_sort_key(df)
+    event_dt = pd.to_datetime(df["_event_dt"], errors="coerce")
 
     if not event_dt.is_monotonic_increasing:
         df.sort_values(["_event_dt", "race_id"], inplace=True)
@@ -753,7 +722,9 @@ def compute_elo_features(
         elo_cols["trainer_elo_vs_field"] = (trainer_elo - t_avg).to_numpy()
 
     elo_frame = pd.DataFrame(elo_cols, index=df.index)
-    df = pd.concat([df.drop(columns=["_event_dt"], errors="ignore"), elo_frame], axis=1)
+    if added_event_dt:
+        df = df.drop(columns=["_event_dt"])
+    df = pd.concat([df, elo_frame], axis=1)
 
     logger.info(
         f"Elo complete: {len(horse_ratings)} horses, {len(jockey_offsets)} jockeys, "

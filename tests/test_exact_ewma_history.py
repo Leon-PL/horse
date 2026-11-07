@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.feature_engineer import _fast_grouped_rolling_core, _rolling_with_seed
+from src.features.history import _fast_grouped_rolling_core, _rolling_with_seed
 
 
 def test_missing_results_beyond_tail_do_not_erase_known_form():

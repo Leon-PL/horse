@@ -31,7 +31,7 @@ from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore
 logger = logging.getLogger(__name__)
 
 # Config flags that change FE output. Keep in sync with the flags read at
-# runtime by feature_engineer.py / ratings.py (see the audit grep in
+# runtime by feature_engineer.py, src/features/ and ratings.py (see the audit grep in
 # docs/architecture/FE_REFACTOR_PLAN.md). A change to any of these invalidates the store.
 FE_CONFIG_KEYS = [
     "ROLLING_WINDOWS",
@@ -56,6 +56,10 @@ _FE_SOURCE_FILES = (
     "reference/verified_runner_ratings.json", "reference/connection_aliases.json",
     "src/prize_currency_features.py", "reference/track_prize_currency.json",
     "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
+    # Feature stages, one module per family (split from feature_engineer.py, 065).
+    "src/features/common.py", "src/features/history.py", "src/features/horse.py",
+    "src/features/connections.py", "src/features/pedigree.py",
+    "src/features/sectionals.py", "src/features/race.py", "src/features/relative.py",
     "src/trueskill_kernel.py",
     "src/result_margins.py", "src/runner_identity.py",
     "src/result_status.py", "src/rating_reuse.py",
@@ -83,6 +87,7 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "database": "raw-data access only; values covered by data_signature",
     "identity_schema": "source-table and repair-receipt migrations only; accepted values covered by data_signature",
     "ingestion": "collection namespace only; no feature calculations or import-time collection",
+    "features": "package namespace only; its stage modules are hashed above",
     "ingestion.pipeline": "source orchestration only; published observations covered by data and RTV signatures",
     "ingestion.auxiliary": "collects raw ATR/BSP only; accepted values covered by source-content signatures",
     "ingestion.storage": "source locking, raw retention and atomic publication only",
@@ -232,15 +237,9 @@ def data_signature(processed: pd.DataFrame, *, cutoff=None) -> str:
     sub = processed if cutoff is None else processed[rd <= pd.Timestamp(cutoff)]
     h = hashlib.sha256()
     h.update(str(len(sub)).encode("ascii"))
-    categorical = ("going", "race_class", "race_type", "region", "sex", "surface")
-    derived_prefixes = tuple(f"{c}_" for c in categorical if c in sub.columns)
-    # A processed frame also has season dummies, derived from race_date.
-    derived_prefixes += ("season_",)
-    columns = sorted(c for c in sub.columns if not (
-        c.startswith(derived_prefixes)
-        and pd.api.types.is_numeric_dtype(sub[c])
-        and sub[c].dropna().isin([0, 1]).all()
-    ))
+    from src.data_processor import indicator_columns
+    derived = set(indicator_columns())
+    columns = sorted(c for c in sub.columns if c not in derived)
     for col in columns:
         h.update(json.dumps(col).encode("utf-8"))
         series = sub[col]

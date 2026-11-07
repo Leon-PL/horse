@@ -19,6 +19,38 @@ from src.source_dataset import processing_inputs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+#: Every one-hot indicator a frame carries, by source column. These columns
+#: exist whatever a batch contains, so a card of only Flat races still has
+#: ``race_type_Chase == 0`` and the schema never depends on which races happen
+#: to be in the batch. A value outside its domain sets none of its indicators
+#: and is logged. Labels keep their historical spelling (``race_class_1.0``,
+#: ``race_class_Nan``) so stored feature names do not change.
+INDICATOR_DOMAINS: dict[str, tuple[str, ...]] = {
+    "going": ("Fast", "Good", "Heavy", "Slow", "Soft", "Standard", "Unknown", "Yielding"),
+    "race_class": ("1.0", "2.0", "3.0", "4.0", "5.0", "6.0", "Nan"),
+    "race_type": ("Chase", "Flat", "Hurdle"),
+    "region": ("UK",),
+    "sex": ("Female", "Male"),
+    "surface": ("Allweather", "Fibresand", "Polytrack", "Sand", "Turf"),
+    "season": ("Autumn", "Spring", "Summer", "Winter"),
+}
+
+
+def indicator_columns() -> list[str]:
+    """Names of every declared one-hot indicator column."""
+    return [f"{name}_{label}" for name, labels in INDICATOR_DOMAINS.items() for label in labels]
+
+
+def encode_indicators(values: pd.Series, name: str) -> pd.DataFrame:
+    """The declared one-hot columns for *values* of category *name*."""
+    labels = INDICATOR_DOMAINS[name]
+    unknown = sorted(set(values.dropna().astype(str).unique()) - set(labels))
+    if unknown:
+        logger.warning("%s values outside the declared domain set no indicator: %s", name, unknown[:10])
+    return pd.DataFrame({f"{name}_{label}": values.eq(label).to_numpy(dtype=np.int64)
+                         for label in labels}, index=values.index)
+
+
 #: Title-cased sex codes (results use letters; full words kept for safety) to
 #: the sex at birth. Anything else becomes missing rather than a new category.
 _BIRTH_SEX = {
@@ -439,51 +471,18 @@ def encode_categorical(df: pd.DataFrame) -> pd.DataFrame:
     Encode categorical variables for model consumption.
 
     Uses a combination of:
-    - Label encoding for high-cardinality fields (horse, jockey, trainer)
-    - One-hot encoding for low-cardinality fields (going, race_class, etc.)
+    One-hot encodes the low-cardinality fields over their declared domains.
+    High-cardinality entities (horse, jockey, trainer, track) are described by
+    their histories in feature engineering; ``trainer_freq`` is counted there
+    (``src.features.connections.add_trainer_features``) on carried state.
     """
     logger.info("Encoding categorical variables...")
     df = df.copy()
 
-    # --- One-hot encode low-cardinality categoricals ---
-    low_cardinality = ["going", "race_class", "race_type", "region", "sex", "surface"]
-    for col in low_cardinality:
+    # --- One-hot encode low-cardinality categoricals (declared domains) ---
+    for col in ("going", "race_class", "race_type", "region", "sex", "surface"):
         if col in df.columns:
-            dummies = pd.get_dummies(df[col], prefix=col, dtype=int)
-            # A card containing only Flat races or only males still needs the
-            # model's Chase/Female indicators, correctly set to zero. Their
-            # existence must not depend on unrelated races in the same batch.
-            required = {"race_type": ("Flat", "Hurdle", "Chase"),
-                        "sex": ("Male", "Female")}.get(col, ())
-            for category in required:
-                name = f"{col}_{category}"
-                if name not in dummies:
-                    dummies[name] = 0
-            df = pd.concat([df, dummies], axis=1)
-
-    # --- Expanding frequency encoding for high-cardinality fields ---
-    # Uses cumulative count up to each row so that future data is never
-    # used.  The DataFrame must already be sorted by race_date.
-    #
-    # IMPORTANT: when an entity appears on MORE THAN ONE row of the same race,
-    # naive cumcount() produces sequential numbers within that race that
-    # correlate with finish-position order (a result leak). This bites two cases:
-    #   * race-level vars (e.g. track): identical for every runner -> the whole
-    #     race is one cumcount run; collapse per race.
-    #   * trainer: a trainer running several horses in one race gets consecutive
-    #     cumcounts in finishing order across its stablemates -> collapse per
-    #     (race, trainer) so all stablemates share one pre-race count.
-    # horse_name/jockey appear once per race, so the per-(race, entity) collapse
-    # is a no-op for them. We collapse ALL high-cardinality freqs per (race,
-    # entity) min (== first/pre-race count) to be uniformly leak-safe.
-    race_level_vars = {"track"}
-    high_cardinality = ["horse_name", "jockey", "trainer", "track"]
-    for col in high_cardinality:
-        if col in df.columns:
-            df[f"{col}_freq"] = df.groupby(col).cumcount() + 1
-            if "race_id" in df.columns:
-                grp = "race_id" if col in race_level_vars else ["race_id", col]
-                df[f"{col}_freq"] = df.groupby(grp)[f"{col}_freq"].transform("min")
+            df = pd.concat([df, encode_indicators(df[col], col)], axis=1)
 
     logger.info("Categorical encoding complete")
     return df
@@ -508,8 +507,7 @@ def add_time_features(df: pd.DataFrame) -> pd.DataFrame:
                 9: "Autumn", 10: "Autumn", 11: "Autumn",
             }
         )
-        season_dummies = pd.get_dummies(df["season"], prefix="season", dtype=int)
-        df = pd.concat([df, season_dummies], axis=1)
+        df = pd.concat([df, encode_indicators(df["season"], "season")], axis=1)
         df = df.drop(columns=["season"])
 
     return df

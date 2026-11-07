@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 
 from src.data_processor import clean_data
-from src.feature_engineer import add_speed_figure_features
+from src.features.horse import add_speed_figure_features
 from src.model import get_feature_columns
 from src.result_margins import cumulative_beaten_lengths
 

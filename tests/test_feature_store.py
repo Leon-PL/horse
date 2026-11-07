@@ -61,10 +61,17 @@ def _assert_append_matches_batch(store_root, proc, hist, new, boundary):
     appended = _rows_from(store.load_featured(), boundary)
     assert len(appended) == len(new)
 
-    model_cols = [c for c in get_feature_columns(batch) if c in appended.columns]
+    model_cols = get_feature_columns(batch)
     assert model_cols
+    # Every column the full rebuild produces must be in the appended rows: an
+    # intersection would let a feature the append path never computes pass.
+    assert set(appended.columns) == set(batch.columns), (
+        "append and full rebuild have different columns: "
+        f"only batch {sorted(set(batch.columns) - set(appended.columns))[:10]}, "
+        f"only append {sorted(set(appended.columns) - set(batch.columns))[:10]}")
 
-    key = ["race_id", "horse_name"]
+    key = ["race_id", "horse_id"]
+    assert not batch_new.duplicated(key).any() and not appended.duplicated(key).any()
     b = batch_new.set_index(key)[model_cols].sort_index()
     a = appended.set_index(key)[model_cols].sort_index()
     assert b.index.equals(a.index), "appended row set differs from full rebuild"

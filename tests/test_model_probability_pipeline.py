@@ -290,7 +290,16 @@ def test_unmatched_or_empty_allowlist_never_expands_to_all_features(allowlist, m
 
 def test_allowlist_selects_only_requested_eligible_features(tmp_path, monkeypatch):
     allowlist = tmp_path / "features.txt"
-    allowlist.write_text("# selected features\nfeature_b\nmissing_optional_feature\n")
+    allowlist.write_text("# selected features\nfeature_b\n")
     monkeypatch.setattr(config, "FEATURE_ALLOWLIST", allowlist)
     frame = pd.DataFrame({"feature_a": [1, 2], "feature_b": [3, 4]})
     assert model_module.get_feature_columns(frame) == ["feature_b"]
+
+
+def test_allowlist_name_the_build_did_not_produce_fails(tmp_path, monkeypatch):
+    allowlist = tmp_path / "features.txt"
+    allowlist.write_text("feature_b\nmissing_feature\n")
+    monkeypatch.setattr(config, "FEATURE_ALLOWLIST", allowlist)
+    frame = pd.DataFrame({"feature_a": [1, 2], "feature_b": [3, 4]})
+    with pytest.raises(ValueError, match="missing_feature"):
+        model_module.get_feature_columns(frame)

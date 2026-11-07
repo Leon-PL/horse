@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 import config
-from src.feature_engineer import add_collateral_form_features
+from src.features.horse import add_collateral_form_features
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +20,7 @@ def _enable(monkeypatch):
 def _df(rows):
     df = pd.DataFrame(rows)
     df["race_date"] = pd.to_datetime(df["race_date"])
+    df["horse_id"] = pd.factorize(df["horse_name"])[0] + 1
     return df.sort_values(["race_date", "race_id"]).reset_index(drop=True)
 
 

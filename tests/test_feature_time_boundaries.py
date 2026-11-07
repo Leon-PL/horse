@@ -5,10 +5,11 @@ import pandas as pd
 import pytest
 
 from src.data_processor import clean_data, process_data
-from src.feature_engineer import (
-    _add_result_history_flags, add_pedigree_features,
-    add_race_context_features, counts_state_scope, engineer_features,
-)
+from src.feature_engineer import engineer_features
+from src.features.common import _add_result_history_flags
+from src.features.history import counts_state_scope
+from src.features.pedigree import add_pedigree_features
+from src.features.race import add_race_context_features
 from tests.test_live_parity import _synthetic_raw
 
 
@@ -100,11 +101,12 @@ def test_cold_start_speed_features_stay_unknown():
 
 
 def test_non_finisher_does_not_count_as_winning_adjusted_speed():
-    from src.feature_engineer import add_speed_figure_features
+    from src.features.horse import add_speed_figure_features
 
     df = pd.DataFrame({
         "race_id": ["a", "b", "c"],
         "race_date": pd.date_range("2025-01-01", periods=3),
+        "horse_id": [7] * 3,
         "horse_name": ["Same horse"] * 3,
         "finish_position": [2, 0, 2],
         "lengths_behind": [12.0, np.nan, 1.0],
@@ -112,8 +114,7 @@ def test_non_finisher_does_not_count_as_winning_adjusted_speed():
         "race_class": ["Class 5"] * 3,
     })
     featured = add_speed_figure_features(df)
-    for column in ["speed_fig_adj_avg_5", "speed_fig_adj_best_5"]:
-        assert featured.loc[2, column] == pytest.approx(featured.loc[1, column])
+    assert featured.loc[2, "speed_fig_adj_best_5"] == pytest.approx(featured.loc[1, "speed_fig_adj_best_5"])
 
 
 def test_full_features_for_settled_rows_do_not_change_with_future_data():
