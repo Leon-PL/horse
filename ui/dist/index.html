@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Inspect racing data, source evidence and ingestion health in your local workspace.">
+  <title>Racing Workbench · Ingestion</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%231c3735'/%3E%3Cpath d='M18 44V20h13c15 0 15 18 0 18H18m15-2 12 8' fill='none' stroke='%23bde8a1' stroke-width='5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <aside class="sidebar" aria-label="Workspace navigation">
+    <a class="brand" href="#overview"><span class="brandmark">R</span><span>Racing<span class="brand-sub">WORKBENCH</span></span></a>
+    <div class="workspace"><span class="workspace-icon">01</span><div>Project workspace<small>Local racing data</small></div></div>
+    <div class="nav-label">INGESTION</div>
+    <nav id="navigation"></nav>
+    <div class="sidebar-bottom"><span class="local-dot"></span><div>Local workspace<small>Collection &amp; data quality</small></div><span class="version">v1</span></div>
+  </aside>
+  <div class="app-shell">
+    <header class="topbar"><div class="breadcrumb">Project <span>/</span> Ingestion</div><div class="top-actions"><label class="auto-refresh"><input type="checkbox" id="auto-refresh" checked> Live checks</label><button class="button icon-button" id="refresh" aria-label="Refresh current view">↻</button></div></header>
+    <div class="contextbar"><div class="date-range"><label>From<input type="date" id="start-date"></label><span>—</span><label>To<input type="date" id="end-date"></label><button id="apply-dates" class="button small">Apply</button></div><label class="dataset-label">Accepted dataset<select id="dataset"><option value="">Latest complete publication</option></select></label></div>
+    <main id="main" tabindex="-1"><div class="loading"><span class="spinner"></span>Opening your workspace…</div></main>
+    <footer class="footer"><span>Racing Workbench <span class="muted">/</span> Ingestion &amp; preparation</span><span id="last-checked">Local data · no collection on page load</span></footer>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="inspector"><div class="dialog-top"><div><div class="eyebrow" id="inspector-eyebrow">SOURCE RECORD</div><h2 id="inspector-title">Inspect record</h2></div><button class="button icon-button" id="close-inspector" aria-label="Close record inspector">×</button></div><div id="inspector-body"></div></dialog>
+</body>
+</html>

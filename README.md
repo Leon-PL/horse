@@ -23,7 +23,7 @@ the same publication contract. [Data flow](Racing%20Data%20Flow.md) and
 
 Full Betfair historical market downloads are the main refresh's Betfair source
 (`--sources betfair`), including win/place BSP, timed prices and market changes.
-The account is connected under **Data → Historical exchange data**. Existing
+The account connection is stored locally; the setup guide below describes its CLI. Existing
 downloads are consolidated and replayed locally; missing markets are fetched
 automatically. Public BSP fetching and separate manual extraction commands are
 retired. The public volume/VWAP research dataset is frozen under
@@ -32,8 +32,8 @@ the collector conservatively waits six days before requesting them.
 [Setup and access requirements](docs/operations/BETFAIR_HISTORY_AUTOMATION.md).
 [Consolidation and active catch-up](docs/operations/BETFAIR_CONSOLIDATION_2026-11-06.md).
 
-The fresh ATR historical backfill is running independently at a two-second base
-request interval plus jitter. Progress is in
+The fresh ATR historical backfill runs independently with its request pacing
+recorded in `data/atr_cache/rebuild_v2/launch_options.json`. Progress is in
 `data/atr_cache/rebuild_v2/status.json`. It resumes from its SQLite checkpoint;
 do not start a second worker or delete that directory.
 [Backfill operation and qualification](docs/operations/ATR_REBUILD_2026-11-05.md).
@@ -47,6 +47,16 @@ Check actual compatibility before using forecasts:
 ```
 
 ## Collect and aggregate
+
+Inspect ingestion in the local **Racing Workbench**:
+
+```powershell
+.venv\Scripts\python.exe scripts/workbench.py
+```
+
+Open **http://127.0.0.1:8765** for race inspection, source health, BHA reports,
+coverage, background jobs and review notes.
+[Workbench guide](docs/operations/RACING_WORKBENCH.md).
 
 ```powershell
 .venv\Scripts\python.exe -m src.ingestion --sync 14 --results-only
@@ -67,8 +77,8 @@ research weather. `--start` and `--end` select an historical range.
 bounds the normal ATR queue. The separate full ATR backfill uses its own durable
 queue. Use `--help` for the complete options.
 
-Source maintenance is also available on the **Data** page of the maintenance
-app. See the [source operating notes](docs/operations/STAGE1_IMPLEMENTATION_2026-11-04.md)
+Source maintenance is available in **Jobs** in the Racing Workbench.
+See the [source operating notes](docs/operations/STAGE1_IMPLEMENTATION_2026-11-04.md)
 and [BSP/ATR provenance](docs/operations/BSP_AND_ATR_2026-11-05.md).
 
 ## Build features, train and evaluate
@@ -99,7 +109,7 @@ score; `--validation-report` reuses and checks an earlier evaluated recipe.
 ## Forecasts and saved runs
 
 The Streamlit apps (`picks_app.py`, `training_app.py`) were removed on
-2026-11-07; there is no UI. `scripts/build_lookahead.py` prepares dated live
+2026-11-07. Racing Workbench currently covers ingestion; `scripts/build_lookahead.py` prepares dated live
 features and `src.live_prediction` scores them against the promoted run.
 Saved runs are listed, renamed, deleted and pruned through `src.run_store`
 (`list_runs`, `rename_run`, `delete_run`, `prune_runs`). Serving requires

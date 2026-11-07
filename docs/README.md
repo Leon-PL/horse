@@ -1,5 +1,8 @@
 # Documentation
 
+The [Racing Workbench guide](operations/RACING_WORKBENCH.md) describes the local
+ingestion UI, race inspection, BHA reports, source health, jobs and review.
+
 The [current racing data flow](../Racing%20Data%20Flow.md) and
 [shared source publication](operations/SOURCE_PUBLICATION_2026-11-07.md) describe
 the immutable input boundary introduced on 7 November.

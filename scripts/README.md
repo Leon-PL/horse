@@ -16,6 +16,7 @@ Use `--help` before deliberate backfills or repairs.
 
 | Workflow | Commands |
 |---|---|
+| Open the local project UI | `workbench.py`; http://127.0.0.1:8765; see the [Workbench guide](../docs/operations/RACING_WORKBENCH.md) |
 | Check installed state | `project_status.py`, `validate_data_contracts.py` |
 | Collect history | `python -m src.ingestion`; `--enrich` drains the pedigree queue; `backfill_rtv_text.py` rebuilds the Timeform comment-score history |
 | BHA stewards and full reports | Included in normal ingestion as `bha`. Historical catch-up: `python -m src.ingestion.bha_stewards --start YYYY-MM-DD --end YYYY-MM-DD --drain --publish`; `--status` reads progress; see [collection guide](../docs/operations/BHA_REGULAR_INGESTION_2026-11-07.md) |
