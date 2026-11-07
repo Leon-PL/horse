@@ -1,6 +1,6 @@
 """Memory-bounded history build, shared by normal training and explicit rebuilds.
 
-A monolithic ``get_featured_dataset(rebuild=True)`` over the whole DB (~707k
+A monolithic in-memory build (``FeatureStore.build``) over the whole DB (~707k
 rows → a ~6 GB featured frame, plus several intermediate copies during FE)
 peaks past 16 GB of RAM and thrashes the machine. This script produces a
 byte-equivalent store while never holding more than one chunk in memory:
@@ -16,8 +16,9 @@ byte-equivalent store while never holding more than one chunk in memory:
      file; those are reconciled with pyarrow at the end (schemas unified, one
      bounded block at a time), so the whole frame never reaches pandas.
   4. Persist ratings_state + counts_state and stamp meta with the same
-     fe_signature / data_signature get_featured_dataset() expects, so the very
-     next train APPENDS instead of rebuilding.
+     fe_signature / data_signature the training refresh
+     (src.store_refresh.append_current_store) expects, so the very next train
+     APPENDS instead of rebuilding.
   5. Commit all five outputs together under the feature-store lock. A failed
      build leaves the previous store intact; an interrupted commit is resumed
      before the next store operation.

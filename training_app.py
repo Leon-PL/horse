@@ -23,7 +23,7 @@ import streamlit as st
 
 import config
 from src.featured_dataset import fe_signature
-from src.store_refresh import get_training_dataset as get_featured_dataset
+from src.store_refresh import get_training_dataset
 from src.feature_store import FeatureStore
 from src.run_store import (
     GENERATION_MISMATCH,
@@ -88,7 +88,7 @@ def _bsp_status() -> dict:
 def _load_featured():
     """Load the full featured dataset from the store (heavy — cached for the
     session). Only the analysis pages call this; the picks app never does."""
-    return get_featured_dataset()
+    return get_training_dataset()
 
 
 def _window_days(featured: pd.DataFrame, days: int | None) -> pd.DataFrame:

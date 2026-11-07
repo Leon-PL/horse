@@ -1,13 +1,16 @@
 # Feature-Engineering: target architecture & migration plan
 
 **Historical design and migration record.** Several stages below have since
-shipped. The normal training refresh now enters through `src.store_refresh`;
-see the [inventory's consolidation boundaries](../PROJECT_INVENTORY.md#consolidation-boundaries)
-for the remaining overlap and the [README](../../README.md) for operation.
+shipped. Training now enters through `src.store_refresh.get_training_dataset`,
+the only refresh route; the `get_featured_dataset` seam described below and
+`FeatureStore.append` were retired on 2026-11-07. See the
+[inventory's consolidation boundaries](../PROJECT_INVENTORY.md#consolidation-boundaries)
+and the [README](../../README.md) for operation.
 
 > **Status (2026-10-13): phases 0–2 are built and shipped**, so the sections
 > below describing them are a record, not a to-do. The single seam
-> (`featured_dataset.get_featured_dataset`), both freshness guards
+> (then `featured_dataset.get_featured_dataset`, since 2026-11-07
+> `store_refresh.get_training_dataset`), both freshness guards
 > (`fe_signature` / `data_signature`), the new-rows-only append and the
 > counts accumulator are all in the tree and under test. **Phases 3–4
 > (bounded ring buffers for the rolling/lag stages, then retiring the

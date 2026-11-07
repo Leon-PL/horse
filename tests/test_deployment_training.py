@@ -32,7 +32,7 @@ def evaluated(tmp_path, monkeypatch):
          "lengths_behind": float(runner), "track": "Test", "off_time": "14:30"}
         for day in range(150) for runner in range(5)])
     monkeypatch.setattr(training, "process_data", lambda: frame.copy())
-    monkeypatch.setattr(training, "get_featured_dataset", lambda processed: frame.copy())
+    monkeypatch.setattr(training, "get_training_dataset", lambda processed: frame.copy())
     monkeypatch.setattr(training, "data_signature", lambda df, cutoff: "frozen-data")
     instances = []
 
@@ -116,7 +116,7 @@ def test_deployment_preserves_validated_training_order_when_store_schema_changes
     cfg, _, certificate, history, instances = evaluated
     # Both inputs exist, but their parquet schema order is reversed.
     reordered = history[["second_signal", *[c for c in history if c != "second_signal"]]]
-    monkeypatch.setattr(training, "get_featured_dataset", lambda processed: reordered.copy())
+    monkeypatch.setattr(training, "get_training_dataset", lambda processed: reordered.copy())
     training.train_run(replace(cfg, fit_as_of="2025-05-15", validation_report=str(certificate)))
     assert instances[-1].feature_cols == ["signal", "second_signal"]
 

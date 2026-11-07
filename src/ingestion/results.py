@@ -284,8 +284,8 @@ def _sync_database(days_back: int, *, enrich=False, start=None, end=None, rechec
 
     # Publish the snapshot for the pipeline. This MUST be the full history, not
     # the scrape window: feature engineering computes cumulative/rolling features
-    # across each horse's whole career, and get_featured_dataset() rebuilds the
-    # store from this snapshot. Writing only `days_back` here previously clobbered
+    # across each horse's whole career, and the batched feature-store build reads
+    # this snapshot. Writing only `days_back` here previously clobbered
     # the feature store down to the scrape window.
     snapshot = database.publish_results_snapshot()
     lo, hi = min(all_dates, default="9999"), max(all_dates, default="0000")

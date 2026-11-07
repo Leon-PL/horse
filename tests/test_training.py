@@ -138,7 +138,7 @@ def test_training_refuses_history_without_a_complete_valid_field(monkeypatch):
         "horse_name": ["A", "B"], "won": [1, 0],
         "finish_position": [1, 0], "num_runners": [3, 3]})
     monkeypatch.setattr(tr, "process_data", lambda: frame.copy())
-    monkeypatch.setattr(tr, "get_featured_dataset", lambda processed=None: frame.copy())
+    monkeypatch.setattr(tr, "get_training_dataset", lambda processed=None: frame.copy())
     monkeypatch.setattr(tr, "RacePredictor", lambda **k: pytest.fail("Invalid fields reached model fitting"))
     monkeypatch.setattr(tr, "save_run", lambda **k: pytest.fail("Invalid fields produced a run"))
     with pytest.raises(ValueError, match="complete single-winner"):
@@ -177,7 +177,7 @@ def test_train_run_orchestration(monkeypatch, walk_forward, with_incomplete_fiel
         return "20250101_000000"
 
     monkeypatch.setattr(tr, "process_data", lambda: feat.copy())
-    monkeypatch.setattr(tr, "get_featured_dataset", lambda processed=None: feat.copy())
+    monkeypatch.setattr(tr, "get_training_dataset", lambda processed=None: feat.copy())
     monkeypatch.setattr(tr, "RacePredictor", _FakePred)
     monkeypatch.setattr(tr, "fe_signature", lambda: "FE")
     monkeypatch.setattr(tr, "data_signature", lambda df, cutoff=None: "DS")

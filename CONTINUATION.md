@@ -31,6 +31,15 @@ zeros, so the `atr_cmt_*` rates skip that run. This moves `fe_signature()` to `3
 The store was deliberately not rebuilt and still holds the zeros, and the production input
 `atr_cmt_front_rate_5_vs_field` was trained on them, so apply the rebuild and a refit together.
 
+**Old build route retired, 7 November:** `featured_dataset.get_featured_dataset` and
+`FeatureStore.append` are removed. Training refreshes the store only through
+`src.store_refresh.get_training_dataset`, and the empty-store and pre-flip errors now name
+`python -m scripts.build_feature_store_batched`. The append, parity, transaction and
+live-feature tests run against `append_current_store`. This moves `fe_signature()` again, to
+`60990991f5a30931`, superseding the value above. The store was deliberately not rebuilt while
+scraping continues, so `project_status.py` reports it stale and the next training run will
+rebuild it (about 14 minutes). Do that rebuild and the refit together.
+
 **ATR rebuild:** quote progress as two groups. Races with a known ATR ID (2023-08-10 to
 2026-06-20) run at 258 an hour. Races with no ID cannot run, because ATR answers its results
 pages with a client challenge; that covers everything before 2023-08-10 and from 2026-06-21, so

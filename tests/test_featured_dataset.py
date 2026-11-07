@@ -1,7 +1,8 @@
-"""Tests for the single build-path seam (src/featured_dataset.py).
+"""Tests for the store signatures and the training refresh's build-vs-append decision.
 
-Covers the data fingerprint and the build-vs-append decision. FeatureStore is
-faked so we exercise the routing logic without a real (slow) FE build.
+The signatures live in src/featured_dataset.py; the decision lives in
+src/store_refresh.py. FeatureStore and the batched builder are faked so the
+routing logic runs without a real (slow) FE build.
 """
 
 from contextlib import nullcontext
@@ -10,8 +11,11 @@ import pandas as pd
 import pytest
 
 import config
-import src.featured_dataset as fd
-from src.featured_dataset import data_signature, fe_signature, get_featured_dataset
+import scripts.build_feature_store_batched as batched
+from src import store_refresh
+from src.feature_store import STORE_SCHEMA_VERSION
+from src.featured_dataset import data_signature, fe_signature
+from src.store_refresh import get_training_dataset
 
 
 def _toy(dates, draws=None):
@@ -53,13 +57,20 @@ class TestDataSignature:
 
 
 class _FakeStore:
-    def __init__(self, *, exists, meta, last_date):
-        self._exists, self._meta, self._last = exists, meta, last_date
+    def __init__(self, *, exists, meta, last_date, carried_state=True):
+        self._exists, self._last = exists, last_date
+        self._meta = {"schema_version": STORE_SCHEMA_VERSION, **meta}
         self.meta_path = "(fake)"
+        # append_current_store checks this file exists; a store without
+        # carried state predates the incremental flip and must be rebuilt.
+        self.counts_state_path = __file__ if carried_state else "(missing)"
         self.calls: list[str] = []
 
     def _access(self):
         return nullcontext()
+
+    def _staged_update(self):
+        return nullcontext(self)
 
     def exists(self):
         return self._exists
@@ -70,12 +81,8 @@ class _FakeStore:
     def last_date(self):
         return self._last
 
-    def build(self, processed):
-        self.calls.append("build")
-        return pd.DataFrame({"featured": [1]})
-
-    def append(self, processed):
-        self.calls.append("append")
+    def _fast_featurize(self, new):
+        raise AssertionError("these routing tests never carry new rows")
 
     def load_featured(self, columns=None):
         self.calls.append("load")
@@ -85,115 +92,139 @@ class _FakeStore:
         return ["featured"]
 
 
+ATR_STAMP = {"cutoff": "2023-01-02", "sig": "atr-cache"}
+
+
 def _no_rtv_cache(cutoff):
     return {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": {"runs": None, "pre": None}}
 
 
 @pytest.fixture
 def patch_store(monkeypatch):
-    """Install a fake store, a no-op _stamp and an absent RTV cache.
+    """Install a fake store, a recording batched build and fixed side-cache signatures.
 
-    Without the RTV stub the decision reads the real cache under data/, so
-    these tests passed on a fresh checkout and failed wherever RTV data exists.
+    Without the RTV and ATR stubs the decision reads the real caches under
+    data/, so these tests would pass on a fresh checkout and fail wherever
+    those caches exist.
     """
-    holder = {}
+    monkeypatch.setattr(store_refresh, "_rtv_signature", _no_rtv_cache)
+    monkeypatch.setattr(store_refresh, "_atr_signature", lambda cutoff: ATR_STAMP)
 
-    def _install(*, exists, meta, last_date):
-        fake = _FakeStore(exists=exists, meta=meta, last_date=last_date)
-        holder["fake"] = fake
-        monkeypatch.setattr(fd, "FeatureStore", lambda: fake)
-        monkeypatch.setattr(fd, "_stamp", lambda *a, **k: None)
-        monkeypatch.setattr(fd, "_rtv_signature", _no_rtv_cache)
+    def _install(*, exists, meta, last_date, carried_state=True):
+        fake = _FakeStore(exists=exists, meta=meta, last_date=last_date,
+                          carried_state=carried_state)
+        monkeypatch.setattr(store_refresh, "FeatureStore", lambda: fake)
+        monkeypatch.setattr(batched, "_build",
+                            lambda store, chunk_rows, *, processed: fake.calls.append("build"))
         return fake
 
     return _install
 
 
+def _current_meta(proc, **overrides):
+    """Metadata of a store that is current for *proc*; None drops a key."""
+    last = proc["race_date"].max()
+    meta = {"fe_signature": fe_signature(),
+            "data_signature": data_signature(proc, cutoff=last),
+            "atr_signature": ATR_STAMP}
+    meta.update(overrides)
+    return {k: v for k, v in meta.items() if v is not None}
+
+
 class TestBuildVsAppend:
     def test_cold_store_builds(self, patch_store):
         fake = patch_store(exists=False, meta={}, last_date=None)
-        get_featured_dataset(processed=_toy(["2023-01-01", "2023-01-02"]))
-        assert fake.calls == ["build"]
+        get_training_dataset(processed=_toy(["2023-01-01", "2023-01-02"]))
+        assert fake.calls == ["build", "load"]
 
     def test_rebuild_flag_builds(self, patch_store):
-        fake = patch_store(exists=True, meta={}, last_date=pd.Timestamp("2023-01-02"))
-        get_featured_dataset(processed=_toy(["2023-01-01", "2023-01-02"]), rebuild=True)
-        assert fake.calls == ["build"]
+        proc = _toy(["2023-01-01", "2023-01-02"])
+        fake = patch_store(exists=True, meta=_current_meta(proc), last_date=proc["race_date"].max())
+        get_training_dataset(processed=proc, rebuild=True)
+        assert fake.calls == ["build", "load"]
 
     def test_code_change_builds(self, patch_store):
         proc = _toy(["2023-01-01", "2023-01-02"])
-        last = proc["race_date"].max()
-        fake = patch_store(
-            exists=True, last_date=last,
-            meta={"fe_signature": "STALE", "data_signature": data_signature(proc, cutoff=last)},
-        )
-        get_featured_dataset(processed=proc)
-        assert fake.calls == ["build"]
+        fake = patch_store(exists=True, last_date=proc["race_date"].max(),
+                           meta=_current_meta(proc, fe_signature="STALE"))
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
 
     def test_data_change_builds(self, patch_store):
         proc = _toy(["2023-01-01", "2023-01-02"], draws=[7, 9])
-        last = proc["race_date"].max()
-        fake = patch_store(
-            exists=True, last_date=last,
-            meta={"fe_signature": fe_signature(), "data_signature": "OLD-DATA"},
-        )
-        get_featured_dataset(processed=proc)
-        assert fake.calls == ["build"]
+        fake = patch_store(exists=True, last_date=proc["race_date"].max(),
+                           meta=_current_meta(proc, data_signature="OLD-DATA"))
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
 
-    def test_current_store_appends(self, patch_store):
+    def test_schema_change_builds(self, patch_store):
         proc = _toy(["2023-01-01", "2023-01-02"])
-        last = proc["race_date"].max()
-        fake = patch_store(
-            exists=True, last_date=last,
-            meta={"fe_signature": fe_signature(),
-                  "data_signature": data_signature(proc, cutoff=last)},
-        )
-        get_featured_dataset(processed=proc)
-        assert fake.calls == ["append", "load"]
+        fake = patch_store(exists=True, last_date=proc["race_date"].max(),
+                           meta=_current_meta(proc, schema_version=-1))
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
+
+    def test_store_without_carried_state_builds(self, patch_store):
+        proc = _toy(["2023-01-01", "2023-01-02"])
+        fake = patch_store(exists=True, last_date=proc["race_date"].max(),
+                           meta=_current_meta(proc), carried_state=False)
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
+
+    def test_current_store_loads_without_building(self, patch_store):
+        proc = _toy(["2023-01-01", "2023-01-02"])
+        fake = patch_store(exists=True, last_date=proc["race_date"].max(), meta=_current_meta(proc))
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["load"]
 
     def test_sectional_backfill_beneath_the_store_builds(self, patch_store, monkeypatch):
         """The ATR cache is read inside FE, outside fe/data_signature (ledger 13)."""
         proc = _toy(["2023-01-01", "2023-01-02"])
         last = proc["race_date"].max()
-        meta = {"fe_signature": fe_signature(), "data_signature": data_signature(proc, cutoff=last),
-                "atr_signature": {"cutoff": "2023-01-02", "sig": "before-backfill"}}
-        monkeypatch.setattr(fd, "_atr_signature",
-                            lambda cutoff: {"cutoff": str(cutoff), "sig": "after-backfill"})
+        meta = _current_meta(proc, atr_signature={"cutoff": "2023-01-02", "sig": "before-backfill"})
         fake = patch_store(exists=True, last_date=last, meta=meta)
-        get_featured_dataset(processed=proc)
-        assert fake.calls == ["build"]
+        monkeypatch.setattr(store_refresh, "_atr_signature",
+                            lambda cutoff: {"cutoff": "2023-01-02", "sig": "after-backfill"})
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
 
-        monkeypatch.setattr(fd, "_atr_signature",
-                            lambda cutoff: {"cutoff": str(cutoff), "sig": "before-backfill"})
         fake = patch_store(exists=True, last_date=last, meta=meta)
-        get_featured_dataset(processed=proc)
-        assert fake.calls == ["append", "load"]
+        monkeypatch.setattr(store_refresh, "_atr_signature",
+                            lambda cutoff: {"cutoff": "2023-01-02", "sig": "before-backfill"})
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["load"]
+
+    def test_store_without_an_atr_stamp_builds(self, patch_store):
+        proc = _toy(["2023-01-01", "2023-01-02"])
+        fake = patch_store(exists=True, last_date=proc["race_date"].max(),
+                           meta=_current_meta(proc, atr_signature=None))
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
 
     def test_rtv_cache_change_beneath_the_store_builds(self, patch_store, monkeypatch):
         """The RTV observation cache is read inside FE, outside fe/data_signature."""
         proc = _toy(["2023-01-01", "2023-01-02"])
         last = proc["race_date"].max()
         stamped = {"cutoff": "2023-01-02", "sig": {"runs": "before", "pre": None}}
-        meta = {"fe_signature": fe_signature(), "data_signature": data_signature(proc, cutoff=last),
-                "rtv_signature": stamped}
+        meta = _current_meta(proc, rtv_signature=stamped)
 
         fake = patch_store(exists=True, last_date=last, meta=meta)
-        monkeypatch.setattr(fd, "_rtv_signature",
+        monkeypatch.setattr(store_refresh, "_rtv_signature",
                             lambda cutoff: {"cutoff": "2023-01-02", "sig": {"runs": "after", "pre": None}})
-        get_featured_dataset(processed=proc)
-        assert fake.calls == ["build"]
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
 
         fake = patch_store(exists=True, last_date=last, meta=meta)
-        monkeypatch.setattr(fd, "_rtv_signature", lambda cutoff: stamped)
-        get_featured_dataset(processed=proc)
-        assert fake.calls == ["append", "load"]
+        monkeypatch.setattr(store_refresh, "_rtv_signature", lambda cutoff: stamped)
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["load"]
 
         # A store stamped before the RTV cache existed must rebuild once it appears.
         unstamped = {k: v for k, v in meta.items() if k != "rtv_signature"}
         fake = patch_store(exists=True, last_date=last, meta=unstamped)
-        monkeypatch.setattr(fd, "_rtv_signature", lambda cutoff: stamped)
-        get_featured_dataset(processed=proc)
-        assert fake.calls == ["build"]
+        monkeypatch.setattr(store_refresh, "_rtv_signature", lambda cutoff: stamped)
+        get_training_dataset(processed=proc)
+        assert fake.calls == ["build", "load"]
 
 
 @pytest.mark.parametrize("column,value", [
