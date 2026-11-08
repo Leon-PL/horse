@@ -7,7 +7,19 @@ import re
 import pandas as pd
 from bs4 import BeautifulSoup
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2
+
+
+def race_notes(blocks):
+    """The extracted blocks that open a race's own report.
+
+    A race report starts "Race 1 - 1:25pm." with the race title on the next
+    line. Revised off times in the fixture notes have the same start but never
+    the full stop ("Race 1 - 12:15pm (+5) now 12:20pm", "(previously 4:22pm)",
+    or a bare list of new times). Parser 1 kept them as race notes, so each
+    delayed race appeared twice; documents it stored are filtered when read.
+    """
+    return [block for block in blocks if block['text'].startswith('.')]
 
 
 def strip_html(value):
@@ -94,7 +106,11 @@ def parse_document(body):
         hour = hour % 12 + (12 if match.group(3).lower() == 'pm' else 0)
         blocks.append({'race_number': int(match.group(1)), 'off_time_local': f'{hour:02d}:{minute:02d}',
                        'text': clean[match.end():stop].strip()})
+    # Revised-time lines still bound sections and races, as they did in parser 1.
+    notes = race_notes(blocks)
+    if blocks and not notes:
+        raise ValueError('BHA PDF race headings lack the expected full stop; retained for review')
     return {'parser_version': PARSER_VERSION, 'pages': len(pages), 'text': text,
             'course': course.group(1).strip() if course else None, 'race_date': document_date,
-            'sections': sections, 'races': blocks, 'printed_publication_labels': footers,
+            'sections': sections, 'races': notes, 'printed_publication_labels': footers,
             'replacement_character_count': text.count('\ufffd')}

@@ -23,7 +23,7 @@ def document(**changes):
     return {'course': 'AINTREE', 'race_date': DAY, 'parser_version': 1, 'pages': 1,
             'text': 'Full report including going, non-runners and suspensions.',
             'sections': {'going': 'Good', 'rail': 'Rail moved'},
-            'races': [{'race_number': 1, 'off_time_local': '12:40', 'text': 'Nothing to report'}],
+            'races': [{'race_number': 1, 'off_time_local': '12:40', 'text': '.\nTHE AINTREE HANDICAP\nNothing to report'}],
             'printed_publication_labels': ['Generated today'], 'replacement_character_count': 0, **changes}
 
 
@@ -187,19 +187,63 @@ def test_html_legacy_notes_and_distinct_sections_are_preserved():
     assert row['fixture_comments_text'] == 'Fixture' and row['non_race_incidents_text'] == 'Other'
 
 
-def test_pdf_extracts_context_and_races_without_backdating_generated_footer(monkeypatch):
+def parse_text(monkeypatch, text):
     import pypdf
-    text = ("AINTREE STEWARDS' REPORT\nFriday 06 November 2026\nStewards: Official\nGoing: Good\n"
-            "Rail: Moved 10 yards\nNon-Runners\nALPHA: Infected foot\nRace 1 - 12:40pm\nNothing to report\n"
-            "Race 2 - 1:15pm\nReported breathing issue.\nSuspensions\nRider: 2 days\nPublished: Today\n")
     page = SimpleNamespace(extract_text=lambda: text, get_contents=lambda: None)
     monkeypatch.setattr(pypdf, 'PdfReader', lambda _: SimpleNamespace(pages=[page], is_encrypted=False))
-    parsed = bha_reports.parse_document(b'%PDF input')
+    return bha_reports.parse_document(b'%PDF input')
+
+
+def test_pdf_extracts_context_and_races_without_backdating_generated_footer(monkeypatch):
+    parsed = parse_text(monkeypatch,
+        "AINTREE STEWARDS' REPORT\nFriday 06 November 2026\nStewards: Official\nGoing: Good\n"
+        "Rail: Moved 10 yards\nNon-Runners\nALPHA: Infected foot\nRace 1 - 12:40pm.\nTHE AINTREE HANDICAP\n"
+        "Nothing to report\nRace 2 - 1:15pm.\nTHE AINTREE HURDLE\nReported breathing issue.\n"
+        "Suspensions\nRider: 2 days\nPublished: Today\n")
     assert parsed['race_date'] == DAY and parsed['printed_publication_labels'] == ['Today']
     assert parsed['sections']['non_runners'] == 'ALPHA: Infected foot'
     assert parsed['races'][1]['off_time_local'] == '13:15'
     assert 'Suspensions' not in parsed['races'][1]['text']
     assert 'available_at' not in parsed
+
+
+def test_revised_off_times_are_not_race_notes(monkeypatch):
+    # Shapes taken from real reports (2021:19714, 2022:1137, 2024:10126, 2024:50079).
+    parsed = parse_text(monkeypatch,
+        "AINTREE STEWARDS' REPORT\nFriday 06 November 2026\nStewards: Official\nGoing: Good\n"
+        "Race 1 - 12:45pm\nRace 2 - 1:20pm (previously 1:15pm)\n"
+        "Race Delay: At the request of the BHA Racing Department, the following races have been delayed:\n"
+        "Race 1 - 12:40pm (+5) now 12:45pm\nNon-Runners\nALPHA: Infected foot\n"
+        "Race 1 - 12:40pm.\nTHE AINTREE HANDICAP\nNothing to report\n"
+        "Race 2 - 1:15pm.\nTHE AINTREE HURDLE\nReported breathing issue.\n")
+    assert [(r['race_number'], r['off_time_local']) for r in parsed['races']] == [(1, '12:40'), (2, '13:15')]
+    assert parsed['races'][0]['text'] == '.\nTHE AINTREE HANDICAP\nNothing to report'
+    assert parsed['sections']['going'] == 'Good'
+    assert parsed['sections']['non_runners'] == 'ALPHA: Infected foot'
+
+
+def test_unrecognised_race_headings_are_retained_for_review(monkeypatch):
+    with pytest.raises(ValueError, match='full stop'):
+        parse_text(monkeypatch, "AINTREE STEWARDS' REPORT\nFriday 06 November 2026\nGoing: Good\n"
+                                "Race 1 - 12:40pm\nTHE AINTREE HANDICAP\nNothing to report\n")
+
+
+def test_stored_parser_1_revised_times_are_dropped_before_publication(env, monkeypatch):
+    from src.ingestion import publication
+    from src.source_dataset import registry_root
+    root, factory, calls, pages = env
+    # Parser 1 stored the revised time as a second note for race 1.
+    monkeypatch.setattr(bha, 'parse_document', lambda body: document(races=[
+        {'race_number': 1, 'off_time_local': '12:45', 'text': '(+5) now 12:45pm'},
+        {'race_number': 1, 'off_time_local': '12:40', 'text': '.\nTHE AINTREE HANDICAP\nNothing to report'}]))
+    bha.refresh_reports(DAY, DAY, root=root, client_factory=factory)
+    notes = bha.read_tables(root)['race_notes']
+    assert notes[['race_number', 'off_time_local']].values.tolist() == [[1, '12:40']]
+    monkeypatch.setattr(bha, 'default_root', lambda: root)
+    canonical = pd.DataFrame(columns=['race_id', 'horse_id', 'horse_name', 'race_date', 'track', 'off_time'])
+    receipt = publication.publish_bha(canonical)
+    published = pd.read_parquet(registry_root()/'bha'/receipt['version']/receipt['tables']['race_notes']['file'])
+    assert len(published) == 1
 
 
 def test_regular_coordinator_and_command_include_bha(tmp_path, monkeypatch):

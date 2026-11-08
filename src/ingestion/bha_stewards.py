@@ -23,7 +23,7 @@ import pandas as pd
 import requests
 
 import config
-from src.ingestion.bha_reports import normalise_report, parse_document, PARSER_VERSION
+from src.ingestion.bha_reports import normalise_report, parse_document, race_notes, PARSER_VERSION
 from src.ingestion.storage import RawPayloadStore, atomic_json, read_json, writer_lock
 
 logger = logging.getLogger(__name__)
@@ -318,7 +318,7 @@ def read_tables(root=None):
                               'printed_publication_labels_json': json.dumps(parsed['printed_publication_labels']),
                               'replacement_character_count': parsed['replacement_character_count'],
                               'parser_version': parsed['parser_version']})
-            races.extend({**base, **block} for block in parsed['races'])
+            races.extend({**base, **block} for block in race_notes(parsed['races']))
     return {name: pd.DataFrame(rows) for name, rows in
             (('reports', reports), ('documents', documents), ('race_notes', races)) if rows}
 
