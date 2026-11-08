@@ -129,6 +129,15 @@ def has_text(frame) -> np.ndarray:
     return _filled(frame.tf_comment) | _filled(frame.verdict_text)
 
 
+def text_logits(model, frame) -> np.ndarray:
+    """The stage's comment score: missing for a prepared row with no text.
+
+    Such a row's count vector holds only the verdict order dummy, which would
+    otherwise give every runner without text the same constant score.
+    """
+    return np.where(has_text(frame), model.logits(frame), np.nan)
+
+
 def verdict_rank_feature(frame) -> np.ndarray:
     """Verdict order as an input: missing when the race has no verdict, not 'not named'."""
     return np.where(_filled(frame.tf_verdict), frame.verdict_rank.to_numpy(dtype="float64"), np.nan)
@@ -259,13 +268,9 @@ class TextModel:
     scale: float = 1.0
 
     def logits(self, frame) -> np.ndarray:
-        """Scores for prepared rows: comment, verdict sentences and verdict order.
-
-        A row with no text gets NaN: its count vector holds only the verdict
-        order dummy, which would otherwise score every such runner alike.
-        """
+        """Scores for prepared rows: comment, verdict sentences and verdict order."""
         x, _ = counts(frame, vocabulary=self.names)
-        return np.where(has_text(frame), self.scale * (tfidf(x, self.idf) @ self.weights), np.nan)
+        return self.scale * (tfidf(x, self.idf) @ self.weights)
 
     def save(self, directory) -> Path:
         directory = Path(directory)

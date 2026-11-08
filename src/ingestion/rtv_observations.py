@@ -238,7 +238,7 @@ def refresh_text_scores(start, end, *, database=None, text_source=None, destinat
     if not frame.empty:
         for quarter, rows in frame.groupby(rtv_text.quarters(frame.race_date).to_numpy(), sort=True):
             model = text_model(quarter, database=database)
-            parts.append(rows.assign(rtv_text_logit=model.logits(rows),
+            parts.append(rows.assign(rtv_text_logit=rtv_text.text_logits(model, rows),
                                      rtv_verdict_rank=rtv_text.verdict_rank_feature(rows),
                                      rtv_text_format=rtv_text.FORMAT)[columns])
     output = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
@@ -285,7 +285,7 @@ def _snapshot_text(frame):
         except Exception as error:  # a missing model must not lose the numeric card
             logger.warning("No comment model for %s: %s", quarter, error)
             continue
-        output.loc[part.index, "rtv_text_logit"] = model.logits(part)
+        output.loc[part.index, "rtv_text_logit"] = rtv_text.text_logits(model, part)
         output.loc[part.index, "rtv_verdict_rank"] = rtv_text.verdict_rank_feature(part)
     return output
 

@@ -110,7 +110,8 @@ def test_a_runner_without_text_is_missing_not_a_shared_constant():
     names = np.asarray(["c:stays", "c:travels", "v:wins", *(f"rank:{r}" for r in range(rtv_text.RANKS))])
     model = rtv_text.TextModel("2021Q1", names, np.ones(len(names), np.float32), np.arange(len(names), dtype=float),
                                "2020-12-25", 10, 2.0)
-    logits = model.logits(frame)
+    assert np.isfinite(model.logits(frame)).all()                # the model itself scores every row
+    logits = rtv_text.text_logits(model, frame)
     assert np.isfinite(logits[[0, 3]]).all() and np.isnan(logits[[1, 2, 4]]).all()
     # Verdict order means 'not named' only in a race that has a verdict.
     np.testing.assert_array_equal(rtv_text.verdict_rank_feature(frame), [1., 0., 0., np.nan, np.nan])
