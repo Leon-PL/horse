@@ -150,10 +150,13 @@ def oof_predict_expanding(
     n_splits: int = 4,
     embargo_days: int | None = None,
     min_train_rows: int = 1000,
+    folds: Sequence[Fold] | None = None,
+    race_col: str | None = None,
 ) -> np.ndarray:
     """Out-of-fold predictions for *frame*, for fitting a second stage.
 
-    Splits *frame* into *n_splits* contiguous time blocks and predicts each
+    Accepts explicit calendar ``folds`` from :func:`expanding_period_folds`.
+    Without them, splits complete dates into *n_splits* time blocks and predicts each
     block from a model fitted only on earlier rows (minus the embargo). The
     earliest block has no history to learn from and is returned as ``NaN``, so
     callers must mask non-finite values before fitting on the result.
@@ -165,30 +168,74 @@ def oof_predict_expanding(
     ``fit_predict(train_df, predict_df)`` must return one probability per row
     of *predict_df*.
     """
-    dates = pd.to_datetime(frame[date_col], errors="coerce")
-    order = np.argsort(dates.to_numpy(), kind="stable")
+    dates = pd.to_datetime(frame[date_col], errors="coerce").dt.normalize()
+    if dates.isna().any():
+        raise ValueError("Walk-forward dates must be present and valid")
     out = np.full(len(frame), np.nan, dtype=np.float64)
     gap = purge_days() if embargo_days is None else max(0, int(embargo_days))
-
-    blocks = np.array_split(order, max(2, int(n_splits)))
-    sorted_dates = dates.to_numpy()
-    for block in blocks[1:]:
-        if len(block) == 0:
-            continue
-        block_start = sorted_dates[block].min()
-        cutoff = block_start - np.timedelta64(gap, "D")
-        train_rows = order[sorted_dates[order] <= cutoff]
+    if folds is None:
+        blocks = np.array_split(np.sort(dates.unique()), max(2, int(n_splits)))
+        folds = []
+        for i, block in enumerate(blocks[1:], 1):
+            if not len(block):
+                continue
+            before = dates.lt(block[0]).to_numpy()
+            train = before & dates.le(pd.Timestamp(block[0]) - pd.Timedelta(days=gap)).to_numpy()
+            if train.sum() >= min_train_rows:
+                folds.append(Fold(str(i), train, dates.isin(block).to_numpy(), int(before.sum() - train.sum())))
+    validate_forward_folds(frame, folds, date_col=date_col, race_col=race_col, embargo_days=gap)
+    order = np.argsort(dates.to_numpy(), kind="stable")
+    for fold in folds:
+        train_rows, block = order[fold.train[order]], order[fold.test[order]]
         if len(train_rows) < min_train_rows:
-            continue
+            raise ValueError(f"Fold {fold.label} has insufficient training rows")
         preds = np.asarray(
             fit_predict(frame.iloc[train_rows], frame.iloc[block]), dtype=np.float64,
         )
-        if len(preds) != len(block):
+        if preds.ndim != 1 or len(preds) != len(block):
             raise ValueError(
                 f"fit_predict returned {len(preds)} predictions for {len(block)} rows",
             )
         out[block] = preds
     return out
+
+
+def validate_forward_folds(frame, folds, *, date_col="race_date", race_col=None, embargo_days=None):
+    """Reject overlapping, partial-day/race or nonchronological OOF folds.
+
+    Masks are positional, independent of a caller's DataFrame index. All folds
+    are checked before any learner runs, so a later malformed fold cannot leave
+    a partially produced prediction cache.
+    """
+    dates = pd.to_datetime(frame[date_col], errors="coerce").dt.normalize().reset_index(drop=True)
+    if dates.isna().any():
+        raise ValueError("Walk-forward dates must be present and valid")
+    race_col = race_col or ("race_id" if "race_id" in frame else None)
+    if race_col:
+        ids = frame[race_col].reset_index(drop=True)
+        if ids.isna().any() or dates.groupby(ids, dropna=False).nunique().gt(1).any():
+            raise ValueError("Each race needs one valid date and identity")
+    gap = purge_days() if embargo_days is None else max(0, int(embargo_days))
+    seen, labels = np.zeros(len(frame), dtype=bool), set()
+    for fold in folds:
+        if fold.label in labels:
+            raise ValueError("Fold labels must be unique")
+        labels.add(fold.label)
+        for mask in (fold.train, fold.test):
+            if not isinstance(mask, np.ndarray) or mask.dtype != np.bool_ or mask.shape != (len(frame),):
+                raise ValueError("Fold masks must be positional boolean arrays matching the frame")
+            selected = pd.Series(mask)
+            if selected.groupby(dates).nunique().gt(1).any():
+                raise ValueError("A fold cannot split a date or race")
+        if not fold.train.any() or not fold.test.any() or (fold.train & fold.test).any():
+            raise ValueError("Folds need disjoint nonempty training and prediction sets")
+        start = dates[fold.test].min()
+        end = dates[fold.train].max()
+        if end >= start or end > start - pd.Timedelta(days=gap):
+            raise ValueError("Fold training violates the chronological purge boundary")
+        if (seen & fold.test).any():
+            raise ValueError("A row may be predicted in only one OOF fold")
+        seen |= fold.test
 
 
 def _cluster_means(pnl: np.ndarray, clusters) -> tuple[np.ndarray, np.ndarray]:

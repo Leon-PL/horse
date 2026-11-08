@@ -225,7 +225,9 @@ FEATURE_CORR_THRESHOLD = 0.95
 #
 # Accepts a list of names or a path to a file (one name per line, '#'
 # comments allowed, or a JSON list). The current list comes from
-#   python -m scripts.select_features eliminate
+#   the historical 048 selection experiment (its command is retired).
+# Supported selection now uses `python -m src.modelling prepare` and `select`;
+# see docs/operations/MODELLING.md. It writes candidate lists for explicit review.
 # (out-of-sample race log loss, docs/FEATURE_SELECTION_048.md); it beat the old
 # hand-edited win.txt by 0.0194 race LL at native capacity. Applied AFTER it,
 # FEATURE_PRUNE_FRACTION still trims within the allow-list (set it to 0.0 to

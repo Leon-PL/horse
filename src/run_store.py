@@ -554,6 +554,14 @@ def feature_generation_status(run_id: str | None = None) -> dict:
     return result
 
 
+def _run_model_type(run_id: str):
+    """Older artifact-only checkpoints have no metadata to identify a type."""
+    try:
+        return load_run_meta(run_id).get("model_type")
+    except FileNotFoundError:
+        return None
+
+
 def promote(run_id: str, *, allow_feature_mismatch: bool = False) -> bool:
     """Mark *run_id* as the production model. Returns ``True`` on success.
 
@@ -568,6 +576,9 @@ def promote(run_id: str, *, allow_feature_mismatch: bool = False) -> bool:
     """
     if not run_has_model(run_id):
         logger.warning("Cannot promote %s: no model snapshot.", run_id)
+        return False
+    if _run_model_type(run_id) == "win_stack_candidate":
+        logger.warning("Refusing to promote %s: win-only modelling candidate has not qualified the serving/place contract", run_id)
         return False
     status = feature_generation_status(run_id)
     if (status["state"] in (GENERATION_MISMATCH, GENERATION_UNKNOWN)
@@ -631,10 +642,15 @@ def run_model_path(run_id: str) -> str | None:
 
 
 def load_run_predictor(run_id: str):
-    """Load a specific run's model as a ``RacePredictor`` (or ``None``)."""
+    """Load a saved predictor, or None. Win candidates expose ``predict`` only;
+    they are not the production win/place serving adapter.
+    """
     path = run_model_path(run_id)
     if not path:
         return None
+    if _run_model_type(run_id) == "win_stack_candidate":
+        from src.modelling.candidate import WinCandidate
+        return WinCandidate.load(path)
     from src.model import RacePredictor
 
     p = RacePredictor()

@@ -77,6 +77,11 @@ def fit_boosted(
     seed: int = 42,
     n_jobs: int = -1,
     return_selected: bool = False,
+    params: dict | None = None,
+    early_stopping_rounds: int | None = None,
+    purge_days: int | None = None,
+    refit: bool = True,
+    screen_params: dict | None = None,
 ):
     """Fit one LightGBM regressor the way the production win learner is fitted.
 
@@ -97,11 +102,16 @@ def fit_boosted(
     from src.model import RacePredictor
 
     n = len(x)
+    # Explicit recipes are already resolved; never merge them with mutable
+    # defaults. Legacy callers retain the established defaults.
+    hp = learner_params() if params is None else dict(params)
+    es_rounds = int(config.EARLY_STOPPING_ROUNDS if early_stopping_rounds is None else early_stopping_rounds)
+    gap = int(config.PURGE_DAYS if purge_days is None else purge_days)
 
     def fit(lo, hi, params=None, eval_rows=None):
         obj = objective(lo, hi)
         extra = {} if metric is None else {"metric": "None"}
-        model = LGBMRegressor(objective=obj, **learner_params(params), **extra, subsample_freq=1,
+        model = LGBMRegressor(objective=obj, **{**hp, **(params or {})}, **extra, subsample_freq=1,
                               random_state=seed, n_jobs=n_jobs, verbose=-1)
         kwargs = {}
         if sample_weight is not None and isinstance(obj, str):
@@ -111,26 +121,29 @@ def fit_boosted(
             kwargs["eval_set"] = [(x[a:b], y[a:b])]
             if metric is not None:
                 kwargs["eval_metric"] = metric(a, b)
-            kwargs["callbacks"] = [early_stopping(int(config.EARLY_STOPPING_ROUNDS),
+            kwargs["callbacks"] = [early_stopping(es_rounds,
                                                   verbose=False)]
         model.fit(x[lo:hi], y[lo:hi], **kwargs)
         return model
 
     if capacity == "screen":
-        model = fit(0, n, params=SCREEN_PARAMS)
+        model = fit(0, n, params=SCREEN_PARAMS if screen_params is None else screen_params)
         return (model, None) if return_selected else model
     if capacity != "native":
         raise ValueError(f"Unknown capacity {capacity!r}")
     groups = race_groups(race_ids)
     starts = np.r_[0, np.cumsum(groups)[:-1]]
     split = (RacePredictor._early_stop_split(groups, pd.DatetimeIndex(race_dates)[starts],
-                                             purge_days=int(config.PURGE_DAYS))
-             if int(config.EARLY_STOPPING_ROUNDS) > 0 else None)
+                                             purge_days=gap)
+             if es_rounds > 0 else None)
     if split is None:
         model = fit(0, n)
         return (model, None) if return_selected else model
     end, validation = split
     selected = fit(0, end, eval_rows=(validation, n))
+    selected.split_ = (int(end), int(validation))
+    if not refit:
+        return (selected, selected) if return_selected else selected
     rounds = selected.best_iteration_ or selected.n_estimators_
     if not rounds or int(rounds) < 1:
         raise ValueError("Cannot determine the selected tree count; refusing an ambiguous refit")

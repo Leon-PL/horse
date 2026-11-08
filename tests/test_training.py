@@ -88,6 +88,7 @@ def test_promote_and_load_production(tmp_path, monkeypatch):
     pred = rs.load_production_predictor()
     assert pred is not None
     assert pred.feature_cols == ["a", "b"]
+    assert rs.load_run_predictor(rid).feature_cols == ["a", "b"]
 
 
 def test_promote_missing_model_fails(tmp_path, monkeypatch):

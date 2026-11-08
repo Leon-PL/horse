@@ -33,6 +33,8 @@ def main(argv=None) -> None:
                     help="approx rows per chunk (split on date boundaries)")
     ap.add_argument("--store-root", default=None,
                     help="optional separate store for a versioned candidate build")
+    ap.add_argument("--no-helpers", action="store_true",
+                    help="use one feature process to bound memory on a busy machine")
     ap.add_argument("--reuse-ratings-from", default=None,
                     help="unchanged rating snapshot, requiring a frozen receipt")
     ap.add_argument("--ratings-receipt", default=None)
@@ -49,7 +51,7 @@ def main(argv=None) -> None:
     from src.source_dataset import load_manifest, use_manifest
     selected = load_manifest(args.dataset_manifest) if args.dataset_manifest else None
     with use_manifest(selected), store._staged_update() as pending:
-        meta = build_store(pending, args.chunk_rows, ratings_cache=ratings_cache)
+        meta = build_store(pending, args.chunk_rows, ratings_cache=ratings_cache, use_helpers=not args.no_helpers)
     logger.info("Feature store committed: %d featured rows", meta["featured_rows"])
     print(json.dumps(meta, indent=2))
 

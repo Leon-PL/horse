@@ -90,6 +90,9 @@ prices. (The retired `scripts/audit_selection_rule.py`, commit `26d1b6f`, report
   [development tools](docs/operations/DEVELOPMENT_TOOLS.md) for compatibility limits.
 - **LightGBM** is the only model framework. XGBoost and CatBoost were
   removed on 2026-10-30; `RacePredictor` rejects any other framework.
+  The explicit win modelling path keeps LightGBM for boosted estimators;
+  its small linear text expert and conditional-logit pool use the installed
+  scipy/sklearn stack. See `docs/operations/MODELLING.md`.
 - `data/` and `models/` are gitignored and large; run snapshots are
   pruned with `src.run_store.prune_runs` / `delete_run` (the Streamlit
   apps were removed on 2026-11-07).

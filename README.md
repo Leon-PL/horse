@@ -83,6 +83,10 @@ and [BSP/ATR provenance](docs/operations/BSP_AND_ATR_2026-11-05.md).
 
 ## Build features, train and evaluate
 
+The new [modelling workflow](docs/operations/MODELLING.md) adds explicit model
+recipes, complete-race chronological benchmarks, supported feature selection
+and saved win-ensemble candidates. It leaves the selected predictor unchanged.
+
 Refresh the historical dataset without fitting a model:
 
 ```powershell

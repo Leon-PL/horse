@@ -10,6 +10,13 @@ the immutable input boundary introduced on 7 November.
 Start with the [operating guide](../README.md) and
 [current project structure](architecture/PROJECT_STRUCTURE.md).
 
+For modelling, use the [revised migration plan](architecture/MODELLING_REVIEW_AND_PLAN_2026-11-08.md)
+and [supported modelling operations](operations/MODELLING.md). The
+[implementation report](architecture/MODELLING_IMPLEMENTATION_2026-11-08.md)
+records the delivered foundations, baseline, text comparison and remaining work.
+The [performance/spread reproduction](research/PERFORMANCE_SPREAD_REPRODUCTION_2026-11-08.md)
+records the next registered submodel comparison.
+
 | Folder or index | Contents |
 |---|---|
 | [Project inventory](PROJECT_INVENTORY.md) | Apps, source responsibilities and individual tools |

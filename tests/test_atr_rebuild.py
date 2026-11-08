@@ -172,6 +172,10 @@ def test_normal_collection_cannot_overlap_rebuild(environment):
 
 def test_transient_service_failure_defers_one_item_without_an_hour_global_stall(environment,monkeypatch):
     root, _ = environment
+    # Check the backoff policy, independent of time spent flushing fixture I/O
+    # on a busy machine. The original two-second wall-clock window was flaky.
+    frozen_now = rebuild.utc_now()
+    monkeypatch.setattr(rebuild, 'utc_now', lambda: frozen_now)
     rebuild.prepare(root)
     client_for(monkeypatch,root,{'/ajax/':(503,'')})
     rebuild.run(root,max_races=1)

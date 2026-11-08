@@ -136,6 +136,13 @@ Race log loss against production (1.83135):
   than for others (7.42 lb).
 - It closes under 10% of the 055 steamer and drifter bias.
 
+**8 November follow-up:** the new modelling layer's native pilot uses strictly
+chronological residuals and an identified, regularised pool. On 1,142 later
+2026Q2 races it adds **−0.00199 [−0.00322, −0.00070]** to the generalist, while
+remaining weaker alone. This retains the figure head for broader evaluation;
+the stronger 063 generalist and repeat-fit averaging controls still need testing.
+See [the reproduction report](research/PERFORMANCE_SPREAD_REPRODUCTION_2026-11-08.md).
+
 Do not retry luck weights or market-residual connection profiles in these
 forms. Full tables: `MODEL_IDEAS_057_060.md`. Receipts:
 `data/research/model_ideas_057/summary_05{8,9}.json` and `summary_060.json`.

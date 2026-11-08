@@ -260,7 +260,7 @@ def _date_chunks(dates: np.ndarray, chunk_rows: int, counts: dict) -> list[tuple
 
 
 @dataset_build
-def build_store(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processed=None) -> dict:
+def build_store(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, processed=None, use_helpers=True) -> dict:
     """Build into the supplied staging store without touching the live files."""
     t0 = time.perf_counter()
     # Fix the signature BEFORE any work. Reading it at the end described
@@ -296,7 +296,7 @@ def build_store(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, pro
     rating_wait = 0.0
     finishing = None
     last_date = rd.max()
-    with _helper_processes(len(processed) >= HELPERS_MIN_ROWS) as (rater, finisher), \
+    with _helper_processes(use_helpers and len(processed) >= HELPERS_MIN_ROWS) as (rater, finisher), \
             closing(_StoreTail(parts_dir, counts_state)) as tail, \
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="store-inputs") as input_writer:
         saving_inputs = input_writer.submit(copy_context().run, _save_inputs, store, processed, last_date)

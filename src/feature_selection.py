@@ -76,6 +76,8 @@ def hygiene_filter(
     *,
     min_present: float = 0.005,
     prefer: Sequence[str] = (),
+    rows=None,
+    dtype=np.float32,
 ) -> tuple[list[str], dict[str, str]]:
     """Columns worth offering the model, and the reason each other was dropped.
 
@@ -96,7 +98,7 @@ def hygiene_filter(
     reasons: dict[str, str] = {}
     for i in order:
         name = names[i]
-        column = np.asarray(matrix[:, i], dtype=np.float32)
+        column = np.asarray(matrix[:, i] if rows is None else matrix[rows, i], dtype=dtype)
         finite = np.isfinite(column)
         if finite.mean() < min_present:
             reasons[name] = f"present in {finite.mean():.2%} of rows"
@@ -107,7 +109,7 @@ def hygiene_filter(
             continue
         # +0.0 folds -0.0 into 0.0, and one NaN constant fixes the payload, so
         # equal columns always hash equal.
-        canonical = np.where(finite, column + np.float32(0.0), np.float32(np.nan))
+        canonical = np.where(finite, column + dtype(0.0), dtype(np.nan))
         digest = hashlib.blake2b(canonical.tobytes(), digest_size=16).digest()
         if digest in seen:
             reasons[name] = f"duplicate of {seen[digest]}"
