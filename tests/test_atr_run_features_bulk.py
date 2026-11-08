@@ -108,8 +108,8 @@ def test_comment_tags_agree_with_python_regexes():
     comments = ["", "LED, Weakened quickly", "hit 3 out", "café held up", "ſtayed on", "bleed, ledge",
                 "made all", "Kept On WELL", "K", "denied a clear run", "jumped left", "ledé"] * 20
     tags = af._comment_tags(comments)
-    for tag, regex in af._COMMENT_RES.items():
-        expected = [float(regex.search(text) is not None) for text in comments]
+    for tag in af.COMMENT_TAGS:
+        expected = [float(af.tag_comment(text)[tag]) for text in comments]
         assert tags[tag].tolist() == expected, tag
         assert tags[tag].dtype == np.float64
 

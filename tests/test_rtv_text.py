@@ -64,6 +64,7 @@ def test_a_quarter_model_never_sees_races_after_its_purged_cutoff():
     assert first.trained_through == "2020-12-25"
     np.testing.assert_array_equal(first.names, second.names)
     np.testing.assert_allclose(first.weights, second.weights)
+    assert first.scale == second.scale
 
 
 def test_history_fills_only_rows_without_a_snapshot_and_prob_is_a_race_softmax():
@@ -100,3 +101,78 @@ def test_snapshot_without_a_model_or_text_keeps_the_numeric_card(monkeypatch, co
     frame = pd.DataFrame({"race_key": ["2025-08-14/kempton-park/1230"], "fetched_at": ["2025-08-14T09:00:00Z"],
                           "card_horse_name": ["Alpha"], **columns})
     assert collection._snapshot_text(frame).isna().all().all()
+
+
+def test_a_runner_without_text_is_missing_not_a_shared_constant():
+    frame = rtv_text.prepare(pd.concat([
+        _field("r1", ["A", "B", "C"], ["stays well", None, ""], "A wins."),
+        _field("r2", ["D", "E"], ["travels", None], None)], ignore_index=True))
+    names = np.asarray(["c:stays", "c:travels", "v:wins", *(f"rank:{r}" for r in range(rtv_text.RANKS))])
+    model = rtv_text.TextModel("2021Q1", names, np.ones(len(names), np.float32), np.arange(len(names), dtype=float),
+                               "2020-12-25", 10, 2.0)
+    logits = model.logits(frame)
+    assert np.isfinite(logits[[0, 3]]).all() and np.isnan(logits[[1, 2, 4]]).all()
+    # Verdict order means 'not named' only in a race that has a verdict.
+    np.testing.assert_array_equal(rtv_text.verdict_rank_feature(frame), [1., 0., 0., np.nan, np.nan])
+
+
+def test_the_scale_recovers_how_over_confident_scores_are():
+    rng = np.random.default_rng(1)
+    races, size = 4000, 8
+    score = rng.normal(0, 2, races*size)
+    race_ids = np.repeat(np.arange(races), size)
+    truth = rtv_text.race_probs(0.5*score, race_ids)
+    won = np.zeros(races*size)
+    for race in range(races):
+        won[race*size + rng.choice(size, p=truth[race*size:(race+1)*size])] = 1
+    assert abs(rtv_text.fit_scale(score, won, race_ids) - 0.5) < 0.05
+
+
+def test_calibration_rows_are_the_latest_training_races_after_a_purge():
+    dates = pd.date_range("2020-01-01", "2021-06-30", freq="D").to_numpy()
+    train = np.arange(len(dates))
+    fitting, held = rtv_text.calibration_split(dates, train, purge_days=7)
+    first_held = pd.Timestamp(dates[held].min())
+    assert first_held == pd.Timestamp("2021-06-30") - pd.Timedelta(days=rtv_text.CALIBRATION_DAYS)
+    assert pd.Timestamp(dates[fitting].max()) == first_held - pd.Timedelta(days=7)
+    short = train[:100]                     # under a year: its latest quarter of rows
+    fitting, held = rtv_text.calibration_split(dates, short, purge_days=7)
+    assert len(held) == 25 and dates[fitting].max() < dates[held].min()
+
+
+def test_models_of_an_older_format_are_not_loaded(tmp_path):
+    model = rtv_text.TextModel("2021Q1", np.asarray(["rank:0"]), np.ones(1, np.float32), np.zeros(1), "2020-12-25", 1, 0.7)
+    model.save(tmp_path)
+    assert rtv_text.load_model("2021Q1", tmp_path).scale == 0.7
+    np.savez_compressed(tmp_path/"2021Q2.npz", names=np.asarray(["rank:0"]), idf=np.ones(1), weights=np.zeros(1),
+                        trained_through="2021-03-25", rows=1)
+    assert rtv_text.load_model("2021Q2", tmp_path) is None
+    assert rtv_text.models_dir().name == f"format_{rtv_text.FORMAT}"
+
+
+def test_stored_scores_from_an_older_format_force_a_full_rescore(tmp_path):
+    def stored(name, **columns):
+        path = tmp_path/name
+        pd.DataFrame({"race_id": ["1"]*len(next(iter(columns.values()))), **columns}).to_parquet(path)
+        return path
+    assert collection._older_format(stored("old.parquet", rtv_text_logit=[0.1]))
+    assert collection._older_format(stored("mixed.parquet", rtv_text_format=[rtv_text.FORMAT, 1]))
+    assert not collection._older_format(stored("current.parquet", rtv_text_format=[rtv_text.FORMAT]))
+    assert not collection._older_format(tmp_path/"absent.parquet")
+
+
+def test_quarter_models_train_only_on_races_whose_whole_field_has_text(monkeypatch, tmp_path):
+    frame = rtv_text.prepare(pd.concat([
+        _field("r1", ["A", "B"], ["stays", "travels"], None, race_date="2020-10-01"),
+        _field("r2", ["C", "D"], ["stays", None], None, race_date="2020-10-02"),
+        _field("r3", ["E", "F"], ["stays", "travels"], None, won=[0, 0], race_date="2020-10-03")], ignore_index=True))
+    seen = {}
+
+    def fit(rows, labels, **kwargs):
+        seen["races"] = sorted(rows.race_id.unique())
+        return iter(())
+    monkeypatch.setattr(collection, "_text_rows", lambda *args, **kwargs: frame)
+    monkeypatch.setattr(rtv_text, "fit_models", fit)
+    monkeypatch.setattr(rtv_text.config, "RTV_TEXT_MODELS", tmp_path, raising=False)
+    collection.ensure_text_models("2021-01-05")
+    assert seen["races"] == ["r1"]

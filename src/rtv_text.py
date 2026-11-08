@@ -11,6 +11,13 @@ snapshot on 2026-10-30 and does not change after the day (ledger 052). Live
 cards read the pre-race snapshot and are scored by their quarter's model, the
 same model that scored that quarter's history.
 
+Each model also carries a scale fitted on its own training rows (format 2,
+2026-11-08). Early quarters fit few races and were over-confident: the best
+rescaling of their out-of-sample scores was 0.54 in 2021Q1 against about 1.0
+from 2023, so the same raw score meant different things in different years.
+A runner with no comment that the verdict does not name has no text, and its
+score is missing rather than the constant that scoring empty text gave.
+
 Fitting and collection I/O live in ``src.ingestion.rtv_observations``; this module
 holds the model and the feature-engineering join.
 """
@@ -24,7 +31,7 @@ import re
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from scipy.optimize import minimize
+from scipy.optimize import minimize, minimize_scalar
 from sklearn.feature_extraction.text import CountVectorizer
 
 import config
@@ -36,6 +43,9 @@ PENALTY = 3e-5                       # L2 per weight, chosen in 052 on 2024Q1-20
 FIELDS = {"tf_comment": "c", "verdict_text": "v"}   # text column -> n-gram prefix
 TOKENS = r"(?u)\b[\w/'-]+\b"
 RANKS = 5                            # verdict order dummies: 0 (not named), 1, 2, 3, 4+
+CALIBRATION_DAYS = 91                # a model's scale is fitted on its latest quarter of training races,
+CALIBRATION_SHARE = 0.25             # or its latest quarter of rows when it has under a year
+FORMAT = 2                           # 2: calibrated scale, missing text scored as missing
 SNAPSHOT_FEATURES = ("rtv_text_logit", "rtv_verdict_rank")
 FEATURES = SNAPSHOT_FEATURES + ("rtv_text_prob",)
 
@@ -47,7 +57,8 @@ def scores_path():
 
 
 def models_dir():
-    return Path(getattr(config, "RTV_TEXT_MODELS", Path(config.DATA_DIR)/"rtv_cache/text_models"))
+    """This format's quarter models; older formats stay where they were, unread."""
+    return Path(getattr(config, "RTV_TEXT_MODELS", Path(config.DATA_DIR)/"rtv_cache/text_models"))/f"format_{FORMAT}"
 
 
 # ------------------------------------------------------------------ text --
@@ -107,6 +118,20 @@ def prepare(frame, race="race_id"):
     output["verdict_rank"] = ranks
     output["verdict_text"] = [verdict_sentences(v, n) for v, n in zip(verdicts, names)]
     return output
+
+
+def _filled(values) -> np.ndarray:
+    return pd.Series(values, dtype=object).fillna("").astype(str).str.strip().ne("").to_numpy()
+
+
+def has_text(frame) -> np.ndarray:
+    """Prepared rows with a comment or a verdict sentence naming them."""
+    return _filled(frame.tf_comment) | _filled(frame.verdict_text)
+
+
+def verdict_rank_feature(frame) -> np.ndarray:
+    """Verdict order as an input: missing when the race has no verdict, not 'not named'."""
+    return np.where(_filled(frame.tf_verdict), frame.verdict_rank.to_numpy(dtype="float64"), np.nan)
 
 
 # ----------------------------------------------------------------- model --
@@ -210,6 +235,19 @@ def quarters(dates) -> pd.Series:
     return pd.to_datetime(pd.Series(dates)).dt.to_period("Q").astype(str)
 
 
+def fit_scale(score, won, race_ids) -> float:
+    """The multiplier on held-out scores that minimises their race log loss."""
+    starts, sizes = race_index(race_ids)
+    y = won / np.repeat(np.add.reduceat(won, starts), sizes)
+
+    def loss(scale):
+        s = scale * score
+        top = np.maximum.reduceat(s, starts)
+        z = np.add.reduceat(np.exp(s - np.repeat(top, sizes)), starts)
+        return -(np.add.reduceat(y * s, starts) - np.log(z) - top).mean()
+    return float(minimize_scalar(loss, bounds=(0.05, 5.0), method="bounded", options={"xatol": 1e-4}).x)
+
+
 @dataclass(frozen=True)
 class TextModel:
     quarter: str
@@ -218,11 +256,16 @@ class TextModel:
     weights: np.ndarray
     trained_through: str
     rows: int
+    scale: float = 1.0
 
     def logits(self, frame) -> np.ndarray:
-        """Scores for prepared rows: comment, verdict sentences and verdict order."""
+        """Scores for prepared rows: comment, verdict sentences and verdict order.
+
+        A row with no text gets NaN: its count vector holds only the verdict
+        order dummy, which would otherwise score every such runner alike.
+        """
         x, _ = counts(frame, vocabulary=self.names)
-        return tfidf(x, self.idf) @ self.weights
+        return np.where(has_text(frame), self.scale * (tfidf(x, self.idf) @ self.weights), np.nan)
 
     def save(self, directory) -> Path:
         directory = Path(directory)
@@ -230,7 +273,7 @@ class TextModel:
         path = directory/f"{self.quarter}.npz"
         temporary = path.with_name(path.stem+".tmp.npz")
         np.savez_compressed(temporary, names=self.names.astype(str), idf=self.idf, weights=self.weights,
-                            trained_through=self.trained_through, rows=self.rows)
+                            trained_through=self.trained_through, rows=self.rows, scale=self.scale, format=FORMAT)
         temporary.replace(path)
         return path
 
@@ -238,13 +281,37 @@ class TextModel:
 @lru_cache(maxsize=8)
 def _load(path, modified):
     with np.load(path, allow_pickle=False) as data:
+        if "format" not in data.files or int(data["format"]) != FORMAT:
+            return None
         return TextModel(Path(path).stem, data["names"], data["idf"], data["weights"],
-                         str(data["trained_through"]), int(data["rows"]))
+                         str(data["trained_through"]), int(data["rows"]), float(data["scale"]))
 
 
 def load_model(quarter, directory=None) -> TextModel | None:
+    """The quarter's model, or None when it is missing or from another format."""
     path = Path(directory or models_dir())/f"{quarter}.npz"
     return _load(str(path.resolve()), path.stat().st_mtime_ns) if path.exists() else None
+
+
+def calibration_split(dates, train, purge_days):
+    """Rows that fit and rows that calibrate a model's scale, both from ``train``.
+
+    The calibration rows are the latest CALIBRATION_DAYS of training races, or
+    the latest CALIBRATION_SHARE of rows if that is less; the fitting rows end
+    the purge gap before them.
+    """
+    train_dates = dates[train]
+    start = max(train_dates.max() - np.timedelta64(CALIBRATION_DAYS, "D"),
+                train_dates[int(len(train_dates) * (1 - CALIBRATION_SHARE))])
+    return train[train_dates <= start - np.timedelta64(purge_days, "D")], train[train_dates >= start]
+
+
+def _fit(x, names, won, race_ids, rows, warm):
+    columns = np.flatnonzero(np.asarray((x[rows] > 0).sum(axis=0)).ravel() >= MIN_DF)
+    sub = x[rows][:, columns]
+    weights_idf = idf(sub)
+    w0 = None if warm is None else pd.Series(warm.weights, index=warm.names).reindex(names[columns]).fillna(0).to_numpy()
+    return columns, weights_idf, fit_softmax(tfidf(sub, weights_idf), won[rows], race_ids[rows], PENALTY, w0=w0)
 
 
 def fit_models(frame, labels, *, purge_days, warm=None):
@@ -252,7 +319,8 @@ def fit_models(frame, labels, *, purge_days, warm=None):
 
     ``frame`` is prepared, sorted by date and race, with ``won`` and only
     races that have a winner. Each fit starts from the previous quarter's
-    weights, which only shortens the optimisation.
+    weights, which only shortens the optimisation. The scale comes from a
+    second fit that holds out the latest training races and scores them.
     """
     x, names = counts(frame)
     names = np.asarray(names)
@@ -264,12 +332,14 @@ def fit_models(frame, labels, *, purge_days, warm=None):
         train = np.flatnonzero(dates <= np.datetime64(cutoff))
         if not len(train):
             raise ValueError(f"No text history before {label}")
-        columns = np.flatnonzero(np.asarray((x[train] > 0).sum(axis=0)).ravel() >= MIN_DF)
-        sub = x[train][:, columns]
-        weights_idf = idf(sub)
-        w0 = None if warm is None else pd.Series(warm.weights, index=warm.names).reindex(names[columns]).fillna(0).to_numpy()
-        w = fit_softmax(tfidf(sub, weights_idf), won[train], race_ids[train], PENALTY, w0=w0)
-        warm = TextModel(label, names[columns], weights_idf, w, str(pd.Timestamp(dates[train].max()).date()), len(train))
+        scale = 1.0
+        fitting, held = calibration_split(dates, train, purge_days)
+        if len(fitting) and len(held):
+            columns, weights_idf, w = _fit(x, names, won, race_ids, fitting, warm)
+            scale = fit_scale(tfidf(x[held][:, columns], weights_idf) @ w, won[held], race_ids[held])
+        columns, weights_idf, w = _fit(x, names, won, race_ids, train, warm)
+        warm = TextModel(label, names[columns], weights_idf, w, str(pd.Timestamp(dates[train].max()).date()),
+                         len(train), scale)
         yield warm
 
 

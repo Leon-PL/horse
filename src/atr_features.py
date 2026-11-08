@@ -36,11 +36,12 @@ logger = logging.getLogger(__name__)
 # flag per run; downstream we roll them into recent *rates* per horse.
 # Patterns are deliberately specific to avoid false positives.
 _COMMENT_PATTERNS: dict[str, str] = {
-    # Running style
+    # Running style, read from the early clause only (see _early_clause)
     "atr_cmt_front": r"\b(?:led|made all|made virtually all|disputed (?:the )?lead|"
-                     r"prominent|racing prominently|raced prominently|chased (?:the )?leaders?)\b",
+                     r"prominent|racing prominently|raced prominently|chased (?:the )?(?:leaders?|winner)|"
+                     r"track(?:ed|ing) (?:the )?leaders?|pressed (?:the )?leaders?|close[- ]up|handy)\b",
     "atr_cmt_held_up": r"\b(?:held up|in rear|in last|towards (?:the )?rear|behind|"
-                       r"settled (?:in )?rear|dropped (?:to the )?rear)\b",
+                       r"settled (?:in )?rear|dropped (?:to the )?rear|waited with|off the pace)\b",
     # Trouble in running (next-time positive — ran into trouble, excuse)
     "atr_cmt_trouble": r"\b(?:hampered|short of room|no room|not clear run|denied (?:a )?clear run|"
                        r"badly drawn|squeezed|checked|blocked|nowhere to go|forced wide|carried wide|"
@@ -60,8 +61,9 @@ _COMMENT_PATTERNS: dict[str, str] = {
     "atr_cmt_nh_error": r"\b(?:mistake|blundered?|not fluent|untidy|sketchy|fiddled|pecked|"
                         r"hit \d|jumped (?:slowly|left|right|poorly|deliberately))\b",
     # Eased when beaten — its closing sectional is UNRELIABLE (the trap).
+    # Not "never nearer": that is a closer still making ground at the line.
     "atr_cmt_eased": r"\b(?:eased|not knocked about|never knocked about|not extended|"
-                     r"eased down|never (?:asked|nearer))\b",
+                     r"eased down|never asked)\b",
     # Won/finished with plenty in hand (genuine winning impression)
     "atr_cmt_comfortable": r"\b(?:comfortably|readily|easily|cosily|going away|ridden out|"
                            r"in command|hard held)\b",
@@ -72,11 +74,50 @@ _COMMENT_RES: dict[str, re.Pattern] = {
 
 COMMENT_TAGS: list[str] = list(_COMMENT_PATTERNS)
 
+# Running style is where a horse raced early. A comment narrates the whole
+# race, so "held up in rear, ..., led inside final furlong" is a hold-up ride
+# that won; matched anywhere, "led" made the front tag mostly a win flag.
+# Style tags therefore read only the first clause, of the first three, that
+# states a position; clauses before it describe the start or the preliminaries.
+_STYLE_TAGS = frozenset({"atr_cmt_front", "atr_cmt_held_up"})
+_EARLY_CLAUSES = 3
+_POSITION = (r"\b(?:led|made (?:virtually )?all|disputed|prominent|prominently|chased|track(?:ed|ing)|pressed|"
+             r"close[- ]up|handy|with (?:the )?leaders?|in touch|mid-?division|midfield|held up|waited with|rear|last|"
+             r"behind|near leaders|off the pace|detached|tailed off|raced in (?:second|third|fourth|2nd|3rd|4th))\b")
+_POSITION_RE = re.compile(_POSITION, re.IGNORECASE)
+
+# Phrases rewritten before tagging, in both engines (RE2 has no look-ahead):
+# "behind leaders" places a horse with the leaders rather than held up, and
+# "ridden out wide" describes a route, not a comfortable finish.
+_REWRITES: tuple[tuple[str, str], ...] = (
+    (r"(?i)\bbehind (?:the )?lead(?:ers?|ing)\b", "near leaders"),
+    (r"(?i)\bridden out wide\b", "ridden wide"),
+)
+_REWRITE_RES = tuple((re.compile(pattern), replacement) for pattern, replacement in _REWRITES)
+
+
+def _rewrite(text: str) -> str:
+    for regex, replacement in _REWRITE_RES:
+        text = regex.sub(replacement, text)
+    return text
+
+
+def _early_clause(text: str) -> str:
+    """The first clause, of the first three, that states a running position ('' if none)."""
+    for clause in text.split(",", _EARLY_CLAUSES)[:_EARLY_CLAUSES]:
+        if _POSITION_RE.search(clause):
+            return clause
+    return ""
+
 
 def tag_comment(text) -> dict[str, int]:
     """Return 0/1 flags for each comment tag in *text*."""
-    s = "" if text is None or (isinstance(text, float) and np.isnan(text)) else str(text)
-    return {tag: int(bool(rx.search(s))) for tag, rx in _COMMENT_RES.items()}
+    s = "" if text is None or (isinstance(text, float) and np.isnan(text)) else _rewrite(str(text))
+    early = _early_clause(s)
+    tags = {tag: int(bool(rx.search(early if tag in _STYLE_TAGS else s))) for tag, rx in _COMMENT_RES.items()}
+    # "Close up in rear": a bunched field with the horse at the back is a hold-up ride.
+    tags["atr_cmt_front"] &= 1 - tags["atr_cmt_held_up"]
+    return tags
 
 
 # ── Sectional-array parsing ────────────────────────────────────────────
@@ -270,6 +311,22 @@ def _energy_gap(energy_cells: np.ndarray, optimum_cells: np.ndarray) -> np.ndarr
     return out
 
 
+def _early_clauses(text: pa.Array) -> pa.Array:
+    """:func:`_early_clause` for every comment, in Arrow (equal on ASCII text)."""
+    clauses = pc.list_slice(pc.split_pattern(text, ",", max_splits=_EARLY_CLAUSES), 0, _EARLY_CLAUSES)
+    flat = pc.list_flatten(clauses)
+    parents = pc.list_parent_indices(clauses).to_numpy(zero_copy_only=False)
+    hits = np.flatnonzero(pc.match_substring_regex(flat, _POSITION, ignore_case=True).to_numpy(zero_copy_only=False))
+    first = hits[np.r_[True, parents[hits][1:] != parents[hits][:-1]]] if len(hits) else hits
+    chosen = np.full(len(text), -1, dtype=np.int64)
+    chosen[parents[first]] = first
+    found = chosen >= 0
+    if not found.any():
+        return pa.array([""] * len(text), type=pa.string())
+    picked = flat.take(pa.array(np.where(found, chosen, 0)))
+    return pc.if_else(pa.array(found), picked, pa.scalar("", type=pa.string()))
+
+
 def _comment_tags(comments: list[str]) -> dict[str, np.ndarray]:
     """0/1 tag columns. RE2 reads ASCII comments far faster than ``re``.
 
@@ -278,12 +335,17 @@ def _comment_tags(comments: list[str]) -> dict[str, np.ndarray]:
     """
     text = pa.array(comments, type=pa.string())
     other = np.flatnonzero(~pc.string_is_ascii(text).to_numpy(zero_copy_only=False))
+    for pattern, replacement in _REWRITES:
+        text = pc.replace_substring_regex(text, pattern, replacement)
+    early = _early_clauses(text)
     tags = {}
     for tag, pattern in _COMMENT_PATTERNS.items():
-        flags = pc.match_substring_regex(text, pattern, ignore_case=True)
+        flags = pc.match_substring_regex(early if tag in _STYLE_TAGS else text, pattern, ignore_case=True)
         tags[tag] = flags.to_numpy(zero_copy_only=False).astype(np.float64)
-        for row in other:
-            tags[tag][row] = float(_COMMENT_RES[tag].search(comments[row]) is not None)
+    tags["atr_cmt_front"] = tags["atr_cmt_front"] * (1 - tags["atr_cmt_held_up"])
+    for row in other:
+        for tag, flag in tag_comment(comments[row]).items():
+            tags[tag][row] = float(flag)
     return tags
 
 

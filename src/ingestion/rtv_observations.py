@@ -187,7 +187,10 @@ def ensure_text_models(through, *, database=None, text_source=None):
     gap = purge_days()
     end = (rtv_text.quarter_start(missing[-1])-pd.Timedelta(days=gap)).strftime("%Y-%m-%d")
     frame = _text_rows(rtv_text.START, end, database, text_source=text_source)
-    frame = frame.loc[frame.groupby("race_id").won.transform("sum").gt(0)].reset_index(drop=True)
+    frame = frame.loc[frame.groupby("race_id").won.transform("sum").gt(0)]
+    # The race softmax needs the whole field, and a runner without text has no features.
+    complete = pd.Series(rtv_text.has_text(frame), index=frame.index).groupby(frame.race_id).transform("all")
+    frame = frame.loc[complete].reset_index(drop=True)
     position = labels.index(missing[0])
     warm = rtv_text.load_model(labels[position-1]) if position else None
     fitted = []
@@ -208,17 +211,36 @@ def text_model(quarter, *, database=None):
     return model
 
 
+def _older_format(path) -> bool:
+    """Stored scores that a previous text-model format produced, in whole or in part."""
+    path = Path(path)
+    if not path.exists():
+        return False
+    if "rtv_text_format" not in pq.read_schema(path).names:
+        return True
+    return bool(pd.read_parquet(path, columns=["rtv_text_format"]).rtv_text_format.ne(rtv_text.FORMAT).any())
+
+
 def refresh_text_scores(start, end, *, database=None, text_source=None, destination=None, previous_path=None):
-    """Score every starter in [start, end] with its quarter's model and merge the result."""
+    """Score every starter in [start, end] with its quarter's model and merge the result.
+
+    Scores from an older model format are never merged with new ones: the
+    whole history is rescored instead, so every row comes from one format.
+    """
+    previous = Path(previous_path or destination or native_path("scores"))
+    if _older_format(previous):
+        logger.info("Text scores in %s predate format %d; rescoring all history", previous, rtv_text.FORMAT)
+        start = rtv_text.START
     start = max(start, str(rtv_text.quarter_start(rtv_text.FIRST_QUARTER).date()))
-    columns = ["race_id", "horse_id", "race_date", *rtv_text.SNAPSHOT_FEATURES]
+    columns = ["race_id", "horse_id", "race_date", *rtv_text.SNAPSHOT_FEATURES, "rtv_text_format"]
     frame = _text_rows(start, end, database, text_source=text_source) if start <= end else pd.DataFrame()
     parts = []
     if not frame.empty:
         for quarter, rows in frame.groupby(rtv_text.quarters(frame.race_date).to_numpy(), sort=True):
             model = text_model(quarter, database=database)
             parts.append(rows.assign(rtv_text_logit=model.logits(rows),
-                                     rtv_verdict_rank=rows.verdict_rank.astype("float64"))[columns])
+                                     rtv_verdict_rank=rtv_text.verdict_rank_feature(rows),
+                                     rtv_text_format=rtv_text.FORMAT)[columns])
     output = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=columns)
     output = _merge_dated(output, Path(destination or native_path("scores")), start, end, "text score", previous_path=previous_path)
     return {"text_scores": len(output)}
@@ -264,7 +286,7 @@ def _snapshot_text(frame):
             logger.warning("No comment model for %s: %s", quarter, error)
             continue
         output.loc[part.index, "rtv_text_logit"] = model.logits(part)
-        output.loc[part.index, "rtv_verdict_rank"] = part.verdict_rank.astype("float64").to_numpy()
+        output.loc[part.index, "rtv_verdict_rank"] = rtv_text.verdict_rank_feature(part)
     return output
 
 

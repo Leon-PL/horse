@@ -1,5 +1,41 @@
 # Market performance implementation
 
+**Text inputs repaired, 8 November 2026 (code only; scores, store and model not
+rebuilt).** An audit of the text inputs found no leak in the Timeform comment
+score. Its quarter models stop 7–10 days before their quarter. All 68 races
+captured before the off (1,190 runners) match the stored history text. It did
+find four faults, fixed in code:
+
+- **Comment-score scale drifted.** Early quarter models were over-confident:
+  the best rescaling of 2021Q1's scores was 0.54, against about 1.0 from 2023.
+  Each model now fits its own scale on its latest training quarter (format 2,
+  `text_models/format_2`). On six quarters refitted with the new code, the race
+  log loss of the text score alone:
+
+  | Quarter | Before | After |
+  |---|---|---|
+  | 2021Q1 | 2.1303 | 2.0344 |
+  | 2021Q2 | 2.1140 | 2.0472 |
+  | 2021Q3 | 2.0353 | 2.0048 |
+  | 2021Q4 | 2.0148 | 2.0169 (the only quarter that got worse) |
+  | 2022Q2 | 1.9591 | 1.9507 |
+  | 2023Q1 | 1.9092 | 1.9088 |
+
+- **Missing text scored as a constant.** 1,926 runners with no comment and no
+  verdict scored a constant instead of missing. A runner with no comment that
+  the verdict does not name now scores NaN, and the verdict order is missing
+  when a race has no verdict.
+- **ATR "front" tag mostly flagged winners.** It matched "led" anywhere in the
+  comment, so it fired on 82% of winners against 28% of horses finishing 4th or
+  worse. It now reads only the first position clause: 57% against 36%, and its
+  correlation with winning fell from 0.33 to 0.12.
+- **ATR "eased" tag counted closers.** "Never nearer" made up 38% of eased
+  flags; it is no longer counted as eased.
+
+The effect on the win model is not measured. To apply the fixes, run an RTV
+refresh, which refits all 24 quarter models and rescores the history, then
+publish, rebuild the store and retrain.
+
 **Store build speed, 6 November 2026 (no feature or model change).** A full build
 went from 5,521 to 845 seconds on the same frozen 757,580 rows, 6.5 times faster,
 with no feature removed. `featured.parquet` and `processed.parquet` are
