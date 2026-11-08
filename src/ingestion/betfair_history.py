@@ -528,6 +528,19 @@ def restore_place_runner_ids(store):
     return restored
 
 
+def numeric_prices(frame):
+    """Store starting prices as numbers; a price Betfair did not reconcile is missing.
+
+    Stream files write an unreconciled BSP as the text "NaN" (and could write
+    "Infinity"); kept as text it blocks the typed Parquet write of every row.
+    """
+    for column in ("bsp", "place_bsp"):
+        if column in frame:
+            values = pd.to_numeric(frame[column], errors="coerce").astype(float)
+            frame[column] = values.where(values.abs() != float("inf"))
+    return frame
+
+
 def publish(store, processed):
     restored = restore_place_runner_ids(store)
     with store.connection() as con:
@@ -545,7 +558,7 @@ def publish(store, processed):
                 continue
             path = Path(processed) / name
             before = pd.read_parquet(path) if path.exists() else pd.DataFrame()
-            incoming = pd.DataFrame(rows)
+            incoming = numeric_prices(pd.DataFrame(rows))
             if name in {"betfair_bsp.parquet", "betfair_bsp_early.parquet"}:
                 incoming = incoming.reindex(columns=WIN_COLUMNS)
             if name == "betfair_bsp.parquet":

@@ -22,12 +22,12 @@ def remote(number):
     return f"/data/xds/historic/BASIC/123/1.{number}.bz2"
 
 
-def payload(number=100, market="WIN", country="GB", day="2026-01-10"):
+def payload(number=100, market="WIN", country="GB", day="2026-01-10", bsp=(3.5, 5.0)):
     definition = {"eventTypeId": "7", "eventId": "123", "eventName": "York 10th Jan",
         "countryCode": country, "marketType": market, "marketTime": day+"T14:00:00.000Z",
         "status": "CLOSED", "numberOfWinners": 1, "unparsed_source_information": [1, 2, 3],
-        "runners": [{"id": 1, "name": "Alpha", "status": "WINNER", "bsp": 3.5},
-                    {"id": 2, "name": "Beta", "status": "LOSER", "bsp": 5.0}]}
+        "runners": [{"id": 1, "name": "Alpha", "status": "WINNER", "bsp": bsp[0]},
+                    {"id": 2, "name": "Beta", "status": "LOSER", "bsp": bsp[1]}]}
     messages = [{"op": "mcm", "pt": 1768032000000, "mc": [{"id": f"1.{number}",
         "marketDefinition": definition, "rc": [{"id": 1, "ltp": 4.0}, {"id": 2, "ltp": 6.0}]}]}]
     return bz2.compress("\n".join(json.dumps(m) for m in messages).encode())
@@ -76,6 +76,19 @@ def test_download_publish_and_repeat_retains_full_source_and_prices(environment)
     assert "ltp_1100" in win and "rf_after_300s" in win
     repeated = history.sync_history(FIRST, LAST, client=client)
     assert repeated["downloaded"] == 0 and len(client.downloads) == 2
+
+
+def test_text_nan_starting_prices_publish_as_missing_numbers(environment):
+    # Betfair writes an unreconciled BSP as the text "NaN"; on 2026-11-08 one
+    # such runner stopped the whole backfill at the typed Parquet write.
+    client = FakeClient({remote(100): payload(bsp=(3.5, "NaN")), remote(101): payload(101, "PLACE", bsp=("Infinity", 1.8))})
+    report = history.sync_history(FIRST, LAST, client=client)
+    assert report["state"] == "ok" and report["files"] == {"published": 2}
+    for name, column, expected in [("betfair_bsp", "bsp", [3.5, None]), ("betfair_timing", "bsp", [3.5, None]),
+                                   ("betfair_place_bsp", "place_bsp", [None, 1.8])]:
+        frame = pd.read_parquet(environment / f"processed/{name}.parquet").sort_values("horse_name")
+        assert frame[column].dtype == float
+        assert [None if pd.isna(v) else v for v in frame[column]] == expected
 
 
 def test_budgeted_queue_resumes_an_older_requested_range(environment):
