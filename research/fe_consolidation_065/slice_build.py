@@ -35,25 +35,11 @@ def _manifest(data_root: Path, identifier: str | None) -> dict:
     return manifest
 
 
-def _read_sources_from(root: Path) -> None:
-    """Point the source registry at *root* for every module, however imported.
-
-    Some readers (``bha_features.source_paths``) build paths from
-    ``registry_root()`` rather than the manifest's ``root``, so the function's
-    code is replaced in place. Caches still go under this checkout's data.
-    """
-    from src import source_dataset
-    namespace: dict = {}
-    exec(f"def registry_root():\n    return Path({str(root)!r})\n", namespace)
-    source_dataset.registry_root.__code__ = namespace["registry_root"].__code__
-
-
 def build(data_root: Path, start: str, end: str | None, manifest_id: str | None) -> pd.DataFrame:
     from src.data_processor import load_raw_data, process_data
     from src.feature_engineer import engineer_features
     from src.source_dataset import use_manifest
 
-    _read_sources_from(data_root / "sources")
     manifest = _manifest(data_root, manifest_id)
     with use_manifest(manifest):
         raw = load_raw_data()
