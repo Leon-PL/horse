@@ -22,12 +22,12 @@ def remote(number):
     return f"/data/xds/historic/BASIC/123/1.{number}.bz2"
 
 
-def payload(number=100, market="WIN", country="GB", day="2026-01-10", bsp=(3.5, 5.0)):
+def payload(number=100, market="WIN", country="GB", day="2026-01-10", bsp=(3.5, 5.0), **definition_fields):
     definition = {"eventTypeId": "7", "eventId": "123", "eventName": "York 10th Jan",
         "countryCode": country, "marketType": market, "marketTime": day+"T14:00:00.000Z",
         "status": "CLOSED", "numberOfWinners": 1, "unparsed_source_information": [1, 2, 3],
         "runners": [{"id": 1, "name": "Alpha", "status": "WINNER", "bsp": bsp[0]},
-                    {"id": 2, "name": "Beta", "status": "LOSER", "bsp": bsp[1]}]}
+                    {"id": 2, "name": "Beta", "status": "LOSER", "bsp": bsp[1]}], **definition_fields}
     messages = [{"op": "mcm", "pt": 1768032000000, "mc": [{"id": f"1.{number}",
         "marketDefinition": definition, "rc": [{"id": 1, "ltp": 4.0}, {"id": 2, "ltp": 6.0}]}]}]
     return bz2.compress("\n".join(json.dumps(m) for m in messages).encode())
@@ -89,6 +89,22 @@ def test_text_nan_starting_prices_publish_as_missing_numbers(environment):
         frame = pd.read_parquet(environment / f"processed/{name}.parquet").sort_values("horse_name")
         assert frame[column].dtype == float
         assert [None if pd.isna(v) else v for v in frame[column]] == expected
+
+
+def test_a_match_bet_filed_as_a_win_market_is_retained_but_not_published(environment):
+    # Thurles 22 Jan 2023 13:10 had "Match Betting 1" (bspMarket false) beside
+    # the race's win market; the same selection IDs stopped publication.
+    match = payload(102, bsp=(None, None), name="Match Betting 1", bspMarket=False,
+                    runners=[{"id": 2, "name": "Beta", "status": "WINNER"}, {"id": 1, "name": "Alpha", "status": "LOSER"}])
+    charity = payload(103, day="2026-01-11", bsp=(None, None), name="Charity Race", bspMarket=False)
+    client = FakeClient({remote(100): payload(name="2m4f Nov Chs", bspMarket=True), remote(102): match,
+                         remote(103): charity})
+    report = history.sync_history(FIRST, LAST, client=client)
+    assert report["state"] == "ok" and report["files"] == {"published": 3}
+    assert history.local_path(environment / "betfair/history", remote(102)).read_bytes() == match
+    win = pd.read_parquet(environment / "processed/betfair_bsp.parquet").sort_values(["race_date", "horse_name"])
+    assert win.bf_market_id.tolist() == ["1.100", "1.100", "1.103", "1.103"]
+    assert win.won.tolist() == [1, 0, 1, 0] and win.bsp.iloc[:2].tolist() == [3.5, 5.0] and win.bsp.iloc[2:].isna().all()
 
 
 def test_budgeted_queue_resumes_an_older_requested_range(environment):

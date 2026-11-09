@@ -295,7 +295,14 @@ def parse_download(compressed, remote, start, end):
             raise ValueError("source filter")
         if definition.get("status") != "CLOSED":
             raise ValueError("market not settled")
-        rows = (parse_market if market_type == "WIN" else parse_place_market)(stream) or []
+        if (market_type == "WIN" and definition.get("bspMarket") is False
+                and str(definition.get("name", "")).casefold().startswith("match bet")):
+            # Betfair files a few match bets ("Match Betting 1": two runners,
+            # no BSP) as WIN markets of the race. They are not its win market,
+            # and their "winner" only beat one rival; retain, publish nothing.
+            # A race run without BSP (a charity race) is still its win market.
+            return market_type, []
+        rows =(parse_market if market_type == "WIN" else parse_place_market)(stream) or []
         # A genuinely void market has no settled runners; it is still retained.
         if not rows and any(r.get("status") in {"WINNER", "LOSER"} for r in definition.get("runners", [])):
             raise ValueError("settled runners not parsed")
