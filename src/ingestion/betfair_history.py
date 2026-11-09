@@ -289,6 +289,16 @@ def parse_download(compressed, remote, start, end):
             raise ValueError("market identity")
         definition = next(mc["marketDefinition"] for mc in reversed(changes) if mc.get("marketDefinition"))
         market_type = definition["marketType"]
+        runners = definition.get("runners") or []
+        if (market_type in {"WIN", "PLACE"} and str(definition.get("eventTypeId")) == "7"
+                and definition.get("status") == "CLOSED" and runners
+                and all(r.get("status") == "REMOVED" for r in runners)):
+            # Every runner withdrawn: a void market (an abandoned meeting, a
+            # voided duplicate, a "Do Not Activate" placeholder). Betfair files
+            # many under the day it voided them or with a stray country code
+            # ("MO"); with nothing to publish, retain it before those checks
+            # instead of sending it to review.
+            return market_type, []
         day = date.fromisoformat(definition["marketTime"][:10])
         if (definition.get("countryCode") not in {"GB", "IE"} or market_type not in {"WIN", "PLACE"}
                 or str(definition.get("eventTypeId")) != "7" or not start <= day <= end):

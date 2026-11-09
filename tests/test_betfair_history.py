@@ -33,6 +33,9 @@ def payload(number=100, market="WIN", country="GB", day="2026-01-10", bsp=(3.5, 
     return bz2.compress("\n".join(json.dumps(m) for m in messages).encode())
 
 
+REMOVED = [{"id": 1, "name": "Alpha", "status": "REMOVED"}, {"id": 2, "name": "Beta", "status": "REMOVED"}]
+
+
 @pytest.fixture
 def environment(tmp_path, monkeypatch):
     monkeypatch.setattr(history.config, "DATA_DIR", str(tmp_path))
@@ -107,6 +110,21 @@ def test_a_match_bet_filed_as_a_win_market_is_retained_but_not_published(environ
     assert win.won.tolist() == [1, 0, 1, 0] and win.bsp.iloc[:2].tolist() == [3.5, 5.0] and win.bsp.iloc[2:].isna().all()
 
 
+def test_void_markets_filed_under_another_day_or_country_are_retained_not_reviewed(environment):
+    # The 2026-11-09 backfill ended with 45 such files in review: Hereford's
+    # abandoned 2 Jan 2021 card filed in December, voided Chelmsford duplicates
+    # with country "MO", and "Do Not Activate" placeholders.
+    files = {remote(100): payload(),
+             remote(104): payload(104, day="2026-02-01", runners=REMOVED),
+             remote(105): payload(105, "PLACE", country="MO", runners=REMOVED),
+             remote(106): payload(106, day="2025-12-28", name="Do Not Activate", bspMarket=False, runners=REMOVED)}
+    report = history.sync_history(FIRST, LAST, client=FakeClient(files))
+    assert report["state"] == "ok" and report["files"] == {"published": 4}
+    assert history.local_path(environment / "betfair/history", remote(104)).read_bytes() == files[remote(104)]
+    assert pd.read_parquet(environment / "processed/betfair_bsp.parquet").bf_market_id.tolist() == ["1.100", "1.100"]
+    assert not (environment / "processed/betfair_place_bsp.parquet").exists()
+
+
 def test_budgeted_queue_resumes_an_older_requested_range(environment):
     client = FakeClient()
     first = history.sync_history(FIRST, LAST, client=client, budget=1)
@@ -143,6 +161,11 @@ def test_bad_downloads_remain_retryable_and_do_not_publish(environment, bad):
     (payload(country="US"), remote(100)),
     (payload(day="2026-02-01"), remote(100)),
     (payload(market="ANTEPOST_WIN"), remote(100)),
+    # Only void horse-racing WIN/PLACE markets skip the date and country checks.
+    (payload(day="2026-02-01", eventTypeId="4339", runners=REMOVED), remote(100)),
+    (payload(day="2026-02-01", market="ANTEPOST_WIN", runners=REMOVED), remote(100)),
+    (payload(day="2026-02-01", status="OPEN", runners=REMOVED), remote(100)),
+    (payload(day="2026-02-01", runners=[REMOVED[0], {"id": 2, "name": "Beta", "status": "WINNER"}]), remote(100)),
 ])
 def test_market_identity_country_date_and_type_are_checked(contents, path):
     with pytest.raises(history.HistoryError):
