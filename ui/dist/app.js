@@ -1,3 +1,4 @@
+import {createFeaturesUI} from './features.js';
 const $ = (q, root = document) => root.querySelector(q);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = value => value == null ? '—' : Number(value).toLocaleString('en-GB', {maximumFractionDigits: 2});
@@ -12,11 +13,12 @@ const icons = {
  races:'<path d="M4 5h16M4 12h16M4 19h16"/><circle cx="8" cy="5" r="2"/><circle cx="16" cy="12" r="2"/><circle cx="10" cy="19" r="2"/>',
  sources:'<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
  coverage:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 10h18M8 10v11m8-11v11m-13-6h18"/>',
+ features:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18M15 9v12M3 15h18"/>',
  jobs:'<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
  review:'<path d="M5 21V4m0 0c6-4 8 4 14 0v10c-6 4-8-4-14 0"/>'
 };
 const svgIcon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]}</svg>`;
-$('#navigation').innerHTML = Object.entries({overview:'Overview',races:'Races',sources:'Sources',coverage:'Coverage',jobs:'Jobs',review:'Review queue'}).map(([key,label]) => `<a href="#${key}" data-page="${key}">${svgIcon(key)}${label}</a>`).join('');
+$('#navigation').innerHTML = Object.entries({overview:'Overview',races:'Races',sources:'Sources',coverage:'Coverage',features:'Features',jobs:'Jobs',review:'Review queue'}).map(([key,label]) => `<a href="#${key}" data-page="${key}">${svgIcon(key)}${label}</a>`).join('');
 
 function badge(label, kind = '') { return `<span class="badge ${kind}">${esc(label)}</span>`; }
 function sourceIcon(id) { return `<span class="source-icon ${id}">${sourceShort[id]}</span>`; }
@@ -44,8 +46,8 @@ async function api(path, params = {}, body) {
  if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
  return result;
 }
-function heading(title, description, action = '') {
- return `<div class="page-heading"><div><div class="eyebrow">COLLECTION &amp; DATA QUALITY</div><h1>${esc(title)}</h1><p>${esc(description)}</p></div>${action ? `<div class="actions">${action}</div>` : ''}</div>`;
+function heading(title, description, action = '', eyebrow = 'COLLECTION & DATA QUALITY') {
+ return `<div class="page-heading"><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(title)}</h1><p>${esc(description)}</p></div>${action ? `<div class="actions">${action}</div>` : ''}</div>`;
 }
 function banner(title, description = '', kind = '', action = '') {
  return `<div class="banner ${kind}"><span class="banner-icon">${kind === 'good' ? '✓' : kind === 'error' ? '!' : '◷'}</span><div><strong>${esc(title)}</strong>${description ? `<p>${esc(description)}</p>` : ''}</div>${action ? `<div class="actions">${action}</div>` : ''}</div>`;
@@ -131,7 +133,7 @@ async function racePage(id) {
  state.race = race; state.review = review; state.changes = [];
  const r = race.header, note = review.notes.find(n=>n.race_id===id);
  $('#main').innerHTML = `<a href="#races" class="back-link">← Back to race explorer</a><section class="race-header"><div class="section-toolbar"><div class="chip-stack">${badge(r.race_type || 'Type unknown','neutral')}${badge(`Race ${r.race_id}`,'neutral')}${race.findings.some(f=>f.severity==='error')?badge('Check field','warning'):badge('Field structure checked')}</div><div class="actions"><button class="button bookmark" data-action="bookmark" title="Bookmark race" aria-label="Bookmark race">${note?.bookmarked ? '★' : '☆'}</button><a class="button small" href="${url(`races/${id}/export`,{format:'csv'})}">Export CSV</a><a class="button small" href="${url(`races/${id}/export`)}">Evidence pack</a></div></div><h1>${esc(r.track)} · ${esc(r.off_time_local)}</h1><div class="race-subheading">${dateLabel(r.race_date)} · ${esc(r.race_name || '')}</div><dl class="race-facts">${[['Distance',`${r.distance_furlongs ?? '?'} furlongs`],['Going',r.going],['Surface',r.surface],['Field',`${race.rows.length} / ${r.num_runners ?? '?'} runners`],['Prize',r.prize_money==null?'Unknown':number(r.prize_money)+' · source units'],['Stored off-time',(r.off_time || 'Unknown')+' UTC']].map(([k,v])=>`<div><dt>${esc(k)}</dt><dd>${esc(v || 'Unknown')}</dd></div>`).join('')}</dl></section>
- <div class="tabs" aria-label="Race inspection tabs">${Object.entries({runners:'Runners',evidence:'Source evidence',prepared:'Prepared inputs',changes:'Publication changes',review:'Review & notes'}).map(([key,label])=>`<button data-action="race-tab" data-tab="${key}" class="${state.raceTab===key?'active':''}">${label}</button>`).join('')}</div><div id="race-content"></div>`;
+ <div class="tabs" aria-label="Race inspection tabs">${Object.entries({runners:'Runners',evidence:'Source evidence',prepared:'Prepared inputs',features:'Features',changes:'Publication changes',review:'Review & notes'}).map(([key,label])=>`<button data-action="race-tab" data-tab="${key}" class="${state.raceTab===key?'active':''}">${label}</button>`).join('')}</div><div id="race-content"></div>`;
  await raceContent();
 }
 async function raceContent() {
@@ -139,6 +141,8 @@ async function raceContent() {
  $$('.tabs button').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.raceTab));
  if (state.raceTab==='runners') {
   target.innerHTML = race.findings.map(f=>banner(f.message,'',f.severity==='error'?'error':'')).join('')+`<section class="panel"><div class="panel-head"><div><h2>Canonical runner field</h2><p>Stored race records. Open a runner to inspect every available field.</p></div>${badge(`${race.rows.length} runners`,'neutral')}</div><div class="table-wrap"><table><thead><tr><th>Place</th><th>Runner</th><th>Jockey / trainer</th><th>Rating</th><th>Weight</th><th>Source odds</th><th></th></tr></thead><tbody>${race.rows.map(r=>`<tr><td>${esc(r.finish_pos_label || r.finish_position || 'Unknown')}</td><td><strong>${esc(r.horse_name)}</strong><div class="race-meta">ID ${esc(r.horse_id ?? 'Unknown')} · ${r.age ?? '?'}yo · ${esc(r.sex || 'Sex unknown')}</div></td><td>${esc(r.jockey || 'Unknown')}<div class="race-meta">${esc(r.trainer || 'Unknown')}</div></td><td>${number(r.official_rating)}</td><td>${number(r.weight_lbs)} lb</td><td>${number(r.odds)}</td><td>${inspectButton(r,'sl','View runner')}</td></tr>`).join('')}</tbody></table></div></section>`;
+ } else if (state.raceTab==='features') {
+  await featureUI.raceInTab(race.header.race_id,target);
  } else if (state.raceTab==='evidence') {
   target.innerHTML=sourcePicker()+`<div class="section-toolbar"><div><h2>${esc(sourceLabels[state.source])}</h2><div class="hint no-margin">Native evidence and immutable accepted observations remain separate.</div></div>${layerPicker()}</div><div id="source-content" class="loading"><span class="spinner"></span>Reading source observations…</div>`;
   await loadRaceSource();
@@ -182,8 +186,8 @@ async function coveragePage() {
 async function jobsPage() {
  const result=await api('jobs');
  const busySources=new Set(result.workers.filter(w=>w.active || w.process_alive && ['running','waiting'].includes(w.status.state)).map(w=>w.source));
- $('#main').innerHTML=heading('Collection jobs','Start bounded operations, follow existing workers and inspect their recorded outcomes.')+
- `<div class="two-column"><div><section class="panel"><div class="panel-head"><div><h2>Refresh a date range</h2><p>Uses the dates selected above and the existing source coordinator.</p></div></div><form class="panel-body" data-form="refresh"><div class="check-grid">${['sl','rtv','atr','betfair','fx','bha'].map(id=>`<label><input name="source" type="checkbox" value="${id}" ${busySources.has(id)?'disabled':'checked'}>${esc(sourceLabels[id])}</label>`).join('')}</div>${busySources.size?`<p class="hint">Active collectors are reserved: ${[...busySources].map(id=>esc(sourceLabels[id])).join(', ')}. Their existing jobs continue independently.</p>`:''}<label class="hint"><input type="checkbox" id="recheck"> Recheck already collected records in this range</label><p class="hint">BHA stewards is included when its collector is free. Historical ranges are limited to 31 settled days per job; provider publication delays and cooldowns are retained.</p><button class="button primary">Queue source refresh</button></form></section><section class="panel"><div class="panel-head"><div><h2>Local data operations</h2><p>Long operations continue independently of this page.</p></div></div><div class="panel-body"><div class="actions"><button class="button" data-action="queue" data-kind="publish">Publish accepted sources</button><button class="button" data-action="queue" data-kind="verify">Verify publication hashes</button><button class="button" data-action="queue" data-kind="validate">Check race fields</button><button class="button" data-action="queue" data-kind="replay">Replay retained SL responses</button></div><p class="hint">Publication adopts local stores and promotes qualified ATR observations. It does not download data. Replay reparses retained Sporting Life responses through the existing ingestion path.</p></div></section><section class="panel"><div class="panel-head"><h2>Workbench job history</h2>${badge(result.rows.length,'neutral')}</div>${result.rows.length?result.rows.map(j=>`<div class="job-row"><header><strong>${esc(pretty(j.kind))}</strong>${badge(pretty(j.state),j.state==='failed'?'error':j.state==='partial'?'warning':j.state==='running'?'blue':'')}</header><div class="race-meta">${esc(when(j.created_at))} · ${esc(j.params?.start || '')}${j.params?.end?' → '+esc(j.params.end):''}</div>${j.error?`<p>${esc(j.error)}</p>`:''}${j.progress?`<p>${esc(j.progress.source || '')} · ${esc(j.progress.state || '')}</p>`:''}<div class="actions"><button class="button small" data-action="job-log" data-job="${j.id}">View log</button>${inspectButton(j,'','Receipt')}</div></div>`).join(''):empty('No workbench jobs yet','Existing source workers are shown separately. Page loads never queue operations.')}</section></div><div>${result.workers.map(w=>`<section class="panel"><div class="panel-head"><h2>${esc(w.label)} worker</h2></div>${workerCard(w,true)}</section>`).join('')}</div></div>`;
+ $('#main').innerHTML=heading('Project jobs','Follow source collection, feature builds and recorded validation outcomes.')+
+ `<div class="two-column"><div><section class="panel"><div class="panel-head"><div><h2>Refresh a date range</h2><p>Uses the dates selected above and the existing source coordinator.</p></div></div><form class="panel-body" data-form="refresh"><div class="check-grid">${['sl','rtv','atr','betfair','fx','bha'].map(id=>`<label><input name="source" type="checkbox" value="${id}" ${busySources.has(id)?'disabled':'checked'}>${esc(sourceLabels[id])}</label>`).join('')}</div>${busySources.size?`<p class="hint">Active collectors are reserved: ${[...busySources].map(id=>esc(sourceLabels[id])).join(', ')}. Their existing jobs continue independently.</p>`:''}<label class="hint"><input type="checkbox" id="recheck"> Recheck already collected records in this range</label><p class="hint">BHA stewards is included when its collector is free. Historical ranges are limited to 31 settled days per job; provider publication delays and cooldowns are retained.</p><button class="button primary">Queue source refresh</button></form></section><section class="panel"><div class="panel-head"><div><h2>Local data operations</h2><p>Long operations continue independently of this page.</p></div></div><div class="panel-body"><div class="actions"><button class="button" data-action="queue" data-kind="publish">Publish accepted sources</button><button class="button" data-action="queue" data-kind="verify">Verify publication hashes</button><button class="button" data-action="queue" data-kind="validate">Check race fields</button><button class="button" data-action="queue" data-kind="replay">Replay retained SL responses</button></div><p class="hint">Publication adopts local stores and promotes qualified ATR observations. It does not download data. Replay reparses retained Sporting Life responses through the existing ingestion path.</p></div></section><section class="panel"><div class="panel-head"><h2>Workbench job history</h2>${badge(result.rows.length,'neutral')}</div>${result.rows.length?result.rows.map(j=>`<div class="job-row"><header><strong>${esc(pretty(j.kind))}</strong>${badge(pretty(j.state),j.state==='failed'?'error':j.state==='partial'?'warning':j.state==='running'?'blue':'')}</header><div class="race-meta">${esc(when(j.created_at))} · ${esc(j.params?.start || '')}${j.params?.end?' → '+esc(j.params.end):''}</div>${j.error?`<p>${esc(j.error)}</p>`:''}${j.progress?`<p>${esc(j.progress.message || j.progress.source || '')} · ${esc(j.progress.phase || j.progress.state || '')}</p>`:''}<div class="actions"><button class="button small" data-action="job-log" data-job="${j.id}">View log</button>${inspectButton(j,'','Receipt')}</div></div>`).join(''):empty('No workbench jobs yet','Existing source workers are shown separately. Page loads never queue operations.')}</section></div><div>${result.workers.map(w=>`<section class="panel"><div class="panel-head"><h2>${esc(w.label)} worker</h2></div>${workerCard(w,true)}</section>`).join('')}</div></div>`;
  $('#recheck').closest('label').insertAdjacentHTML('beforebegin','<label class="hint checkbox-line"><input type="checkbox" id="enrich"> Enrich pedigree for collected runners</label><label class="hint checkbox-line"><input type="checkbox" id="weather"> Collect weather observations (research)</label>');
 }
 async function reviewPage() {
@@ -288,13 +292,20 @@ async function render(showLoading=true) {
  state.abort?.abort();state.abort=new AbortController();
  const ticket=++state.ticket,segments=(location.hash.slice(1)||'overview').split('/');
  state.page=segments[0];
- if(!['overview','races','race','sources','coverage','jobs','review'].includes(state.page)){location.hash='overview';return;}
+ if(!['overview','races','race','sources','coverage','features','jobs','review'].includes(state.page)){location.hash='overview';return;}
  $$('#navigation a').forEach(a=>a.classList.toggle('active',a.dataset.page===(state.page==='race'?'races':state.page)));
  if(showLoading)$('#main').innerHTML='<div class="loading"><span class="spinner"></span>Reading your local data…</div>';
  try{
-  const o=await api('overview',{dataset:state.dataset});if(ticket!==state.ticket)return;
-  state.overview=o;state.boundDataset=state.dataset || o.dataset.id || '';
-  if(state.page==='overview')await overviewPage();else if(state.page==='races')await racesPage();else if(state.page==='race')await racePage(decodeURIComponent(segments[1]||''));else if(state.page==='sources')await sourcesPage(segments[1]);else if(state.page==='coverage')await coveragePage();else if(state.page==='jobs')await jobsPage();else if(state.page==='review')await reviewPage();
+  if(state.page==='features') {
+   const summary=await api('features/overview',{dataset:state.dataset});if(ticket!==state.ticket)return;
+   state.boundDataset=state.dataset || summary.selected_dataset || '';
+   await featureUI.render(segments[1],decodeURIComponent(segments[2]||''),summary);
+  } else {
+   const o=await api('overview',{dataset:state.dataset});if(ticket!==state.ticket)return;
+   state.overview=o;state.boundDataset=state.dataset || o.dataset.id || '';
+   if(state.page==='overview')await overviewPage();else if(state.page==='races')await racesPage();else if(state.page==='race')await racePage(decodeURIComponent(segments[1]||''));else if(state.page==='sources')await sourcesPage(segments[1]);else if(state.page==='coverage')await coveragePage();else if(state.page==='jobs')await jobsPage();else if(state.page==='review')await reviewPage();
+  }
+  $('.breadcrumb').innerHTML=state.page==='features'?'Project <span>/</span> Features':'Project <span>/</span> Ingestion';
   $('#last-checked').textContent=`Checked ${new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} · Local workspace`;
   document.title=`${state.page==='race'?'Race inspection':pretty(state.page)} · Racing Workbench`;
  }catch(e){if(ticket===state.ticket)$('#main').innerHTML=heading('Unable to load this view','Your source data has not been changed.')+banner(e.message,'Check the selected date range, dataset or local source availability.','error')+'<button class="button" data-nav="overview">Back to overview</button>';}
@@ -307,6 +318,7 @@ $('#auto-refresh').addEventListener('change',e=>state.auto=e.target.checked);
 $('#apply-dates').addEventListener('click',()=>{state.offset=0;render();});
 $('#dataset').addEventListener('change',e=>{state.dataset=e.target.value;render();});
 window.addEventListener('hashchange',()=>{render();window.scrollTo(0,0);});
-setInterval(()=>{if(state.auto && ['overview','jobs'].includes(state.page) && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName) && !$('#inspector').open)render(false);},30000);
+setInterval(()=>{if(state.auto && (['overview','jobs'].includes(state.page) || state.page==='features' && ['overview','builds'].includes(location.hash.split('/')[1] || 'overview')) && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName) && !$('#inspector').open)render(false);},30000);
+const featureUI=createFeaturesUI({api,url,esc,number,pretty,banner,badge,empty,metric,toast,state,heading,queue,render,raceContent});
 async function boot(){try{const session=await api('session');token=session.token;const yesterday=new Date();yesterday.setDate(yesterday.getDate()-1);const end=yesterday.toISOString().slice(0,10);yesterday.setDate(yesterday.getDate()-6);$('#start-date').value=yesterday.toISOString().slice(0,10);$('#end-date').value=end;const sets=await api('datasets');$('#dataset').insertAdjacentHTML('beforeend',sets.rows.map(s=>`<option value="${s.id}">${dateLabel(s.created_at)} · ${s.id.slice(0,10)}</option>`).join(''));await render();}catch(e){$('#main').innerHTML=heading('Workspace connection unavailable','Start the local workbench server and reload this page.')+banner(e.message,'','error');}}
 boot();

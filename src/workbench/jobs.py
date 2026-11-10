@@ -1,4 +1,4 @@
-"""Durable background commands; source owners retain their locks and policies."""
+"""Durable source and feature jobs; existing owners retain locks and policies."""
 from datetime import date, datetime, timedelta, timezone
 import os
 import re
@@ -42,8 +42,27 @@ class Jobs:
     def validate(self, kind, params):
         if not isinstance(params, dict):
             raise ValueError("Operation parameters must be a JSON object")
-        if kind not in {"refresh", "replay", "publish", "validate", "verify", "atr_resume"}:
-            raise ValueError("Unknown ingestion operation")
+        if kind not in {"refresh", "replay", "publish", "validate", "verify", "atr_resume", "feature_update", "feature_check"}:
+            raise ValueError("Unknown workbench operation")
+        if kind in {"feature_update", "feature_check"}:
+            from src.workbench.features import Features
+            service = Features(self.catalog)
+            if kind == "feature_update":
+                manifest = self.catalog.manifest(params.get("dataset"))
+                if not manifest.get("id"):
+                    raise ValueError("Publish and select an accepted dataset before building features")
+                if not isinstance(params.get("rebuild", False), bool):
+                    raise ValueError("Rebuild must be a boolean")
+                return {"dataset": manifest["id"], "rebuild": params.get("rebuild", False)}
+            first, last = date_range(params["start"], params["end"], 31)
+            selected = service.selection(params.get("feature_set"))
+            family = params.get("family", "")
+            from src.workbench.feature_catalog import FAMILIES
+            if family and family not in FAMILIES:
+                raise ValueError("Choose a known feature family")
+            return {"start": first.isoformat(), "end": last.isoformat(),
+                    "feature_set": selected["id"] if selected else "all", "family": family,
+                    "feature_set_signature": selected["signature"] if selected else None}
         if kind in {"refresh", "replay", "validate"}:
             yesterday = date.today()-timedelta(days=1)
             start = params.get("start") or (yesterday-timedelta(days=6)).isoformat()

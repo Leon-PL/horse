@@ -5,6 +5,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+import time
 
 from src.ingestion.storage import atomic_json, writer_lock
 from src.workbench.data import Catalog, connection, read_json
@@ -30,7 +31,37 @@ def run(path):
     catalog = Catalog(config.DATA_DIR, config.BASE_DIR)
     kind, params = job["kind"], job["params"]
     try:
-        if kind in {"refresh", "replay"}:
+        if kind == "feature_update":
+            from src.workbench.features import update_store
+            def progress(**values):
+                stamp(progress={**job.get("progress", {}), **values})
+            class FeatureProgress(logging.Handler):
+                last = 0
+                def emit(self, record):
+                    if record.name not in {"src.feature_engineer", "src.store_build", "src.ratings", "src.bha_events"} or time.monotonic()-self.last < 2:
+                        return
+                    self.last = time.monotonic()
+                    try:
+                        progress(phase="building", message=record.getMessage()[:320])
+                    except Exception:
+                        self.handleError(record)
+            handler = FeatureProgress()
+            logging.getLogger().addHandler(handler)
+            try:
+                result = update_store(catalog, params["dataset"], params["rebuild"], progress=progress)
+            finally:
+                logging.getLogger().removeHandler(handler)
+            state = "complete"
+        elif kind == "feature_check":
+            from src.workbench.features import Features
+            service = Features(catalog)
+            selection = service.selection(params["feature_set"])
+            if (selection["signature"] if selection else None) != params["feature_set_signature"]:
+                raise ValueError("The feature set changed after this check was queued; queue it again")
+            stamp(progress={"phase": "checking", "message": "Scanning the bounded stored cohort"})
+            result = service.quality(params["start"], params["end"], params["feature_set"], params["family"])
+            state = "partial" if result["missing_columns"] or result["duplicate_keys"] or any(r["infinite"] for r in result["rows"]) else "complete"
+        elif kind in {"refresh", "replay"}:
             from src.ingestion.pipeline import refresh_sources
             result = refresh_sources(start=params["start"], end=params["end"],
                 sources=("sl",) if kind == "replay" else tuple(params["sources"]),

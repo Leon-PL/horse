@@ -190,13 +190,16 @@ def parse_distance(html, race_id):
         node = entry.select_one(".card-cell--distancerandistran")
         diff = entry.select_one(".card-cell--distanceranvmedian")
         if node is None or diff is None:
-            # ATR's unsupported-race template repeats identities without any
-            # measurement cells or median. Accept only that exact empty shape.
+            # Some untracked runners have empty split placeholders instead of
+            # distance cells, even when another runner has a measured distance.
             identity_classes = {'card-cell--pos-no','card-cell--silk','card-cell--horse-basic'}
             cells = entry.select('.card-cell')
-            identity_only = len(cells) == 3 and all(identity_classes.intersection(cell.get('class',[]))
-                                                   for cell in cells)
-            if not (node is None and diff is None and median is None and identity_only):
+            identity = [cell for cell in cells if identity_classes.intersection(cell.get('class', []))]
+            extra = [cell for cell in cells if not identity_classes.intersection(cell.get('class', []))]
+            empty_splits = extra and all('card-cell--sectional-time' in cell.get('class', [])
+                                         and cell.get_text(strip=True) in {'', '-', '—', '–'} for cell in extra)
+            empty_row = len(identity) == 3 and (empty_splits or (not extra and median is None))
+            if not (node is None and diff is None and empty_row):
                 raise ValueError("Missing labelled distance cells")
         link = entry.select_one("a.horse__link")
         linked = parse_qs(urlsplit(link.get("href", "") if link else "").query).get("raceid", [])
@@ -204,16 +207,17 @@ def parse_distance(html, race_id):
             raise ValueError("Distance runner/race identity mismatch")
         seen.add(row["atr_horse_id"])
         display = node.get_text(" ", strip=True) if node else ''
+        yards = distance_yards(display)
         difference = diff.get_text(" ", strip=True) if diff else ''
         if difference == "No Change":
-            delta = 0.0
+            delta = 0.0 if yards is not None else None
         elif difference in {"", "-", "—", "–"}:
             delta = None
         elif re.fullmatch(r"[+-]?\d+(?:\.\d+)?\s+lengths?", difference):
             delta = float(difference.split()[0])
         else:
             raise ValueError("Unknown distance difference units")
-        row.update(context, atr_distance_ran_display=display, atr_distance_ran_yards=distance_yards(display),
+        row.update(context, atr_distance_ran_display=display, atr_distance_ran_yards=yards,
                    atr_distance_diff_vs_median_lengths=delta)
         rows.append(row)
     return rows, context

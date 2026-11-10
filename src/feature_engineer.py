@@ -16,7 +16,6 @@ Features include:
 import logging
 import ast
 import os
-from contextlib import contextmanager
 from itertools import chain, repeat
 from typing import NamedTuple
 
@@ -32,6 +31,8 @@ from src.bha_features import add_bha_features
 
 import config
 from src.source_dataset import dataset_build
+from src.feature_context import counts_state_scope, current_context, current_counts_state
+from src.feature_semantics import distance_category
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -641,13 +642,13 @@ def _time_window(df, entity_col, date_col, value_col, window_days):
     Full build (no active state) calls the core directly — byte-identical.
     Under a seed scope it carries each entity's last ``window_days`` of rows so
     an append can run over new rows only. State keyed by (entity, value, days)."""
-    if _COUNTS_STATE is None:
+    if current_counts_state() is None:
         return _time_window_stats_core(df, entity_col, date_col, value_col, window_days)
     key = f"tw::{entity_col}::{value_col}::{window_days}"
     out, new_state = _time_window_with_seed(
-        df, entity_col, date_col, value_col, window_days, _COUNTS_STATE.get(key)
+        df, entity_col, date_col, value_col, window_days, current_counts_state().get(key)
     )
-    _COUNTS_STATE[key] = new_state
+    current_counts_state()[key] = new_state
     return out
 
 
@@ -687,28 +688,6 @@ def _entity_day_start_view(
     return df
 
 
-# ── Incremental cumulative-state threading ─────────────────────────────────
-# A seeded run (FeatureStore append) sets a flat {column: accumulator_state}
-# dict here; class-C stages seed their cumulative_counts from it and write back
-# their advanced state, so an append never recomputes history. A full build
-# leaves it None -> stages compute from scratch (byte-identical). See
-# docs/architecture/FE_REFACTOR_PLAN.md.
-_COUNTS_STATE: dict | None = None
-
-
-@contextmanager
-def counts_state_scope(state: dict | None):
-    """Activate a seed/collector dict for cumulative-count stages."""
-    global _COUNTS_STATE
-    prev = _COUNTS_STATE
-    _COUNTS_STATE = state
-    try:
-        yield
-    finally:
-        _COUNTS_STATE = prev
-        _TIMELINES.clear()
-
-
 def _cumulative(keys, race_ids, metrics: dict) -> dict:
     """Seed-aware cumulative counts for a class-C stage.
 
@@ -717,9 +696,9 @@ def _cumulative(keys, race_ids, metrics: dict) -> dict:
     seeds from the carried state and writes the advanced state back, so the
     same stage code serves both build and append.
     """
-    out, new_state = cumulative_counts(keys, race_ids, metrics, state=_COUNTS_STATE)
-    if _COUNTS_STATE is not None:
-        _COUNTS_STATE.update(new_state)
+    out, new_state = cumulative_counts(keys, race_ids, metrics, state=current_counts_state())
+    if current_counts_state() is not None:
+        current_counts_state().update(new_state)
     return out
 
 
@@ -727,9 +706,9 @@ def _cumulative_plain(keys, metrics: dict) -> dict:
     """Seed-aware **plain** cumulative counts (cumsum - current) for a class-C
     stage with at most one observation per entity per race. Mirrors
     ``_cumulative`` but threads ``PlainCountsAccumulator`` state."""
-    out, new_state = cumulative_counts_plain(keys, metrics, state=_COUNTS_STATE)
-    if _COUNTS_STATE is not None:
-        _COUNTS_STATE.update(new_state)
+    out, new_state = cumulative_counts_plain(keys, metrics, state=current_counts_state())
+    if current_counts_state() is not None:
+        current_counts_state().update(new_state)
     return out
 
 
@@ -796,7 +775,6 @@ class _Timeline(NamedTuple):
 # Stages call ``_rolling`` dozens of times per frame on the same entity. The
 # grouping is a pure function of ``sources``, which are compared by value, so
 # this can only save work. It lives for one ``counts_state_scope``.
-_TIMELINES: dict = {}
 
 
 def _same_arrays(left: tuple, right: tuple) -> bool:
@@ -819,7 +797,9 @@ def _timeline(df: pd.DataFrame, keys: list, date_col: str) -> _Timeline:
     races = df["race_id"].to_numpy() if "race_id" in df.columns else np.arange(n)
     sources = (*key_arrays, dates, races)
     slot = (tuple(keys), date_col)
-    known = _TIMELINES.get(slot)
+    context = current_context()
+    timelines = context.timelines if context is not None else {}
+    known = timelines.get(slot)
     if known is not None and _same_arrays(known.sources, sources):
         return known
 
@@ -836,7 +816,7 @@ def _timeline(df: pd.DataFrame, keys: list, date_col: str) -> _Timeline:
     line = _Timeline(tuple(np.array(source, copy=True) for source in sources), uniques.tolist(),
                      labels, np.bincount(labels, minlength=len(uniques)), order, history,
                      sorted_labels, opens_race)
-    _TIMELINES[slot] = line
+    timelines[slot] = line
     return line
 
 
@@ -960,10 +940,10 @@ def _lag(df, entity_col, col):
     holds the last value per entity. Works for any dtype (numeric / date / str)."""
     g = df.groupby(entity_col, sort=False)
     shifted = g[col].shift(1)
-    if _COUNTS_STATE is None:
+    if current_counts_state() is None:
         return shifted
     key = f"lag::{entity_col}::{col}"
-    seed = _COUNTS_STATE.get(key, {})
+    seed = current_counts_state().get(key, {})
     entities = df[entity_col].to_numpy()
     carried = _in_frame(seed, entities)
     if carried:
@@ -973,7 +953,7 @@ def _lag(df, entity_col, col):
     last = _last_rows(g, entities)
     new_state = dict(seed)
     new_state.update(zip(entities[last], df[col].to_numpy()[last]))
-    _COUNTS_STATE[key] = new_state
+    current_counts_state()[key] = new_state
     return shifted
 
 
@@ -986,7 +966,7 @@ def _running_extreme(df, entity_col, col, *, kind="max", prev=False):
     cum = g[col].cummax() if kind == "max" else g[col].cummin()
     if prev:
         cum = cum.groupby(df[entity_col].to_numpy()).shift(1)
-    if _COUNTS_STATE is None:
+    if current_counts_state() is None:
         return cum
 
     # Seeded path. pandas ``cummax``/``cummin`` are skipna BUT keep NaN at NaN
@@ -1000,7 +980,7 @@ def _running_extreme(df, entity_col, col, *, kind="max", prev=False):
     # race had nulled out in the full build.
     npf = np.fmax if kind == "max" else np.fmin
     state_key = f"ext::{kind}::{int(prev)}::{entity_col}::{col}"
-    state = _COUNTS_STATE.get(state_key, {})  # entity -> (R, L)
+    state = current_counts_state().get(state_key, {})  # entity -> (R, L)
     ent = df[entity_col]
     vals = df[col].to_numpy(dtype="float64")
     local = (g[col].cummax() if kind == "max" else g[col].cummin()).to_numpy(dtype="float64")
@@ -1028,7 +1008,7 @@ def _running_extreme(df, entity_col, col, *, kind="max", prev=False):
     prior = np.fromiter((carried.get(e, (np.nan,))[0] for e in frame_entities), np.float64, len(frame_entities))
     for e, extreme in zip(frame_entities, npf(prior, extremes).tolist()):
         new_state[e] = (extreme, last_combined.get(e, np.nan))
-    _COUNTS_STATE[state_key] = new_state
+    current_counts_state()[state_key] = new_state
     return result
 
 
@@ -1040,10 +1020,10 @@ def _ffill_prev(df, entity_col, col):
     filled = g[col].ffill()
     entities = df[entity_col].to_numpy()
     filled_prev = filled.groupby(entities).shift(1)
-    if _COUNTS_STATE is None:
+    if current_counts_state() is None:
         return filled_prev
     state_key = f"ffill::{entity_col}::{col}"
-    seed = _COUNTS_STATE.get(state_key, {})
+    seed = current_counts_state().get(state_key, {})
     carried = _in_frame(seed, entities)
     if carried:
         seed_vals = pd.Series(entities, index=df.index).map(carried)
@@ -1053,7 +1033,7 @@ def _ffill_prev(df, entity_col, col):
     for e, v in zip(entities[last], filled.to_numpy()[last]):
         if pd.notna(v):
             new_state[e] = v
-    _COUNTS_STATE[state_key] = new_state
+    current_counts_state()[state_key] = new_state
     return filled_prev
 
 
@@ -1152,11 +1132,11 @@ def _expanding_prev(df, key_col, col, stats):
                 out[st] = gb.transform(lambda x: x.shift(1).expanding().std())
         return out
 
-    if _COUNTS_STATE is None:
+    if current_counts_state() is None:
         return _compute(df.groupby(key_col, sort=False)[col])
 
     state_key = f"exp::{key_col}::{col}"
-    seed = _COUNTS_STATE.get(state_key, {})  # key -> chronological list of values
+    seed = current_counts_state().get(state_key, {})  # key -> chronological list of values
     labels, uniques = pd.factorize(df[key_col].to_numpy(), use_na_sentinel=False)
     vals = df[col].to_numpy().astype("float64")
     medians = np.empty(len(df), dtype=np.float64)
@@ -1173,7 +1153,7 @@ def _expanding_prev(df, key_col, col, stats):
         medians[rows], deviations[rows] = _nb_expanding_prior(
             np.array(carried, dtype=np.float64), vals[rows])
         new_state[key] = list(carried) + vals[rows].tolist()
-    _COUNTS_STATE[state_key] = new_state
+    current_counts_state()[state_key] = new_state
     computed = {"median": medians, "std": deviations}
     return {st: pd.Series(computed[st], index=df.index) for st in stats}
 
@@ -1213,7 +1193,7 @@ def _distinct_count(df, entity_col, col):
     )
 
     state_key = f"nuniq::{entity_col}::{col}"
-    seed = _COUNTS_STATE.get(state_key, {}) if _COUNTS_STATE is not None else {}
+    seed = current_counts_state().get(state_key, {}) if current_counts_state() is not None else {}
 
     if seed:
         # A first-in-frame value only increments if not already carried.
@@ -1232,7 +1212,7 @@ def _distinct_count(df, entity_col, col):
     run_s = base + pd.Series(inc_s).groupby(ent_s).cumsum().to_numpy()
     out = pd.Series(run_s[inv].astype("float64"), index=df.index)
 
-    if _COUNTS_STATE is not None:
+    if current_counts_state() is not None:
         # Set union replaces touched entries without mutating the seed's sets.
         new_state = dict(seed)
         seen = pd.DataFrame({"e": ent_s[notna_s], "v": val_s[notna_s]}).drop_duplicates()
@@ -1243,7 +1223,7 @@ def _distinct_count(df, entity_col, col):
                 values = grown[entity] = set(seed.get(entity, ()))
             values.add(value)
         new_state.update(grown)
-        _COUNTS_STATE[state_key] = new_state
+        current_counts_state()[state_key] = new_state
     return out
 
 
@@ -1254,13 +1234,17 @@ def _rolling(df, group_key, value_col, operations) -> dict:
     byte-identical to before. Under a seed scope it carries a per-entity raw
     tail so an append can run over new rows only. State is keyed by the first
     output name (globally unique)."""
-    if _COUNTS_STATE is None:
-        return _fast_grouped_rolling_core(df, group_key, value_col, operations)
+    if current_counts_state() is None:
+        results = _fast_grouped_rolling_core(df, group_key, value_col, operations)
+        # The persisted/seeded engine groups bounded operations before EWMA.
+        # Give the reference sweep that same schema without changing values.
+        ordered = [op for op in operations if op[1] != "ewma"] + [op for op in operations if op[1] == "ewma"]
+        return {name: results[name] for name, _, _ in ordered}
     state_key = f"roll::{operations[0][0]}"
     results, new_state = _rolling_with_seed(
-        df, group_key, value_col, operations, _COUNTS_STATE.get(state_key)
+        df, group_key, value_col, operations, current_counts_state().get(state_key)
     )
-    _COUNTS_STATE[state_key] = new_state
+    current_counts_state()[state_key] = new_state
     return results
 
 
@@ -1522,12 +1506,12 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
 def add_established_form_features(df: pd.DataFrame) -> pd.DataFrame:
     """Comparable marks and evidence from today's actual racing discipline."""
     from src.established_form_features import STATE_KEY, established_form_features
-    seed = _COUNTS_STATE.get(STATE_KEY) if _COUNTS_STATE is not None else None
+    seed = current_counts_state().get(STATE_KEY) if current_counts_state() is not None else None
     values, advanced = established_form_features(df, state=seed, return_state=True)
     for column in values:
         df[column] = values[column]
-    if _COUNTS_STATE is not None:
-        _COUNTS_STATE[STATE_KEY] = advanced
+    if current_counts_state() is not None:
+        current_counts_state()[STATE_KEY] = advanced
     return df
 
 
@@ -1537,7 +1521,7 @@ _PRIOR_MARKET_STATE_KEY = "prior_market::v1"
 def add_prior_market_features(df: pd.DataFrame) -> pd.DataFrame:
     """Earlier market opinions and rated opposition, with no current-price input."""
     from src.prior_market_features import FEATURES, prior_market_features
-    seed = _COUNTS_STATE.get(_PRIOR_MARKET_STATE_KEY) if _COUNTS_STATE is not None else None
+    seed = current_counts_state().get(_PRIOR_MARKET_STATE_KEY) if current_counts_state() is not None else None
     # Direct minimal-frame callers can lack measurements. Keep those unknown;
     # do not add fabricated measurement columns to the caller's dataframe.
     missing = {c: np.nan for c in ("odds", "official_rating", "won", "finish_position", "num_runners") if c not in df}
@@ -1545,8 +1529,8 @@ def add_prior_market_features(df: pd.DataFrame) -> pd.DataFrame:
     values, advanced = prior_market_features(work, state=seed, return_state=True)
     for column in FEATURES:
         df[column] = values[column]
-    if _COUNTS_STATE is not None:
-        _COUNTS_STATE[_PRIOR_MARKET_STATE_KEY] = advanced
+    if current_counts_state() is not None:
+        current_counts_state()[_PRIOR_MARKET_STATE_KEY] = advanced
     return df
 
 
@@ -2065,11 +2049,7 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
     df["stepping_down"] = (df["distance_change"] < -0.5).astype(int)
 
     # --- Distance category ---
-    bins = [0, 6.5, 8.5, 11.5, 50]
-    labels = [0, 1, 2, 3]  # Sprint / Mile / Middle / Staying
-    df["dist_category"] = pd.cut(
-        df["distance_furlongs"], bins=bins, labels=labels, include_lowest=True,
-    ).astype(float).fillna(1)
+    df["dist_category"] = distance_category(df["distance_furlongs"])
 
     # --- Horse win rate at this distance category ---
     df["_dist_cat_str"] = df["dist_category"].astype(str)
@@ -4732,6 +4712,11 @@ def add_race_relative_signal_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _use_day_order_after_ratings(df):
+    """Preserve the existing day-order history policy after the rating stages."""
+    return _without(df, ["_event_dt"])
+
+
 @dataset_build
 def engineer_features(
     df: pd.DataFrame,
@@ -4802,15 +4787,9 @@ def engineer_features(
         stages.append(compute_elo_features)
         if getattr(config, "GLICKO_ENABLED", True):
             stages.append(compute_glicko_features)  # rating + uncertainty (RD)
-    else:
-        # The rating sweeps drop ``_event_dt`` as a side effect (ratings.py:
-        # ``compute_elo_features`` line ~806). Downstream rolling stages then
-        # fall back to sorting by ``race_date`` (day granularity). When the
-        # caller supplies ratings and skips the sweeps we must reproduce that
-        # side effect, or those stages sort by the finer ``_event_dt`` and the
-        # rolling/EWMA features (field_avg_elo_*, speed_fig_*, speed_z_class_*)
-        # diverge from a full inline build. See tests/test_feature_store.py.
-        stages.append(lambda d: _without(d, ["_event_dt"]))
+    # Retain the established downstream day-level ordering in every mode.
+    # Its lifetime is an engine policy, independent of rating implementation.
+    stages.append(_use_day_order_after_ratings)
     stages += [
         add_opposition_strength_features,  # needs horse_elo
         add_headgear_features,

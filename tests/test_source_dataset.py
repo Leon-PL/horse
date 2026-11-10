@@ -12,6 +12,15 @@ from src import source_dataset as datasets
 from src.ingestion import publication
 
 
+@pytest.fixture(scope="module")
+def module_dataset():
+    return datasets.current_manifest()
+
+
+def test_module_fixtures_also_use_the_isolated_dataset(module_dataset, reference_dataset):
+    assert module_dataset is reference_dataset
+
+
 @pytest.fixture
 def sources(tmp_path, monkeypatch):
     monkeypatch.setattr(datasets.config, "DATA_DIR", str(tmp_path))
@@ -71,6 +80,65 @@ def test_missing_selected_source_stays_missing(sources):
         assert datasets.read_table("rtv", "runs").empty
     with pytest.raises(RuntimeError, match="No source dataset is selected"):
         datasets.source_path("rtv", "runs")
+
+
+def test_a_declared_file_cannot_disappear_after_selection(sources):
+    manifest = datasets.save_manifest({"test": publish(10)})
+    with datasets.use_manifest(manifest):
+        path = datasets.source_path("test", "runners")
+        path.unlink()
+        with pytest.raises(datasets.SourceIntegrityError, match="missing its declared file"):
+            datasets.read_table("test", "runners")
+        with pytest.raises(datasets.SourceIntegrityError, match="missing its declared file"):
+            datasets.source_path("test", "runners")
+
+
+@pytest.mark.parametrize("damage", ["undeclared", "missing", "incomplete", "invalid_ids", "row_order"])
+def test_model_rows_require_a_complete_accepted_crosswalk(sources, damage):
+    frame = canonical().iloc[:1]
+    receipt = publication._publish("rtv", {"cards": frame},
+        {"cards": TableContract("runner", ())}, canonical())
+    manifest = datasets.save_manifest({"rtv": receipt})
+    with datasets.use_manifest(manifest):
+        path = datasets.source_path("rtv", "links_cards")
+        if damage == "undeclared":
+            del manifest["sources"]["rtv"]["tables"]["links_cards"]
+        elif damage == "missing":
+            path.unlink()
+        else:
+            links = pd.read_parquet(path)
+            if damage == "incomplete":
+                links = links.drop(columns="match_status")
+            elif damage == "invalid_ids":
+                links["sl_horse_id"] = pd.NA
+            else:
+                links["source_row"] = 3
+            links.to_parquet(path, index=False)
+        with pytest.raises(datasets.SourceIntegrityError, match="crosswalk|runner links|declared file"):
+            datasets.model_table("rtv", "cards")
+
+
+@pytest.mark.parametrize("entry", [datasets.processing_inputs, datasets.dataset_build])
+def test_external_registry_survives_frame_reentry(sources, monkeypatch, entry):
+    root = datasets.registry_root()
+    manifest = {**datasets.save_manifest({"test": publish(10)}), "root": str(root)}
+    @entry
+    def prepare(df):
+        return df.copy()
+    with datasets.use_manifest(manifest):
+        frame = prepare(pd.DataFrame({"x": [1]}))
+    monkeypatch.setattr(datasets.config, "DATA_DIR", str(sources/"different_registry"))
+    monkeypatch.setattr(datasets, "capture_dataset", lambda **kw: pytest.fail("Unexpected source publication"))
+    @datasets.dataset_build
+    def consume(df):
+        assert datasets.source_path("test", "runners").is_relative_to(root)
+        return datasets.read_table("test", "runners").value.tolist()
+    assert consume(frame) == [10]
+    assert datasets.current_manifest() is None
+    # Root-aware re-entry still performs content verification.
+    (root/"test"/manifest["sources"]["test"]["version"]/"runners.parquet").write_bytes(b"broken")
+    with pytest.raises(ValueError, match="corrupt"):
+        consume(frame)
 
 
 def test_parent_and_spawned_workers_read_the_same_version(sources):

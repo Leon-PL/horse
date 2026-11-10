@@ -25,10 +25,10 @@ class TestStateThreading:
     """The mechanism that lets class-C stages seed from / write back state."""
 
     def test_scope_sets_and_restores(self):
-        assert fe._COUNTS_STATE is None
+        assert fe.current_counts_state() is None
         with fe.counts_state_scope({"m": {}}):
-            assert fe._COUNTS_STATE == {"m": {}}
-        assert fe._COUNTS_STATE is None
+            assert fe.current_counts_state() == {"m": {}}
+        assert fe.current_counts_state() is None
 
     def test_cumulative_full_build_when_no_scope(self):
         keys = np.array(["A", "A", "B"]); races = np.array(["r1", "r2", "r3"])

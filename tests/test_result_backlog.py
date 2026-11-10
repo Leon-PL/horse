@@ -16,6 +16,19 @@ from src.ingestion import results
 OLD = "2026-08-01"
 
 
+@pytest.fixture
+def published_sources(monkeypatch):
+    # These recovery fixtures intentionally omit canonical IDs. Publication has
+    # its own contracts/tests; report-path checks must not adopt native caches.
+    from src import source_dataset
+    calls = []
+    def capture(**kwargs):
+        calls.append(kwargs)
+        return {"id": "f"*64}
+    monkeypatch.setattr(source_dataset, "capture_dataset", capture)
+    return calls
+
+
 def queue(identity, *, attempted=None, error="Empty or incomplete result response"):
     database.init_db()
     with database._get_conn() as con:
@@ -116,14 +129,16 @@ def test_backlog_retains_review_cases_and_recent_attempts(sync_env):
     assert report["backlog"]["due_races"] == 0
 
 
-def test_source_coordinator_can_recover_backlog_without_a_recent_window(sync_env, monkeypatch):
+def test_source_coordinator_can_recover_backlog_without_a_recent_window(sync_env, monkeypatch, published_sources):
     monkeypatch.setattr(source_pipeline.config, "DATA_DIR", str(sync_env.root))
     queue("a")
     report = source_pipeline.refresh_sources(0, sources=("sl",), sl_backlog_max_races=1)
     assert report["sources"]["sl"]["backlog"]["completed"] == 1
+    assert report["dataset_manifest_id"] == "f"*64
+    assert published_sources == [{"include_prices": True}]
 
 
-def test_recovery_report_does_not_replace_the_current_all_source_report(sync_env, monkeypatch):
+def test_recovery_report_does_not_replace_the_current_all_source_report(sync_env, monkeypatch, published_sources):
     monkeypatch.setattr(source_pipeline.config, "DATA_DIR", str(sync_env.root))
     path = sync_env.root/"source_refresh/status.json"
     path.parent.mkdir()
@@ -132,6 +147,7 @@ def test_recovery_report_does_not_replace_the_current_all_source_report(sync_env
     source_pipeline.refresh_sources(0, sources=("sl",), sl_backlog_max_races=1)
     assert json.loads(path.read_text()) == {"existing_report": True}
     assert json.loads(path.with_name("backlog_status.json").read_text())["state"] == "ok"
+    assert published_sources == [{"include_prices": True}]
 
 
 def test_provider_refusal_stops_historical_fallback_page_requests(sync_env):

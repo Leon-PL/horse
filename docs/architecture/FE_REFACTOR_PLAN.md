@@ -7,6 +7,11 @@ the only refresh route; the `get_featured_dataset` seam described below and
 [inventory's consolidation boundaries](../PROJECT_INVENTORY.md#consolidation-boundaries)
 and the [README](../../README.md) for operation.
 
+For the implemented source, categorical-schema and private execution-state
+contracts as of 8 November, use [FEATURE_CONTRACTS.md](FEATURE_CONTRACTS.md).
+The older phase statuses and timings below are historical, not the current work
+queue; rolling and cumulative state already resume across chunks.
+
 > **Status (2026-10-13): phases 0–2 are built and shipped**, so the sections
 > below describing them are a record, not a to-do. The single seam
 > (then `featured_dataset.get_featured_dataset`, since 2026-11-07

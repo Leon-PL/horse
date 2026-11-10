@@ -37,7 +37,7 @@ def test_unconverted_raw_money_never_reenters_an_all_feature_model(monkeypatch):
 
 
 @pytest.mark.parametrize("explicit_rebuild", [False, True])
-def test_ordinary_training_rebuild_receives_corrections_without_research_flags(monkeypatch, explicit_rebuild):
+def test_ordinary_training_rebuild_receives_corrections_without_research_flags(monkeypatch, tmp_path, explicit_rebuild):
     from contextlib import nullcontext
     from src import store_refresh
     from src.data_processor import process_data
@@ -47,10 +47,14 @@ def test_ordinary_training_rebuild_receives_corrections_without_research_flags(m
     raw = raw.assign(race_id=622145, race_date="2021-04-28", track="Punchestown", race_type="Flat",
                      going="Yielding (Good To Yielding In Places)", prize_money=10000.)
     processed = process_data(raw)
+    import config
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
     captured = []
     class Store:
+        _rebuild_reason = "fixture_rebuild"
         def _access(self): return nullcontext()
         def _staged_update(self): return nullcontext(self)
+        def meta(self): return {}
         def load_featured(self, **kwargs): return pd.DataFrame({"signal": [1.]})
     monkeypatch.setattr(store_refresh, "FeatureStore", Store)
     monkeypatch.setattr(store_refresh, "process_data", lambda **kwargs: processed)

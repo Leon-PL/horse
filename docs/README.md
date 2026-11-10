@@ -2,6 +2,9 @@
 
 The [Racing Workbench guide](operations/RACING_WORKBENCH.md) describes the local
 ingestion UI, race inspection, BHA reports, source health, jobs and review.
+The [Features workspace](operations/WORKBENCH_FEATURES.md) adds stored-value
+inspection, named feature sets and model roles, quality checks and shared-store
+build jobs.
 
 The [current racing data flow](../Racing%20Data%20Flow.md) and
 [shared source publication](operations/SOURCE_PUBLICATION_2026-11-07.md) describe
@@ -16,6 +19,10 @@ and [supported modelling operations](operations/MODELLING.md). The
 records the delivered foundations, baseline, text comparison and remaining work.
 The [performance/spread reproduction](research/PERFORMANCE_SPREAD_REPRODUCTION_2026-11-08.md)
 records the next registered submodel comparison.
+
+The [feature execution and schema contracts](architecture/FEATURE_CONTRACTS.md)
+describe selected source inputs, explicit categorical completion, strict model
+inputs and private feature working state.
 
 | Folder or index | Contents |
 |---|---|

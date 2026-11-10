@@ -151,7 +151,6 @@ def _make_history(monkeypatch, publish_dataset, edit=None):
     # The upcoming race (r9) has no ATR row; its features come from history.
     _published_history.cache_clear()
     publish_dataset(canonical, atr={"sectionals": (sectionals, TableContract("runner", (), delay_hours=48))})
-    monkeypatch.setattr(fe, "_COUNTS_STATE", None, raising=False)
     return canonical
 
 

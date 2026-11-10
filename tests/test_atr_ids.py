@@ -50,6 +50,35 @@ def test_saved_index_is_recovered_without_http_during_discovery_cooldown(environ
     assert read_json(root/'status.json')['saved_rows']==1
 
 
+def test_saved_results_page_queues_exact_links_and_protects_existing_evidence(environment, tmp_path):
+    root, _ = environment
+    rebuild.prepare(root)
+    saved = tmp_path/'Browser download.html'
+    canonical = f'<link rel="canonical" href="{atr.ATR_BASE}/results/{DATE}">'
+    saved.write_text(canonical + article(), encoding='utf-8')
+    index = atr_ids.import_saved_results(saved, atr.ATR_INDEX_DIR)
+    with rebuild.connect(root) as con:
+        con.execute('UPDATE jobs SET native_id=NULL')
+        seen = {}
+        assert atr_ids.recover_cached(con, atr.ATR_INDEX_DIR, seen=seen)[0]['ids_added_or_corrected'] == 1
+        assert atr_ids.recover_cached(con, atr.ATR_INDEX_DIR, seen=seen) == []
+        assert con.execute('SELECT native_id FROM jobs').fetchone()[0] == '1629208'
+    saved.write_text(canonical + article(CARD, '99999'), encoding='utf-8')
+    with pytest.raises(ValueError, match='would remove or change'):
+        atr_ids.import_saved_results(saved, atr.ATR_INDEX_DIR)
+    assert read_json(Path(index['index']))['race_ids'] == {CARD: '1629208'}
+
+
+def test_fresh_known_race_precedes_a_newer_retry(environment):
+    root, canonical = environment
+    add_second(canonical)
+    rebuild.prepare(root)
+    with rebuild.connect(root) as con:
+        con.execute("UPDATE jobs SET native_id='1629209',state='retry' WHERE race_id='r3'")
+        job = rebuild.pick_job(con, rebuild.utc_now().timestamp(), '2026-11-05 00:00', discovery_allowed=False)
+        assert job['race_id'] == 'r1'
+
+
 def test_incomplete_saved_day_does_not_starve_other_missing_dates(environment,monkeypatch):
     root,canonical=environment
     add_second(canonical)

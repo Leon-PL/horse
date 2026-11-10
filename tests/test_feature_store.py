@@ -61,10 +61,13 @@ def _assert_append_matches_batch(store_root, proc, hist, new, boundary):
     appended = _rows_from(store.load_featured(), boundary)
     assert len(appended) == len(new)
 
-    model_cols = [c for c in get_feature_columns(batch) if c in appended.columns]
+    model_cols = get_feature_columns(batch)
     assert model_cols
+    assert get_feature_columns(appended) == model_cols, "appended feature schema differs from full rebuild"
+    assert appended[model_cols].dtypes.equals(batch[model_cols].dtypes), "appended feature dtypes differ"
 
-    key = ["race_id", "horse_name"]
+    key = ["race_id", "horse_id"]
+    assert not batch_new.duplicated(key).any() and not appended.duplicated(key).any()
     b = batch_new.set_index(key)[model_cols].sort_index()
     a = appended.set_index(key)[model_cols].sort_index()
     assert b.index.equals(a.index), "appended row set differs from full rebuild"

@@ -340,7 +340,9 @@ def fit_models(frame, labels, *, purge_days, warm=None):
         scale = 1.0
         fitting, held = calibration_split(dates, train, purge_days)
         if len(fitting) and len(held):
-            columns, weights_idf, w = _fit(x, names, won, race_ids, fitting, warm)
+            # A previous-quarter model may include labels from this calibration
+            # slab. Even its optimiser initialisation must respect the boundary.
+            columns, weights_idf, w = _fit(x, names, won, race_ids, fitting, None)
             scale = fit_scale(tfidf(x[held][:, columns], weights_idf) @ w, won[held], race_ids[held])
         columns, weights_idf, w = _fit(x, names, won, race_ids, train, warm)
         warm = TextModel(label, names[columns], weights_idf, w, str(pd.Timestamp(dates[train].max()).date()),

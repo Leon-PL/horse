@@ -75,12 +75,29 @@ class TestResultInvariants:
         assert regions <= ALLOWED_REGIONS, f"unexpected regions: {regions - ALLOWED_REGIONS}"
 
 
+def _duplicate_runners(con):
+    # Namesakes with different canonical IDs can run in the same race. Names
+    # remain the fallback key for legacy rows without a usable horse ID.
+    return con.execute(
+        "SELECT COUNT(*) FROM (SELECT race_id, "
+        "CASE WHEN horse_id IS NULL OR TRIM(CAST(horse_id AS TEXT)) IN ('', '0') "
+        "THEN 'name:' || horse_name ELSE 'id:' || CAST(horse_id AS TEXT) END AS runner_key "
+        "FROM results GROUP BY race_id, runner_key HAVING COUNT(*) > 1)"
+    ).fetchone()[0]
+
+
+@pytest.mark.parametrize("runners,expected", [
+    ([(1, "Namesake"), (2, "Namesake")], 0),
+    ([(1, "Original"), (1, "Alias")], 1),
+    ([(None, "Unknown ID"), (None, "Unknown ID")], 1),
+])
+def test_duplicate_gate_uses_runner_identity(runners, expected):
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE TABLE results (race_id TEXT, horse_id INTEGER, horse_name TEXT)")
+        connection.executemany("INSERT INTO results VALUES ('race', ?, ?)", runners)
+        assert _duplicate_runners(connection) == expected
+
+
 class TestNoDuplicateRunners:
     def test_unique_horse_per_race(self, con):
-        dups = con.execute(
-            "SELECT COUNT(*) FROM ("
-            "  SELECT race_id, horse_name FROM results"
-            "  GROUP BY race_id, horse_name HAVING COUNT(*) > 1"
-            ")"
-        ).fetchone()[0]
-        assert dups == 0
+        assert _duplicate_runners(con) == 0

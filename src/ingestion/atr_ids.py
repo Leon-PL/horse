@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 
 from src.ingestion import attheraces as atr
-from src.ingestion.storage import read_json
+from src.ingestion.storage import atomic_json, read_json
 
 
 def ensure_schema(con):
@@ -89,15 +89,49 @@ def apply_index(con, atr_date, mapping, receipt=None):
     return {'date':day,'ids_added_or_corrected':changed,'conflicts':conflicts,'source_races':len(mapping)}
 
 
-def recover_cached(con, directory):
+def recover_cached(con, directory, *, seen=None):
     reports = []
     for path in sorted(Path(directory).glob('*.json')):
         try:
+            stamp = path.stat().st_mtime_ns
+            if seen is not None and seen.get(path) == stamp:
+                continue
             receipt = read_json(path)
             reports.append(apply_index(con,path.stem,receipt['race_ids'],receipt))
-        except (KeyError, ValueError, TypeError) as error:
+            if seen is not None:
+                seen[path] = stamp
+        except (KeyError, OSError, ValueError, TypeError) as error:
             reports.append({'file':str(path),'error':str(error)})
     return reports
+
+
+def import_saved_results(path, directory):
+    """Queue exact IDs from a saved, dated ATR results page without HTTP."""
+    import hashlib
+    from bs4 import BeautifulSoup
+
+    raw = path.read_bytes()
+    soup = BeautifulSoup(raw, 'html.parser')
+    canonical = soup.select_one('link[rel="canonical"]')
+    url = canonical.get('href', '') if canonical else ''
+    match = re.fullmatch(r'https://(?:www\.|m\.)attheraces\.com/results/(\d{2}-[A-Za-z]+-\d{4})/?', url)
+    if not match or 'Client Challenge' in str(soup.title):
+        raise ValueError(f'{path} is not a saved, dated ATR results page')
+    day = match[1]
+    datetime.strptime(day, '%d-%B-%Y')
+    mapping = {card: native for card, native in atr._parse_results_index(str(soup)).items()
+               if re.fullmatch(rf'/racecard/[^/]+/{re.escape(day)}/\d{{4}}', card)}
+    folded = {card.casefold(): native for card, native in mapping.items()}
+    if not mapping or len(folded) != len(mapping) or len(set(mapping.values())) != len(mapping):
+        raise ValueError(f'{path} has no unambiguous dated ATR race index')
+    target = Path(directory)/f'{day}.json'
+    previous = read_json(target) or {}
+    if any(folded.get(card.casefold()) != str(native) for card, native in previous.get('race_ids', {}).items()):
+        raise ValueError(f'{path} would remove or change existing ATR links for {day}')
+    atomic_json(target, {'source_url':url, 'source_format':'saved_results_html',
+                         'source_sha256':hashlib.sha256(raw).hexdigest(), 'source_file':str(path.resolve()),
+                         'retrieved_at':datetime.now(timezone.utc).isoformat(), 'race_ids':mapping})
+    return {'date':day, 'source_races':len(mapping), 'index':str(target)}
 
 
 def plan_legacy_hints(jobs, cache):
@@ -178,17 +212,21 @@ def main():
     from contextlib import closing
     import sqlite3
     import pandas as pd
-    parser = argparse.ArgumentParser(description='Read-only ATR native-ID and legacy-hint audit')
+    parser = argparse.ArgumentParser(description='Audit ATR native IDs or import saved daily results pages')
     parser.add_argument('--root',type=Path,default=Path(atr.ATR_CACHE_DIR)/'rebuild_v2')
     parser.add_argument('--out',type=Path,default=Path(atr.ATR_CACHE_DIR)/'id_audit.json')
+    parser.add_argument('--import-results',type=Path,nargs='+',help='Saved ATR results HTML files; queue exact IDs without HTTP')
     args = parser.parse_args()
+    if args.import_results:
+        for path in args.import_results:
+            print(json.dumps(import_saved_results(path, atr.ATR_INDEX_DIR)))
+        return
     with closing(sqlite3.connect((args.root/'rebuild.sqlite').resolve().as_uri()+'?mode=ro',uri=True)) as con:
         con.row_factory = sqlite3.Row
         jobs = [dict(row) for row in con.execute('SELECT * FROM jobs')]
     cache = pd.read_parquet(atr.ATR_CACHE_FILE,columns=['race_date','track','horse_name','atr_raceid'])
     report = plan_legacy_hints(jobs,cache)
     report['missing_ids'] = sum(job['native_id'] is None for job in jobs)
-    from src.ingestion.storage import atomic_json
     atomic_json(args.out,report)
     print(json.dumps({'missing_ids':report['missing_ids'],'supported_hints':len(report['supported']),
                       'proposed_corrections':len(report['changes']),'report':str(args.out)}))

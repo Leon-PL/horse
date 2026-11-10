@@ -10,6 +10,12 @@ import numpy as np
 import pandas as pd
 
 
+def distance_category(values):
+    """Shared historical distance bins, including the existing unknown fallback."""
+    return pd.cut(values, bins=[0, 6.5, 8.5, 11.5, 50], labels=[0, 1, 2, 3],
+                  include_lowest=True).astype(float).fillna(1)
+
+
 def normalise_going(value, detailed_map=None):
     """Retain known mappings; classify unlisted variants by their main going.
 

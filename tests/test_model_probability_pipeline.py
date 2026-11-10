@@ -54,7 +54,7 @@ def _races():
 
 def test_missing_model_signal_is_not_silently_replaced_with_zero():
     frame = _races().drop(columns="signal")
-    with pytest.raises(ValueError, match="missing model features.*signal"):
+    with pytest.raises(ValueError, match="Prediction frame.*missing: signal"):
         _predictor().predict_races(frame)
     assert "signal" not in frame
 
@@ -253,7 +253,8 @@ def test_exchange_settlement_and_targets_never_enter_form_features(monkeypatch):
     assert model_module.get_feature_columns(frame) == ["horse_win_rate"]
     # An allowlist must never override mandatory leakage exclusions.
     monkeypatch.setattr(config, "FEATURE_ALLOWLIST", list(frame.columns))
-    assert model_module.get_feature_columns(frame) == ["horse_win_rate"]
+    with pytest.raises(ValueError, match="FEATURE_ALLOWLIST contains excluded"):
+        model_module.get_feature_columns(frame)
 
 
 @pytest.mark.parametrize("explicit_allowlist", [False, True])
@@ -263,7 +264,11 @@ def test_future_dependent_sectional_composites_never_enter_model_features(monkey
     frame = pd.DataFrame({"horse_win_rate": [.1, .2], "atr_finishing_speed_pct_avg_3": [98., 101.],
                           **{name: [1., 2.] for name in unsafe}})
     monkeypatch.setattr(config, "FEATURE_ALLOWLIST", list(frame) if explicit_allowlist else None)
-    assert model_module.get_feature_columns(frame) == ["horse_win_rate", "atr_finishing_speed_pct_avg_3"]
+    if explicit_allowlist:
+        with pytest.raises(ValueError, match="FEATURE_ALLOWLIST contains excluded"):
+            model_module.get_feature_columns(frame)
+    else:
+        assert model_module.get_feature_columns(frame) == ["horse_win_rate", "atr_finishing_speed_pct_avg_3"]
 
 
 @pytest.mark.parametrize("contents", ["", "# nothing selected\n", "[]", "[not json]", '[12]'])
@@ -288,9 +293,12 @@ def test_unmatched_or_empty_allowlist_never_expands_to_all_features(allowlist, m
         model_module.get_feature_columns(pd.DataFrame({"feature": [1, 2], "bsp": [3, 4]}))
 
 
-def test_allowlist_selects_only_requested_eligible_features(tmp_path, monkeypatch):
+def test_allowlist_requires_all_requested_eligible_features(tmp_path, monkeypatch):
     allowlist = tmp_path / "features.txt"
     allowlist.write_text("# selected features\nfeature_b\nmissing_optional_feature\n")
     monkeypatch.setattr(config, "FEATURE_ALLOWLIST", allowlist)
     frame = pd.DataFrame({"feature_a": [1, 2], "feature_b": [3, 4]})
+    with pytest.raises(ValueError, match="missing: missing_optional_feature"):
+        model_module.get_feature_columns(frame)
+    monkeypatch.setattr(config, "FEATURE_ALLOWLIST", ["feature_b"])
     assert model_module.get_feature_columns(frame) == ["feature_b"]

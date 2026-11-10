@@ -1,7 +1,8 @@
 # Racing Workbench
 
-The local project app currently covers ingestion and preparation, through the
-input to feature building. It uses the existing Python environment and introduces
+The local project app covers ingestion, preparation and stored feature inspection.
+The [Features guide](WORKBENCH_FEATURES.md) describes model roles, named feature
+sets, quality checks and shared-store build jobs. It uses the existing Python environment and introduces
 no new runtime dependency. [Implementation plan](../architecture/INGESTION_WORKBENCH_PLAN.md).
 
 ## Start
@@ -24,6 +25,7 @@ does not stop independently running collectors or workbench background jobs.
 | Races | Date/search filters, runner fields, native/accepted source tables, established-identity comparisons, evidence downloads, ATR charts, prepared input preview and publication changes |
 | Sources | Shared health layout for SL, RTV, ATR, Betfair, BHA, pedigree, FX and weather; contracts, missingness, identity reasons and provenance |
 | Coverage | Accepted observations by source/date at the source's own grain; reference and publication-window states; click through to races |
+| Features | Shared-store status, named model input sets, race values, catalog, bounded quality checks and explicit feature-build jobs |
 | Jobs | Existing worker state, bounded refresh, pedigree/weather options, retained SL replay, local source publication, dataset integrity checks, race checks and ATR graceful stop/resume |
 | Review queue | Bounded race/ATR findings, persistent acknowledgement/investigation states, bookmarks, notes and saved correction proposals |
 

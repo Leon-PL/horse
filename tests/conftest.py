@@ -52,6 +52,13 @@ def selected_dataset(request, reference_dataset):
         yield manifest
 
 
+@pytest.fixture(scope="session", autouse=True)
+def session_dataset(reference_dataset):
+    """Module-scoped fixtures run before function fixtures and need isolation too."""
+    with source_dataset.use_manifest(reference_dataset):
+        yield
+
+
 @pytest.fixture
 def publish_dataset(tmp_path_factory):
     """Publish fixture sources and select them for the rest of the test.

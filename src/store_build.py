@@ -51,6 +51,7 @@ import config
 from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.feature_store import STORE_SCHEMA_VERSION, FeatureStore, _stringify_objects
+from src.feature_schema import categorical_columns
 from src.featured_dataset import data_signature, fe_signature, _bha_signature
 from src.feature_inputs import atr_cache_signature, rtv_cache_signature
 from src.parquet_io import RollingParquetWriter, combine_parquet_parts
@@ -373,6 +374,7 @@ def build_store(store: FeatureStore, chunk_rows: int, *, ratings_cache=None, pro
         "last_date": str(last_date.date()),
         "featured_rows": int(total_rows),
         "processed_rows": int(len(processed)),
+        "categorical_columns": categorical_columns(processed),
         "built_at": datetime.now().isoformat(timespec="seconds"),
         "fe_signature": fe_sig_at_start,
         **input_signatures,

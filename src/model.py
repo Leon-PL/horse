@@ -686,6 +686,15 @@ def get_feature_columns(df: pd.DataFrame, *, apply_allowlist=True) -> list[str]:
     When ``config.FEATURE_ALLOWLIST`` is set, the result is further
     restricted to those names (a deterministic, reproducible cut).
     """
+    from src.feature_schema import require_numeric_features
+    allow = _resolve_feature_allowlist() if apply_allowlist else None
+    if allow is not None:
+        require_numeric_features(df, sorted(allow), context="FEATURE_ALLOWLIST")
+        excluded = sorted(allow & set(EXCLUDE_COLUMNS))
+        if excluded:
+            raise ValueError(f"FEATURE_ALLOWLIST contains excluded identifiers or labels: {excluded}")
+    if df.columns.has_duplicates:
+        raise ValueError("Feature frame contains duplicated column names")
     cols = [
         col
         for col in df.columns
@@ -693,21 +702,8 @@ def get_feature_columns(df: pd.DataFrame, *, apply_allowlist=True) -> list[str]:
         and pd.api.types.is_numeric_dtype(df[col])
         and not pd.api.types.is_complex_dtype(df[col])
     ]
-    allow = _resolve_feature_allowlist() if apply_allowlist else None
     if allow is not None:
-        kept = [c for c in cols if c in allow]
-        if not kept:
-            raise ValueError(
-                f"FEATURE_ALLOWLIST matched none of {len(cols)} eligible numeric feature columns. "
-                "Check the feature names or use None to select all eligible features."
-            )
-        n_missing = len(allow) - len(kept)
-        if n_missing > 0:
-            logger.info(
-                "FEATURE_ALLOWLIST: kept %d features; %d list entries not present "
-                "in this frame.", len(kept), n_missing,
-            )
-        return kept
+        return [c for c in cols if c in allow]
     return cols
 
 
@@ -3557,15 +3553,9 @@ class RacePredictor:
         return probs
 
     def _prepare_prediction_frame(self, race_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+        from src.feature_schema import require_numeric_features
+        require_numeric_features(race_df, self.feature_cols, context="Prediction frame")
         predict_df = race_df.reset_index(drop=True).copy()
-        missing = [c for c in self.feature_cols if c not in predict_df.columns]
-        if missing:
-            # The live feature store supplies genuine all-zero category
-            # indicators. Missing model inputs here have no justified value.
-            raise ValueError(
-                f"Prediction frame is missing model features: {missing[:10]}"
-                + (" ..." if len(missing) > 10 else "")
-            )
 
         X = predict_df[self.feature_cols].values
         X_scaled_np = self.scaler.transform(X)

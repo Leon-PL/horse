@@ -25,10 +25,9 @@ Design record from the incremental-FE work:
     historical featured rows are never recomputed (the no-leakage rule
     guarantees a settled row's features never change as later races
     arrive — see CLAUDE.md hard rule #1).
-  * **Correctness** — appending re-features new rows through the
-    parity-tested `feature_engineer_with_history_core` path, so the
-    appended rows are identical to a full batch rebuild. This is enforced
-    by `tests/test_feature_store.py`.
+  * **Correctness** — appending features only new rows through the same
+    engine, seeded from persisted counts and ratings. Schema, dtype and value
+    parity with a full build is checked by `tests/test_feature_store.py`.
   * **First incremental component** — the Elo and Glicko rating sweeps now
     carry serialisable state (`compute_elo_features(..., return_state=True)`,
     `compute_glicko_features(..., return_state=True)`). The store persists
@@ -37,11 +36,9 @@ Design record from the incremental-FE work:
     the seeded sweep vs a full batch sweep is proven in
     `tests/test_incremental_ratings.py`.
 
-What is NOT yet incremental: the remaining stateful pandas stages (career
-counts, target encodings, rolling form, …) are still recomputed over the
-full history inside the history-core pass. Converting those stage-by-stage
-(each gated by a parity test) is what unlocks the full speed-up; the rating
-state above is the template for that work.
+Counts, target encodings, rolling history and ratings carry state across
+chunks. Live calculation owns private working state and completes only the
+categorical columns declared by the store; it never publishes state advances.
 """
 
 from __future__ import annotations
@@ -63,6 +60,8 @@ import config
 from src.runner_identity import identity_columns, join_runner_columns
 from src.feature_engineer import engineer_features
 from src.ratings import compute_elo_features, compute_glicko_features
+from src.feature_schema import CATEGORICAL_FIELDS, categorical_columns, complete_categorical_columns
+from src.feature_semantics import distance_category
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +240,17 @@ class FeatureStore:
         return pq.read_schema(self.featured_path).names if os.path.exists(self.featured_path) else []
 
     @_locked
+    def categorical_schema(self) -> list[str]:
+        """The explicit dummy domain; older reference stores derive it from inputs."""
+        declared = self.meta().get("categorical_columns")
+        if declared is not None:
+            return declared
+        import pyarrow.parquet as pq
+        names = pq.read_schema(self.processed_path).names
+        columns = [c for c in (*CATEGORICAL_FIELDS, "race_date") if c in names]
+        return categorical_columns(pd.read_parquet(self.processed_path, columns=columns))
+
+    @_locked
     def load_processed(self) -> pd.DataFrame | None:
         if not os.path.exists(self.processed_path):
             return None
@@ -268,18 +278,12 @@ class FeatureStore:
     def _with_dist_category(df: pd.DataFrame) -> pd.DataFrame:
         """Add ``dist_category`` (a pure bin of distance_furlongs).
 
-        The rating sweeps read it, but in the full pipeline it is added
-        mid-way by ``add_course_distance_features``. Mirror that one-liner
-        so a standalone rating sweep produces identical dimensional Elo.
+        The rating sweeps and the distance-change stage share this definition,
+        so standalone seeded ratings produce the same dimensional Elo.
         """
         if "distance_furlongs" in df.columns and "dist_category" not in df.columns:
             df = df.copy()
-            df["dist_category"] = (
-                pd.cut(
-                    df["distance_furlongs"], bins=[0, 6.5, 8.5, 11.5, 50],
-                    labels=[0, 1, 2, 3], include_lowest=True,
-                ).astype(float).fillna(1)
-            )
+            df["dist_category"] = distance_category(df["distance_furlongs"])
         return df
 
     def _seeded_rating_frame(
@@ -340,6 +344,7 @@ class FeatureStore:
             "last_date": str(_event_date(processed).max().date()),
             "featured_rows": int(len(featured)),
             "processed_rows": int(len(processed)),
+            "categorical_columns": categorical_columns(processed),
             f"{op}_at": datetime.now().isoformat(timespec="seconds"),
         })
         with open(self.meta_path, "w", encoding="utf-8") as fh:
@@ -466,17 +471,5 @@ class FeatureStore:
         featured = engineer_features(
             card_rated, save=False, skip_ratings=True, counts_state=counts_state)
 
-        # Complete the one-hot categorical schema to the TRAINING category domain.
-        # get_dummies only emits columns for categories present in the card, so a
-        # category absent today (e.g. no 'H' entire horse → no sex_H, a card with
-        # no chases → no race_type_Chase) is silently missing. Such a column is a
-        # genuine all-zero (none of these runners is in that category), not an
-        # imputation — add any one-hot column the store has but the card lacks,
-        # using the store schema as the authoritative category set.
-        oh_prefixes = ("going_", "race_class_", "race_type_", "region_",
-                       "sex_", "surface_", "season_")
-        have = set(featured.columns)
-        for col in self.featured_schema_names():
-            if col.startswith(oh_prefixes) and col not in have:
-                featured[col] = 0
-        return featured
+        return complete_categorical_columns(
+            featured, self.featured_schema_names(), self.categorical_schema())

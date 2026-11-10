@@ -1,5 +1,59 @@
 # Negative Results Ledger
 
+## Cheap screens: relatives' form, going reasons, pairwise and completion models, improvement, store pedigree and first string — null (9 November 2026)
+
+The [cheap screens](research/CHEAP_SCREENS_2026-11-09.md) learn a small
+regularised correction from a group's inputs on top of the stored full 063
+forecasts and compare it with the same fit on a twin whose inputs are shuffled
+within quarter (2025Q3–2026Q2, 11,905 races, retrospective).
+
+| Group | Against its twin | Reading |
+|---|---:|---|
+| Relatives' form as rates (dam's other offspring: runs, wins, places, position, rating) | −0.00017 [−0.00052, +0.00017], 2/4, three twins | Not robust |
+| Relatives' ratings: siblings' peak ability in pounds, raw and relative to their trainers | +0.00002 [−0.00046, +0.00041], 1/4 | Null |
+| Going reasons: BHA going withdrawals joined to the withdrawn meeting's going, plus the store's 26 BHA going/withdrawal columns | +0.00020 [−0.00029, +0.00071], 2/4 | Rejected; the new comparisons alone cover 3–5% of runners and are null at Tier 0 |
+| Store pedigree rates not in full 063 (26) | −0.00036 [−0.00074, +0.00002], 3/4; net −0.0001 | Absorbed |
+| `trainer_first_string_*` without its odds-ranked columns | +0.00003 | Null; its signal came from `odds`, a market input |
+| Completion (jumps): out-of-fold chance of failing to complete (AUC 0.69–0.72) from full 063 inputs plus 20 completion and jumping-error columns | +0.00020 [−0.00012, +0.00053], 1/4 | Rejected; the generalist already prices it |
+| Improvement: sire, trainer and horse residuals against a margin-and-weight ability filter | +0.00015 [−0.00028, +0.00061], 1/4 | Rejected |
+| Bounce: last-run residual, career best, close finish, quick return | −0.00016 [−0.00060, +0.00028], 2/4 | Unresolved; all of it on jumps races |
+
+A head-to-head component (LightGBM with a Bradley–Terry loss over every pair
+in a race, full 063 inputs and its 75% market target) scored 1.82796 alone
+against 1.82598 for one exploded-softmax fit, and the log-pool gave it zero
+weight in every quarter. With 062's CatBoost pairwise result, two pairwise
+learners have now failed to add anything to the exploded softmax.
+
+Do not rebuild relatives' form in another encoding expecting a gain. Ability
+in pounds from margins and weights is not in this list: it adds information on
+jumps races only (see the report).
+
+## Text representation controls — little gain from more tokens (8 November 2026)
+
+The [text development screen](research/TEXT_MODEL_IMPROVEMENTS_2026-11-08.md)
+compares 19 recipes on the same 6,178 complete text fields in 2024Q1 and
+2025Q2. Differences below are race log loss against the corrected calibrated
+hard-target reference. They are development results.
+
+| Control | Change | What to retain |
+|---|---:|---|
+| Word trigrams | +0.00145 | Word unigrams/bigrams |
+| Two-year recency half-life | +0.00209 | Uniform weights for this learner |
+| Separate comment/verdict/rank normalisation | +0.00967 | Joint normalisation; wins at all three matching penalties |
+| Weak L2 (1e-5) with hard targets | +0.02114 | Tune penalty with the target |
+| Character patterns | −0.00055 | Mixed across quarters, with substantially slower fitting |
+| Rare terms (min_df=5) | −0.00033 | Keep min_df=20 unless a larger controlled gain pays for the vocabulary |
+
+The largest gains in this screen come from the market-informed target. The
+representation controls above use hard targets; they do not test every
+interaction with the teacher. Self/rival attribution remains in target tuning
+because its cost is small and it makes comparison phrases horse-specific.
+
+The selected text model improves standalone loss by 0.01918 over four later
+quarters. Adding it to the saved generalist/performance pool gives only
+−0.00010 [−0.00149, +0.00146] on 1,142 races. The generalist already contains
+older learned text inputs; this probe does not establish a new ensemble slot.
+
 ## 063. Race context, finer race types, subject models and meta learners — no gain (4 November 2026)
 
 `scripts/feature_structure_063.py` screened how the 129 inputs are used, on the

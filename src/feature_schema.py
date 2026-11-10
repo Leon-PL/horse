@@ -1,5 +1,38 @@
-"""Required numeric model-feature validation."""
+"""Shared categorical domains and required numeric feature validation.
+
+Categorical columns are declared from their source fields, never inferred from
+a feature-name prefix or an observed numeric range.
+"""
 import pandas as pd
+
+
+CATEGORICAL_FIELDS = ("going", "race_class", "race_type", "region", "sex", "surface")
+FIXED_DOMAINS = {
+    "race_type": ("Flat", "Hurdle", "Chase"),
+    "sex": ("Male", "Female"),
+    "season": ("Winter", "Spring", "Summer", "Autumn"),
+}
+
+
+def categorical_columns(frame):
+    """Explicit dummy names for the categories represented by prepared rows."""
+    columns = set()
+    for field in CATEGORICAL_FIELDS:
+        if field in frame:
+            labels = set(frame[field].dropna().unique()) | set(FIXED_DOMAINS.get(field, ()))
+            columns.update(f"{field}_{label}" for label in labels)
+    if "race_date" in frame:
+        columns.update(f"season_{label}" for label in FIXED_DOMAINS["season"])
+    return sorted(columns)
+
+
+def complete_categorical_columns(frame, expected, declared):
+    """Complete absent declared dummies; continuous measurements stay untouched."""
+    missing = (set(expected) & set(declared)) - set(frame.columns)
+    if not missing:
+        return frame
+    zeros = pd.DataFrame(0, index=frame.index, columns=sorted(missing), dtype="int64")
+    return pd.concat([frame, zeros], axis=1)
 
 
 def require_numeric_features(frame, names, *, context):

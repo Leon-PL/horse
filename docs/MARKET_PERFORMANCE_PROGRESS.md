@@ -1,5 +1,21 @@
 # Market performance implementation
 
+**Market-distilled Timeform text candidate, 9 November 2026.** The explicit
+text expert now calibrates with earlier-only fits and masks an incomplete
+text field. The legacy calibration fit also starts cold so previous-quarter
+weights cannot carry labels from its calibration period. Of 50 screened
+recipes, the original word layout with historical market targets and 3e-6
+regularisation won on five earlier quarters. It reduced later race log loss
+from 1.92807 to 1.90889 on 11,893 races, improving all four quarters
+(paired change −0.01918 [−0.02295, −0.01503]). Forecasting requires no prices.
+
+The ensemble probe found no established incremental gain over the saved
+generalist/performance pool (−0.00010 [−0.00149, +0.00146], 1,142 races).
+A separate verified text candidate was fitted through 6 November; the
+installed store and selected win model were left as they were. See the
+[text development report](research/TEXT_MODEL_IMPROVEMENTS_2026-11-08.md)
+for the saved recipe, model, calibration and adoption decision.
+
 **Text inputs repaired, 8 November 2026 (code only; scores, store and model not
 rebuilt).** An audit of the text inputs found no leak in the Timeform comment
 score. Its quarter models stop 7–10 days before their quarter. All 68 races

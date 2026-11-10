@@ -52,6 +52,25 @@ def test_real_unavailable_distance_template_is_missing_not_zero():
     assert tabs.signal_runner_count('distanceran',{r['horse_name']:r for r in rows}) == 0
 
 
+def test_distance_split_placeholders_keep_other_runners_measured():
+    soup = BeautifulSoup(page('distanceran'), 'html.parser')
+    first, second, *_ = atr._sectional_entries(soup)
+    for cell in first.select('.card-cell')[3:]:
+        cell.decompose()
+    placeholder = soup.new_tag('div', attrs={'class': 'card-cell card-cell--sectional-time'})
+    placeholder.string = '-'
+    first.append(placeholder)
+    second.select_one('.card-cell--distancerandistran').clear()
+    second.select_one('.card-cell--distanceranvmedian').string = 'No Change'
+    rows, _ = tabs.parse_distance(str(soup), '1629208')
+    assert len(rows) == 10 and rows[2]['atr_distance_ran_yards'] == 1339
+    assert all(row['atr_distance_ran_yards'] is None and row['atr_distance_diff_vs_median_lengths'] is None
+               for row in rows[:2])
+    placeholder.string = '12.34'
+    with pytest.raises(ValueError, match='Missing labelled distance cells'):
+        tabs.parse_distance(str(soup), '1629208')
+
+
 def test_identity_only_empty_templates_do_not_claim_performance_data():
     client = _FakeFetcher({f'/{kind}':(200,(FIXTURES/'unavailable'/f'{kind}.html').read_text(encoding='utf-8'))
                            for kind in tabs.PERFORMANCE_TABS})

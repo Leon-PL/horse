@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "feature_sets": [
+    {
+      "id": "general-win",
+      "label": "General win",
+      "file": "win_selected_056.txt",
+      "description": "The current general model input selection. Other model roles can reference their own named selections."
+    }
+  ],
+  "model_roles": [
+    {
+      "id": "general",
+      "label": "General model",
+      "scope": "All race types",
+      "feature_sets": ["general-win"]
+    }
+  ]
+}

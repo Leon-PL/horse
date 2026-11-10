@@ -37,11 +37,21 @@ project `beaten_lengths` and `distance_furlongs` as training context; those
 columns are not silently appended to the input list. Supported feature
 selection currently applies to the numeric win learner.
 
-`TextExpert` is an explicit TF-IDF/conditional-logit expert using the existing
-text mathematics. It takes supplied raw comments, verdicts and earlier result
-labels. It records the fitted vocabulary, IDF, weights, cutoff and input digest;
-prediction never initiates fitting. Races with no text return an unavailable
-expert. The legacy source materialiser still maintains the quarterly scores
+`TextExpert` is an explicit calibrated TF-IDF/conditional-logit expert. It takes
+supplied raw comments, verdicts and earlier result labels. Its recipe can vary
+regularisation, word/character representation, self/rival attribution, recency,
+finishing-order targets and the historical market-teacher share. The last two
+are training choices; prediction needs no results or prices. It records the
+fitted vocabulary, IDF, weights, scale, optimisation, cutoff and input digest;
+prediction never initiates fitting. An incomplete text field masks the expert
+for the whole race. The [text development report](../research/TEXT_MODEL_IMPROVEMENTS_2026-11-08.md)
+records the evaluated recipes and the separate current candidate. This explicit
+raw-text component is not dispatched by the numeric `--spec` CLI yet.
+The [validated text recipe](../../reference/modelling/timeform_text_market_v1.json)
+can be passed directly to `TextExpert(**settings)`. Its historical prices
+inform training; no price columns are required for `predict`.
+
+The legacy source materialiser still maintains the quarterly scores
 consumed by the existing 129-input model. Moving that existing path requires
 qualification of the replacement and is not done by changing feature semantics
 under old models.

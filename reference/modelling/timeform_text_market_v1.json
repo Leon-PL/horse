@@ -1,0 +1,14 @@
+{
+  "id": "timeform-text-candidate",
+  "penalty": 0.000003,
+  "min_df": 20,
+  "ngram_max": 2,
+  "roles": false,
+  "separate_fields": false,
+  "half_life_days": null,
+  "stage_weights": [1.0],
+  "soft_label_blend": 1.0,
+  "characters": false,
+  "purge_days": 7,
+  "max_iter": 400
+}

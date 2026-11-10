@@ -56,6 +56,8 @@ _FE_SOURCE_FILES = (
     "reference/verified_runner_ratings.json", "reference/connection_aliases.json",
     "src/prize_currency_features.py", "reference/track_prize_currency.json",
     "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
+    "src/feature_schema.py",
+    "src/feature_context.py",
     "src/trueskill_kernel.py",
     "src/result_margins.py", "src/runner_identity.py",
     "src/result_status.py", "src/rating_reuse.py",

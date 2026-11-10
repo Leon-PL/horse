@@ -112,3 +112,37 @@ recovered. It reached 5,504 accepted fields and 43,974 saved runner records, wit
 no new retries or reviews, and flushed all pending exports. This short, different
 race sample is not a controlled throughput comparison or a full-backfill ETA.
 The continuous worker was then relaunched; consult `launch.json` and live status.
+
+## Importing saved results pages
+
+The 9 November check found that ATR's daily results pages for 16 September 2020
+and 3 November 2026 loaded in the browser while unattended discovery received a
+challenge. The rendered race links matched 58 previously missing queue entries
+by exact date, course and UK local time.
+
+Save a dated ATR results page from the browser as HTML, then import it. You can
+pass several saved files in the same command.
+
+```powershell
+.venv\Scripts\python.exe -m src.ingestion.atr_ids --import-results 'C:\path\to\saved-results.html'
+```
+
+The importer uses the page's canonical ATR date and the native ID linked within
+each result article. It saves a dated receipt with a hash of the input file. The
+running historical worker reads new receipts within about a minute, matches them
+to canonical jobs, and fetches eligible fields at its configured pace. A saved
+ID identifies a race. Availability of sectional telemetry is determined by its
+performance tabs.
+
+The worker now gives fresh known-ID fields priority over retries. An identical
+HTTP 500 response repeated at the same race endpoint defers that field for a day
+when ATR supplies no Retry-After. The Distance Ran parser also recognises empty
+split placeholders and keeps measurements for other runners in the same tab.
+
+The 9 November deployment passed 145 ATR checks. Replaying retained responses
+accepted 27 new fields and completed five fields with earlier partial data,
+adding 236 runner records. After restart at 1.5 seconds plus jitter, the worker
+imported all 58 exact IDs. The first live check saved nine of the newly mapped
+November fields with all five tab outcomes recorded. The September 2020 fields
+entered the queue for collection. Verification and the remaining date list are
+under `data/audit/atr_recovery_20261109/`.

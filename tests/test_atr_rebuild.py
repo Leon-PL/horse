@@ -203,6 +203,16 @@ def test_server_retry_after_is_never_shortened():
     assert policy['global_delay'] == policy['item_delay'] == 7200
 
 
+def test_identical_race_endpoint_500_defers_only_that_race():
+    response = {'status':500, 'url':atr.ATR_BASE+'/ajax/sectionals-razor/123/times', 'sha256':'a'*64}
+    assert rebuild._retry_policy(response, 0, 0)['scope'] == 'global'
+    assert rebuild._retry_policy(response, 1, 3, previous=response) == {
+        'scope':'item', 'global_delay':0, 'item_delay':86400, 'transient':False}
+    assert rebuild._retry_policy({**response, 'sha256':'b'*64}, 1, 3, previous=response)['scope'] == 'global'
+    assert rebuild._retry_policy({**response, 'retry_after_seconds':7200}, 1, 3,
+                                 previous=response)['global_delay'] == 7200
+
+
 def test_a_successful_field_resets_transient_failure_escalation(environment,monkeypatch):
     root, _ = environment
     rebuild.prepare(root)

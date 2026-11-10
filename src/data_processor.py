@@ -15,6 +15,7 @@ import logging
 import numpy as np
 import pandas as pd
 from src.source_dataset import processing_inputs
+from src.feature_schema import CATEGORICAL_FIELDS, FIXED_DOMAINS
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -446,15 +447,14 @@ def encode_categorical(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     # --- One-hot encode low-cardinality categoricals ---
-    low_cardinality = ["going", "race_class", "race_type", "region", "sex", "surface"]
+    low_cardinality = CATEGORICAL_FIELDS
     for col in low_cardinality:
         if col in df.columns:
             dummies = pd.get_dummies(df[col], prefix=col, dtype=int)
             # A card containing only Flat races or only males still needs the
             # model's Chase/Female indicators, correctly set to zero. Their
             # existence must not depend on unrelated races in the same batch.
-            required = {"race_type": ("Flat", "Hurdle", "Chase"),
-                        "sex": ("Male", "Female")}.get(col, ())
+            required = FIXED_DOMAINS.get(col, ())
             for category in required:
                 name = f"{col}_{category}"
                 if name not in dummies:

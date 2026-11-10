@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from src.workbench.data import Catalog
 from src.workbench.jobs import Jobs
 from src.workbench.review import ReviewStore
+from src.workbench.features import Features
 
 
 class WorkbenchServer(ThreadingHTTPServer):
@@ -21,6 +22,7 @@ class WorkbenchServer(ThreadingHTTPServer):
         self.catalog = catalog
         self.jobs = Jobs(catalog)
         self.review = ReviewStore(catalog.root/"workbench/review.sqlite")
+        self.features = Features(catalog)
         self.static_dir = Path(static_dir)
         self.token = secrets.token_urlsafe(32)
         super().__init__(address, Handler)
@@ -85,10 +87,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if mutation:
                 raise FileNotFoundError("Unknown action")
-            name = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css"}.get(parsed.path)
+            name = {"/": "index.html", "/app.js": "app.js", "/features.js": "features.js", "/style.css": "style.css"}.get(parsed.path)
             if not name:
                 raise FileNotFoundError("Page was not found")
-            kind = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}[name]
+            kind = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "features.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}[name]
             self.send((self.server.static_dir/name).read_bytes(), content_type=kind)
         except FileNotFoundError as exc:
             self.send({"error": str(exc)}, 404)
@@ -127,6 +129,34 @@ class Handler(BaseHTTPRequestHandler):
             return catalog.overview(dataset)
         if route == "datasets":
             return {"rows": catalog.manifests()}
+        if route == "features/overview":
+            return self.server.features.overview(dataset)
+        if route == "features/catalog":
+            return self.server.features.catalog_rows(params.get("feature_set"), params.get("query", ""),
+                params.get("family", ""), params.get("offset", 0), params.get("limit", 60))
+        if route == "features/quality":
+            return self.server.features.quality(start, end, params.get("feature_set"), params.get("family", ""))
+        if route == "features/races":
+            return self.server.features.races(start, end)
+        if len(parts) >= 3 and parts[:2] == ["features", "races"]:
+            if len(parts) == 4 and parts[3] == "value":
+                return self.server.features.value(parts[2], params["horse_id"], params["column"])
+            if len(parts) not in {3, 4} or len(parts) == 4 and parts[3] != "export":
+                raise FileNotFoundError("Feature route was not found")
+            result = self.server.features.race(parts[2], params.get("feature_set"), params.get("family", ""), params.get("query", ""), params.get("offset", 0))
+            if len(parts) == 4 and parts[3] == "export":
+                import pandas as pd
+                frame = pd.DataFrame(result["rows"])
+                frame["feature_generation"] = result["store"]["signature"]
+                frame["source_dataset"] = result["store"]["dataset"]
+                frame["feature_build"] = result["store"]["build_id"]
+                frame["feature_set"] = result["feature_set"]
+                frame["feature_set_signature"] = result["feature_set_signature"]
+                self.send(frame.to_csv(index=False).encode(), content_type="text/csv; charset=utf-8", filename="race-features.csv")
+                return None
+            if len(parts) != 3:
+                raise FileNotFoundError("Feature route was not found")
+            return result
         if route == "races":
             return catalog.races(start, end, params.get("query", ""), params.get("track", ""), params.get("limit", 50), params.get("offset", 0))
         if len(parts) >= 2 and parts[0] == "races":
@@ -193,7 +223,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     import argparse
     import config
-    parser = argparse.ArgumentParser(description="Local ingestion and race inspection UI")
+    parser = argparse.ArgumentParser(description="Local racing sources, feature inspection and project jobs")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     server = WorkbenchServer(("127.0.0.1", args.port), Catalog(config.DATA_DIR, config.BASE_DIR), Path(config.BASE_DIR)/"ui/dist")

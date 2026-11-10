@@ -456,7 +456,7 @@ def _raw_ids(store):
     return {key for key, values in found.items() if len(values) == 3}
 
 
-def _retry_policy(last, attempts, transient_streak, standard=3600):
+def _retry_policy(last, attempts, transient_streak, standard=3600, *, previous=None):
     """Separate genuine edge blocks from temporary service/network failures."""
     requested = max(0,float(last.get('retry_after_seconds') or 0))
     if last.get('status') == 429:
@@ -469,6 +469,11 @@ def _retry_policy(last, attempts, transient_streak, standard=3600):
         return {'scope':'discovery' if '/ajax/' not in last.get('url','') else 'global',
                 'global_delay':max(standard,requested),
                 'item_delay':max(standard,requested),'transient':False}
+    if (last.get('status') == 500 and not requested and last.get('sha256')
+            and '/ajax/sectionals-razor/' in last.get('url', '') and isinstance(previous, dict)
+            and all(last.get(key) == previous.get(key) for key in ('status', 'url', 'sha256'))):
+        # The same field and endpoint have already returned this exact error.
+        return {'scope':'item','global_delay':0,'item_delay':max(86400,standard),'transient':False}
     if last.get('status') in {500,502,503,504} or last.get('reason') == 'transport_error':
         return {'scope':'global','global_delay':max(requested,min(standard,60*2**min(transient_streak,6))),
                 'item_delay':max(requested,min(standard,300*2**min(attempts,4))), 'transient':True}
@@ -476,16 +481,19 @@ def _retry_policy(last, attempts, transient_streak, standard=3600):
             'item_delay':max(standard,requested),'transient':False}
 
 
-def job_query(discovery_allowed):
+def job_query(discovery_allowed, *, pending_only=False):
     native = '' if discovery_allowed else 'AND native_id IS NOT NULL '
     index = 'jobs_active_order' if discovery_allowed else 'jobs_active_native'
+    pending = "AND state='pending' " if pending_only else ''
     return (f"SELECT * FROM jobs INDEXED BY {index} WHERE state IN ('pending','retry') AND next_retry<=? "
-            "AND race_date||' '||substr(off_time,1,5)<=? "+native+
+            "AND race_date||' '||substr(off_time,1,5)<=? "+native+pending+
             "ORDER BY race_date DESC,off_time DESC,native_id IS NULL LIMIT 1")
 
 
 def pick_job(con, now, cutoff, *, discovery_allowed):
-    return con.execute(job_query(discovery_allowed), (now,cutoff)).fetchone()
+    ready = (now, cutoff)
+    pending = con.execute(job_query(False, pending_only=True), ready).fetchone()
+    return pending if pending is not None else con.execute(job_query(discovery_allowed), ready).fetchone()
 
 
 def discover_ids(con, client, now, cutoff, *, retry_seconds=3600):
@@ -590,10 +598,16 @@ def run(root=DEFAULT_ROOT, *, request_delay=3.0, max_races=None, retry_seconds=3
             replay.on_index = on_index
             with con:
                 audit_legacy_hints(con)
-            atr_ids.recover_cached(con,replay.index_dir)
+            seen_receipts = {}
+            next_receipt_scan = 0.0
             reconcile_exports(con,root)
             dirty.update(row[0] for row in con.execute('SELECT race_date FROM dirty_days'))
             while not (root/'STOP').exists():
+                if time.monotonic() >= next_receipt_scan:
+                    for report in atr_ids.recover_cached(con,replay.index_dir,seen=seen_receipts):
+                        if report.get('error') or report.get('conflicts'):
+                            logger.warning('Saved ATR index needs review: %s', report)
+                    next_receipt_scan = time.monotonic()+60
                 if max_races is not None and attempted >= max_races:
                     break
                 if code_hashes() != control(con,'code_hashes'):
@@ -662,7 +676,12 @@ def run(root=DEFAULT_ROOT, *, request_delay=3.0, max_races=None, retry_seconds=3
                     policy = None
                     retry_base = utc_now().timestamp()
                     if outcome == atr.BLOCKED:
-                        policy = _retry_policy(last,job['attempts'],control(con,'transient_streak',0),retry_seconds)
+                        try:
+                            previous = json.loads(job['error'] or '{}')
+                        except ValueError:
+                            previous = None
+                        policy = _retry_policy(last,job['attempts'],control(con,'transient_streak',0),
+                                               retry_seconds,previous=previous)
                         delay = policy['item_delay']
                     invalid_hint = last.get('reason') in ('source_identity_mismatch','unverified_identity_absence')
                     if invalid_hint:
@@ -672,7 +691,7 @@ def run(root=DEFAULT_ROOT, *, request_delay=3.0, max_races=None, retry_seconds=3
                                     (retry_base+delay,json.dumps(last) or outcome,utc_now().isoformat(),job['race_id']))
                         if invalid_hint:
                             con.execute('UPDATE jobs SET native_id=NULL WHERE race_id=?',(job['race_id'],))
-                        if outcome == atr.BLOCKED:
+                        if outcome == atr.BLOCKED and policy['scope'] != 'item':
                             set_control(con,'discovery_retry' if policy['scope']=='discovery' else 'global_retry',
                                         retry_base+policy['global_delay'])
                             if policy['transient']:
