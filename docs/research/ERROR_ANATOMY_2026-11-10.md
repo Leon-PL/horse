@@ -793,6 +793,7 @@ leaves, 600 rounds) added to the same native forecast:
 | **Plus franking, hidden form and past late moves** | 416 | −0.01384 | **−0.01261 [−0.01507, −0.01033]** | **1.80676** | **−0.00238 [−0.00333, −0.00149], 4/4** |
 | Plus the generalist's own inputs as context | 608 | −0.01496 | −0.01334 [−0.01575, −0.01106] | 1.80603 | −0.00312 [−0.00424, −0.00202], 4/4 |
 | Eight groups, deeper recipe (31 leaves, 1,000 rounds) | 359 | −0.01291 | −0.01138 [−0.01394, −0.00908] | 1.80799 | −0.00115 [−0.00174, −0.00054], 4/4 |
+| **More groups and the deeper recipe together** (added after the rows above were read) | 416 | −0.01596 | **−0.01431 [−0.01705, −0.01186]** | **1.80506** | **−0.00409 [−0.00532, −0.00289], 4/4** |
 
 - The three extra groups add −0.0024 inside the joint model, in every
   quarter, and 91% of the screen figure carries to native. As separate
@@ -803,7 +804,9 @@ leaves, 600 rounds) added to the same native forecast:
   elsewhere.
 - A deeper recipe on the original eight groups adds −0.0012 in every
   quarter, 88% carried to native. The two steps together
-  (`more-groups-deeper`) were added as a fifth variant after these were read.
+  (`more-groups-deeper`, a fifth variant added after these were read) add up
+  almost exactly: −0.0143 on native, 90% of the screen figure, the best
+  development forecast at 1.80506.
 - By quarter the 416-input model gains −0.0084, −0.0125, −0.0184, −0.0127 on
   the native forecast.
 
