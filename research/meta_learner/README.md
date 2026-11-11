@@ -61,6 +61,11 @@ component, a jumps completion model, and improvement and bounce inputs
 (built in `ability.py`). See
 `docs/research/CHEAP_SCREENS_2026-11-09.md`.
 
+`tier2_inputs.py` refits full 063 with a screened group among its inputs, three
+seeds per arm, against the benchmark's cached three seeds (`fit --arm NAME`,
+then `report`). The ability and same-day arm failed its gate on 10 November;
+see `docs/research/TIER2_INPUTS_2026-11-10.md`.
+
 Do not fit combination weights on base-model training predictions. Existing
 2024–2026 results and feature lists have informed previous choices, including
 the formerly reserved holdout. Label their results retrospective. Keep the

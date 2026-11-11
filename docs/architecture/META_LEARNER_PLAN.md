@@ -57,6 +57,10 @@ informed earlier research. Details are in the
 | Relatives' ratings with trainer adjustment (new); going reasons from BHA withdrawals (new) with the store's BHA withdrawal columns | +0.0000 and +0.0002 against twins | 1/4, 2/4 | Null |
 | Head-to-head (Bradley–Terry on full 063 inputs) in the pool | 0.0000 (zero pool weight in every quarter) | — | Null; alone 0.0020 worse than one full 063 fit |
 | Completion (jumps), improvement and bounce as corrections | +0.0002, +0.0002, −0.0002 against twins | 1/4, 1/4, 2/4 | Null; bounce helps only on jumps, like ability |
+| **Error corrections, 10 November: the model's own past errors by horse, trainer and sire (results and past closing prices against its out-of-fold forecasts), four corrections with weights fitted on earlier quarters, added to the stack** ([report](../research/ERROR_ANATOMY_2026-11-10.md)) | **−0.0036 [−0.0055, −0.0019] against the stack; −0.0053 against the average** | 4/4 | **Retrospective lead, the largest group screened; each group beats three twins and a 7-day timing lag changes nothing. Needs a registered read on unseen races** |
+| **Registered read on unseen races, 11 November: seven price-taught corrections (own horse, market gap, residual, second wave, franking, same-day, tracking) on a seed-42 fit, 5,761 races from 11 June to 6 November 2026** ([report, section 7](../research/ERROR_ANATOMY_2026-11-10.md)) | **−0.0091, z −4.8, one-sided p = 0.0000007**; own horse and market gap alone −0.0060, z −4.5 | 3/3 periods | **Confirmed against a screen-capacity base. Franking (−0.0013, z −1.6) and same-day bias (−0.0001) did not hold alone. About four fifths carries over to native capacity on 2025Q3** |
+| Second registered read, 11 November: run-by-run horse state and 30/90-day stable form added to those seven, same races ([report, section 8](../research/ERROR_ANATOMY_2026-11-10.md)) | −0.0018, z −1.7, p = 0.04 against a 0.005 mark (development: −0.0036 on the stack, −0.0047 in rehearsal) | 3/3 periods | **Not confirmed as an addition.** Horse state alone is −0.0065 (z −5.1) against the base, better than the own-horse group it would replace (−0.0042), and it carried over to native capacity on 2025Q3 (−0.0047) |
+| Ability in pounds and same-day bias as generalist inputs (212 inputs, three seeds) against the three-seed average, 10 November | −0.0005 [−0.0016, +0.0006] | 3/4 | Fails the gate; no better than the same inputs as corrections (−0.0007). They stay corrections |
 
 Full 063 is the 129-input recipe plus 64 inputs (rating gaps, signal gaps,
 context-weighted form and race context), trained with a 75% market share in its
@@ -350,10 +354,21 @@ Recipes and gates were registered before scoring.
    Bounce inputs were left out by a rule fixed before comparing them. Before
    scoring it needs a commit, base inputs for those races, the frozen base and
    correction fits, and a one-shot scoring script.
-2. **Tier 2 for tracking, same-day and ability inputs inside the generalist:**
-   three seeds of full 063 plus those inputs (twelve screen-capacity fits,
-   about an hour), against the cached three seeds. It tells whether they help
-   more inside the generalist than on top of it.
+2. **Tier 2 for same-day and ability inputs inside the generalist: done
+   10 November, fails its gate**
+   ([report](../research/TIER2_INPUTS_2026-11-10.md)). Three seeds of full 063
+   plus the 19 inputs against the cached three seeds: −0.0005
+   [−0.0016, +0.0006], 3/4. The same inputs as corrections on top give −0.0007,
+   so they stay corrections. The 184 tracking inputs were not refitted (memory);
+   nothing suggests a different answer.
+   **Error corrections, found 10 November**
+   ([report](../research/ERROR_ANATOMY_2026-11-10.md)): the generalist's
+   errors repeat by horse, trainer and sire (trainer errors correlate 0.19
+   between two halves, against 0.09 for BSP). Inputs that record each
+   entity's past results and closing prices against the model's own
+   out-of-fold forecast give −0.0036 on the stack. Next: base forecasts for
+   the races from 11 June 2026, frozen corrections and weights, one registered
+   read. Serving needs a stored history of out-of-fold forecasts.
 3. **The sequence network,** if the framework decision is made. It is the one
    model form not yet tested.
 4. **The market tier,** after serving qualification.

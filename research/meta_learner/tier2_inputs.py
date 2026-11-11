@@ -136,12 +136,12 @@ def report():
             entry["average_vs_reference_single"] = fe.difference(races, losses["reference_seed42"][1])
             entry["clears_gate"] = fe.clears_gate(change)
         out["arms"][arm] = entry
-        for key in ("average_vs_reference_average", *[("single_seed_pairs", k) for k in entry["single_seed_pairs"]]):
-            r = entry[key] if isinstance(key, str) else entry[key[0]][key[1]]
-            label = key if isinstance(key, str) else f"seed {key[1]} vs seed {key[1]}"
-            if key in entry or not isinstance(key, str):
-                print(f"{arm:<16} {label:<30} {r['mean']:+.5f} [{r['ci95'][0]:+.5f}, {r['ci95'][1]:+.5f}] "
-                      f"{r['quarters_better']}/4", flush=True)
+        lines = {f"seed {seed} vs seed {seed}": r for seed, r in entry["single_seed_pairs"].items()}
+        if "average_vs_reference_average" in entry:
+            lines = {"average vs reference average": entry["average_vs_reference_average"], **lines}
+        for label, r in lines.items():
+            print(f"{arm:<16} {label:<30} {r['mean']:+.5f} [{r['ci95'][0]:+.5f}, {r['ci95'][1]:+.5f}] "
+                  f"{r['quarters_better']}/4", flush=True)
     atomic_json(OUT / "report.json", out)
 
 

@@ -2621,3 +2621,67 @@ Do not re-encode existing inputs expecting accuracy; the gains came from new
 information. The faults were fixed in code anyway, for correctness, on the
 same day. The store was not rebuilt, so no rebuilt-store measurement exists
 yet. [Faults, evidence, the full table and the fixes](research/FEATURE_IMPLEMENTATION_REVIEW_047.md).
+
+## Tier 2. Ability and same-day inputs inside the generalist: no better than as corrections (10 November 2026)
+
+Full 063 refitted with the 14 ability-in-pounds and 5 same-day bias inputs,
+three seeds, 2025Q3–2026Q2 (11,905 races), against the cached three-seed
+average: −0.00050 [−0.00160, +0.00063], 3/4 quarters. The gate (interval below
+zero) fails. The same inputs as two summed residual corrections give −0.00065
+[−0.00138, +0.00020], and adding those corrections to the refitted arm gives
+nothing more (+0.00026). The hope that a refit would unlock a larger gain, as
+it did for the 063 rating gaps, is refuted for these groups. Do not move
+screen survivors worth about 0.0005 into the generalist: three seeds per arm
+cannot resolve them (±0.0011) and the corrections already capture them.
+Averaging all six fits scores −0.00072 [−0.00127, −0.00016], 4/4, against the
+three-seed reference; about −0.0003 of that is expected from six fits instead
+of three. Exploratory, not a registered comparison.
+[Report](research/TIER2_INPUTS_2026-11-10.md).
+
+## Error anatomy, 10-11 November 2026: what held, what did not
+
+Positive result first, because it changes what is worth trying: inputs that
+measure each horse, trainer and sire against the model's own out-of-fold
+forecast (results and past closing prices) were confirmed on one registered
+read of 5,761 unseen races, −0.0091, z −4.8
+([report](research/ERROR_ANATOMY_2026-11-10.md)). Do not rebuild these from
+scratch; extend them.
+
+Refuted or weakened in the same study:
+
+- **Sale price is dead for accuracy too**, not only for betting. Pre-racing
+  auction prices and the sire's sale record: −0.0002 at best, no better than a
+  shuffled twin, in three training arms.
+- **Jockey residuals against the model:** +0.0002 against their twin. Trainer
+  and sire residuals are real; the jockey's is not.
+- **Form franking alone** fell from −0.0041 on development races to −0.0013
+  (z −1.6) on unseen races. Unconfirmed as a separate group.
+- **Same-day bias** was −0.0001 on the unseen races.
+- **The rest of the feature store** (1,176 unused numeric columns) predicts
+  the market's disagreement with the model no better than the model's own 193
+  inputs (R² 0.138 against 0.132). There is little left in it.
+- **Screen-capacity references flatter large corrections.** A correction that
+  sees only the generalist's own inputs gains −0.0015 on a 400-tree fit and
+  half of that on a native fit. Check large-recipe screens against a
+  native-capacity forecast.
+- **Run-by-run horse state and 30/90-day stable form, as an addition to the
+  seven confirmed corrections: not confirmed.** In development the two groups
+  added −0.0036 to the stack and −0.0047 in rehearsal (z −4.7), and horse
+  state alone carried over to the native 2025Q3 forecast (−0.0047). The
+  registered second read on the unseen races gave −0.00175, se 0.00100,
+  z −1.7, p 0.04 against a pass mark of 0.005. Alone against the base, horse
+  state was −0.0065 (z −5.1) there, so it is a real correction and probably a
+  better own-horse group than the one it would replace; its value **on top
+  of** the seven is unproven. Development increments on a stack that already
+  holds a correlated correction shrank by almost two thirds here; expect the
+  same of the next one.
+- **A horse's past closing prices without the model's forecast:** −0.0003,
+  2/4 quarters, +0.0004 on the native forecast. The value is in the price
+  against the forecast, so it needs stored out-of-fold forecasts and cannot be
+  an ordinary feature-store column.
+- **Past late price moves** (08:00, 11:00 and one hour to BSP at earlier
+  runs): −0.0016 alone, but a negative weight and a worse stack once the
+  horse's past closing gaps are present. Redundant.
+- **One joint correction model over all 359 error inputs:** ties the weighted
+  sum of eight (−0.0006 [−0.0017, +0.0006], 2/4). Simpler, not more accurate;
+  the per-group recipe is too small for it (+0.0022 worse).
