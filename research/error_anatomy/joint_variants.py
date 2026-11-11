@@ -39,6 +39,9 @@ VARIANTS = {
     "with-context": {"groups": (*MORE, "own"), **WIDE},
     "deeper": {"groups": GROUPS, "rounds": 1000,
                "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Added 12 November after the three above were read: the two steps that each helped, together.
+    "more-groups-deeper": {"groups": MORE, "rounds": 1000,
+                           "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"
