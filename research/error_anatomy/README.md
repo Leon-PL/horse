@@ -47,3 +47,12 @@ Third round (11 November):
 - `holdout_state.py`: the second registered read on the same hold-out races,
   for what the two `horse_state` groups add to the first read's seven
   (`rehearse`, `register`, `score`). Scored; the increment did not pass.
+
+Input audit (11 November):
+
+- `card_audit.py`: prints a race as a card, with each horse's earlier runs
+  and the raw values behind the main inputs, for reading by eye.
+- `card_vs_result.py`: cached pre-race racecards against stored results,
+  field by field.
+- `hidden_form.py`: the card's form figures for runs the database lacks
+  (`hidden-form`), screened through `soft_corrections.py`.

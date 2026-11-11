@@ -98,3 +98,11 @@ def test_moves_are_centred_and_signed():
     out = mh.moves(frame, prices)
     assert out.move_1100[0] > 0 > out.move_1100[1]          # the first horse shortened
     assert np.isclose(out.move_1100.sum(), 0.) and np.allclose(out.move_3600s, 0.)
+
+
+def test_hidden_form_reads_only_the_oldest_figures():
+    from research.error_anatomy import hidden_form as hf
+    out = hf.figures(["1/P2-34", "21", None, "0F"], [3, 0, 2, 2])
+    assert out[0].tolist() == [1., 2., 1., 1., 1.5, 2., 3.]      # "1", "P", "2": the later 3 and 4 are database runs
+    assert np.isnan(out[1]).all() and np.isnan(out[2]).all()
+    assert out[3, 3] == 10. and out[3, 2] == 1. and out[3, 5] == 12.

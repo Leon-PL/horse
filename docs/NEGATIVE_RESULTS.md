@@ -2685,3 +2685,9 @@ Refuted or weakened in the same study:
 - **One joint correction model over all 359 error inputs:** ties the weighted
   sum of eight (−0.0006 [−0.0017, +0.0006], 2/4). Simpler, not more accurate;
   the per-group recipe is too small for it (+0.0022 worse).
+- **Input audit against racecards: no fault in the training rows.** Draw,
+  form, days off, ratings, weights and trainer names hold up; the old cached
+  racecards (before 21 June 2026) carried cloth numbers as draw and are not a
+  reference. Do not re-audit these fields without a new reason. The one gap
+  is runs the database lacks: their card form figures add −0.0006
+  (`hidden-form`, 4/4, development only).

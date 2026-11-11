@@ -638,6 +638,79 @@ negative coefficient), its interval is a quarter narrower, and it held up
 better on the one native-capacity quarter, so it is the form to carry forward
 when this is built for serving. The small recipe is too small for 359 inputs.
 
+## 9. Reading the inputs against the racecards (11 November)
+
+A check of whether what the model is given matches what a racecard shows.
+
+**Whole cards read by eye.** `card_audit.py` prints a race as a punter reads
+it: each runner's card line, the model's and market's chance, the horse's
+earlier runs from the results database and the raw values behind the main
+inputs. On the races read, ratings, weights, weight and trip changes, days
+off, course records and the prior-market input all agree with the record.
+Three things that look wrong and are not:
+
+- `speed_fig_*` is a margin-based figure where lower is better, so the worst
+  horse has the highest value and `best_5` is a minimum.
+- `lengths_behind` in the results is the gap to the horse in front; the
+  features use the cumulative distance (`beaten_lengths`).
+- An unrated run is stored as official rating 0 in the database but is
+  missing in the store, so a handicap debutant's rating change is missing,
+  not +65.
+
+**Cached pre-race racecards against stored results** (`card_vs_result.py`, 18
+card dates, 5,235 matched runners). Every large difference is the card being
+an early snapshot, not the result being wrong:
+
+| Field | Differ | What it is |
+|---|---:|---|
+| Field size | 39% | The card counts declared runners; the result has those that ran |
+| Draw | 54% before 21 June, 0–8% after | The old card scraper stored cloth numbers. The results are right: of 29,733 Flat handicaps only 0.16% have draws in weight order |
+| Going | 10% | The card has the going as declared; the result has it on the day |
+| Weight | 9% | The card had 0 for 479 runners |
+| Jockey | 2.2% | Changes of rider |
+| Form, days off | 0.6% | The card was captured before the horse's latest run; the result has the race-day form |
+| Career runs | 80% | The results' `horse_runs` counts the race itself. It is in the model's excluded list |
+| Trainer, age, class, distance, surface | under 0.3% | |
+
+So the training rows hold race-day values, which is right for a forecast made
+at the off and comparable with BSP. A forecast made in the morning would see
+the declared field and declared going instead; that difference is not
+measured here. The trainer names are already normalised: only nine yards
+change name in a way that restarts their history (8,583 runs, 1.1%).
+
+**What the page has that the model does not.** The raw Sporting Life page
+carries the owner, the jockey's claim and each horse's previous runs,
+including runs the database lacks. None of that is kept historically (raw
+pages are retained from 4 November 2026 only). A horse's profile page lists
+its foreign runs with position, field size, price and comment.
+
+### Form figures of the runs the database lacks
+
+The card's form string shows how the horse finished in the runs the database
+does not hold; the store gives the model only their number. On the scored
+quarters, 7,004 runners (6.4%) have such runs:
+
+| Best finish among the missing runs | Runners | Won | Stack expected | Betfair SP expected |
+|---|---:|---:|---:|---:|
+| Won | 2,887 | 499 | 443 | 462 |
+| Second | 1,595 | 204 | 206 | 212 |
+| Third | 840 | 79 | 87 | 83 |
+| Fourth to sixth | 901 | 68 | 75 | 71 |
+
+`hidden_form.py` turns those figures into ten inputs (wins, places, failures
+to finish, best, mean and latest figure, against the field).
+
+| Hidden form | Change | Against its twin | Quarters |
+|---|---:|---:|---:|
+| Prices, rows from 2022Q3 | −0.00057 [−0.00089, −0.00027] | −0.00059 | 4/4 |
+| Prices, 2022Q3, more capacity | −0.00068 [−0.00113, −0.00027] | −0.00066 | 4/4 |
+| Added to the eight-group stack | −0.00032 (1.81307 to 1.81275), weight 0.4–1.2 | | |
+| On the native 2025Q3 forecast | −0.00020 [−0.00069, +0.00024] | | |
+
+Small, consistent, and from data already held. It needs no forecast history,
+so it belongs in the feature store as ordinary inputs. Development only; by
+the section 8 lesson expect less on unseen races.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the
@@ -678,6 +751,10 @@ when this is built for serving. The small recipe is too small for 359 inputs.
    stack. Structural: one wider correction model ties the weighted sum and is
    the simpler form. The remaining disagreement sits on horses with one to
    four runs and no input tried here predicts it.
+   The input audit (section 9) found the training rows sound; the one real
+   gap is the runs the database lacks. Their form figures give −0.0006 now;
+   their detail (class, price, opposition) is on Sporting Life horse profiles
+   for about 9,100 horses and has not been fetched.
 1. **Done 11 November: confirmed on unseen races** (section 7). What remains
    before this can serve: the same corrections against a native-capacity
    generalist on more than one quarter, and a stored history of out-of-fold
@@ -705,6 +782,9 @@ when this is built for serving. The small recipe is too small for 359 inputs.
   `market_disagreement.json`, `soft_corrections.json`, `soft_stack_soft-long-rich.json`
   and its forecast, `native_check.json`, `native_stack_check_soft-long-rich.json`,
   `second_pass.json`.
+- Input audit: `card_audit.py`, `card_vs_result.py`, `hidden_form.py`.
+  Outputs: `card_vs_result.json`, `draw_cloth_signature.parquet`,
+  `trainer_renames.csv`, `soft_stack_soft-long-rich_hidden.json`.
 - Third round: `third_pass.py`, `horse_state.py`, `market_history.py`,
   `joint_corrector.py`, `holdout_state.py`, tests in `test_horse_state.py`.
   Outputs: `third_pass.json`, `third_pass_state.json`,
