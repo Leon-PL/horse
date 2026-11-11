@@ -58,3 +58,5 @@ Input audit (11 November):
   (`hidden-form`), screened through `soft_corrections.py`.
 - `native_folds.py`: native-capacity full 063 forecasts for the other scored
   quarters (`fit`) and every saved correction applied to them (`check`).
+- `joint_variants.py`: larger versions of the joint correction model, judged
+  on the native-capacity forecasts.

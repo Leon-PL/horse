@@ -780,6 +780,38 @@ the same 11,905 races.
 - The corrections were fitted from the screen forecast's offset. Refitting
   them from native forecasts is untested and could do slightly better.
 
+### A larger joint correction, judged on the native forecasts
+
+With native forecasts for four quarters, a bigger correction can be told from
+capacity repair: it has to gain on the native forecast. `joint_variants.py`,
+variants declared before scoring, each a single price-taught model (15
+leaves, 600 rounds) added to the same native forecast:
+
+| Joint correction | Inputs | On screen | On native | Native race log loss | Against the eight-group joint model |
+|---|---:|---:|---:|---:|---:|
+| Eight groups (section 10) | 359 | −0.01138 | −0.01022 [−0.01243, −0.00825] | 1.80914 | |
+| **Plus franking, hidden form and past late moves** | 416 | −0.01384 | **−0.01261 [−0.01507, −0.01033]** | **1.80676** | **−0.00238 [−0.00333, −0.00149], 4/4** |
+| Plus the generalist's own inputs as context | 608 | −0.01496 | −0.01334 [−0.01575, −0.01106] | 1.80603 | −0.00312 [−0.00424, −0.00202], 4/4 |
+
+- The three extra groups add −0.0024 inside the joint model, in every
+  quarter, and 91% of the screen figure carries to native. As separate
+  corrections they looked weaker or redundant (past late moves took a
+  negative weight in the weighted sum); a single model uses them better.
+- Context adds a further −0.0007 [−0.0014, −0.0001], better in three quarters
+  of four, for 192 more inputs. Marginal; not worth carrying unless it holds
+  elsewhere.
+- By quarter the 416-input model gains −0.0084, −0.0125, −0.0184, −0.0127 on
+  the native forecast.
+
+**Where the best forecast now stands** (native with the eight-group joint
+model, same races as section 2):
+
+| | Start of this study | Now |
+|---|---:|---:|
+| Gap to Betfair SP, 11,902 races | 0.080 | 0.064 |
+| Behind the 08:00 exchange price, 6,194 races | 0.0215 | 0.0076 |
+| Behind the 11:00 exchange price, 7,292 races | 0.041 | 0.028 |
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the
@@ -851,6 +883,8 @@ the same 11,905 races.
   `market_disagreement.json`, `soft_corrections.json`, `soft_stack_soft-long-rich.json`
   and its forecast, `native_check.json`, `native_stack_check_soft-long-rich.json`,
   `second_pass.json`.
+- Joint variants: `joint_variants.py`; outputs `joint_variants.json` and
+  `joint_variants.parquet`.
 - Native capacity: `native_folds.py` (`fit`, `check`). Outputs:
   `native/native_2025Q4.parquet`, `native_2026Q1`, `native_2026Q2`,
   `native_folds_check.json`.
