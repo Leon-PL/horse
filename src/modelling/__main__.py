@@ -36,19 +36,20 @@ def main(argv=None):
     benchmark = commands.add_parser("benchmark", help="chronological OOF benchmark; never promotes")
     prepare = commands.add_parser("prepare", help="prepare a projected, bounded-memory selection matrix")
     selection = commands.add_parser("select", help="select on earlier folds; confirm on separate later folds")
+    admit = commands.add_parser("admit", help="forward test: would adding named inputs to a recipe help?")
     fit = commands.add_parser("fit", help="fit a win-only candidate from a benchmark's locked recipes/OOF")
     for command in (benchmark, prepare, fit):
         command.add_argument("--store-root", default=None)
     for command in (benchmark, prepare):
         command.add_argument("--start", default=None)
         command.add_argument("--end", default=None)
-    for command in (benchmark, selection):
+    for command in (benchmark, selection, admit):
         command.add_argument("--spec", action="append", help="resolved ModelSpec JSON; repeat for several win experts")
         command.add_argument("--features", default=None, help="feature-list file when creating a default recipe")
         command.add_argument("--capacity", choices=("native", "screen"), default="native")
         command.add_argument("--threads", type=int, default=2)
         command.add_argument("--min-train-periods", type=int, default=8)
-    for command in (benchmark, prepare, selection):
+    for command in (benchmark, prepare, selection, admit):
         command.add_argument("--output", required=True, help="new output directory, or the same registration for a resumed run")
     benchmark.add_argument("--fold-start", default=None)
     benchmark.add_argument("--pool", action="store_true", help="evaluate a pool fitted on earlier OOF quarters")
@@ -56,6 +57,17 @@ def main(argv=None):
     selection.add_argument("--selection-end", required=True)
     selection.add_argument("--confirmation-start", required=True)
     selection.add_argument("--min-features", type=int, default=30)
+    selection.add_argument("--near-copy", type=float, default=0.95,
+        help="keep one of each cluster of columns at or above this absolute rank correlation; 0 keeps all")
+    selection.add_argument("--importance", choices=("auto", "shap", "permutation"), default="auto",
+        help="how inputs are ranked for elimination; auto uses SHAP share for the long tail, loss prevented near the choice")
+    selection.add_argument("--permutation-below", type=int, default=150)
+    selection.add_argument("--confirm-capacity", choices=("native", "screen"), default=None,
+        help="also confirm the baseline and selected lists at this capacity")
+    admit.add_argument("--prepared", required=True)
+    admit.add_argument("--candidates", nargs="+", required=True,
+        help="input names, or one text file with a name per line")
+    admit.add_argument("--from", dest="start", required=True, help="first test date of the folds to score")
     fit.add_argument("--benchmark", required=True)
     fit.add_argument("--as-of", required=True)
     fit.add_argument("--threads", type=int, default=2)
@@ -115,8 +127,28 @@ def main(argv=None):
             result = select_features(frame, matrix, description["features"], specs[0],
                 selection_end=args.selection_end, confirmation_start=args.confirmation_start,
                 dataset_start=description["receipt"]["dataset_start"], n_min=args.min_features,
-                min_train_periods=args.min_train_periods, capacity=args.capacity, threads=args.threads, output=root)
-            print(json.dumps(result["confirmation"], indent=2))
+                min_train_periods=args.min_train_periods, capacity=args.capacity, threads=args.threads, output=root,
+                near_copy=args.near_copy or None, importance=args.importance,
+                permutation_below=args.permutation_below, confirm_capacity=args.confirm_capacity)
+            print(json.dumps({k: v for k, v in result.items() if k.startswith("confirmation")}, indent=2))
+            return
+        if args.command == "admit":
+            from src.modelling.selection import admit_features, matrix_signature
+            if len(specs) != 1 or not isinstance(specs[0], ModelSpec):
+                raise ValueError("Feature admission evaluates one numeric win recipe at a time")
+            prepared = Path(args.prepared)
+            description = json.loads((prepared / "prepared.json").read_text())
+            frame = pd.read_parquet(prepared / "context.parquet")
+            matrix = np.load(prepared / "matrix.npy", mmap_mode="r")
+            if matrix_signature(matrix, description["features"]) != description["matrix_signature"]:
+                raise ValueError("Selection matrix changed after preparation")
+            candidates = args.candidates
+            if len(candidates) == 1 and Path(candidates[0]).is_file():
+                candidates = read_features(candidates[0])
+            result = admit_features(frame, matrix, description["features"], specs[0], candidates, start=args.start,
+                dataset_start=description["receipt"]["dataset_start"], min_train_periods=args.min_train_periods,
+                capacity=args.capacity, threads=args.threads, output=root)
+            print(json.dumps({k: v for k, v in result.items() if k != "candidates"}, indent=2))
             return
         # The default baseline preserves the existing model's store column order.
         names = list(dict.fromkeys(n for s in specs for n in s.features))

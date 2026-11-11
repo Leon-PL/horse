@@ -102,3 +102,65 @@ def test_model_feature_catalog_distinguishes_learned_text_and_prior_market():
     assert feature_metadata("rtv_text_prob")["kind"] == "learned_prediction"
     assert feature_metadata("jt_win_rate")["family"] == "connections"
     assert feature_metadata("unclassified")["individual_dependencies"] is None
+
+
+def wide_data():
+    """Six races a day for 290 days: two real signals, near-copies of the first, and noise."""
+    rng = np.random.default_rng(23)
+    race = np.repeat(np.arange(290 * 3), 6)
+    first, second = rng.normal(size=(2, len(race)))
+    noise = rng.normal(size=(4, len(race)))
+    strength = pd.Series(1.4 * first + .9 * second + rng.gumbel(size=len(race)))
+    finish = strength.groupby(race).rank(ascending=False).astype(int).to_numpy()
+    frame = pd.DataFrame({"race_id": [f"r{r:04d}" for r in race], "horse_id": np.tile(np.arange(6), 290 * 3),
+        "horse_name": np.tile([f"Horse {i}" for i in range(6)], 290 * 3), "num_runners": 6,
+        "race_date": pd.Timestamp("2023-01-01") + pd.to_timedelta(race // 3, unit="D"),
+        "finish_position": finish, "won": (finish == 1).astype(int), "odds": 7., "bsp": 6.})
+    matrix = np.column_stack([first, second, np.exp(first), first + rng.normal(scale=.02, size=len(race)), *noise])
+    names = ["first", "second", "first_exp", "first_again", "n0", "n1", "n2", "n3"]
+    spec = ModelSpec("generalist", ("first", "n0"), burn_in_months=0,
+        params=(("min_child_samples", 10), ("num_leaves", 7)),
+        screen_params=(("n_estimators", 25), ("learning_rate", .2)))
+    return frame, matrix, names, spec
+
+
+def test_selection_drops_near_copies_and_ranks_by_loss_prevented(tmp_path):
+    frame, matrix, names, spec = wide_data()
+    result = select_features(frame, matrix, names, spec, selection_end="2023-06-30",
+        confirmation_start="2023-07-08", n_min=2, min_train_periods=1, capacity="screen",
+        importance="permutation", confirm_capacity="native", output=tmp_path)
+    # The two rewritten copies of the first signal are dropped before any fit, in favour of the baseline input.
+    assert set(result["near_copy_rejections"]) == {"first_exp", "first_again"}
+    assert all("near-copy of first " in reason for reason in result["near_copy_rejections"].values())
+    # Shuffling a real signal costs loss; elimination to two inputs keeps exactly the two signals.
+    import json
+    last = sorted(tmp_path.glob("selection_*.json"))[-1]
+    step = json.loads(last.read_text())
+    assert step["ranking"] == "permutation" and sorted(step["features"]) == ["first", "second"]
+    assert set(result["selected_spec"]["features"]) >= {"first", "second"}
+    # The second capacity confirms the baseline and selected lists only.
+    assert set(result["confirmation_native"]) == {"baseline", "selected"}
+    assert result["confirmation_native"]["selected"]["paired_vs_baseline"]["mean"] < 0
+    assert "broad" in result["confirmation"]
+
+
+def test_near_copy_filter_can_be_turned_off(tmp_path):
+    frame, matrix, names, spec = wide_data()
+    result = select_features(frame, matrix, names, spec, selection_end="2023-06-30",
+        confirmation_start="2023-07-08", n_min=6, min_train_periods=1, capacity="screen", near_copy=None)
+    assert result["near_copy_rejections"] == {} and result["confirmation"]["broad"]["features"] == 8
+
+
+def test_admission_separates_information_from_extra_inputs(tmp_path):
+    from src.modelling.selection import admit_features
+    frame, matrix, names, spec = wide_data()
+    good = admit_features(frame, matrix, names, spec, ["second"], start="2023-07-08", min_train_periods=1,
+                          output=tmp_path)
+    assert good["with_candidates_vs_twin"]["mean"] < -0.02 and good["with_candidates_vs_baseline"]["mean"] < -0.02
+    assert (tmp_path / "admission.json").exists()
+    noise = admit_features(frame, matrix, names, spec, ["n1", "n2"], start="2023-07-08", min_train_periods=1)
+    low, high = noise["with_candidates_vs_twin"]["ci95"]
+    assert low < 0 < high                                  # noise is no better than its shuffled twin
+    assert good["with_candidates_vs_twin"]["ci95"][1] < 0  # a real signal is
+    with pytest.raises(ValueError, match="new inputs"):
+        admit_features(frame, matrix, names, spec, ["first"], start="2023-07-08", min_train_periods=1)

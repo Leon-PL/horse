@@ -19,6 +19,10 @@ Protocol, each step a function below:
 
 1. :func:`hygiene_filter` drops, without looking at labels, columns that are
    near-empty, constant or exact duplicates of another column.
+   :func:`near_copy_filter` then keeps one representative of each cluster of
+   near-identical columns, and :func:`permutation_importance` ranks inputs by
+   the loss they prevent on unseen races (both added 12 November 2026 and used
+   by ``src.modelling.selection``).
 2. :func:`run_elimination` performs recursive elimination over expanding,
    purged quarterly folds (:func:`src.wf_eval.expanding_period_folds`). At each
    step every fold's model is fitted on its training window and scored on its
@@ -117,6 +121,92 @@ def hygiene_filter(
         seen[digest] = name
     kept = [name for name in names if name not in reasons]
     return kept, reasons
+
+
+def near_copy_filter(
+    matrix: np.ndarray,
+    names: Sequence[str],
+    *,
+    threshold: float = 0.95,
+    prefer: Sequence[str] = (),
+    rows=None,
+    sample: int = 100_000,
+    seed: int = 0,
+) -> tuple[list[str], dict[str, str]]:
+    """One representative of each cluster of near-identical columns.
+
+    The store holds many versions of one measurement (a rating, the same rating
+    against the field, its z-score, its rank). Recursive elimination splits the
+    credit between them, so a useful family can be dropped piece by piece and
+    the first fits carry hundreds of redundant inputs. This is label-free:
+    columns are ranked, missing values take the middle rank, and a column whose
+    absolute rank correlation with an already-kept column reaches *threshold*
+    is dropped in favour of it. Columns are considered in order of *prefer*,
+    then fewest missing values, then position, so a current model input or the
+    better-covered column represents its cluster.
+    """
+    names = list(names)
+    if matrix.shape[1] != len(names):
+        raise ValueError(f"{matrix.shape[1]} columns but {len(names)} names")
+    if not 0 < threshold <= 1:
+        raise ValueError("threshold must be in (0, 1]")
+    index = np.arange(matrix.shape[0]) if rows is None else np.flatnonzero(rows) if np.asarray(rows).dtype == bool else np.asarray(rows)
+    if len(index) > sample:
+        index = np.sort(np.random.default_rng(seed).choice(index, size=sample, replace=False))
+    z = np.empty((len(index), len(names)), dtype=np.float32)
+    missing = np.empty(len(names))
+    for j in range(len(names)):
+        column = np.asarray(matrix[:, j], dtype=np.float64)[index]
+        finite = np.isfinite(column)
+        missing[j] = 1 - finite.mean()
+        ranks = np.full(len(column), (finite.sum() + 1) / 2.0)
+        if finite.any():
+            ranks[finite] = pd.Series(column[finite]).rank().to_numpy()
+        ranks -= ranks.mean()
+        scale = np.sqrt(np.square(ranks).sum())
+        z[:, j] = ranks / scale if scale > 0 else 0.0
+    preferred = {name: i for i, name in enumerate(prefer)}
+    order = sorted(range(len(names)), key=lambda i: (preferred.get(names[i], len(preferred)), missing[i], i))
+    kept: list[int] = []
+    reasons: dict[str, str] = {}
+    for i in order:
+        if kept:
+            r = np.abs(z[:, kept].T @ z[:, i])
+            best = int(np.argmax(r))
+            if r[best] >= threshold:
+                reasons[names[i]] = f"near-copy of {names[kept[best]]} (|rank r| {float(r[best]):.3f})"
+                continue
+        kept.append(i)
+    chosen = set(kept)
+    return [name for i, name in enumerate(names) if i in chosen], reasons
+
+
+def permutation_importance(predict: Callable[[np.ndarray], np.ndarray], x: np.ndarray, won, groups,
+                           *, seed: int = 0) -> np.ndarray:
+    """Rise in race log loss when each column of *x* is shuffled across runners.
+
+    Mean |SHAP| measures how much a model leans on an input; this measures what
+    the forecast loses without it, on races the model has not seen. A value at
+    or below zero means the input did not help there. *predict(x)* must return
+    race-normalised win probabilities for the rows of *x*.
+    """
+    won = np.asarray(won, dtype=np.float64)
+    starts = np.r_[0, np.cumsum(groups)[:-1]]
+
+    def loss(matrix):
+        p = np.clip(np.asarray(predict(matrix), dtype=np.float64), 1e-12, None)
+        return float((-np.add.reduceat(won * np.log(p), starts)).mean())
+
+    base = loss(x)
+    rng = np.random.default_rng(seed)
+    out = np.zeros(x.shape[1])
+    work = np.array(x, copy=True)
+    for j in range(x.shape[1]):
+        original = work[:, j].copy()
+        work[:, j] = original[rng.permutation(len(original))]
+        out[j] = loss(work) - base
+        work[:, j] = original
+    return out
 
 
 # ---------------------------------------------------------------- scoring --

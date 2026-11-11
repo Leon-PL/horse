@@ -164,8 +164,30 @@ The dates above reproduce the broad historical research separation, not a fresh
 independent test. The gap also applies between selection labels and the first
 confirmation race. Confirmation may therefore omit the first days of a quarter.
 
-Hygiene uses earlier rows only and reads one column at a time. Recursive
-elimination uses held-out SHAP shares and the paired date-clustered one-SE rule.
+Hygiene uses earlier rows only and reads one column at a time. After it, one
+representative is kept of each cluster of near-identical columns (absolute rank
+correlation of 0.95 or more on earlier rows; `--near-copy 0` keeps them all).
+A current model input, then the better-covered column, represents its cluster.
+The store holds many versions of one measurement, and elimination otherwise
+splits their credit and carries hundreds of redundant inputs through its first
+fits.
+
+Recursive elimination uses the paired date-clustered one-SE rule. Inputs are
+ranked on each fold's unseen races, by `--importance`:
+
+- `shap`: each input's share of the model's mean absolute contribution. Cheap;
+  it measures how much the model leans on an input.
+- `permutation`: the rise in race log loss when the input is shuffled across
+  the fold's latest 1,500 races. It measures what the forecast loses without
+  the input, and costs one prediction pass per input per fold.
+- `auto` (default): SHAP share while more than `--permutation-below` (150)
+  inputs remain, the loss prevented after that, where the choice is made.
+
+`--confirm-capacity native` repeats the baseline and selected arms at native
+capacity after a screen-capacity selection. A 400-tree fit can favour inputs
+that only make up for the capacity it lacks
+(`docs/research/ERROR_ANATOMY_2026-11-10.md`, sections 5 and 10), so a list
+chosen at screen capacity should not be adopted on screen figures alone.
 Every subset uses the same explicit `WinModel` learner/calibration recipe.
 Confirmation compares the frozen selected list, the baseline and the broad
 hygiene-kept universe on identical races; it does not change the choice.
@@ -174,6 +196,19 @@ contains `selected_features.txt`, a resolved `selected_spec.json`, hygiene
 rejections, the selection path and paired confirmation differences. Repeat
 confirmation at native capacity before adopting a list selected at screen
 capacity. Feature selection is deliberate, not a hidden step on routine refits.
+
+To test new columns without repeating the elimination, ask whether adding them
+to a recipe helps:
+
+```powershell
+.venv\Scripts\python.exe -m src.modelling admit --prepared data/research/meta_learner/selection_matrix --candidates hidden_form_wins hidden_form_best --from 2025-07-08 --capacity screen --threads 2 --output data/research/meta_learner/admit_hidden_form
+```
+
+It fits three arms on the folds from that date: the recipe, the recipe with the
+candidates, and a twin with the candidates shuffled within each quarter. The
+real arm against the twin is what the candidates' information is worth; the
+twin against the recipe is what extra inputs do by themselves. `--candidates`
+also takes one text file of names. Nothing is added to any list.
 
 ## Candidate fitting and saved runs
 

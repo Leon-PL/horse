@@ -167,3 +167,42 @@ def test_native_capacity_early_stops_then_refits_on_every_row(monkeypatch):
                              targets.race_dates[rows], capacity="native", n_jobs=1)
     assert model.n_estimators <= 80
     assert model.predict_proba(x).shape == (len(rows), 2)
+
+
+def test_near_copy_filter_keeps_one_of_each_cluster_and_prefers_named_inputs():
+    rng = np.random.default_rng(3)
+    a, b = rng.normal(size=(2, 4000))
+    monotone = np.exp(a)                       # same ranks as a
+    noisy = a + rng.normal(scale=.05, size=4000)
+    sparse = np.where(rng.random(4000) < .6, np.nan, a)   # mostly missing: not a copy
+    matrix = np.column_stack([a, monotone, b, noisy, -a, sparse])
+    names = ["a", "a_exp", "b", "a_noisy", "a_negated", "a_sparse"]
+    kept, reasons = fs.near_copy_filter(matrix, names, threshold=.95)
+    assert kept == ["a", "b", "a_sparse"]
+    assert set(reasons) == {"a_exp", "a_noisy", "a_negated"} and all("near-copy of a " in r for r in reasons.values())
+    kept, reasons = fs.near_copy_filter(matrix, names, threshold=.95, prefer=["a_noisy"])
+    assert kept == ["b", "a_noisy", "a_sparse"] and "near-copy of a_noisy" in reasons["a"]
+    # Chosen from the given rows only.
+    early = np.arange(4000) < 2000
+    late_only = np.where(early, 0., a)
+    kept, _ = fs.near_copy_filter(np.column_stack([a, late_only]), ["a", "late_copy"], rows=early)
+    assert kept == ["a", "late_copy"]
+
+
+def test_permutation_importance_finds_what_the_forecast_needs():
+    rng = np.random.default_rng(5)
+    groups = np.full(300, 6)
+    x = rng.normal(size=(1800, 3))
+    strength = 1.5 * x[:, 0]
+    race = np.repeat(np.arange(300), 6)
+    score = pd.Series(strength + rng.gumbel(size=1800))
+    won = (score.groupby(race).transform("max") == score).to_numpy().astype(float)
+
+    def predict(m):
+        # A forecaster that uses column 0 properly, leans on column 1 for nothing useful, ignores column 2.
+        raw = np.exp(1.5 * m[:, 0] + 0.0 * m[:, 1])
+        return fs.race_normalise(raw, groups)
+
+    importance = fs.permutation_importance(predict, x, won, groups, seed=1)
+    assert importance[0] > 0.2 and importance[1] == 0 and importance[2] == 0
+    np.testing.assert_array_equal(importance, fs.permutation_importance(predict, x, won, groups, seed=1))
