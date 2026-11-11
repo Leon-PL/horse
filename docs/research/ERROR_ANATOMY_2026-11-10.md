@@ -704,7 +704,7 @@ to finish, best, mean and latest figure, against the field).
 |---|---:|---:|---:|
 | Prices, rows from 2022Q3 | −0.00057 [−0.00089, −0.00027] | −0.00059 | 4/4 |
 | Prices, 2022Q3, more capacity | −0.00068 [−0.00113, −0.00027] | −0.00066 | 4/4 |
-| Added to the eight-group stack | −0.00032 (1.81307 to 1.81275), weight 0.4–1.2 | | |
+| Added to the eight-group stack | −0.00032 (1.81307 to 1.81276), weight 0.4–1.2 | | |
 | On the native 2025Q3 forecast | −0.00020 [−0.00069, +0.00024] | | |
 
 Small, consistent, and from data already held. It needs no forecast history,
