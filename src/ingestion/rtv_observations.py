@@ -31,7 +31,7 @@ def _read_columns(path, columns):
     return pd.read_parquet(path, columns=[c for c in columns if c in schema])
 
 
-def observation_tables(start, end, *, source_root=None, names=None, manifest=None):
+def observation_tables(start, end, *, source_root=None, names=None, manifest=None, column_overrides=None):
     root = Path(source_root or Path(config.DATA_DIR)/"rtv_cache")
     overrides = accepted_days(root, manifest=manifest)
     overrides = {d: v for d, v in overrides.items() if start <= d <= end}
@@ -45,6 +45,7 @@ def observation_tables(start, end, *, source_root=None, names=None, manifest=Non
         "sectionals": ["race_id", "runner_id", "sector_number", "sector_time", "sector_length_yards", "sector_position",
             "cumulative_sector_time"],
         "quality_flags": ["race_id", "runner_id", "check", "severity"]}
+    columns.update(column_overrides or {})
     columns = {name: cols for name, cols in columns.items() if names is None or name in names or name == "races"}
     parts = {name: [] for name in columns}
     seen = set()
@@ -67,6 +68,63 @@ def observation_tables(start, end, *, source_root=None, names=None, manifest=Non
     if "sectionals" in tables:
         tables["sectionals"] = tables["sectionals"].rename(columns={"sector_position": "race_position"})
     return tables
+
+
+RIDER_CLAIM_COLUMNS = (
+    "race_id", "horse_id", "race_date", "rtv_race_id", "rtv_runner_id",
+    "rider_name", "rider_weight_lbs", "rider_claim_lbs",
+)
+
+
+def historical_rider_claims(canonical, *, source_root=None):
+    """Publish a historical claim only when the archived card and result agree."""
+    from src.feature_semantics import claim_pounds, rider_name_key
+
+    columns = ["race_id", "horse_id", "race_date", "track", "off_time", "horse_name", "jockey", "weight_lbs"]
+    empty = pd.DataFrame(columns=RIDER_CLAIM_COLUMNS)
+    if canonical.empty or not set(columns).issubset(canonical):
+        return empty
+    runner_cols = [
+        "race_id", "runner_id", "horse_name", "in_results", "in_racecard", "is_nonrunner",
+        "res_jockey_name", "res_jockey__name", "res_jockey__id", "card_jockey_id",
+        "card_jockey_name", "card_jockey__name", "res_apprentice_claim", "card_apprentice_claim", "weight_lbs",
+    ]
+    race_cols = ["race_id", "race_date", "track_name", "off_time_utc", "is_abandoned", "is_arab_race"]
+    dates = pd.to_datetime(canonical.race_date).dt.strftime("%Y-%m-%d")
+    tables = observation_tables(dates.min(), dates.max(), source_root=source_root, names=("runners",),
+                                column_overrides={"races": race_cols, "runners": runner_cols})
+    races = tables["races"]
+    runners = tables["runners"].reindex(columns=runner_cols)
+    runners = runners.loc[runners.in_results.eq(True) & ~runners.is_nonrunner.fillna(False)]
+    links = match_runners(races, runners, canonical[columns[:6]])
+    if links.empty:
+        return empty
+    detail = canonical[["race_id", "horse_id", "jockey", "weight_lbs"]].rename(columns={
+        "race_id": "sl_race_id", "horse_id": "sl_horse_id", "weight_lbs": "declared_weight"})
+    detail = detail.loc[~detail.duplicated(["sl_race_id", "sl_horse_id"], keep=False)]
+    linked = links.merge(runners, left_on=["rtv_race_id", "rtv_runner_id"], right_on=["race_id", "runner_id"],
+                         validate="one_to_one").merge(detail, on=["sl_race_id", "sl_horse_id"], validate="many_to_one")
+    declared = pd.to_numeric(linked.declared_weight, errors="coerce")
+    rtv_weight = pd.to_numeric(linked.weight_lbs, errors="coerce")
+    claim = claim_pounds(linked.res_apprentice_claim)
+    card_claim = claim_pounds(linked.card_apprentice_claim)
+    jockey = rider_name_key(linked.jockey)
+    same_result_rider = jockey.eq(rider_name_key(linked.res_jockey_name)) | jockey.eq(rider_name_key(linked.res_jockey__name))
+    same_card_rider = jockey.eq(rider_name_key(linked.card_jockey_name)) | jockey.eq(rider_name_key(linked.card_jockey__name))
+    result_id = pd.to_numeric(linked.res_jockey__id, errors="coerce").where(lambda ids: ids.gt(0))
+    card_id = pd.to_numeric(linked.card_jockey_id, errors="coerce").where(lambda ids: ids.gt(0))
+    known_ids = result_id.notna() & card_id.notna()
+    same_card_rider = same_card_rider.where(~known_ids, result_id.eq(card_id))
+    valid = (linked.in_racecard.eq(True) & jockey.notna() & same_result_rider & same_card_rider
+             & claim.notna() & claim.eq(card_claim) & declared.between(50, 220)
+             & (rtv_weight.eq(declared) | rtv_weight.eq(declared - claim)))
+    result = linked.assign(rider_name=jockey, rider_weight_lbs=declared, rider_claim_lbs=claim)
+    result = result.loc[valid, ["sl_race_id", "sl_horse_id", *RIDER_CLAIM_COLUMNS[2:]]].rename(
+        columns={"sl_race_id": "race_id", "sl_horse_id": "horse_id"})
+    keys = ["race_id", "horse_id"]
+    result = result.loc[result[keys].notna().all(axis=1) & ~result.duplicated(keys, keep=False)]
+    result[keys] = result[keys].astype("string").replace(r"\.0$", "", regex=True)
+    return result.sort_values(["race_date", *keys], kind="stable").reset_index(drop=True)
 
 
 def time_par(*, source_root=None):
@@ -290,6 +348,40 @@ def _snapshot_text(frame):
     return output
 
 
+PRE_CAPTURE_KEYS = ["race_date", "track_key", "off_key", "horse_key", "observed_at"]
+
+
+def _snapshot_identity(frame, horse_name):
+    pieces = frame.race_key.str.split("/", expand=True)
+    local = pieces[0] + " " + pieces[2].str[:2] + ":" + pieces[2].str[2:]
+    off = pd.to_datetime(local).dt.tz_localize("Europe/London").dt.tz_convert("UTC")
+    identity = pd.DataFrame({
+        "race_date": pieces[0], "track_key": pieces[1].str.replace("-", " ").map(canonical_track_key),
+        "horse_key": frame[horse_name].map(normalise_horse_key),
+        "observed_at": pd.to_datetime(frame.fetched_at, utc=True), "off_key": off.dt.strftime("%H:%M"),
+    })
+    return identity, off
+
+
+def _rider_capture_rows(frame, identity, eligible):
+    from src.feature_semantics import claim_pounds, rider_name_key
+
+    claim = frame.reindex(columns=["card_jockey_name", "card_format_weight", "card_apprentice_claim",
+                                   "card_withdrawn", "card_reserve", "card_status__state"])
+    active = (~claim.card_withdrawn.eq(True) & ~claim.card_reserve.eq(True)
+              & ~claim.card_status__state.isin(["scratched", "withdrawn", "non_runner", "nonrunner", "reserve"]))
+    captures = identity[PRE_CAPTURE_KEYS].assign(
+        rider_card_observed=1,
+        rider_name=rider_name_key(claim.card_jockey_name),
+        rider_weight_lbs=claim.card_format_weight.map(rtv.parse_weight_lbs),
+        rider_claim_lbs=claim_pounds(claim.card_apprentice_claim).where(active),
+    ).loc[eligible].drop_duplicates()
+    # Conflicting captures retain their timestamp but provide no rider claim.
+    fields = list(features.RIDER_CLAIM_SNAPSHOT_COLUMNS[1:])
+    captures.loc[captures.duplicated(PRE_CAPTURE_KEYS, keep=False), fields] = np.nan
+    return captures.drop_duplicates(PRE_CAPTURE_KEYS)
+
+
 def refresh_pre_observations(day=None, *, raw_path=None, destination=None):
     store = rtv.RawStore(str(raw_path or Path(config.DATA_DIR)/"rtv_cache/rtv_raw.sqlite"))
     try:
@@ -297,6 +389,7 @@ def refresh_pre_observations(day=None, *, raw_path=None, destination=None):
     finally:
         store.close()
     observations = []
+    claim_observations = pd.DataFrame()
 
     def card(frame):
         values = features.card_values(frame)
@@ -314,18 +407,12 @@ def refresh_pre_observations(day=None, *, raw_path=None, destination=None):
         frame = tables[table]
         if frame.empty:
             continue
-        pieces = frame.race_key.str.split("/", expand=True)
-        out = pd.DataFrame({"race_date": pieces[0], "track_key": pieces[1].str.replace("-", " ").map(canonical_track_key),
-            "horse_key": frame[horse_name].map(normalise_horse_key),
-            "observed_at": pd.to_datetime(frame.fetched_at, utc=True)})
-        local = pieces[0]+" "+pieces[2].str[:2]+":"+pieces[2].str[2:]
-        off = pd.to_datetime(local).dt.tz_localize("Europe/London").dt.tz_convert("UTC")
-        out["off_key"] = off.dt.strftime("%H:%M")
+        out, off = _snapshot_identity(frame, horse_name)
         out = pd.concat([out, values(frame).reindex(columns=list(features.SNAPSHOT_FEATURES))], axis=1)
-        # Captures made after the intended five-minute forecast decision cannot
-        # become pre-race observations for that race.
-        out = out.loc[out.observed_at.le(off-pd.Timedelta(minutes=5))]
-        observations.append(out)
+        eligible = out.observed_at.le(off-pd.Timedelta(minutes=5))
+        if table == "pre_runners":
+            claim_observations = _rider_capture_rows(frame, out, eligible)
+        observations.append(out.loc[eligible])
     keys = ["race_date", "track_key", "off_key", "horse_key"]
     snapshot = list(features.SNAPSHOT_FEATURES)
     output = pd.concat(observations, ignore_index=True) if observations else pd.DataFrame(columns=keys+["observed_at", *snapshot])
@@ -335,6 +422,8 @@ def refresh_pre_observations(day=None, *, raw_path=None, destination=None):
         output = output.groupby(keys+["observed_at"], as_index=False)[snapshot].first()
         output = output.sort_values("observed_at", kind="stable")
         output[snapshot] = output.groupby(keys)[snapshot].ffill()
+    if not claim_observations.empty:
+        output = output.merge(claim_observations, on=PRE_CAPTURE_KEYS, how="left", validate="one_to_one")
     path = Path(destination or native_path("pre"))
     if day and path.exists():
         previous = pd.read_parquet(path)

@@ -241,3 +241,30 @@ def test_card_fingerprint_covers_the_race_date_itself(publish_dataset):
     cards.loc[0, "rtv_card_tf_rating"] = 99.
     select_rtv(publish_dataset, cards=cards)
     assert rtv_cache_signature("2025-01-10") != first
+
+
+
+def test_rider_claims_keep_explicit_zero_and_require_predecision_evidence(monkeypatch):
+    frame = pd.DataFrame({
+        "race_id": ["past"] * 3 + ["live"] * 4, "horse_id": range(1, 8),
+        "race_date": "2026-01-03", "off_time": "13:00", "jockey": "J. Doe", "weight_lbs": 140,
+        "finish_position": [1, 2, 0, 0, 0, 0, 0],
+        "reported_jockey_claim_lbs": [None, 5, None, None, None, None, None],
+        "prediction_as_of": "2026-01-03T12:50:00Z",
+    })
+    history = pd.DataFrame({
+        "race_id": ["past", "past", "past", "live"], "horse_id": ["1", "2", "3", "7"],
+        "race_date": "2026-01-03", "rider_name": "j doe", "rider_weight_lbs": 140,
+        "rider_claim_lbs": [0, 7, 3, 5],
+    })
+    pre = linked_snapshots(["live"] * 5, ["4", "4", "5", "6", "6"], [
+        "2026-01-03T12:45:00Z", "2026-01-03T12:53:00Z", "2026-01-03T12:51:00Z",
+        "2026-01-03T12:45:00Z", "2026-01-03T12:46:00Z"])
+    pre = pre.assign(rider_card_observed=1, rider_name=["j doe"] * 4 + ["s changed"],
+                     rider_weight_lbs=140, rider_claim_lbs=[5, 7, 3, 5, 5])
+    monkeypatch.setattr("src.source_dataset.read_table",
+                        lambda provider, table, **kwargs: (history if table == "rider_claims" else pre).copy())
+    result = rtv.add_rider_claims(frame)
+    np.testing.assert_allclose(result.reported_jockey_claim_lbs,
+                               [0, np.nan, 3, 5, np.nan, np.nan, np.nan], equal_nan=True)
+    pd.testing.assert_series_equal(frame.weight_lbs, result.weight_lbs)

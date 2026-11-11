@@ -235,7 +235,8 @@ FEATURE_CORR_THRESHOLD = 0.95
 # same features as research runs. New experimental lists can still be supplied
 # here explicitly. win_selected_056.txt is that list plus the three Timeform
 # comment-score inputs (src/rtv_text.py, experiment 052).
-FEATURE_ALLOWLIST = os.path.join(BASE_DIR, "feature_sets", "win_selected_056.txt")
+# The current training recipe adds reported rider claims and race-title eligibility.
+FEATURE_ALLOWLIST = os.path.join(BASE_DIR, "feature_sets", "win_with_rider_context.txt")
 
 # BHA retrospective feature availability: an explicit assumption, not a claim
 # that the original publication/revision timestamp was captured. Raw source

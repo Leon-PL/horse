@@ -2,7 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.feature_semantics import class_number, history_coverage_features, jumps_mask, normalise_going, observed_rating
+from src.feature_semantics import (class_number, history_coverage_features, jumps_mask, normalise_going,
+                                   observed_rating, rider_restriction_features)
 from src.data_processor import _GOING_MAP
 
 
@@ -55,3 +56,35 @@ def test_unseen_experience_and_contradictory_recency_are_distinguished():
     assert out.source_shows_intervening_run.tolist() == [0, 0, 1, 0, 0]
     assert out.source_recency_conflict.tolist() == [0, 0, 0, 1, 0]
     pd.testing.assert_frame_equal(out, history_coverage_features(frame.assign(won=1, finish_position=1)))
+
+
+
+def test_rider_restrictions_use_the_race_title_for_every_runner():
+    frame = pd.DataFrame({
+        "race_id": [1, 1, 2, 3, 4, 5, 6, 7, 8],
+        "race_name": ["Connacht Hotel (Q.R.) Handicap", None, "NH Flat Race (Amateurs/Conditionals)",
+                      "Mares' Handicap Hurdle (CJs' & Amateurs)", "Claiming Stakes",
+                      "John Mabbs Amateur Night In Cairo EBF Maiden Stakes", "",
+                      "Amateur Riders' Handicap", "Conditional Jockeys’ Handicap"],
+    })
+    flags = rider_restriction_features(frame)
+    np.testing.assert_allclose(flags.race_amateur_riders, [1, 1, 1, 1, 0, 0, np.nan, 1, 0])
+    np.testing.assert_allclose(flags.race_conditional_jockeys, [0, 0, 1, 1, 0, 0, np.nan, 0, 1])
+    np.testing.assert_allclose(flags.race_apprentice_jockeys, [0, 0, 0, 0, 0, 0, np.nan, 0, 0])
+
+
+
+def test_amateur_restrictions_account_for_race_conditions_and_date():
+    frame = pd.DataFrame({
+        "race_id": range(7),
+        "race_date": ["2025-03-14", "2021-03-19", "2021-03-19", "2021-01-18",
+                      "2024-03-12", "2025-03-11", "2026-03-12"],
+        "track": ["Cheltenham", "Cheltenham", "Downpatrick", "Kempton",
+                  "Cheltenham", "Cheltenham", "Cheltenham"],
+        "race_name": ["Festival Open Hunters' Chase", "Festival Open Hunters' Chase",
+                      "Open Hunters' Chase", "Amateur Jockeys' Handicap",
+                      "National Hunt Challenge Cup Novices' Chase",
+                      "National Hunt Challenge Cup Novices' Handicap Chase",
+                      "Fulke Walwyn Kim Muir Challenge Cup Handicap Chase"],
+    })
+    assert rider_restriction_features(frame).race_amateur_riders.tolist() == [1, 0, 1, 0, 1, 0, 1]

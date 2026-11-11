@@ -393,50 +393,100 @@ def add_history_features(frame, *, runs=None):
     return rtv_text.replaced_columns(frame, FEATURES, output)
 
 
-def add_pre_race_features(frame, *, observations=None, as_of=None):
-    """The latest snapshot captured before each runner's decision cutoff.
+RIDER_CLAIM_SNAPSHOT_COLUMNS = (
+    "rider_card_observed", "rider_name", "rider_weight_lbs", "rider_claim_lbs",
+)
 
-    Snapshots join by their saved canonical race and horse IDs only. Ambiguous
-    or unmatched snapshots, and rows without IDs, supply nothing.
-    """
-    output = pd.DataFrame(np.nan, index=pd.RangeIndex(len(frame)), columns=SNAPSHOT_FEATURES)
+
+def _latest_pre_race_rows(frame, observations, *, as_of=None):
+    """Join only the latest eligible, unambiguous snapshot to each runner."""
+    keys = ["sl_race_id", "sl_horse_id"]
+    required = {"race_id", "horse_id", "off_time", "race_date"}
+    if observations.empty or not required.issubset(frame):
+        return pd.DataFrame()
+    if not {*keys, "match_status"}.issubset(observations):
+        raise ValueError("RTV snapshots must carry their canonical links (sl_race_id, sl_horse_id, match_status)")
+    observations = observations.loc[observations.match_status.eq("matched")].copy()
+    for key in keys:
+        observations[key] = observations[key].astype("string").str.replace(r"\.0$", "", regex=True)
+    target = pd.DataFrame({
+        "_row": np.arange(len(frame)),
+        "sl_race_id": frame.race_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy(),
+        "sl_horse_id": frame.horse_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy(),
+    }).astype(dict.fromkeys(keys, "string"))
+    day = pd.to_datetime(frame.race_date).dt.strftime("%Y-%m-%d")
+    off = frame.off_time.map(normalise_off_time_key)
+    cutoff = pd.to_datetime(day + " " + off, utc=True, errors="coerce") - pd.Timedelta(minutes=5)
+    if "prediction_as_of" in frame:
+        moment = pd.to_datetime(frame.prediction_as_of, utc=True, errors="raise")
+        cutoff = cutoff.mask(cutoff.gt(moment), moment)
+    ceiling = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.now(tz="UTC")
+    if ceiling.tzinfo is None:
+        raise ValueError("RTV snapshot cutoff must include a timezone")
+    target["_cutoff"] = cutoff.clip(upper=ceiling).array
+    observations["observed_at"] = pd.to_datetime(observations.observed_at, utc=True, errors="raise")
+    observations = observations.loc[~observations.duplicated(keys + ["observed_at"], keep=False)]
+    target = target.loc[target._cutoff.notna() & ~target.duplicated(keys, keep=False)]
+    return pd.merge_asof(target.sort_values("_cutoff"), observations.sort_values("observed_at"),
+                         left_on="_cutoff", right_on="observed_at", by=keys, direction="backward")
+
+
+def add_pre_race_features(frame, *, observations=None, as_of=None):
+    """Use the latest snapshot captured before each runner's decision cutoff."""
     if observations is None:
         from src.source_dataset import read_table
         observations = read_table("rtv", "pre", linked=True)
-    else:
-        observations = observations.copy()
-    keys = ["sl_race_id", "sl_horse_id"]
-    if not observations.empty and not {*keys, "match_status"}.issubset(observations):
-        raise ValueError("RTV snapshots must carry their canonical links (sl_race_id, sl_horse_id, match_status)")
-    required = {"race_id", "horse_id", "off_time", "race_date"}
-    if not observations.empty and required.issubset(frame):
-        observations = observations.loc[observations.match_status.eq("matched")].copy()
-        for key in keys:
-            # Saved links may come back as object or pandas string columns.
-            observations[key] = observations[key].astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
-        target = pd.DataFrame({"_row": np.arange(len(frame))})
-        target["race_date"] = pd.to_datetime(frame.race_date).dt.strftime("%Y-%m-%d").to_numpy()
-        target["off_key"] = frame.off_time.map(normalise_off_time_key).to_numpy()
-        target["sl_race_id"] = frame.race_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
-        target["sl_horse_id"] = frame.horse_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()
-        cutoff = pd.to_datetime(target.race_date+" "+target.off_key, utc=True, errors="coerce")-pd.Timedelta(minutes=5)
-        if "prediction_as_of" in frame:
-            moment = pd.to_datetime(frame.prediction_as_of, utc=True, errors="raise").reset_index(drop=True)
-            cutoff = cutoff.where(cutoff.le(moment), moment)
-        ceiling = pd.Timestamp(as_of) if as_of is not None else pd.Timestamp.now(tz="UTC")
-        if ceiling.tzinfo is None:
-            raise ValueError("RTV snapshot cutoff must include a timezone")
-        target["_cutoff"] = cutoff.where(cutoff.le(ceiling), ceiling)
-        observations["observed_at"] = pd.to_datetime(observations.observed_at, utc=True, errors="raise")
-        observations = observations.loc[~observations.duplicated(keys+["observed_at"], keep=False)]
-        target = target.loc[target._cutoff.notna() & ~target.duplicated(keys,keep=False)]
-        joined = pd.merge_asof(target.sort_values("_cutoff"), observations.sort_values("observed_at"),
-            left_on="_cutoff", right_on="observed_at", by=keys, direction="backward")
-        # Files written before the card family existed simply lack its columns.
-        output.loc[joined._row, list(SNAPSHOT_FEATURES)] = joined.reindex(columns=list(SNAPSHOT_FEATURES)).to_numpy(
-            dtype="float64", na_value=np.nan)
+    joined = _latest_pre_race_rows(frame, observations, as_of=as_of)
+    output = pd.DataFrame(np.nan, index=pd.RangeIndex(len(frame)), columns=SNAPSHOT_FEATURES)
+    if not joined.empty:
+        output.loc[joined._row, list(SNAPSHOT_FEATURES)] = joined.reindex(
+            columns=list(SNAPSHOT_FEATURES)).to_numpy(dtype="float64", na_value=np.nan)
     output.index = frame.index
     return rtv_text.replaced_columns(frame, SNAPSHOT_FEATURES, output)
+
+
+def add_rider_claims(frame):
+    """Resolve per-runner claims from accepted, rider-matched evidence."""
+    required = {"race_id", "horse_id", "race_date", "jockey", "weight_lbs", "finish_position"}
+    if not required.issubset(frame) or frame.empty:
+        return frame
+    from src.feature_semantics import claim_pounds, rider_name_key
+    from src.source_dataset import read_table
+
+    explicit = claim_pounds(frame.get("reported_jockey_claim_lbs", pd.Series(np.nan, index=frame.index)))
+    fallback = pd.Series(np.nan, index=pd.RangeIndex(len(frame)))
+    jockey = rider_name_key(frame.jockey).reset_index(drop=True)
+    weight = pd.to_numeric(frame.weight_lbs, errors="coerce").reset_index(drop=True)
+    settled = pd.to_numeric(frame.finish_position, errors="coerce").gt(0).groupby(
+        frame.race_id, sort=False).transform("any").fillna(False).to_numpy(dtype=bool)
+    if settled.any():
+        history = read_table("rtv", "rider_claims")
+        if not history.empty:
+            keys = ["race_id", "horse_id", "race_date"]
+            target = frame.loc[settled, keys].copy()
+            target["_row"] = np.flatnonzero(settled)
+            for key in keys[:2]:
+                target[key] = target[key].astype("string").str.replace(r"\.0$", "", regex=True)
+                history[key] = history[key].astype("string")
+            target["race_date"] = pd.to_datetime(target.race_date).dt.strftime("%Y-%m-%d")
+            matched = target.merge(history, on=keys, validate="many_to_one")
+            rows = matched._row.to_numpy()
+            valid = (matched.rider_name.eq(jockey.iloc[rows].array) &
+                     matched.rider_weight_lbs.eq(weight.iloc[rows].array))
+            fallback.iloc[rows] = claim_pounds(matched.rider_claim_lbs).where(valid).to_numpy()
+    if (~settled).any():
+        pre = read_table("rtv", "pre", linked=True)
+        if not pre.empty and set(RIDER_CLAIM_SNAPSHOT_COLUMNS).issubset(pre):
+            positions = np.flatnonzero(~settled)
+            joined = _latest_pre_race_rows(frame.iloc[positions], pre.loc[pre.rider_card_observed.eq(1)])
+            if not joined.empty:
+                rows = positions[joined._row.to_numpy()]
+                valid = (joined.rider_name.eq(jockey.iloc[rows].array) &
+                         joined.rider_weight_lbs.eq(weight.iloc[rows].array))
+                fallback.iloc[rows] = claim_pounds(joined.rider_claim_lbs).where(valid).to_numpy()
+    fallback.index = frame.index
+    conflict = explicit.notna() & fallback.notna() & explicit.ne(fallback)
+    return frame.assign(reported_jockey_claim_lbs=explicit.fillna(fallback).mask(conflict))
 
 
 def _card_table(cards):

@@ -208,6 +208,30 @@ def publish_atr(canonical, *, rebuild_root=None):
     return receipt
 
 
+def publish_rtv(canonical, identity_reference=None):
+    """Publish Racing TV history and pre-race observations against canonical runners."""
+    from src.ingestion.rtv_observations import RIDER_CLAIM_COLUMNS, historical_rider_claims
+    from src.ingestion.rtv_storage import FEATURE_TABLES, native_path, pin_generation
+
+    reference = canonical if identity_reference is None else identity_reference
+    claims = historical_rider_claims(canonical)
+    tables, contracts = {}, {}
+    with pin_generation():
+        paths = {name: native_path(name) for name in FEATURE_TABLES}
+    for name, path in paths.items():
+        if path.exists():
+            tables[name] = pd.read_parquet(path)
+            snapshot = name == "pre"
+            required = ("race_date", "track_key", "off_key", "horse_key", "observed_at") if snapshot else ("race_id", "horse_id")
+            contracts[name] = TableContract("runner snapshot" if snapshot else "runner", required,
+                role="snapshot" if snapshot else "history", delay_hours=48 if name == "runs" else 0)
+    if not claims.empty:
+        tables["rider_claims"] = claims
+        contracts["rider_claims"] = TableContract("canonical runner", RIDER_CLAIM_COLUMNS,
+                                                   ("race_id", "horse_id"), role="context")
+    return _publish("rtv", tables, contracts, reference, eligible=len(reference))
+
+
 def capture_sources(*, include_prices=False, canonical_cards=None):
     """Adopt accepted native stores into one immutable consumer boundary."""
     canonical, pedigree, revision = canonical_snapshot()
@@ -229,20 +253,8 @@ def capture_sources(*, include_prices=False, canonical_cards=None):
         {"races": TableContract("race", ("race_id", "race_date"), ("race_id",), role="research")}, canonical)
     sources["bha"] = _adopt("bha", lambda: publish_bha(canonical))
     sources["atr"] = _adopt("atr", lambda: publish_atr(canonical), canonical=canonical)
-    from src.ingestion.rtv_storage import FEATURE_TABLES, native_path, pin_generation
-    with pin_generation():
-        paths = {name: native_path(name) for name in FEATURE_TABLES}
-    def publish_rtv():
-        tables, contracts = {}, {}
-        for name, path in paths.items():
-            if path.exists():
-                tables[name] = pd.read_parquet(path)
-                snapshot = name == "pre"
-                required = ("race_date", "track_key", "off_key", "horse_key", "observed_at") if snapshot else ("race_id", "horse_id")
-                contracts[name] = TableContract("runner snapshot" if snapshot else "runner", required,
-                    role="snapshot" if snapshot else "history", delay_hours=48 if name == "runs" else 0)
-        return _publish("rtv", tables, contracts, identity_reference, eligible=len(identity_reference))
-    sources["rtv"] = _adopt("rtv", publish_rtv, canonical=identity_reference)
+    sources["rtv"] = _adopt("rtv", lambda: publish_rtv(canonical, identity_reference),
+                            canonical=identity_reference)
     from src.ingestion.fx import reference_paths
     units_path, rates_path = reference_paths()
     def publish_fx():

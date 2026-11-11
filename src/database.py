@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS results (
     headgear          TEXT,
     wind_surgery      INTEGER,
     weight_lbs        REAL,
+    reported_jockey_claim_lbs REAL,
     draw              INTEGER,
     form              TEXT,
     days_since_last_run INTEGER,
@@ -218,6 +219,7 @@ def init_db() -> None:
             # (scripts/backfill_wind_surgery.py).
             ("wind_surgery", "INTEGER"),
             ("finish_pos_label", "TEXT"),
+            ("reported_jockey_claim_lbs", "REAL"),
             # No longer collected, but older rows hold it and the history carries it.
             ("opening_odds", "REAL"),
         ]:
@@ -292,7 +294,7 @@ RESULTS_SNAPSHOT_COLUMNS = {
     "dam": "text", "damsire": "text", "weather_temp_max": "real", "weather_temp_min": "real",
     "weather_precip_mm": "real", "weather_wind_kmh": "real",
     "weather_precip_prev3": "real", "opening_odds": "real",
-    "wind_surgery": "real", "finish_pos_label": "text",
+    "wind_surgery": "real", "finish_pos_label": "text", "reported_jockey_claim_lbs": "real",
 }
 
 
@@ -328,7 +330,10 @@ _SNAPSHOT_KINDS = {"text": (_snapshot_text, "string"), "whole": (_snapshot_whole
 def results_snapshot_frame(frame: pd.DataFrame) -> pd.DataFrame:
     """The published history's columns and types, whichever route the rows took."""
     different = set(frame.columns) ^ set(RESULTS_SNAPSHOT_COLUMNS)
-    if different:
+    # Older databases can be published before the next ingestion migrates them.
+    if different == {"reported_jockey_claim_lbs"} and "reported_jockey_claim_lbs" not in frame:
+        frame = frame.assign(reported_jockey_claim_lbs=np.nan)
+    elif different:
         raise ValueError(f"Results columns differ from the declared snapshot: {sorted(different)}")
     return pd.DataFrame({name: _SNAPSHOT_KINDS[kind][0](frame[name])
                          for name, kind in RESULTS_SNAPSHOT_COLUMNS.items()})
@@ -353,19 +358,21 @@ def publish_results_snapshot(*, force=False):
     receipt_path = path.with_suffix(".source.json")
     with _get_conn() as conn:
         conn.execute("BEGIN")
-        database_id, revision = conn.execute("SELECT database_id,revision FROM result_source_state WHERE id=1").fetchone()
+        database_id, revision, columns_hash = conn.execute(
+            "SELECT database_id,revision,columns_hash FROM result_source_state WHERE id=1").fetchone()
         try:
             receipt, stat = read_json(receipt_path), path.stat()
         except (OSError, ValueError):
             receipt, stat = {}, None
         if (not force and stat and receipt.get("database_id") == database_id
-                and receipt.get("revision") == revision and receipt.get("bytes") == stat.st_size
+                and receipt.get("revision") == revision and receipt.get("columns_hash") == columns_hash
+                and receipt.get("bytes") == stat.st_size
                 and receipt.get("mtime_ns") == stat.st_mtime_ns):
             return {**receipt, "state": "cached"}
         frame = pd.read_sql_query("SELECT * FROM results ORDER BY race_date", conn).drop(columns="scraped_at", errors="ignore")
         _export_results_snapshot(frame, str(path))
         stat = path.stat()
-        receipt = {"database_id": database_id, "revision": revision, "rows": len(frame),
+        receipt = {"database_id": database_id, "revision": revision, "columns_hash": columns_hash, "rows": len(frame),
                    "bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns, "path": str(path),
                    "published_at": datetime.now().isoformat()}
         atomic_json(receipt_path, receipt)
@@ -392,7 +399,7 @@ _COLUMNS = [
     "race_name", "race_class", "race_type", "distance_furlongs",
     "going", "prize_money", "num_runners", "horse_name", "horse_id",
     "jockey", "trainer", "age", "sex", "headgear", "wind_surgery",
-    "weight_lbs",
+    "weight_lbs", "reported_jockey_claim_lbs",
     "draw", "form", "days_since_last_run", "odds",
     "official_rating",
     "finish_position", "finish_pos_label", "won", "lengths_behind", "horse_runs",

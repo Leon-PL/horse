@@ -10,6 +10,73 @@ import numpy as np
 import pandas as pd
 
 
+# Historical titles include the abbreviation and a misspelling in mixed races.
+_CONDITIONAL = r"\b(?:conditionals?|conditonals?|cjs?['’]?)"
+_AMATEUR = r"\bamateurs?"
+_RIDER_GROUP_SEPARATOR = r"\s*(?:[/&]|\band\b)\s*"
+_CONDITIONAL_AND_AMATEUR = (
+    _CONDITIONAL + _RIDER_GROUP_SEPARATOR + _AMATEUR + r"\b|"
+    + _AMATEUR + _RIDER_GROUP_SEPARATOR + _CONDITIONAL + r"\b"
+)
+_RIDER_RESTRICTIONS = {
+    "race_conditional_jockeys": r"\bconditionals?\s+(?:jockeys?|riders?)\b|" + _CONDITIONAL_AND_AMATEUR,
+    "race_apprentice_jockeys": (r"\bapprentices?['’]?\s+(?:jockeys?|riders?|handicap|classified|maiden|"
+                                r"claiming|optional|rated|restricted|derby|nursery|training series|fillies|"
+                                r"selling|race|stakes)\b"),
+    "race_amateur_riders": (r"\bamateur\s+(?:(?:male|female|lady|gentleman)\s+)?(?:jockeys?|riders?)\b|"
+                            r"\b(?:lady|ladies|gentlemen|gentleman|male|female|military)\s+amateurs?\b|"
+                            r"\bqualified riders?\b|\(\s*q\.?\s*r\.?\s*\)|\(\s*amateurs?\s*\)|"
+                            + _CONDITIONAL_AND_AMATEUR),
+}
+
+
+# BHA race-type rules and dated fixture changes. Ireland follows the IHRB.
+_HUNTER_CHASE = r"\b(?:foxhunters?|hunters?)['’]?\s+(?:open\s+)?(?:steeple\s*)?chase\b"
+_CHELTENHAM_KIM_MUIR = r"\bfulke walwyn kim muir\b"
+_CHELTENHAM_NH_CHASE = r"\bnational hunt (?:challenge cup|chase)\b"
+
+
+def claim_pounds(values):
+    """Only reported whole pounds, including an explicit zero, are usable."""
+    values = pd.to_numeric(values.astype("string"), errors="coerce")
+    return values.where(values.between(0, 30) & values.mod(1).eq(0)).astype(float)
+
+
+def rider_name_key(values):
+    """Compare the declared person's name without guessing expansions of initials."""
+    return (values.astype("string").str.casefold().str.replace(".", " ", regex=False)
+            .str.replace(r"\s+", " ", regex=True).str.strip().replace(["", "unknown", "none", "nan"], pd.NA))
+
+
+def rider_restriction_features(frame):
+    """Combine advertised rider eligibility with verified race-type and fixture rules."""
+    titles = frame.get("race_name", pd.Series(index=frame.index, dtype="string")).astype("string").str.strip()
+    titles = titles.mask(titles.eq(""))
+    flags = pd.DataFrame({name: titles.str.contains(pattern, case=False).astype(float)
+                          for name, pattern in _RIDER_RESTRICTIONS.items()}, index=frame.index)
+    if {"race_date", "track"}.issubset(frame):
+        from src.prize_currency_features import course_currency
+        from src.utils import canonical_track_key
+
+        day = pd.to_datetime(frame.race_date, errors="coerce")
+        track = frame.track.map(canonical_track_key)
+        currency = course_currency(frame.track)
+        britain = currency.eq("GBP")
+        ireland = currency.eq("EUR")
+        # Amateurs were suspended in Britain from 16 January until 29 March 2021.
+        suspended = britain & day.between("2021-01-16", "2021-03-28")
+        hunter = titles.str.contains(_HUNTER_CHASE, case=False, na=False)
+        festival = track.eq("cheltenham") & (
+            titles.str.contains(_CHELTENHAM_KIM_MUIR, case=False, na=False)
+            | (day.lt("2025-01-01") & titles.str.contains(_CHELTENHAM_NH_CHASE, case=False, na=False)))
+        amateur = flags["race_amateur_riders"]
+        amateur = amateur.mask(day.notna() & ((hunter & (britain | ireland)) | festival), 1.)
+        flags["race_amateur_riders"] = amateur.mask(suspended & amateur.eq(1), 0.)
+    if "race_id" in frame:
+        flags = flags.groupby(frame["race_id"], sort=False).transform("max").fillna(flags)
+    return flags
+
+
 def distance_category(values):
     """Shared historical distance bins, including the existing unknown fallback."""
     return pd.cut(values, bins=[0, 6.5, 8.5, 11.5, 50], labels=[0, 1, 2, 3],

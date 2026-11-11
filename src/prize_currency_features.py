@@ -47,13 +47,18 @@ def reference_signature():
     return digest.hexdigest()[:20]
 
 
+def course_currency(tracks):
+    unit_path, _ = _paths()
+    stat = unit_path.stat()
+    units = _read_units(str(unit_path), stat.st_mtime_ns, stat.st_size)
+    return tracks.astype("string").str.strip().str.casefold().map(units)
+
+
 def prepare_prize_references(frame):
     """Read the references before the cache lookup. Refreshing is `ingestion.fx`'s job."""
     if not {"track", "race_date"}.issubset(frame):
         return
-    unit_path, _ = _paths(); stat = unit_path.stat()
-    units = _read_units(str(unit_path), stat.st_mtime_ns, stat.st_size)
-    euro = frame.track.astype("string").str.strip().str.casefold().map(units).eq("EUR")
+    euro = course_currency(frame.track).eq("EUR")
     dates = pd.to_datetime(frame.loc[euro, "race_date"], errors="coerce").dropna()
     if len(dates):
         _load_rates()

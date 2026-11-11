@@ -20,6 +20,8 @@ def feature_metadata(name):
         family, source = "pedigree", "pedigree and prior family results"
     elif name.startswith(("horse_", "days_since_", "prev_", "form_", "career_")):
         family, source = "horse", "prior canonical results"
+    elif name in {"reported_jockey_claim_lbs", "race_conditional_jockeys", "race_apprentice_jockeys", "race_amateur_riders"}:
+        family, source, kind = "race", "Sporting Life, Racing TV and verified race conditions", "context"
     elif name.startswith(("race_", "field_", "course_", "track_", "going_", "surface_", "sex_", "region_", "season_")):
         family, source, kind = "race", "race context and derived history", "context_or_history"
     elif name in {"num_runners", "age", "weight_lbs", "distance_furlongs", "official_rating", "draw", "handicap"}:

@@ -100,6 +100,11 @@ def _synthetic_raw(n_days: int = 100, races_per_day: int = 2, field: int = 6, se
 def parity_frames():
     raw = _synthetic_raw()
     last_date = raw["race_date"].max()
+    last_day_races = raw.loc[raw["race_date"].eq(last_date), "race_id"].unique()
+    raw.loc[raw["race_id"].eq(last_day_races[0]), "race_name"] = "Handicap (Conditional & Amateur Jockeys)"
+    raw.loc[raw["race_id"].eq(last_day_races[1]), "race_name"] = "Apprentice Handicap"
+    runners = raw.index[raw["race_id"].eq(last_day_races[1])]
+    raw.loc[runners[:3], "reported_jockey_claim_lbs"] = [7, 0, -2]
 
     # ── Training path: everything processed and featured together ──
     feat_train = engineer_features(process_data(raw.copy()), save=False)
@@ -138,6 +143,17 @@ def test_live_rows_complete(parity_frames):
     _, train_day, feat_live, _ = parity_frames
     assert len(feat_live) == len(train_day) > 0
     assert set(feat_live["race_id"]) == set(train_day["race_id"])
+
+
+def test_live_rider_inputs(parity_frames):
+    _, _, featured, _ = parity_frames
+    apprentice = featured[featured.race_apprentice_jockeys.eq(1)]
+    mixed = featured[featured.race_conditional_jockeys.eq(1)]
+    assert len(apprentice) == len(mixed) == 6
+    assert apprentice.race_amateur_riders.eq(0).all()
+    assert mixed.race_amateur_riders.eq(1).all()
+    assert sorted(apprentice.reported_jockey_claim_lbs.dropna()) == [0, 7]
+    assert mixed.reported_jockey_claim_lbs.isna().all()
 
 
 def test_no_model_features_missing_in_live(parity_frames):

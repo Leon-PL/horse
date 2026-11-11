@@ -325,6 +325,14 @@ def clean_data(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # Historical results and live cards both report the allowance separately
+    # from allocated weight. Legacy or unreported claims stay missing.
+    from src.feature_semantics import claim_pounds, rider_restriction_features
+    df["reported_jockey_claim_lbs"] = claim_pounds(
+        df.get("reported_jockey_claim_lbs", pd.Series(np.nan, index=df.index)))
+    restrictions = rider_restriction_features(df)
+    df[restrictions.columns] = restrictions
+
     # Sporting Life's raw finish_distance is the gap to the PREVIOUS horse.
     # The legacy raw column is unfortunately named lengths_behind. Preserve
     # it for source replay; all new history calculations use this explicit
@@ -533,8 +541,8 @@ def process_data(df: pd.DataFrame = None) -> pd.DataFrame:
     # the selected pedigree (no-op when the dataset has none). A selected
     # accepted input must never silently disappear, so errors propagate.
     df = apply_pedigree(df)
-
-    df = clean_data(df)
+    from src.rtv_features import add_rider_claims
+    df = clean_data(add_rider_claims(df))
 
     # Chronological ordering is required before any cumulative encodings.
     if "race_date" in df.columns:

@@ -92,6 +92,25 @@ def ledger():
         """).fetchall()
 
 
+def test_claims_are_published_and_follow_result_revisions(sync_env):
+    race_id = "claim"
+    sync_env.scraper.listings[YESTERDAY] = [race_id]
+    field = runners(race_id)
+    field[0].update(weight_lbs=149, reported_jockey_claim_lbs=5)
+    field[1].update(weight_lbs=144, reported_jockey_claim_lbs=0)
+    sync_env.scraper.responses[race_id] = field
+    sync(days_back=1)
+    path = sync_env.root / "race_results.parquet"
+    snapshot = database.read_results_snapshot(path).sort_values("horse_name")
+    assert snapshot.reported_jockey_claim_lbs.tolist() == [5, 0]
+    assert snapshot.weight_lbs.tolist() == [149, 144]
+
+    field[0]["reported_jockey_claim_lbs"] = None
+    sync(days_back=1, recheck=True)
+    snapshot = database.read_results_snapshot(path).sort_values("horse_name")
+    assert snapshot.reported_jockey_claim_lbs.isna().tolist() == [True, False]
+
+
 def test_results_only_preserves_full_export_without_enrichment(sync_env):
     old = "2026-09-01"
     database.insert_results(pd.DataFrame(runners("old", old)))
