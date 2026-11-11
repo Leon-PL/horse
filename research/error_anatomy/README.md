@@ -56,3 +56,5 @@ Input audit (11 November):
   field by field.
 - `hidden_form.py`: the card's form figures for runs the database lacks
   (`hidden-form`), screened through `soft_corrections.py`.
+- `native_folds.py`: native-capacity full 063 forecasts for the other scored
+  quarters (`fit`) and every saved correction applied to them (`check`).

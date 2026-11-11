@@ -711,6 +711,75 @@ Small, consistent, and from data already held. It needs no forecast history,
 so it belongs in the feature store as ordinary inputs. Development only; by
 the section 8 lesson expect less on unseen races.
 
+### The worst misses, read as cards, do not generalise
+
+The 18 winners the eight-group stack most under-rated against Betfair SP
+(horses with at least two earlier runs) repeat a handful of stories: a mark
+well below a recent high after a run of poor efforts, a handicap debut after
+quick runs at huge prices, a new stable after a long absence, first-time
+headgear, a return to a course where the horse had run well. Several of these
+are not among the 193 inputs, so each was measured on all 109,593 priced
+runners of the scored quarters:
+
+| Circumstance | Runners | Won | Stack expected | z |
+|---|---:|---:|---:|---:|
+| Handicap mark 8 lb or more below its six-run high | 13,014 | 1,014 | 1,021 | −0.2 |
+| Handicap debut | 6,149 | 578 | 597 | −0.9 |
+| Handicap debut, last three prices all 33/1 or longer | 1,234 | 57 | 51 | +0.9 |
+| Different trainer from the last run | 4,030 | 353 | 345 | +0.5 |
+| Off 200 days or more, same trainer | 5,150 | 533 | 547 | −0.7 |
+| First-time headgear | 8,821 | 783 | 789 | −0.3 |
+| First-time headgear and mark 8 lb down | 1,401 | 106 | 93 | +1.5 |
+| Three poor runs, then back where it was placed before | 3,153 | 197 | 187 | +0.8 |
+| Irish race, different trainer | 1,045 | 78 | 66 | +1.6 |
+
+Nothing reaches two standard errors. The model already prices these
+circumstances correctly on average; the worst misses are the gambled horses
+among them, and the 11:00 price usually had not moved either (0.019 to 0.092,
+0.038 to 0.163 in two of the cases read). Picking patterns out of the worst
+misses selects on the outcome. This line is closed.
+
+## 10. The corrections against full-capacity models (12 November)
+
+Every figure above is against 400-tree screen fits, and one full-capacity
+forecast existed. `native_folds.py` fits the seed-42 full 063 at native
+capacity for the other three scored quarters (same purged refits, about 40
+minutes each) and adds the saved corrections, unchanged, to both forecasts on
+the same 11,905 races.
+
+| Forecast | Race log loss |
+|---|---:|
+| Full 063, screen capacity, one seed | 1.82598 |
+| Full 063, native capacity, one seed | 1.81937 (−0.00662 [−0.00812, −0.00514], 4/4) |
+| Native with the weighted stack of eight | 1.81009 |
+| **Native with the one joint correction model** | **1.80915** |
+
+| Correction | On the screen forecast | On the native forecast | Carried over | Quarters |
+|---|---:|---:|---:|---:|
+| Weighted stack of eight | −0.01074 | −0.00928 [−0.01220, −0.00655] | 86% | 4/4 |
+| **One joint model** | −0.01138 | **−0.01022 [−0.01243, −0.00825]** | 90% | 4/4 |
+| Horse state alone | −0.00669 | −0.00604 [−0.00790, −0.00437] | 90% | 4/4 |
+| Market gap alone | −0.00275 | −0.00243 [−0.00359, −0.00127] | 88% | 4/4 |
+| Own horse (old) alone | −0.00259 | −0.00231 [−0.00381, −0.00094] | 89% | 4/4 |
+| Recent stable form alone | −0.00255 | −0.00224 [−0.00338, −0.00113] | 88% | 4/4 |
+| Residual alone | −0.00181 | −0.00163 [−0.00235, −0.00091] | 90% | 4/4 |
+| Second wave alone | −0.00133 | −0.00124 [−0.00194, −0.00057] | 93% | 4/4 |
+| Tracking alone | −0.00135 | −0.00112 [−0.00159, −0.00068] | 83% | 4/4 |
+| Same-day bias alone | −0.00045 | −0.00042 [−0.00077, −0.00007] | 93% | 4/4 |
+
+- **The corrections are not capacity repair.** Nine tenths of the gain
+  survives on a model with nine times the trees, in every quarter, for every
+  group. The native-capacity gain from the corrections (−0.010) is larger than
+  the gain from native capacity itself (−0.007), and the two add.
+- **The joint model is the better form at serving capacity**: larger, with a
+  narrower interval, and no fitted weights.
+- These are the development quarters on which the corrections were designed,
+  and the unseen-race read confirmed the seven at −0.0091 but not the two
+  later groups as an addition. A fair expectation on unseen races at native
+  capacity is the confirmed figure scaled by what carries over, about −0.008.
+- The corrections were fitted from the screen forecast's offset. Refitting
+  them from native forecasts is untested and could do slightly better.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the
@@ -755,10 +824,10 @@ the section 8 lesson expect less on unseen races.
    gap is the runs the database lacks. Their form figures give −0.0006 now;
    their detail (class, price, opposition) is on Sporting Life horse profiles
    for about 9,100 horses and has not been fetched.
-1. **Done 11 November: confirmed on unseen races** (section 7). What remains
-   before this can serve: the same corrections against a native-capacity
-   generalist on more than one quarter, and a stored history of out-of-fold
-   forecasts kept up to date as results arrive.
+1. **Done: confirmed on unseen races** (section 7) **and measured at native
+   capacity on four quarters** (section 10: −0.0102 with the joint model, nine
+   tenths of the screen figure). What remains before this can serve is a
+   stored history of out-of-fold forecasts kept up to date as results arrive.
 2. **Fill the hidden form.** 15.6% of hurdlers have runs the database lacks;
    point-to-point and foreign results are the obvious source.
 3. **Extend the idea.** Residuals against the model by owner (not collected),
@@ -782,6 +851,9 @@ the section 8 lesson expect less on unseen races.
   `market_disagreement.json`, `soft_corrections.json`, `soft_stack_soft-long-rich.json`
   and its forecast, `native_check.json`, `native_stack_check_soft-long-rich.json`,
   `second_pass.json`.
+- Native capacity: `native_folds.py` (`fit`, `check`). Outputs:
+  `native/native_2025Q4.parquet`, `native_2026Q1`, `native_2026Q2`,
+  `native_folds_check.json`.
 - Input audit: `card_audit.py`, `card_vs_result.py`, `hidden_form.py`.
   Outputs: `card_vs_result.json`, `draw_cloth_signature.parquet`,
   `trainer_renames.csv`, `soft_stack_soft-long-rich_hidden.json`.

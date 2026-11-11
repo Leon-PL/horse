@@ -2691,3 +2691,8 @@ Refuted or weakened in the same study:
   reference. Do not re-audit these fields without a new reason. The one gap
   is runs the database lacks: their card form figures add −0.0006
   (`hidden-form`, 4/4, development only).
+- **Racing patterns read off the worst misses** (mark well below a recent
+  high, handicap debut after runs at huge prices, stable switch, first-time
+  headgear, return to a course where placed): each wins as often as the
+  stacked forecast expects across 109,593 runners (no z above 1.6). The
+  misses are gambled horses; the patterns are selection on the outcome.
