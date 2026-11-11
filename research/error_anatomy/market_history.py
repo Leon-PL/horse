@@ -18,7 +18,6 @@ import pandas as pd
 
 from research.error_anatomy import horse_state as hs
 from research.meta_learner import screening as s
-from research.meta_learner import tier2_inputs as t2
 from src.source_dataset import load_manifest, read_table, use_manifest
 from src.source_prices import attach_bsp
 
@@ -58,7 +57,10 @@ def market_level(frame, market="p_market"):
 
 def snapshots(frame):
     """Exchange prices at each snapshot and at the off for the frame's runners, by the dataset's saved links."""
-    receipt = t2.design()["receipt"]["dataset_manifest"]
+    # Only the benchmark's dataset ID is needed here. ``t2.design()`` also checks that modelling code is
+    # unchanged, which protects fits; nothing in this module fits with that code.
+    from research.meta_learner import first_ensemble as fe
+    receipt = fe.read_json(s.STUDY / "registration.json")["receipt"]["dataset_manifest"]
     with use_manifest(load_manifest(receipt["id"], root=receipt.get("root"))):
         table = read_table("betfair", "timing", linked=True)
     table = table.rename(columns={"bsp": "bf_bsp"})

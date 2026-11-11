@@ -1808,6 +1808,58 @@ def add_hidden_form_features(df: pd.DataFrame) -> pd.DataFrame:
     df["experience_with_hidden"] = (
         db_prior.to_numpy() + df["hidden_form_runs"].to_numpy()
     ).astype(np.int32)
+    if "form" in df.columns:
+        df = _add_hidden_form_figures(df)
+    return df
+
+
+_HIDDEN_FORM_FAIL = frozenset("PFURBCSDO")
+_HIDDEN_FORM_FIGURES = ("wins", "places", "fails", "best", "mean", "last")
+
+
+def hidden_form_figures(form, hidden_runs) -> np.ndarray:
+    """Wins, places, failures to finish, best, mean and latest figure over the oldest
+    ``hidden_runs`` characters of each form string; NaN where there are none.
+
+    The form string runs oldest to newest and the database's own runs are the
+    most recent, so the oldest ``hidden_form_runs`` figures are the ones the
+    database does not account for. A "0" is tenth or worse; a letter is a
+    failure to finish and counts as 12 for the latest figure only.
+    """
+    out = np.full((len(form), len(_HIDDEN_FORM_FIGURES)), np.nan)
+    for i, (text, count) in enumerate(zip(form, hidden_runs)):
+        if not count or count <= 0 or not isinstance(text, str):
+            continue
+        marks = [c for c in text.upper() if c.isascii() and c.isalnum()][:int(count)]
+        if not marks:
+            continue
+        places = [10 if c == "0" else int(c) for c in marks if c.isdigit()]
+        out[i, 0] = sum(p == 1 for p in places)
+        out[i, 1] = sum(p <= 3 for p in places)
+        out[i, 2] = sum(c in _HIDDEN_FORM_FAIL for c in marks)
+        if places:
+            out[i, 3], out[i, 4] = min(places), float(np.mean(places))
+        last = marks[-1]
+        out[i, 5] = (10 if last == "0" else int(last)) if last.isdigit() else 12.0
+    return out
+
+
+def _add_hidden_form_figures(df: pd.DataFrame) -> pd.DataFrame:
+    """How the horse finished in the runs the database lacks, read from the card's form string.
+
+    ``hidden_form_runs`` only counts those runs. Runners whose missing runs
+    include a win won 499 races against 443 forecast on 2025Q3-2026Q2
+    (docs/research/ERROR_ANATOMY_2026-11-10.md, section 9). Pre-race by the
+    same argument as the count: only the card's ``form`` is read.
+    """
+    values = hidden_form_figures(df["form"].to_numpy(dtype=object), df["hidden_form_runs"].to_numpy())
+    for j, name in enumerate(_HIDDEN_FORM_FIGURES):
+        df[f"hidden_form_{name}"] = values[:, j].astype(np.float32)
+    if "race_id" in df.columns:
+        # Against the field, with a runner that has no such runs counted as no wins and a middling best.
+        for name, neutral in (("hidden_form_wins", 0.0), ("hidden_form_best", 6.0)):
+            filled = df[name].fillna(neutral)
+            df[f"{name}_vs_field"] = (filled - filled.groupby(df["race_id"]).transform("mean")).astype(np.float32)
     return df
 
 

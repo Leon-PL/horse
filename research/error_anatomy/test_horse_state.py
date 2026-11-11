@@ -106,3 +106,11 @@ def test_hidden_form_reads_only_the_oldest_figures():
     assert out[0].tolist() == [1., 2., 1., 1., 1.5, 2., 3.]      # "1", "P", "2": the later 3 and 4 are database runs
     assert np.isnan(out[1]).all() and np.isnan(out[2]).all()
     assert out[3, 3] == 10. and out[3, 2] == 1. and out[3, 5] == 12.
+
+
+def test_store_hidden_form_matches_the_screened_definition():
+    from research.error_anatomy import hidden_form as hf
+    from src.feature_engineer import hidden_form_figures
+    forms = np.array(["1/P2-34", "21", None, "0F", "U11", "7-", "PPP000"], dtype=object)
+    hidden = np.array([3, 0, 2, 2, 2, 1, 6])
+    np.testing.assert_allclose(hidden_form_figures(forms, hidden), hf.figures(forms, hidden)[:, :6], equal_nan=True)
