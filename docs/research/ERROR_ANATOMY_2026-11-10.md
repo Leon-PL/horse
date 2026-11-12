@@ -819,6 +819,51 @@ model, same races as section 2):
 | Behind the 08:00 exchange price, 6,194 races | 0.0215 | 0.0076 |
 | Behind the 11:00 exchange price, 7,292 races | 0.041 | 0.028 |
 
+## 11. Fourth pass: the loss to the 08:00 price is in newcomers (12 November)
+
+`fourth_pass.py`, on the 6,194 scored races with a full-field 08:00, 11:00, one-hour and BSP price
+(50,371 runners). The forecast is the native full 063 with the `more-groups-deeper` correction.
+
+| Forecast | Race log loss |
+|---|---|
+| Native full 063 | 1.74512 |
+| With the joint correction | 1.73293 |
+| 08:00 exchange price | 1.72901 |
+| 11:00 | 1.70904 |
+| One hour before the off | 1.69863 |
+| BSP | 1.67810 |
+| Equal geometric mix of forecast and 08:00 price | 1.71732 |
+
+- **Handicaps are level with the 08:00 price**: chase +0.0002, flat +0.0001, hurdle +0.0010. The
+  deficit of 0.0039 sits in flat non-handicaps (+0.0172, 88% of it) and in races whose median
+  runner has at most one earlier run (+0.0378, all of it). Hurdle non-handicaps are ahead (-0.0091).
+- **Where the two disagree, the result lies between them.** Experienced horses (5+ runs) the 08:00
+  price rates much lower than the forecast (log gap below -0.5): 241 winners against 312 forecast
+  and 158 priced, and BSP moves 46% back towards the forecast. Much higher: 237 winners against 163
+  and 328. The mix beats the 08:00 price by 0.0117 and the forecast by 0.0156, so each holds
+  information the other lacks. Against BSP the mix is worse than BSP (+0.011), as before.
+
+### Owner and newcomer inputs: both null inside the joint correction
+
+Two groups declared before scoring, built like the trainer and sire error inputs (shrunk, 365-day
+decayed residual and market-gap means on strictly earlier dates):
+
+- `owner` (`owner.py`): owner names from the Racing TV archive linked to 710,224 starters since
+  September 2020 (34,170 owners). Keys: owner, owner with trainer, owner with horse state.
+- `newcomer` (`newcomer.py`): dam; sire, dam's sire and jockey with horse state (debut, back from a
+  break, fit); trainer with state and age band.
+
+| Group | Alone, screen (vs twin) | Added to `more-groups-deeper`, native |
+|---|---|---|
+| owner | -0.0022 [-0.0035, -0.0010], 3/4 (-0.0023) | +0.00017 [-0.0003, +0.0007], 2/4 |
+| newcomer | -0.0049 [-0.0064, -0.0036], 4/4 (-0.0050) | -0.00026 [-0.0007, +0.0001], 2/4 |
+
+Each carries real information alone and none beyond what the horse-state, trainer-by-state and
+franking inputs already give the joint model. A dam's earlier runners include the horse's own past
+runs, which is most of why `newcomer` looked large alone. Not adopted. The lesson from the second
+hold-out read holds again: a group's gain alone says little about its gain on a stack that holds a
+correlated correction; judge additions inside the joint model on native forecasts.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the

@@ -2696,3 +2696,13 @@ Refuted or weakened in the same study:
   headgear, return to a course where placed): each wins as often as the
   stacked forecast expects across 109,593 runners (no z above 1.6). The
   misses are gambled horses; the patterns are selection on the outcome.
+- **Owner error inputs** (owner names from the Racing TV archive; the model's
+  past residual and market gap by owner, owner with trainer, owner with horse
+  state): −0.0022 alone, +0.0002 [−0.0003, +0.0007] added to the best joint
+  correction on native forecasts. Null; section 11 of the error report.
+- **Newcomer error inputs** (dam; sire, dam's sire and jockey by horse state;
+  trainer by state and age band): −0.0049 alone (4/4), −0.0003
+  [−0.0007, +0.0001], 2/4 inside the joint correction. Overlap with the
+  horse-state and trainer-by-state inputs, not new information. The remaining
+  loss to the 08:00 price is all in newcomers (flat non-handicaps, fields of
+  unraced horses), and keyed error histories do not reach it.

@@ -42,6 +42,14 @@ VARIANTS = {
     # Added 12 November after the three above were read: the two steps that each helped, together.
     "more-groups-deeper": {"groups": MORE, "rounds": 1000,
                            "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 12 November before scoring: the owner inputs (owner.py) inside the best variant's recipe.
+    # Judged against more-groups-deeper on native.
+    "with-owner": {"groups": (*MORE, "owner"), "rounds": 1000,
+                   "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 12 November before scoring, after with-owner was read as a null: the newcomer inputs
+    # (newcomer.py) inside the best variant's recipe. Judged against more-groups-deeper on native.
+    "with-newcomer": {"groups": (*MORE, "newcomer"), "rounds": 1000,
+                      "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"

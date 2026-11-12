@@ -60,3 +60,12 @@ Input audit (11 November):
   quarters (`fit`) and every saved correction applied to them (`check`).
 - `joint_variants.py`: larger versions of the joint correction model, judged
   on the native-capacity forecasts.
+
+Fourth round (12 November):
+
+- `fourth_pass.py`: where the best forecast loses to each exchange snapshot,
+  by kind of race, and who is right when it disagrees with the 08:00 price.
+- `owner.py`: owner names from the Racing TV archive and the model's past
+  errors by owner (`owner`); null inside the joint correction.
+- `newcomer.py`: past errors by dam and by sire, jockey and trainer with the
+  horse's state (`newcomer`); null inside the joint correction.

@@ -114,3 +114,11 @@ def test_store_hidden_form_matches_the_screened_definition():
     forms = np.array(["1/P2-34", "21", None, "0F", "U11", "7-", "PPP000"], dtype=object)
     hidden = np.array([3, 0, 2, 2, 2, 1, 6])
     np.testing.assert_allclose(hidden_form_figures(forms, hidden), hf.figures(forms, hidden)[:, :6], equal_nan=True)
+
+
+def test_owner_key_ignores_titles_and_punctuation():
+    from research.error_anatomy.owner import owner_key
+    out = owner_key(["Mr J. P. McManus", "J P McManus", "Mrs Sue Magnier & Mr M. Tabor", "  ", None])
+    assert out[0] == out[1] == "j p mcmanus"
+    assert out[2] == "sue magnier m tabor"
+    assert out[3:].isna().all()
