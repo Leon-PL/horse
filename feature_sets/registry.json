@@ -4,7 +4,7 @@
     {
       "id": "general-win",
       "label": "General win",
-      "file": "win_with_rider_context.txt",
+      "file": "win_selected_20261112.txt",
       "description": "The current general model input selection. Other model roles can reference their own named selections."
     }
   ],

@@ -236,3 +236,23 @@ an accuracy gain.
 
 The [initial performance/spread reproduction](../research/PERFORMANCE_SPREAD_REPRODUCTION_2026-11-08.md)
 records the first fixed native-capacity comparison and its evidence limits.
+
+## Current default list (selection of 2026-11-12)
+
+`config.FEATURE_ALLOWLIST` points at `feature_sets/win_selected_20261112.txt`, 87 inputs chosen by
+`select` from the 1,317 numeric store columns (1,065 after the hygiene and near-copy steps; store
+`fe_signature` 06c07aff1f3f1c6c). Selection used races to 2025-06-30 (six folds, 2024Q1 to 2025Q2);
+confirmation used 11,632 races from 2025-07-08.
+
+| List | Inputs | Screen capacity | Native capacity |
+|---|---|---|---|
+| `win_with_rider_context.txt` (previous default) | 133 | 1.82997 | 1.82491 |
+| Selected | 87 | 1.82894 | 1.82446 |
+| All 1,065 | 1,065 | 1.82910 | not fitted |
+
+The selected list is level with the previous default (native difference -0.00046, 95% interval
+-0.0024 to +0.0014, better in three of four quarters): it was adopted for being smaller, not more
+accurate. It keeps 67 of the previous inputs and adds 20, including `hidden_form_mean` and
+`hidden_form_best_vs_field`; none of the rider-context inputs was selected. Run outputs are in
+`data/research/selection_20261111/select/`. This list is not the full 063 recipe, whose 64 extra
+inputs are built at fit time and are not store columns.
