@@ -69,3 +69,5 @@ Fourth round (12 November):
   errors by owner (`owner`); null inside the joint correction.
 - `newcomer.py`: past errors by dam and by sire, jockey and trainer with the
   horse's state (`newcomer`); null inside the joint correction.
+- `foal_age.py`: exact age from the foaling date (`foal-age`). Scored well and
+  is a look-ahead leak: the date's precision depends on the later career.

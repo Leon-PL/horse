@@ -50,6 +50,13 @@ VARIANTS = {
     # (newcomer.py) inside the best variant's recipe. Judged against more-groups-deeper on native.
     "with-newcomer": {"groups": (*MORE, "newcomer"), "rounds": 1000,
                       "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 12 November before scoring: exact age from the foaling date (foal_age.py), -0.0015 alone
+    # on the screen forecast. Judged against more-groups-deeper on native.
+    # REJECTED AS A LEAK after scoring (-0.0016 on native): 22% of horses carry a placeholder foaling
+    # date of 1 January in profiles all fetched in 2026, the placeholder is commoner the shorter the
+    # career, and those horses win 7-23% less often than BSP implies. Do not use this variant.
+    "with-foal-age": {"groups": (*MORE, "foal-age"), "rounds": 1000,
+                      "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"

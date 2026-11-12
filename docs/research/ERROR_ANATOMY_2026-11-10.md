@@ -864,6 +864,29 @@ runs, which is most of why `newcomer` looked large alone. Not adopted. The lesso
 hold-out read holds again: a group's gain alone says little about its gain on a stack that holds a
 correlated correction; judge additions inside the joint model on native forecasts.
 
+### Exact age from the foaling date: a look-ahead leak
+
+`foal_age.py`, declared before scoring: age in days, against the field, and the foaling day of the
+year. Alone -0.0015 [-0.0021, -0.0010], 4/4; inside `more-groups-deeper` on native -0.0016
+[-0.0021, -0.0010], 3/4 (1.80350). The foaling day of the year ranked among the top inputs, which
+prompted a look at the dates:
+
+- 22% of horses have a foaling date of 1 January, a placeholder in the Sporting Life profile.
+- Every profile was fetched in 2026 (70,768 in June), long after most of the races.
+- The placeholder is commoner the shorter the career: 35% of horses with one run, 28% with three or
+  four, 11% with twenty or more.
+- Placeholder horses win less often than BSP implies in every age band: two-year-olds 104 winners
+  against 133 priced (-22%), ages four and five 419 against 485 (-14%), all ages -7% to -22%. Horses
+  with a real date win 1-3% more often than priced.
+
+An input that beats BSP by that much from a data-quality flag is not information available before
+the race: whether the profile holds the real date depends on how the career went. Rejected, and the
+1.80350 figure is void. Nothing in the model or the store reads `foaled` today; the rule from here
+is not to build inputs from it. The same mechanism as the `sex` leak of October.
+
+Also closed in this round: re-scaling the forecast by the field's experience gains at most 0.0008
+fitted in-sample (calibration in newcomer races is sound).
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the

@@ -2706,3 +2706,11 @@ Refuted or weakened in the same study:
   horse-state and trainer-by-state inputs, not new information. The remaining
   loss to the 08:00 price is all in newcomers (flat non-handicaps, fields of
   unraced horses), and keyed error histories do not reach it.
+- **Exact age from the foaling date (`foaled`): LEAK, do not use.** −0.0016
+  at native capacity inside the joint correction, but 22% of horses carry a
+  1 January placeholder in profiles all fetched in 2026; the placeholder is
+  commoner the shorter the career and those horses win 7–23% less often than
+  BSP implies. The precision of the date encodes the later career. Section 11
+  of the error report. Any future input from the pedigree profile (fetched
+  once, long after the races) needs the same check: does its presence or
+  precision vary with career length?
