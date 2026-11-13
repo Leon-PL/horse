@@ -119,7 +119,30 @@ def arms(context, base):
         return {"hidden_form_mean": np.where(early, np.nan, base("hidden_form_mean")),
                 "hidden_form_best_vs_field": np.where(early, 0., base("hidden_form_best_vs_field"))}, {}
 
-    return {"baseline": lambda: ({}, {}), "weight-rebuilt": weight_rebuilt, "weight-fallback": weight_fallback,
+    def signed_replace():
+        # Added 13 November after signed-margin was read: the same idea as a replacement of the two kept
+        # margin inputs instead of five extra columns, which is what a change to the feature code would do.
+        store = pd.read_parquet(STORE, columns=[*KEYS, "race_date", "finish_position", "lengths_behind",
+                                                "distance_furlongs"])
+        position = pd.to_numeric(store.finish_position, errors="coerce")
+        behind = pd.to_numeric(store.lengths_behind, errors="coerce").where(position >= 1)
+        second = behind.where(position == 2).groupby(store.race_id).transform("min")
+        scale = np.power(store.distance_furlongs.replace(0, np.nan).fillna(8.).astype(float), .6)
+        store["signed"] = np.clip(np.where(position == 1, -second, behind) / scale, -6, 20)
+        store["rel"] = store.signed - store.groupby("race_id").signed.transform("median")
+        store = store.sort_values(["horse_id", "race_date", "race_id"], kind="stable").reset_index(drop=True)
+        day = (store.race_date - pd.Timestamp("2000-01-01")).dt.days.to_numpy(np.int64)
+        horse = store.horse_id.to_numpy(np.int64)
+        best = _last_five(horse, day, store.signed.to_numpy(float))[:, 1]
+        rel = _last_five(horse, day, store.rel.to_numpy(float))[:, 2]
+        made = store[KEYS].copy()
+        made["speed_fig_rel_avg_5"] = rel
+        made["speed_fig_best_5_vs_best_in_race"] = best - pd.Series(best).groupby(store.race_id.to_numpy()).transform("min")
+        made["race_id"] = made.race_id.astype(context.race_id.dtype)
+        made = context[KEYS].merge(made, on=KEYS, how="left", validate="one_to_one")
+        return {c: made[c].to_numpy(float) for c in ("speed_fig_rel_avg_5", "speed_fig_best_5_vs_best_in_race")}, {}
+
+    return {"baseline": lambda: ({}, {}), "signed-margin-replace": signed_replace, "weight-rebuilt": weight_rebuilt, "weight-fallback": weight_fallback,
             "signed-margin": signed, "hidden-form-masked": hidden_masked}
 
 

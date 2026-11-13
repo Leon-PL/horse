@@ -988,10 +988,18 @@ confirmation folds with a few columns changed or added, against the unchanged mo
 | Claim-adjusted weight where known, plain weight otherwise | +0.00076 [-0.0005, +0.0020] | 1/4 |
 | Margin figures with winners credited their winning distance (5 added) | +0.00075 [-0.0011, +0.0025] | 1/4 |
 | Hidden form blanked for horses first seen before 15 March 2021 | +0.00035 [-0.0008, +0.0014] | 2/4 |
+| The two kept margin inputs replaced by winner-credited versions (added after the row above was read) | +0.00069 [-0.0008, +0.0021] | 1/4 |
 
 None differs from the unchanged model beyond the 0.001-0.002 noise between fits. The lost weight
 data costs nothing measurable and the fallback recovers nothing measurable; the two oddities in the
-margin and hidden-form inputs are real but harmless. No code was changed.
+margin and hidden-form inputs are real but harmless.
+
+Afterwards, at the user's request, the weight comparisons were given a fallback in the feature code
+(`burden_weight` in `src/feature_semantics.py`: claim-adjusted where the claim is verified, allocated
+weight otherwise), restoring full coverage. It sits in the working tree with the other session's
+uncommitted rider-claims work and needs a store rebuild. The margin figures were left as they are:
+crediting winners their winning distance is worse in three of four quarters whether added or
+substituted.
 
 ## What this means
 
