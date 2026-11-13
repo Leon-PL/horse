@@ -42,6 +42,44 @@ def claim_pounds(values):
     return values.where(values.between(0, 30) & values.mod(1).eq(0)).astype(float)
 
 
+CLAIM_ADJUSTED_WEIGHT_INPUTS = ("weight_lbs", "has_observed_weight", "reported_jockey_claim_lbs")
+
+
+def claim_adjusted_weight(frame):
+    """Estimate pre-race burden from observed allocated weight and allowance.
+
+    Sporting Life supplies the allocation in pounds. A verified zero claim
+    preserves it. An unknown claim or imputed allocation leaves the estimate
+    missing. Weigh-out adjustments such as overweight require separate evidence.
+    """
+    if not {"weight_lbs", "reported_jockey_claim_lbs"}.issubset(frame):
+        return pd.Series(np.nan, index=frame.index, dtype=float)
+    allocated = pd.to_numeric(frame.weight_lbs, errors="coerce").astype(float)
+    observed = allocated.between(50, 220)
+    if "has_observed_weight" in frame:
+        observed &= pd.to_numeric(frame.has_observed_weight, errors="coerce").eq(1)
+    return allocated.where(observed) - claim_pounds(frame.reported_jockey_claim_lbs)
+
+
+def burden_weight(frame):
+    """Weight for comparisons: claim-adjusted where the claim is verified, allocated weight otherwise.
+
+    The allocated weight is known for every runner, while a verified claim is missing for about
+    30% of 2020-2023 runners. Comparing only verified runners left ``weight_vs_field`` and the
+    weight-change inputs blank for those rows and biased the field mean towards verified riders.
+    Most riders claim nothing, so the allocation is the best estimate when the claim is unknown.
+    ``claim_adjusted_weight_lbs`` itself stays missing in that case, so the model can tell.
+    """
+    adjusted = claim_adjusted_weight(frame)
+    if "weight_lbs" not in frame:
+        return adjusted
+    allocated = pd.to_numeric(frame.weight_lbs, errors="coerce").astype(float)
+    observed = allocated.between(50, 220)
+    if "has_observed_weight" in frame:
+        observed &= pd.to_numeric(frame.has_observed_weight, errors="coerce").eq(1)
+    return adjusted.fillna(allocated.where(observed))
+
+
 def rider_name_key(values):
     """Compare the declared person's name without guessing expansions of initials."""
     return (values.astype("string").str.casefold().str.replace(".", " ", regex=False)

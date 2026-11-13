@@ -99,6 +99,16 @@ def test_impossible_historical_weight_does_not_survive_cleaning():
     assert raw.loc[0, "weight_lbs"] == 1
 
 
+def test_field_weight_comparisons_need_only_one_observed_rival():
+    raw = _synthetic_raw(n_days=1, races_per_day=2, field=4)
+    raw["weight_lbs"] = 130.
+    raw["reported_jockey_claim_lbs"] = [0., 5., np.nan, np.nan, 0., np.nan, np.nan, np.nan]
+    out = add_race_context_features(process_data(raw)).reindex(raw.index)
+    # An unverified claim falls back to the allocated weight, so every observed runner is compared.
+    np.testing.assert_allclose(out.weight_vs_field, [1.25, -3.75, 1.25, 1.25, 0., 0., 0., 0.])
+    np.testing.assert_allclose(out.weight_rank, [1., 4., 1., 1., 1., 1., 1., 1.])
+
+
 def test_single_code_single_sex_card_has_fixed_selected_categorical_inputs():
     raw = _synthetic_raw(n_days=1, races_per_day=1, field=4)
     raw["race_type"], raw["sex"] = "Flat", "G"

@@ -76,6 +76,7 @@ def _synthetic_raw(n_days: int = 100, races_per_day: int = 2, field: int = 6, se
                     "sex": ["G", "F", "M"][h % 3],
                     "headgear": "" if h % 4 else "Blinkers",
                     "weight_lbs": 130.0 + (h % 10),
+                    "reported_jockey_claim_lbs": 0.,
                     "draw": slot + 1,
                     "form": "321",
                     "days_since_last_run": 20,
@@ -103,8 +104,14 @@ def parity_frames():
     last_day_races = raw.loc[raw["race_date"].eq(last_date), "race_id"].unique()
     raw.loc[raw["race_id"].eq(last_day_races[0]), "race_name"] = "Handicap (Conditional & Amateur Jockeys)"
     raw.loc[raw["race_id"].eq(last_day_races[1]), "race_name"] = "Apprentice Handicap"
-    runners = raw.index[raw["race_id"].eq(last_day_races[1])]
-    raw.loc[runners[:3], "reported_jockey_claim_lbs"] = [7, 0, -2]
+    mixed = raw.index[raw["race_id"].eq(last_day_races[0])]
+    apprentice = raw.index[raw["race_id"].eq(last_day_races[1])]
+    raw.loc[mixed, "reported_jockey_claim_lbs"] = np.nan
+    raw.loc[mixed[0], "reported_jockey_claim_lbs"] = -2
+    raw.loc[apprentice[0], "reported_jockey_claim_lbs"] = 7
+    horse = raw.loc[apprentice[0], "horse_id"]
+    prior = raw.index[raw.horse_id.eq(horse) & raw.race_date.lt(last_date)][-1]
+    raw.loc[prior, "reported_jockey_claim_lbs"] = 3
 
     # ── Training path: everything processed and featured together ──
     feat_train = engineer_features(process_data(raw.copy()), save=False)
@@ -152,8 +159,30 @@ def test_live_rider_inputs(parity_frames):
     assert len(apprentice) == len(mixed) == 6
     assert apprentice.race_amateur_riders.eq(0).all()
     assert mixed.race_amateur_riders.eq(1).all()
-    assert sorted(apprentice.reported_jockey_claim_lbs.dropna()) == [0, 7]
-    assert mixed.reported_jockey_claim_lbs.isna().all()
+    assert sorted(apprentice.reported_jockey_claim_lbs) == [0, 0, 0, 0, 0, 7]
+    adjusted = apprentice.weight_lbs - apprentice.reported_jockey_claim_lbs
+    np.testing.assert_allclose(apprentice.claim_adjusted_weight_lbs, adjusted)
+    np.testing.assert_allclose(apprentice.weight_vs_field, adjusted - adjusted.mean())
+    np.testing.assert_allclose(apprentice.weight_rank, adjusted.rank(ascending=False, method="min"))
+    np.testing.assert_allclose(apprentice.weight_per_furlong, adjusted / apprentice.distance_furlongs)
+    np.testing.assert_allclose(apprentice.uphill_x_weight, adjusted * apprentice.track_uphill_finish)
+    # In the fixture each horse has the same allocation on every appearance.
+    change = -apprentice.reported_jockey_claim_lbs + 3 * apprentice.reported_jockey_claim_lbs.eq(7)
+    np.testing.assert_allclose(apprentice.weight_change, change)
+    np.testing.assert_allclose(apprentice.weight_change_vs_field, change - change.mean())
+    np.testing.assert_allclose(apprentice.is_big_weight_drop, change.lt(-3))
+    np.testing.assert_allclose(apprentice.weight_dropped, change.lt(0))
+    np.testing.assert_allclose(apprentice.weight_raised, change.gt(0))
+    # An unverified claim leaves the claim itself and the adjusted weight missing; comparisons
+    # fall back to the allocated weight, which is observed for every runner.
+    assert mixed[["reported_jockey_claim_lbs", "claim_adjusted_weight_lbs"]].isna().all(axis=None)
+    np.testing.assert_allclose(mixed.weight_vs_field, mixed.weight_lbs - mixed.weight_lbs.mean())
+    np.testing.assert_allclose(mixed.weight_per_furlong, mixed.weight_lbs / mixed.distance_furlongs)
+    compared = ["weight_rank", "uphill_x_weight", "weight_change", "weight_change_vs_field",
+                "is_big_weight_drop", "weight_dropped", "weight_raised"]
+    assert mixed[compared].notna().all(axis=None)
+    selectable = get_feature_columns(featured)
+    assert "claim_adjusted_weight_lbs" in selectable and "weight_lbs" not in selectable
 
 
 def test_no_model_features_missing_in_live(parity_frames):

@@ -32,7 +32,8 @@ from src.bha_features import add_bha_features
 import config
 from src.source_dataset import dataset_build
 from src.feature_context import counts_state_scope, current_context, current_counts_state
-from src.feature_semantics import distance_category
+from src.feature_semantics import burden_weight, claim_adjusted_weight, distance_category
+from src.foreign_form import history as foreign_history
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1248,7 +1249,76 @@ def _rolling(df, group_key, value_col, operations) -> dict:
     return results
 
 
+def _with_foreign_starts(df, stage, history_columns):
+    """Create a private horse timeline and project only domestic rows back."""
+    if df.empty or _horse_key(df) != "horse_id":
+        return df, None
+    state = current_counts_state()
+    key = f"foreign_form::{stage}"
+    through = df.race_date.max()
+    if "prediction_as_of" in df:
+        decision_day = pd.to_datetime(df.prediction_as_of, utc=True, errors="raise").dt.tz_localize(None)
+        # Historical training rows use race date; a live request can be
+        # prepared in advance. Use the earliest decision day in that batch.
+        earliest = decision_day.min()
+        if pd.notna(earliest):
+            through = min(through, earliest.normalize())
+    foreign = foreign_history(through=through, after=state.get(key) if state is not None else None)
+    if state is not None:
+        state[key] = through
+    if foreign.empty:
+        return df, None
+    from src.runner_identity import horse_ids
+    domestic_ids = horse_ids(df)
+    # An unseeded calculation only needs foreign histories for its target
+    # horses. A seeded build also consumes runs for horses absent from this chunk.
+    if state is None:
+        foreign = foreign.loc[foreign.horse_id.isin(domestic_ids)]
+    if foreign.empty:
+        return df, None
+    required = ["horse_id", "race_id", "race_date", *history_columns]
+    domestic = df.reindex(columns=required).reset_index(drop=True)
+    domestic["race_id"] = domestic.race_id.astype(str)
+    domestic["_event_dt"] = df.get("_event_dt", df.race_date).to_numpy()
+    foreign = foreign.copy()
+    foreign["horse_id"] = foreign.horse_id.astype(df.horse_id.dtype)
+    foreign["race_id"] = "foreign:" + foreign.provider + ":" + foreign.native_race_id
+    foreign["won"] = foreign.finish_position.eq(1).astype(int)
+    foreign = _add_result_history_flags(foreign)
+    foreign = foreign.reindex(columns=domestic.columns)
+    work = pd.concat([domestic, foreign], ignore_index=True).sort_values(["_event_dt", "race_id"])
+    return work, domestic.index
+
+
+def _roll_horse_starts(df, column, operations):
+    work, positions = _with_foreign_starts(df, column, [column])
+    values = _rolling(work, _horse_key(df), column, operations)
+    if positions is None:
+        return values
+    return {name: pd.Series(value, index=work.index).loc[positions].to_numpy()
+            for name, value in values.items()}
+
+
 def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
+    columns = ["_result_start", "_finished_result", "_non_finisher_result", "_placed_for_history",
+               "_norm_pos_for_history", "_won_for_history", "_non_finisher_for_history", "won",
+               "race_type", "age", "weight_lbs", "reported_jockey_claim_lbs", "has_observed_weight",
+               "lengths_behind", "beaten_lengths", "finish_position",
+               "form_last_pos", "form_avg", "form_wins_count", "form_length"]
+    work, positions = _with_foreign_starts(df, "form", [c for c in columns if c in df])
+    if positions is None:
+        return _add_horse_features(df)
+    inputs = set(work.columns)
+    engineered = _add_horse_features(work)
+    updated = {"horse_runs", "horse_wins", "horse_places", "form_last_pos", "form_avg",
+               "form_wins_count", "form_length"}
+    for col in engineered:
+        if col not in inputs or col in updated:
+            df[col] = engineered.loc[positions, col].to_numpy()
+    return df
+
+
+def _add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Calculate horse-specific historical features.
 
@@ -1260,7 +1330,6 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
     hkey = _horse_key(df)
 
     # --- Cumulative horse stats (shifted to avoid leakage) ---
-    horse_groups = df.groupby(hkey, sort=False)
     result_start_flag = df["_result_start"]
     finished_flag = df["_finished_result"]
     non_finisher_flag = df["_non_finisher_result"]
@@ -1397,20 +1466,22 @@ def add_horse_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         df = _without(df, ["horse_rt_wins"])
 
-    # --- Weight change from previous run ---
+    # --- Change in weight burden from the previous run ---
     if "weight_lbs" in df.columns:
-        horse_groups = df.groupby(hkey)
-        df["_observed_weight"] = df["weight_lbs"].where(
-            df["has_observed_weight"].eq(1)) if "has_observed_weight" in df else df["weight_lbs"]
-        df["weight_change"] = df["_observed_weight"] - _lag(df, hkey, "_observed_weight")
-        # Weight-change relative to the field: did THIS horse's burden shift
-        # more or less than the race average?  Captures apprentice allowances
-        # and handicapping adjustments that narrow/widen vs the competition.
-        race_mean_wc = df.groupby("race_id")["weight_change"].transform("mean")
-        df["weight_change_vs_field"] = df["weight_change"] - race_mean_wc
-        # Binary flag: a drop of 3+ lbs is considered a meaningful relief.
-        df["is_big_weight_drop"] = (df["weight_change"] < -3).astype(np.int8)
-        df = _without(df, ["_observed_weight"])
+        weight = claim_adjusted_weight(df)
+        # Comparisons use the allocated weight where the claim is unverified (see burden_weight).
+        burden = burden_weight(df)
+        history = pd.DataFrame({hkey: df[hkey], "_burden_weight_lbs": burden}, index=df.index)
+        change = burden - _lag(history, hkey, "_burden_weight_lbs")
+        # Compare against the field's observed changes, with at least one rival.
+        changes = change.groupby(df["race_id"], sort=False)
+        race_mean = changes.transform("mean").where(changes.transform("count").ge(2))
+        df = _with_columns(df, pd.DataFrame({
+            "claim_adjusted_weight_lbs": weight,
+            "weight_change": change,
+            "weight_change_vs_field": change - race_mean,
+            "is_big_weight_drop": change.lt(-3).astype(float).where(change.notna()),
+        }, index=df.index))
 
     # --- Age × form-trend interaction ---
     # Young horses (≤3yo) that are *improving* on recent form represent one
@@ -2094,7 +2165,9 @@ def add_distance_change_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Distance change from previous race ---
     horse_groups = df.groupby(hkey)
-    df["_prev_dist"] = _lag(df, hkey, "distance_furlongs")
+    trip_history, positions = _with_foreign_starts(df, "trip", ["distance_furlongs"])
+    previous_trip = _lag(trip_history, hkey, "distance_furlongs")
+    df["_prev_dist"] = previous_trip if positions is None else previous_trip.loc[positions].to_numpy()
     # Missing for a debutant: 0 would read as "same trip as last time".
     df["distance_change"] = df["distance_furlongs"] - df["_prev_dist"]
     df["stepping_up"] = (df["distance_change"] > 0.5).astype(int)
@@ -2373,8 +2446,9 @@ def add_jockey_intent_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Weight change direction ---
     if "weight_change" in df.columns:
-        df["weight_dropped"] = (df["weight_change"] < 0).astype(int)
-        df["weight_raised"] = (df["weight_change"] > 0).astype(int)
+        change = df["weight_change"]
+        df["weight_dropped"] = change.lt(0).astype(float).where(change.notna())
+        df["weight_raised"] = change.gt(0).astype(float).where(change.notna())
 
     df = _without(df, ["_prev_jockey"])
     return df
@@ -2428,13 +2502,17 @@ def add_trainer_specialisation_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+WINNER_MARGIN_CAP = 20.0
+
+
 def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Derive proxy speed figures from ``lengths_behind`` and distance.
 
     These legacy inputs are margin-based performance proxies, not measured
     speed. Winning-time data exists separately. Use cumulative distance
-    behind the winner, never the raw gap to the preceding finisher.
+    behind the winner, never the raw gap to the preceding finisher. A winner
+    scores minus its winning distance, so lower is still better.
 
     All rolling windows use ``shift(1)`` to avoid data leakage.
     """
@@ -2442,15 +2520,20 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     logger.info("Engineering speed figure features...")
-    hkey = _horse_key(df)
-
     # Only use lengths_behind from horses that actually finished
     from src.result_margins import margin_values
     _lb_for_speed = margin_values(df).copy()
     if "finish_position" in df.columns:
-        _lb_for_speed = _lb_for_speed.where(
-            df["finish_position"].fillna(0).astype(int) >= 1
-        )
+        _position = df["finish_position"].fillna(0).astype(int)
+        _lb_for_speed = _lb_for_speed.where(_position >= 1)
+        # Credit winners the distance back to the next finisher (negative), capped at
+        # WINNER_MARGIN_CAP lengths. Scoring every winner as 0 made a wide-margin winner equal
+        # to a nose winner and left 36% of ``speed_fig_best_5`` at exactly zero. Only cumulative
+        # margins qualify: the legacy ``lengths_behind`` is the gap to the horse in front.
+        if "beaten_lengths" in df.columns:
+            _next_best = _lb_for_speed.where(_position > 1).groupby(df["race_id"], sort=False).transform("min")
+            _credit = -_next_best.clip(upper=WINNER_MARGIN_CAP)
+            _lb_for_speed = _lb_for_speed.mask((_position == 1) & _credit.notna(), _credit)
 
     # Lengths normalized for distance with non-linear power-law scaling (2c)
     # This reflects that margin dispersion does not scale linearly with distance;
@@ -2463,12 +2546,14 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
     df["_rel_perf"] = df["_lb_per_furlong"] - race_median_lpf
 
     # --- Numba-accelerated rolling speed figures ---
+    # Foreign starts consume a slot, with the domestic performance proxy
+    # and class scales unavailable for those starts.
     _speed_ops = [
         ("speed_fig_avg_5", "mean", 5),
         ("speed_fig_avg_10", "mean", 10),
         ("speed_fig_best_5", "min", 5),
     ]
-    for name, arr in _rolling(df,hkey, "_lb_per_furlong", _speed_ops).items():
+    for name, arr in _roll_horse_starts(df, "_lb_per_furlong", _speed_ops).items():
         df[name] = arr
 
     # Trend: recent avg minus long-term avg (negative = improving)
@@ -2476,7 +2561,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # Relative performance rolling avg (negative = above average)
     _rel_ops = [("speed_fig_rel_avg_5", "mean", 5)]
-    for name, arr in _rolling(df,hkey, "_rel_perf", _rel_ops).items():
+    for name, arr in _roll_horse_starts(df, "_rel_perf", _rel_ops).items():
         df[name] = arr
 
     # ── Class-adjusted speed figures ─────────────────────────────
@@ -2496,7 +2581,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
             ("speed_fig_adj_avg_5", "mean", 5),
             ("speed_fig_adj_best_5", "min", 5),
         ]
-        for name, arr in _rolling(df,hkey, "_adj_lpf", _adj_ops).items():
+        for name, arr in _roll_horse_starts(df, "_adj_lpf", _adj_ops).items():
             df[name] = arr
         df = _without(df, ["_adj_lpf"])
 
@@ -2525,7 +2610,7 @@ def add_speed_figure_features(df: pd.DataFrame) -> pd.DataFrame:
             ("speed_z_class_avg_10", "mean", 10),
             ("speed_z_class_best_5", "min", 5),
         ]
-        for name, arr in _rolling(df,hkey, "_speed_z_class", _z_ops).items():
+        for name, arr in _roll_horse_starts(df, "_speed_z_class", _z_ops).items():
             df[name] = arr
         df["speed_z_class_trend"] = (
             df["speed_z_class_avg_5"] - df["speed_z_class_avg_10"]
@@ -2759,7 +2844,7 @@ def add_track_config_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Uphill finish × weight ---
     # Uphill finishes penalise heavier horses more
     if "weight_lbs" in df.columns:
-        df["uphill_x_weight"] = df["track_uphill_finish"] * df["weight_lbs"]
+        df["uphill_x_weight"] = df["track_uphill_finish"] * burden_weight(df)
 
     # --- Tight/sharp track × draw ---
     # On tight tracks, inside draws matter more
@@ -3683,9 +3768,11 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
     # Young flat horse (2-3yo) — still improving
     df["young_flat"] = ((_age <= 3) & (_is_nh < 0.5)).astype(int)
 
-    # Weight relative to field
-    race_avg_weight = df.groupby("race_id")["weight_lbs"].transform("mean")
-    df["weight_vs_field"] = df["weight_lbs"] - race_avg_weight
+    # Compare weight burdens (claim-adjusted where verified) when at least one rival is measured.
+    weight = burden_weight(df)
+    field_weight = weight.groupby(df["race_id"], sort=False)
+    comparable_weight = field_weight.transform("count").ge(2)
+    df["weight_vs_field"] = (weight - field_weight.transform("mean")).where(comparable_weight)
 
     # Age relative to field
     race_avg_age = df.groupby("race_id")["age"].transform("mean")
@@ -3723,7 +3810,7 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
     # Weight per furlong — at longer distances weight matters more
     if "distance_furlongs" in df.columns:
         safe_dist = df["distance_furlongs"].replace(0, np.nan).fillna(8.0)
-        df["weight_per_furlong"] = df["weight_lbs"] / safe_dist
+        df["weight_per_furlong"] = weight / safe_dist
 
     # Handicap features
     if "handicap" in df.columns:
@@ -3744,11 +3831,9 @@ def add_race_context_features(df: pd.DataFrame) -> pd.DataFrame:
             race_mean_odds > 0, race_std_odds / race_mean_odds, 0
         )
 
-    # --- Weight rank within race ---
+    # --- Weight-burden rank among measured runners ---
     if "weight_lbs" in df.columns:
-        df["weight_rank"] = df.groupby("race_id")["weight_lbs"].rank(
-            ascending=False, method="min"
-        )
+        df["weight_rank"] = field_weight.rank(ascending=False, method="min").where(comparable_weight)
 
     # --- OR vs top-rated in race (observed marks only) ---
     if "official_rating" in df.columns:
