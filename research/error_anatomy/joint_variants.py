@@ -76,6 +76,10 @@ VARIANTS = {
     # Declared 13 November before scoring: the three new groups together, in case each is too small alone.
     "with-three": {"groups": (*MORE, "filter", "market-rating", "debut-choice"), "rounds": 1000,
                    "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 13 November before scoring: the 11:00 exchange price of the race itself (morning_price.py).
+    # The first variant that cannot forecast before 11:00. Judged against more-groups-deeper on native.
+    "with-1100": {"groups": (*MORE, "price-1100"), "rounds": 1000,
+                  "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"

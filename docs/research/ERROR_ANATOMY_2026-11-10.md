@@ -1078,6 +1078,43 @@ where it disagreed with the model does. With owner, newcomer and plot races that
 real alone and null inside: the joint correction at 450 inputs is saturated for information of this
 kind (records of entities and horses against the model's own forecasts).
 
+## 16. The 11:00 exchange price as an input (13 November)
+
+New information instead of new views of old information: the Betfair last traded price of each runner
+at 11:00 on the day (`research/error_anatomy/morning_price.py`, group `price-1100`, eight inputs: log
+share of the field, that share against the model's forecast, price against the favourite, rank, age
+of the last trade, number of price changes, move since 08:00, share of the field priced). 95.7% of
+runners in the long frame have a price; 10,817 of the 11,905 scored races have one for every runner.
+A model using it cannot forecast before 11:00.
+
+| On native forecasts, four dev quarters | Race log loss |
+|---|---|
+| Native model | 1.81937 |
+| Best joint correction (`more-groups-deeper`) | 1.80506 |
+| The same with the 11:00 price (`with-1100`) | 1.77915 |
+
+`with-1100` against `more-groups-deeper`: −0.02591 [−0.03015, −0.02201], 4/4 quarters. Alone on the
+screen forecast the group is −0.0395 against its shuffled twin, 4/4.
+
+On the 10,817 races priced for the whole field:
+
+| Forecast | Race log loss |
+|---|---|
+| Best joint correction without the price | 1.78213 |
+| Raw 11:00 price | 1.76177 |
+| Joint correction with the 11:00 price | 1.75431 |
+| Closing price | 1.72286 |
+
+The model with the price beats the raw 11:00 price by −0.00746 [−0.01020, −0.00464], 4/4, and is
+still +0.0315 behind the close. Without the price the model is 0.020 behind the 11:00 price; so the
+price carries most of the gain, and the model adds about a fifth of the 11:00-to-close distance on
+top of it. On the 1,088 races not priced for the whole field the change is −0.0069
+[−0.0197, +0.0068], 2/4: no harm where the price is missing.
+
+Not on the hold-out, which stays unread. The user intends a Sporting Life price as the live source
+later; its first show sits nearest the exchange price an hour before the off, so that would be a
+different (later) forecast time and needs its own history before it can be fitted.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the

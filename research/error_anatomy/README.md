@@ -87,5 +87,8 @@ Fifth round (13 November), from reading what the feature selection dropped:
 - `horse_filter.py`, `market_rating.py`, `debut_choice.py`: filtered horse state,
   price ratings through shared rivals, race chosen for a newcomer (`filter`,
   `market-rating`, `debut-choice`, joint variant `with-three`); null inside.
+- `morning_price.py`: the 11:00 exchange price of the race itself (`price-1100`,
+  joint variant `with-1100`); −0.0259 on native inside the joint correction, 4/4,
+  and −0.0075 against the raw 11:00 price. Forecasts then need the 11:00 price.
 - `input_repairs.py`: repairs of the oddities found, refitted inside the
   87-input model on the confirmation folds; all within noise.
