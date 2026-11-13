@@ -57,6 +57,10 @@ VARIANTS = {
     # career, and those horses win 7-23% less often than BSP implies. Do not use this variant.
     "with-foal-age": {"groups": (*MORE, "foal-age"), "rounds": 1000,
                       "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 13 November before scoring: the plot-race inputs (plot_races.py, the user's suggestion),
+    # -0.0025 alone on the screen forecast. Judged against more-groups-deeper on native.
+    "with-plot": {"groups": (*MORE, "plot"), "rounds": 1000,
+                  "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"

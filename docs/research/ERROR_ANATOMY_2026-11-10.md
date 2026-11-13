@@ -1016,6 +1016,34 @@ credit itself is neutral. At the user's request it was made in the feature code
 lengths; test in `tests/test_margin_history_repair.py`). Like the weight fallback it is uncommitted
 and needs a store rebuild; neither is expected to change accuracy.
 
+## 14. Two suggestions from the user: race-relative views and "laying one out" (13 November)
+
+**Race-relative views.** The store compares a runner with its field by difference from the field
+mean, z-score, rank percentile and gap to the best other rival. `rival-structure`
+(`input_repairs.py`) adds four more views for ten kept ability measures (40 columns): the average
+pairwise win share against each rival, the log softmax share of the field, the gap to the mean of the
+three best rivals, and the count of rivals within half a standard deviation. Added to the 87 inputs:
+−0.00018 [−0.0025, +0.0021], 3/4 quarters. Null as an addition. Replacing the existing views with
+these was not tested.
+
+**Plot races.** The suggestion: some owners and trainers do not ask for a horse's best in qualifying
+runs, to earn a lenient mark for a target race. `plot_races.py` keys the shrunk past residual and
+closing-price gap of each trainer and each owner by the horse's handicap situation (handicap debut,
+below last winning mark, eased 2lb or more since last run, other handicap, not a handicap), by
+whether its last three runs were all at 16/1 or longer, and by today's switch (class drop, trip
+change of two furlongs or more, both).
+
+| Test | Change | Quarters better |
+|---|---|---|
+| Alone, as a correction on stored forecasts (screen) | −0.00245 [−0.0036, −0.0012] | 4/4 |
+| Same against shuffled twin | −0.00247 | 4/4 |
+| Added to the best joint correction, native forecasts (`with-plot` vs `more-groups-deeper`) | +0.00019 [−0.0004, +0.0007] | 1/4 |
+
+Real alone, nothing inside the joint correction: the third group with this pattern after owner and
+newcomer. The existing trainer keys (handicap or not, code, track, freshness) and the horse's own
+price-gap history already carry it. Connections that outperform the forecast in these situations
+are found by the corrections as they stand.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the

@@ -2739,3 +2739,14 @@ Refuted or weakened in the same study:
   within ±0.001 of the unchanged model. The claim-adjusted weight inputs are
   blank for 31% of 2020–2023 runners in the 13 November store and that costs
   nothing measurable (+0.0009 [−0.0004, +0.0023]).
+- **More race-relative views of kept ability measures** (pairwise win share,
+  log softmax share, gap to the three best rivals, count of close rivals; 40
+  columns added to the 87): −0.0002 [−0.0025, +0.0021], 3/4. Null as an
+  addition; replacing the existing mean/z/rank/best-rival views is untested.
+- **Trainer and owner record by handicap situation ("laying one out")**:
+  past residual and closing-price gap keyed by handicap debut, below last
+  winning mark, eased mark, three unfancied runs, class drop or trip switch.
+  −0.0025 4/4 alone as a correction, +0.0002 [−0.0004, +0.0007] 1/4 once the
+  existing joint correction is present. Already carried by the trainer and
+  horse price-gap inputs. Third group (after owner, newcomer) to be real
+  alone and null inside; judge new correction groups inside the joint model.

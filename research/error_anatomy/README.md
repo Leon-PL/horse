@@ -80,5 +80,8 @@ Fifth round (13 November), from reading what the feature selection dropped:
   continuous going scale (`matched-form`); null.
 - `kept_inputs_audit.py`: profile of the 87 selected inputs (fill by year,
   repeated values, zero sentinels, within-race variation, win rate by fifth).
+- `plot_races.py`: trainer and owner record by handicap situation, preparation
+  and switch (`plot`, joint variant `with-plot`); real alone, null inside the
+  joint correction.
 - `input_repairs.py`: repairs of the oddities found, refitted inside the
   87-input model on the confirmation folds; all within noise.

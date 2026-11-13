@@ -98,6 +98,72 @@ def signed_margin(context):
     return context[KEYS].merge(out, on=KEYS, how="left", validate="one_to_one").drop(columns=KEYS)
 
 
+RIVAL_BASES = (("combined_elo", 1), ("horse_ts_mu", 1), ("horse_margin_elo", 1), ("official_rating", 1),
+               ("rtv_card_tf_rating", 1), ("rtv_time_fig_mean3", 1), ("rtv_text_logit", 1), ("trainer_elo", 1),
+               ("jockey_elo", 1), ("speed_fig_rel_avg_5", -1))
+
+
+@nb.njit(cache=True)
+def _rivals(bounds, x, scale):
+    """Per runner: pairwise share, log softmax share, gap to the three best rivals, rivals within half a scale."""
+    out = np.full((len(x), 4), np.nan)
+    for r in range(len(bounds) - 1):
+        a, b = bounds[r], bounds[r + 1]
+        known = 0
+        peak = -np.inf
+        for i in range(a, b):
+            if not np.isnan(x[i]):
+                known += 1
+                peak = max(peak, x[i])
+        if known < 2:
+            continue
+        total = 0.
+        for i in range(a, b):
+            if not np.isnan(x[i]):
+                total += np.exp((x[i] - peak) / scale)
+        for i in range(a, b):
+            if np.isnan(x[i]):
+                continue
+            share = 0.
+            close = 0.
+            top = np.full(3, -np.inf)
+            for j in range(a, b):
+                if j == i or np.isnan(x[j]):
+                    continue
+                share += 1. / (1. + np.exp(-(x[i] - x[j]) / scale))
+                close += abs(x[i] - x[j]) <= .5 * scale
+                v = x[j]
+                for k in range(3):
+                    if v > top[k]:
+                        v, top[k] = top[k], v
+            best = 0.
+            used = 0
+            for k in range(3):
+                if top[k] > -np.inf:
+                    best += top[k]
+                    used += 1
+            out[i, 0] = share / (known - 1)
+            out[i, 1] = (x[i] - peak) / scale - np.log(total)
+            out[i, 2] = (x[i] - best / used) / scale
+            out[i, 3] = close
+    return out
+
+
+def rival_structure(context, base):
+    """Race-relative views that keep what mean, z-score and percentile lose (see the arm's description)."""
+    race = context.race_id.to_numpy()
+    bounds = np.r_[0, np.flatnonzero(race[1:] != race[:-1]) + 1, len(race)].astype(np.int64)
+    made = {}
+    for name, sign in RIVAL_BASES:
+        x = sign * base(name)
+        centred = x - pd.Series(x).groupby(race).transform("mean").to_numpy()
+        scale = float(np.nanstd(centred))  # one within-race spread for every race, so small fields are not rescaled
+        values = _rivals(bounds, x, scale)
+        for k, label in enumerate(("pair_share", "log_share", "vs_top3", "close_rivals")):
+            made[f"rv_{name}_{label}"] = values[:, k]
+    return made
+
+
 def arms(context, base):
     """name -> (replaced columns, added columns), built lazily."""
     def weight_rebuilt():
@@ -192,7 +258,15 @@ def arms(context, base):
         made = context[KEYS].merge(made, on=KEYS, how="left", validate="one_to_one")
         return {c: made[c].to_numpy(float) for c in ("speed_fig_rel_avg_5", "speed_fig_best_5_vs_best_in_race")}, {}
 
-    return {"baseline": lambda: ({}, {}), "signed-margin-replace": signed_replace,
+    def rivals():
+        # Declared 13 November before scoring. The store compares a runner with its field by mean, z-score,
+        # percentile and best rival. For ten ability measures this adds four views those lose: the expected
+        # share of rivals beaten (pairwise logistic), the log of the runner's softmax share (aware of field
+        # size and of every gap), the gap to the mean of the three best rivals, and the number of rivals
+        # within half a spread. One spread per measure for all races, so small fields are not rescaled.
+        return {}, rival_structure(context, base)
+
+    return {"baseline": lambda: ({}, {}), "rival-structure": rivals, "signed-margin-replace": signed_replace,
             "signed-margin-replace-v2": signed_replace_v2, "unsigned-control": unsigned_control, "weight-rebuilt": weight_rebuilt, "weight-fallback": weight_fallback,
             "signed-margin": signed, "hidden-form-masked": hidden_masked}
 
