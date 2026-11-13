@@ -83,5 +83,9 @@ Fifth round (13 November), from reading what the feature selection dropped:
 - `plot_races.py`: trainer and owner record by handicap situation, preparation
   and switch (`plot`, joint variant `with-plot`); real alone, null inside the
   joint correction.
+- `second_round.py`: records re-measured against the corrected forecast; near null.
+- `horse_filter.py`, `market_rating.py`, `debut_choice.py`: filtered horse state,
+  price ratings through shared rivals, race chosen for a newcomer (`filter`,
+  `market-rating`, `debut-choice`, joint variant `with-three`); null inside.
 - `input_repairs.py`: repairs of the oddities found, refitted inside the
   87-input model on the confirmation folds; all within noise.

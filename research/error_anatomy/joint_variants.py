@@ -61,6 +61,21 @@ VARIANTS = {
     # -0.0025 alone on the screen forecast. Judged against more-groups-deeper on native.
     "with-plot": {"groups": (*MORE, "plot"), "rounds": 1000,
                   "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 13 November before scoring: the filtered horse state (horse_filter.py). Judged against
+    # more-groups-deeper on native.
+    "with-filter": {"groups": (*MORE, "filter"), "rounds": 1000,
+                    "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 13 November before scoring: ratings from past closing prices linked through rivals
+    # (market_rating.py). Judged against more-groups-deeper on native.
+    "with-market-rating": {"groups": (*MORE, "market-rating"), "rounds": 1000,
+                           "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 13 November before scoring: the race chosen for a newcomer against the trainer's habit
+    # (debut_choice.py). Judged against more-groups-deeper on native.
+    "with-debut-choice": {"groups": (*MORE, "debut-choice"), "rounds": 1000,
+                          "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 13 November before scoring: the three new groups together, in case each is too small alone.
+    "with-three": {"groups": (*MORE, "filter", "market-rating", "debut-choice"), "rounds": 1000,
+                   "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"

@@ -2750,3 +2750,13 @@ Refuted or weakened in the same study:
   existing joint correction is present. Already carried by the trainer and
   horse price-gap inputs. Third group (after owner, newcomer) to be real
   alone and null inside; judge new correction groups inside the joint model.
+- **Second-round corrections** (entity and horse records re-measured against
+  the corrected forecast, second correction on top): -0.0004 on native, of
+  which -0.0002 appears with shuffled inputs; real vs twin -0.0002
+  [-0.0007, +0.0002]. Round one has taken it.
+- **Filtered horse state, debut race choice, price ratings through rivals**:
+  -0.0047, -0.0034 and -0.0007 alone; all three inside the joint correction
+  -0.0001 [-0.0010, +0.0007], 2/4 on native. Six groups are now real alone
+  and null inside; the joint correction is saturated for records of entities
+  and horses against the model's forecast. New information is needed, not
+  new keys or weightings of the same residuals.

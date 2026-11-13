@@ -1044,6 +1044,40 @@ newcomer. The existing trainer keys (handicap or not, code, track, freshness) an
 price-gap history already carry it. Connections that outperform the forecast in these situations
 are found by the corrections as they stand.
 
+## 15. Four more ideas inside the corrections (13 November)
+
+All judged on the four development quarters (11,905 races), native forecasts.
+
+**Second-round corrections** (`second_round.py`). The best joint correction was walked forward over
+2023Q3-2025Q2 too, so every race from 2023Q3 has a corrected out-of-fold forecast. Trainer, jockey,
+sire and horse records and the run-by-run horse state were rebuilt against that corrected forecast
+(84 inputs) and a second correction fitted on top.
+
+| Comparison on native | Change | Quarters better |
+|---|---|---|
+| Round two vs round one | -0.00039 [-0.00074, -0.00004] | 4/4 |
+| Shuffled twin vs round one | -0.00016 [-0.00036, +0.00005] | 4/4 |
+| Round two vs twin | -0.00023 [-0.00065, +0.00019] | 3/4 |
+
+Round one has taken nearly all of it; 40% of the small gain is a level adjustment the twin also finds.
+
+**Three new input groups**, each alone as a correction on the screen forecast, then all three added
+to `more-groups-deeper` (`with-three`, 481 inputs):
+
+| Group | Alone (vs twin) | Quarters |
+|---|---|---|
+| `filter`: per-horse local-level filter of the price gap, uncertainty growing with days off and youth (`horse_filter.py`, 11 inputs) | -0.00472 [-0.0065, -0.0031] (-0.00491) | 4/4 |
+| `debut-choice`: prize of the race chosen for a newcomer against the trainer's habit, and trainer records by that choice, track, jockey and season (`debut_choice.py`, 39 inputs) | -0.00338 [-0.0047, -0.0021] (-0.00337) | 4/4 |
+| `market-rating`: Luce rating from past closing prices linked through shared rivals, from 2020-09 (`market_rating.py`, 12 inputs) | -0.00066 [-0.0017, +0.0004] (-0.00068) | 2/4 |
+| All three inside the joint correction, native, vs `more-groups-deeper` | -0.00010 [-0.00095, +0.00074] | 2/4 |
+
+Null inside. Two side findings: the rivals-beaten residual has no persistence between a horse's
+consecutive runs (lag-one covariance -0.002 of variance 0.084), so only the price gap has a level to
+filter; and how good the market thought a horse was in past races carries nothing by itself, only
+where it disagreed with the model does. With owner, newcomer and plot races that makes six groups
+real alone and null inside: the joint correction at 450 inputs is saturated for information of this
+kind (records of entities and horses against the model's own forecasts).
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the
