@@ -71,3 +71,10 @@ Fourth round (12 November):
   horse's state (`newcomer`); null inside the joint correction.
 - `foal_age.py`: exact age from the foaling date (`foal-age`). Scored well and
   is a look-ahead leak: the date's precision depends on the later career.
+
+Fifth round (13 November), from reading what the feature selection dropped:
+
+- `pace_comments.py`: running style and pace set-up from Racing TV in-running
+  comments, full history (`pace-comments`); null.
+- `matched_form.py`: past performances weighted by similarity of conditions,
+  continuous going scale (`matched-form`); null.

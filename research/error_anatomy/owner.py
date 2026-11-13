@@ -39,10 +39,10 @@ def owner_key(names):
     return text.where(text.str.len() > 0)
 
 
-def build(start="2020-09-01", end="2026-06-30"):
-    """Owner of every linked starter, by this project's race and horse IDs."""
+def linked_runner_columns(columns, start="2020-09-01", end="2026-06-30"):
+    """Named Racing TV runner columns for every linked starter, by this project's race and horse IDs."""
     race_cols = ["race_id", "race_date", "track_name", "off_time_utc", "is_abandoned", "is_arab_race"]
-    runner_cols = ["race_id", "runner_id", "horse_name", "in_results", "is_nonrunner", "owner"]
+    runner_cols = ["race_id", "runner_id", "horse_name", "in_results", "is_nonrunner", *columns]
     parts = []
     for year in range(int(start[:4]), int(end[:4]) + 1):  # a year at a time keeps memory flat
         lo, hi = max(start, f"{year}-01-01"), min(end, f"{year}-12-31")
@@ -50,14 +50,22 @@ def build(start="2020-09-01", end="2026-06-30"):
         runners = tables["runners"].reindex(columns=runner_cols)
         runners = runners.loc[runners.in_results.eq(True) & ~runners.is_nonrunner.fillna(False).astype(bool)]
         links = match_runners(tables["races"], runners, canonical_rows(lo, hi))
-        linked = links.merge(runners[["race_id", "runner_id", "owner"]], left_on=["rtv_race_id", "rtv_runner_id"],
+        linked = links.merge(runners[["race_id", "runner_id", *columns]], left_on=["rtv_race_id", "rtv_runner_id"],
                              right_on=["race_id", "runner_id"], validate="one_to_one")
-        parts.append(pd.DataFrame({"race_id": linked.sl_race_id.astype(str),
-                                   "horse_id": pd.to_numeric(linked.sl_horse_id).astype("int64"),
-                                   "owner": owner_key(linked.owner)}))
-        print(year, len(parts[-1]), f"{parts[-1].owner.notna().mean():.3f}", flush=True)
+        part = pd.DataFrame({"race_id": linked.sl_race_id.astype(str),
+                             "horse_id": pd.to_numeric(linked.sl_horse_id).astype("int64")})
+        for column in columns:
+            part[column] = linked[column].to_numpy()
+        parts.append(part)
+        print(year, len(part), flush=True)
     out = pd.concat(parts, ignore_index=True)
-    out = out.loc[~out.duplicated(KEYS, keep=False)].reset_index(drop=True)
+    return out.loc[~out.duplicated(KEYS, keep=False)].reset_index(drop=True)
+
+
+def build(start="2020-09-01", end="2026-06-30"):
+    """Owner of every linked starter, by this project's race and horse IDs."""
+    out = linked_runner_columns(["owner"], start, end)
+    out["owner"] = owner_key(out.owner)
     atomic_parquet(out, SAVED)
     return out
 

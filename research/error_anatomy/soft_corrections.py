@@ -48,7 +48,7 @@ SEEDS = (7, 8, 9)
 TWIN_SEED = 11
 ERROR_GROUPS = ("horse", "market-gap", "residual", "wave2")
 STORE_GROUPS = ("tracking", "same-day-bias", "ability-lb", "own", "sale", "franking", "horse-state", "entity-recent",
-                "horse-state-gap", "horse-state-result", "horse-state-lags", "market-level", "market-moves", "hidden-form", "owner", "newcomer", "foal-age", "foal-age-clean")
+                "horse-state-gap", "horse-state-result", "horse-state-lags", "market-level", "market-moves", "hidden-form", "owner", "newcomer", "foal-age", "foal-age-clean", "pace-comments", "matched-form")
 
 
 def soft_boost(columns, *, target, base="p_single", rounds=100, params=None, threads=4, seeds=SEEDS):
@@ -105,6 +105,12 @@ def group_values(name, frame):
     if name in ("market-level", "market-moves"):
         from research.error_anatomy.market_history import load
         return load(name, frame)
+    if name == "pace-comments":
+        from research.error_anatomy.pace_comments import load
+        return load(frame)
+    if name == "matched-form":
+        from research.error_anatomy.matched_form import load
+        return load(frame)
     if name == "foal-age-clean":
         from research.error_anatomy.foal_age import load_clean
         return load_clean(frame)

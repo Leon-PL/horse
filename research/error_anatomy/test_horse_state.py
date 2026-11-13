@@ -122,3 +122,36 @@ def test_owner_key_ignores_titles_and_punctuation():
     assert out[0] == out[1] == "j p mcmanus"
     assert out[2] == "sue magnier m tabor"
     assert out[3:].isna().all()
+
+
+def test_early_score_takes_the_first_style_phrase():
+    from research.error_anatomy.pace_comments import early_score
+    assert early_score("led, ridden and headed over 1f out, kept on one pace") == 1.
+    assert early_score("held up in rear, headway to lead 1f out") == .25
+    assert early_score("chased leader, led 4 out, headed flat") == .75
+    assert early_score("always behind") == 0.
+    assert np.isnan(early_score("ran on well")) and np.isnan(early_score(None))
+
+
+def test_going_index_blends_in_places():
+    from research.error_anatomy.matched_form import going_index
+    assert going_index("Good") == 3. and going_index("Heavy") == 7.
+    assert going_index("Good to Firm (Good in places)") == .75 * 2 + .25 * 3
+    assert going_index("Standard / Slow") == 3.5
+    assert np.isnan(going_index("Unknown")) and np.isnan(going_index(None))
+
+
+def test_matched_form_uses_earlier_dates_and_weights_similar_runs():
+    from research.error_anatomy import matched_form as mf
+    horse = np.zeros(4, dtype=np.int64)
+    day = np.array([1, 2, 3, 3], dtype=np.int64)
+    dist = np.array([6., 12., 6., 6.])
+    going = np.array([3., 3., 3., 3.])
+    ones = np.ones(4, dtype=np.int64)
+    klass = np.full(4, 4.)
+    beat = np.array([1., 0., .5, .5])
+    means, weights = mf._matched(horse, day, dist, going, ones, ones, klass, ones, beat, beat - .5, .85)
+    assert np.isnan(means[0]).all() and weights[0].sum() == 0
+    assert np.allclose(means[2], means[3])                    # the same-day run is not history
+    assert np.isclose(means[2, 0], (0. * 1 + 1. * .85) / 1.85)  # unmatched: recency only
+    assert means[2, 1] > .95                                  # distance-matched: the 6f run dominates

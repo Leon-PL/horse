@@ -2720,3 +2720,12 @@ Refuted or weakened in the same study:
   Racing TV date still win 12% less often than BSP implies, so never feed the
   raw date with per-runner gaps. The store's `profile_*` foaling inputs are
   0% filled historically (capture-time rule) and that costs nothing.
+- **Pace from in-running comments, full history** (early position from the
+  Racing TV close-up comment since September 2020; style, likely leaders,
+  pace pressure, lone leader, course leader bias): −0.0003 [−0.0007, +0.0002].
+  Null. The store's pace inputs lack history before mid-2023, but history is
+  not what they were missing.
+- **Form matched to today's conditions** (similarity-weighted past
+  performances over distance, a continuous going scale from the 193 raw
+  descriptions, course and class): −0.0002 [−0.0009, +0.0006], 2/4. Null; the
+  seven going buckets and per-category win rates lose nothing measurable.

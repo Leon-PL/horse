@@ -920,6 +920,41 @@ The dated study stores (`modelling_feature_store_20261109`, `_20261111`) were de
 12 November; `frame.py` now reads identity and card columns from the current store when the study
 store is absent.
 
+## 12. What the selection dropped, and two new presentations (13 November)
+
+The 12 November selection kept 87 of 1,317 store columns. Read by family:
+
+| Family | Candidates | Kept | Reading |
+|---|---|---|---|
+| Pace and running style | 37 | 0 | Built from At The Races data: 0% of rows before 2023, 17-25% in 2023, about two thirds since |
+| Going | 53 | 2 | Seven buckets from 193 raw descriptions; win rates per bucket |
+| Distance | 58 | 3 | Win rates per band |
+| Stewards reports (`bha_`) | 123 | 0 | Matches the earlier null |
+| First-time headgear and equipment | 12 | 1 (`has_headgear`) | Matches the earlier null |
+| Rider claims and race eligibility | 4 | 0 | Dropped in the first two steps |
+| Race context (field size, class, handicap flag, distance, race type) | - | 0 | Almost every kept input is the runner against its field |
+
+Two presentations of information already held, each declared before scoring and screened as a
+correction on the stored forecasts against a permuted twin:
+
+- `pace-comments` (`pace_comments.py`): early position scored from the Racing TV close-up comment,
+  which exists for every result since September 2020 (96% of 710,224 runs scored: 13% led, 31%
+  prominent, 21% midfield, 23% held up, 12% rear). Horse style, likely leaders, pace pressure, lone
+  leader, and each course's leader bias from earlier dates.
+- `matched-form` (`matched_form.py`): past performances weighted by how closely each run's distance,
+  going, course and class match today's, on a continuous going scale read from the raw descriptions
+  (99.5% readable).
+
+| Group | Inputs | Alone, screen | vs twin |
+|---|---|---|---|
+| pace-comments | 13 | -0.00027 [-0.0007, +0.0002], 3/4 | -0.00024 [-0.0008, +0.0003] |
+| matched-form | 39 | -0.00017 [-0.0009, +0.0006], 2/4 | -0.00014 [-0.0009, +0.0007] |
+
+Both null. The pace family was starved of history, but full history does not rescue it: running
+style and pace set-up add nothing to the forecast. The coarse going buckets and per-category win
+rates lose nothing measurable either: a continuous, similarity-weighted version does no better.
+Neither was taken to the full-capacity test.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the
