@@ -2729,3 +2729,13 @@ Refuted or weakened in the same study:
   performances over distance, a continuous going scale from the 193 raw
   descriptions, course and class): −0.0002 [−0.0009, +0.0006], 2/4. Null; the
   seven going buckets and per-category win rates lose nothing measurable.
+- **Raw race context added back to the 87-input model** (21 columns:
+  distance, going, race type, surface, handicap, race kind, prize, course
+  shape): −0.00002 against the same columns shuffled. Null, tested directly
+  with `admit`; the selection did not drop context by a ranking artefact.
+- **Repairs to kept inputs** (claim-adjusted weight with a plain-weight
+  fallback; winners credited their winning distance in the margin figures;
+  hidden form blanked for horses from the database's first six months): all
+  within ±0.001 of the unchanged model. The claim-adjusted weight inputs are
+  blank for 31% of 2020–2023 runners in the 13 November store and that costs
+  nothing measurable (+0.0009 [−0.0004, +0.0023]).

@@ -955,6 +955,44 @@ style and pace set-up add nothing to the forecast. The coarse going buckets and 
 rates lose nothing measurable either: a continuous, similarity-weighted version does no better.
 Neither was taken to the full-capacity test.
 
+## 13. Are the kept inputs working? (13 November)
+
+**Race context, tested directly.** `python -m src.modelling admit`: the 87-input model with 21 raw
+context columns added back (distance, going, race type, surface, handicap, novice/maiden/bumper,
+prize money, course shape), on the 11,632 confirmation races at reduced capacity. Against the same
+columns shuffled: -0.00002 [-0.0013, +0.0014]. Against the 87 alone: +0.0011, 1/4. Context adds
+nothing beyond what the runner-against-field inputs already carry. (Field size could not be twinned
+because the model checks it against the context frame; `admit` now refuses such candidates.)
+
+**Profile of the 87** (`kept_inputs_audit.py`, output `kept_inputs_audit.csv`): fill rate by year,
+repeated values, zeros standing for no history, variation inside a race, tails, and win rate across
+within-race fifths. Three inputs looked wrong:
+
+- `weight_vs_field` and `weight_change_vs_field` lost data in the store rebuilt on 13 November. They
+  are now claim-adjusted and blank wherever the rider's claim is unverified: 31% of 2020-2023
+  runners (6% in 2025), against 0% in the store the selection used. `weight_change_vs_field` fell
+  from 90% to 48% filled in 2021.
+- `speed_fig_best_5` is exactly zero for 36% of runners: every winner scores 0 lengths behind.
+- `hidden_form_mean` is filled for 36% of 2021 runners and 6% of 2025 runners: early on it mostly
+  describes ordinary runs from before the database starts.
+
+Sound on inspection: Racing TV sectional inputs empty before 2023 (source start); rating inputs at
+zero for newcomers (the true starting value); draw inputs flat alone (they work with course).
+
+**Repairs measured inside the model** (`input_repairs.py`): the 87-input recipe refitted on the
+confirmation folds with a few columns changed or added, against the unchanged model (1.82894).
+
+| Arm | Change [95% interval] | Quarters better |
+|---|---|---|
+| Weight inputs as the 13 November store has them | +0.00092 [-0.0004, +0.0023] | 2/4 |
+| Claim-adjusted weight where known, plain weight otherwise | +0.00076 [-0.0005, +0.0020] | 1/4 |
+| Margin figures with winners credited their winning distance (5 added) | +0.00075 [-0.0011, +0.0025] | 1/4 |
+| Hidden form blanked for horses first seen before 15 March 2021 | +0.00035 [-0.0008, +0.0014] | 2/4 |
+
+None differs from the unchanged model beyond the 0.001-0.002 noise between fits. The lost weight
+data costs nothing measurable and the fallback recovers nothing measurable; the two oddities in the
+margin and hidden-form inputs are real but harmless. No code was changed.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the

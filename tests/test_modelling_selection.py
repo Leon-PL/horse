@@ -164,3 +164,12 @@ def test_admission_separates_information_from_extra_inputs(tmp_path):
     assert good["with_candidates_vs_twin"]["ci95"][1] < 0  # a real signal is
     with pytest.raises(ValueError, match="new inputs"):
         admit_features(frame, matrix, names, spec, ["first"], start="2023-07-08", min_train_periods=1)
+
+
+def test_admission_refuses_candidates_that_are_context_columns():
+    from src.modelling.selection import admit_features
+    frame, matrix, names, spec = wide_data()
+    matrix = np.column_stack([matrix, frame.num_runners.to_numpy(float)])
+    with pytest.raises(ValueError, match="context columns"):
+        admit_features(frame, matrix, [*names, "num_runners"], spec, ["num_runners"], start="2023-07-08",
+                       min_train_periods=1)

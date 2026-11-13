@@ -320,6 +320,10 @@ def admit_features(context, matrix, names, spec, candidates, *, start, dataset_s
         raise ValueError("Candidates must be new inputs present in the prepared matrix")
     if not development_mask(context.race_date).all():
         raise ValueError("Feature admission cannot use the reserved holdout")
+    fixed = [c for c in candidates if c in context]
+    if fixed:
+        # The model checks such inputs against the context frame, so a shuffled twin cannot be built.
+        raise ValueError(f"Candidates that are also context columns cannot be twinned: {fixed}")
     _, folds = _split_folds(context, spec, None, pd.Timestamp(start), min_train_periods)
     if not folds:
         raise ValueError("No folds from the requested start")
