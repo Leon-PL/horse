@@ -1170,6 +1170,16 @@ different (later) forecast time and needs its own history before it can be fitte
    for the performance/spread model.
 4. **Replace `trainer_prev_runs`** with a trailing-window count at the next
    feature rebuild.
+5. **Price timing (parked by the user, 13 November).** The 11:00 price is a
+   different distance from the off for each race. Two arms to run together when
+   taken up: 11:00 with hours-to-the-off as an input, and the price a fixed hour
+   before the off (held for 99% of races; also the nearest stand-in for Sporting
+   Life's first price).
+6. **Big-race entries have no free history.** The BHA API serves
+   `races/{year}/{raceId}/{division}/entries` and `/nominations` only for the
+   current year, and after a race both return the final declared runners, not
+   the earlier entry stages (checked on the 2024 and 2026 Dewhurst). Entries
+   could only be recorded forward. Breeze-up times: ledger 21, none published.
 
 ## Files
 
