@@ -997,9 +997,24 @@ margin and hidden-form inputs are real but harmless.
 Afterwards, at the user's request, the weight comparisons were given a fallback in the feature code
 (`burden_weight` in `src/feature_semantics.py`: claim-adjusted where the claim is verified, allocated
 weight otherwise), restoring full coverage. It sits in the working tree with the other session's
-uncommitted rider-claims work and needs a store rebuild. The margin figures were left as they are:
-crediting winners their winning distance is worse in three of four quarters whether added or
-substituted.
+uncommitted rider-claims work and needs a store rebuild.
+
+**Correction to the margin arms.** The two margin rows above read the store's `lengths_behind`,
+which is the gap to the horse in front; the distance behind the winner is `beaten_lengths`. They are
+void. Rerun on cumulative distances, with a control that uses the same simplified rolling window and
+leaves winners at zero:
+
+| Arm | Change vs the unchanged model | Quarters better |
+|---|---|---|
+| Kept margin inputs rebuilt, winners credited | +0.00099 [-0.0004, +0.0023] | 1/4 |
+| Kept margin inputs rebuilt, winners at zero (control) | +0.00065 [-0.0006, +0.0019] | 1/4 |
+| Credit against control | +0.00034 [-0.0007, +0.0015] | 2/4 |
+
+Most of the apparent cost is this script's approximation of the store's rolling window; the winner
+credit itself is neutral. At the user's request it was made in the feature code
+(`add_speed_figure_features`: a winner scores minus the distance to the next finisher, capped at 20
+lengths; test in `tests/test_margin_history_repair.py`). Like the weight fallback it is uncommitted
+and needs a store rebuild; neither is expected to change accuracy.
 
 ## What this means
 
