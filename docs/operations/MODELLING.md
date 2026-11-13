@@ -225,6 +225,50 @@ ineligible for promotion, including through the old feature-mismatch override:
 the live/place adapter and its validation are a later qualification step.
 The existing selected model is never replaced by a modelling command.
 
+## Forecast correction
+
+`src/correction/` is a second model that adjusts the win model's forecast. Its inputs measure trainers,
+jockeys, sires and horses against the model's own earlier out-of-sample forecasts: how their runners
+finished, and how they were priced at the off, relative to what the model said. The research is
+[ERROR_ANATOMY_2026-11-10](../research/ERROR_ANATOMY_2026-11-10.md); `research/error_anatomy` imports
+its input definitions from here, and the moved code reproduces the research inputs and fits exactly.
+
+| File | Owns |
+|---|---|
+| `inputs.py` | The input definitions. Every one reads strictly earlier dates. |
+| `history.py` | The forecast history, `data/processed/forecast_history/`: one out-of-sample forecast per past runner. |
+| `data.py` | Joins store, history, closing prices and exchange snapshots into one frame. |
+| `model.py` | The correction model (race softmax from the forecast as offset; target 0.75 closing price + 0.25 result), walk-forward scoring. |
+
+```powershell
+.venv\Scripts\python.exe -m src.correction seed --benchmark <benchmark dir>
+.venv\Scripts\python.exe -m src.correction evaluate --output <dir> --threads 6
+.venv\Scripts\python.exe -m src.correction fit --as-of 2026-11-11 --output <dir> --threads 6
+.venv\Scripts\python.exe -m src.correction extend --run <candidate run id>
+```
+
+The history accepts only forecasts made without sight of the race: a benchmark's walk-forward
+forecasts (`seed`), then a fitted candidate's forecasts for races after its training cutoff (`extend`).
+In-sample forecasts are refused, because a model looks far too accurate on races it was trained on and
+every record built on them would shrink to nothing without an error.
+
+What a refit means for it:
+
+- **Same recipe, more data.** The history stays valid. Run `extend` with the new candidate after
+  results arrive, then `fit` again.
+- **Changed recipe or inputs.** The history describes a different model's mistakes. Run a new
+  benchmark from 2022Q3, `seed --replace`, `evaluate` (the gain must be re-measured, not assumed),
+  then `fit`.
+
+The correction needs closing prices for past races (as training target and as an input on earlier
+runs) and the exchange 08:00, 11:00 and one-hour snapshots of earlier runs. It reads no price or
+result of the race being forecast. The research recipe's same-day bias group is left out: it reads
+earlier races on the same card and cannot be known in the morning. `scripts/project_status.py` warns
+when the history falls more than seven days behind results.
+
+Not yet built: a served prediction path. `fit` saves the boosters, and `build_inputs` accepts unsettled
+card rows, but no command yet joins a live card to the history.
+
 ## Remaining research
 
 The first scope supplies the benchmark, explicit recipes, shared OOF/pool

@@ -22,31 +22,9 @@ from src.source_dataset import load_manifest, read_table, use_manifest
 from src.source_prices import attach_bsp
 
 KEYS = s.KEYS
-SNAPSHOTS = ("ltp_0800", "ltp_1100", "ltp_3600s")
-ALPHA = .5
-
-
-def _lagged(frame, signals, lags, prefix, relative=()):
-    """Lags and a run-weighted average of each signal over the horse's runs on strictly earlier dates."""
-    work = pd.concat([frame[[*KEYS, "race_date"]].reset_index(drop=True), signals.reset_index(drop=True)], axis=1)
-    work["_row"] = np.arange(len(work))
-    work = work.sort_values(["horse_id", "race_date", "_row"], kind="stable").reset_index(drop=True)
-    horse = work.groupby("horse_id", sort=False)
-    code = horse.ngroup().to_numpy()
-    same_day = (horse.race_date.shift(1) == work.race_date).to_numpy()
-    made = {}
-    for name in signals:
-        for k in range(1, lags + 1):
-            made[f"{prefix}_{name}_l{k}"] = horse[name].shift(k)
-        made[f"{prefix}_{name}_ma50"] = hs._moving(code, work[name].to_numpy(float), ALPHA)
-    out = pd.DataFrame(made, index=work.index).astype("float32")
-    out[same_day] = np.nan
-    out = pd.concat([work[[*KEYS, "_row"]], out], axis=1).sort_values("_row").drop(columns="_row").reset_index(drop=True)
-    race = frame.race_id.to_numpy()
-    for name in relative:
-        for column in (f"{prefix}_{name}_l1", f"{prefix}_{name}_ma50"):
-            out[f"{column}_vs_field"] = (out[column] - out[column].groupby(race).transform("mean")).astype("float32")
-    return out
+from src.correction.inputs import SNAPSHOTS  # noqa: F401  (one owner: src)
+from src.correction.inputs import lagged as _lagged
+from src.correction.inputs import price_moves as moves
 
 
 def market_level(frame, market="p_market"):
@@ -65,17 +43,6 @@ def snapshots(frame):
         table = read_table("betfair", "timing", linked=True)
     table = table.rename(columns={"bsp": "bf_bsp"})
     return attach_bsp(frame[[*KEYS]].copy(), table, cols=("bf_bsp", *SNAPSHOTS))
-
-
-def moves(frame, prices):
-    """Race-centred log move from each snapshot to BSP; positive means the horse shortened."""
-    out = {}
-    bsp = prices.bf_bsp.where(prices.bf_bsp > 1)
-    for column in SNAPSHOTS:
-        early = prices[column].where(prices[column] > 1)
-        move = np.log(early / bsp).clip(-3, 3)
-        out[column.replace("ltp_", "move_")] = (move - move.groupby(frame.race_id.to_numpy()).transform("mean")).to_numpy()
-    return pd.DataFrame(out)
 
 
 def market_moves(frame):

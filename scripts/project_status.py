@@ -320,6 +320,28 @@ def _source_refresh():
     return {"state": OK if complete else BAD, "detail": "; ".join(detail+issues), "report": report}
 
 
+#: The correction's records go stale silently when the forecast history stops following results.
+FORECAST_HISTORY_LAG_DAYS = 7
+
+
+def _forecast_history(db_latest=None) -> dict:
+    from src.correction.history import status
+
+    meta = status()
+    if not meta:
+        return {"state": DASH, "detail": "none (the forecast correction is not installed)"}
+    detail = f"{meta['races']:,} races to {meta['last_date']}"
+    if len(meta.get("recipe_signatures", [])) != 1:
+        return {"state": WARN, "detail": detail + "; forecasts from more than one recipe"}
+    try:
+        lag = (datetime.fromisoformat(str(db_latest)[:10]) - datetime.fromisoformat(meta["last_date"])).days
+    except (TypeError, ValueError):
+        return {"state": WARN, "detail": detail + "; results date unknown"}
+    if lag > FORECAST_HISTORY_LAG_DAYS:
+        return {"state": WARN, "detail": detail + f"; {lag} days behind results -> python -m src.correction extend"}
+    return {"state": OK, "detail": detail}
+
+
 def collect(deep: bool = True) -> dict:
     """Every link's state, worst-first in the printed order."""
     sections: dict[str, dict] = {}
@@ -347,6 +369,10 @@ def collect(deep: bool = True) -> dict:
         sections["rtv_collection"] = _rtv_collection()
     except Exception as exc:
         sections["rtv_collection"] = {"state": WARN, "detail": f"RTV monitoring failed: {exc}"}
+    try:
+        sections["forecast_history"] = _forecast_history(sections.get("database", {}).get("latest_date"))
+    except Exception as exc:
+        sections["forecast_history"] = {"state": WARN, "detail": f"forecast history check failed: {exc}"}
     # Every link must hold: a promoted model matching a current store, built
     # from results recent enough for rolling-form features to mean anything.
     servable = not blockers
@@ -371,6 +397,7 @@ def render(report: dict) -> str:
         "training_runs": "Training runs",
         "production_model": "Promoted model",
         "rtv_collection": "Racing TV source",
+        "forecast_history": "Forecast history",
     }
     for name, body in report["sections"].items():
         lines.append(f"  {_MARK[body['state']]:>7}  {labels[name]:<18} {body['detail']}")

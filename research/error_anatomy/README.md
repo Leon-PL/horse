@@ -1,5 +1,8 @@
 # Error anatomy
 
+The input definitions of the joint correction (entity residuals, horse state, franking, hidden form,
+past moves) now live in `src/correction/inputs.py`; the modules here import them (13 November).
+
 Starts from where the stored full 063 forecasts are wrong, then builds inputs
 from those errors. Report: `docs/research/ERROR_ANATOMY_2026-11-10.md`.
 Outputs: `data/research/error_anatomy_20261110/`.

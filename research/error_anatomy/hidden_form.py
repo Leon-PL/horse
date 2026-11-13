@@ -22,42 +22,8 @@ from research.meta_learner import screen_candidates as sc
 from research.meta_learner import screening as s
 
 KEYS = s.KEYS
-FAIL = set("PFURBCSDO")
-
-
-def figures(form, hidden):
-    """Per runner: wins, places, fails, best, mean, last and count over the oldest ``hidden`` form figures."""
-    out = np.full((len(form), 7), np.nan)
-    for i, (text, count) in enumerate(zip(form, hidden)):
-        if not count or count <= 0 or not isinstance(text, str):
-            continue
-        marks = [c for c in text.upper() if c.isalnum()][:int(count)]
-        places = [10 if c == "0" else int(c) for c in marks if c.isdigit()]
-        fails = sum(c in FAIL for c in marks)
-        if not marks:
-            continue
-        out[i, 0] = sum(p == 1 for p in places)
-        out[i, 1] = sum(p <= 3 for p in places)
-        out[i, 2] = fails
-        if places:
-            out[i, 3], out[i, 4] = min(places), float(np.mean(places))
-        last = marks[-1]
-        out[i, 5] = (10 if last == "0" else int(last)) if last.isdigit() else 12.
-        out[i, 6] = len(marks)
-    return out
-
-
-def hidden_form(frame, form, hidden):
-    values = figures(form, hidden)
-    out = frame[KEYS].copy()
-    for j, name in enumerate(("wins", "places", "fails", "best", "mean", "last", "runs")):
-        out[f"hf_{name}"] = values[:, j].astype("float32")
-    out["hf_win_share"] = (out.hf_wins / out.hf_runs).astype("float32")
-    race = frame.race_id.to_numpy()
-    for name in ("hf_wins", "hf_best"):
-        filled = out[name].fillna(0. if name == "hf_wins" else 6.)
-        out[f"{name}_vs_field"] = (filled - filled.groupby(race).transform("mean")).astype("float32")
-    return out
+from src.correction.inputs import form_figures as figures  # noqa: F401  (one owner: src)
+from src.correction.inputs import hidden_form  # noqa: F401
 
 
 def load(frame):
