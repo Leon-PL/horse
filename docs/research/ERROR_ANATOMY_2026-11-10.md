@@ -887,6 +887,39 @@ is not to build inputs from it. The same mechanism as the `sex` leak of October.
 Also closed in this round: re-scaling the forecast by the field's experience gains at most 0.0008
 fitted in-sample (calibration in newcomer races is sound).
 
+### Exact age again, on Racing TV dates and a leak-safe design: null (13 November)
+
+The store rebuilt on 13 November (`fe_signature` a92d85a28e586076) takes foaling dates from Racing
+TV. Audit of the raw `foaled` column:
+
+- No 1 January placeholders; the dates equal the old source on all 65,598 horses where that had a
+  real one. 8,436 old placeholders now have a date and 7,469 have none.
+- 11% of horses have no date: 22% of one-run horses against 8% of those with twenty or more runs,
+  and 38% of horses first seen in 2026 (the backfill is unfinished).
+- Runners without a date win 12% less often than BSP implies (1,100 against 1,248), so a missing
+  value still separates runners.
+- The store's own inputs (`profile_exact_age_days`, `profile_foaling_day_of_year`,
+  `rtv_profile_foaled_abroad`) are filled for 0.0% of rows in every year, because a profile counts
+  only if captured before the race and all were captured in November 2026. No model can be trained
+  on them from history.
+
+`foal-age-clean`, declared before scoring: the same six inputs from the raw date, given only in
+races where every runner has a date (74% of scored runners) and blank for the whole field
+otherwise, so missingness cannot separate runners.
+
+| Group | Alone, screen | vs twin |
+|---|---|---|
+| foal-age (old dates, placeholder leak) | -0.0015, 4/4 | -0.0016 |
+| foal-age-clean | -0.00002 [-0.0004, +0.0004], 1/4 | -0.00003 |
+
+Exact age adds nothing once the leak is removed: the whole earlier gain was the placeholder. Age in
+whole years is enough. The capture-time rule in the store costs nothing, and the foaling-date
+backfill is not worth finishing for accuracy.
+
+The dated study stores (`modelling_feature_store_20261109`, `_20261111`) were deleted on
+12 November; `frame.py` now reads identity and card columns from the current store when the study
+store is absent.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the

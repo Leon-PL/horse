@@ -2714,3 +2714,9 @@ Refuted or weakened in the same study:
   of the error report. Any future input from the pedigree profile (fetched
   once, long after the races) needs the same check: does its presence or
   precision vary with career length?
+- **Exact age on Racing TV foaling dates, leak-safe (inputs only in races
+  where every runner has a date):** −0.00002 [−0.0004, +0.0004], 1/4. Null:
+  the earlier −0.0016 was entirely the placeholder leak. Runners with no
+  Racing TV date still win 12% less often than BSP implies, so never feed the
+  raw date with per-runner gaps. The store's `profile_*` foaling inputs are
+  0% filled historically (capture-time rule) and that costs nothing.

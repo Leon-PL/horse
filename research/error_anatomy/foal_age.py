@@ -51,3 +51,27 @@ def load(frame):
     work = frame[KEYS].merge(store, on=KEYS, how="left", validate="one_to_one")
     values = foal_age(frame, work.foaled.to_numpy(), work.age.to_numpy())
     return values, [c for c in values if c not in KEYS]
+
+
+CLEAN_STORE = "data/processed/feature_store/featured.parquet"
+
+
+def load_clean(frame):
+    """``foal-age-clean``, declared 13 November before scoring.
+
+    The rebuilt store takes foaling dates from Racing TV: no 1 January placeholders, but 11% of
+    horses have no date and those win 12% less often than BSP implies, so a missing value still
+    tells one runner from another. Here the inputs are given only in races where every runner has
+    a date and are missing for the whole field otherwise; a value that is constant within a race
+    cannot separate its runners.
+    """
+    store = pd.read_parquet(CLEAN_STORE, columns=[*KEYS, "foaled", "age"])
+    store["race_id"] = store.race_id.astype(str)  # the stored forecasts key races by string
+    store["horse_id"] = store.horse_id.astype(frame.horse_id.dtype)
+    work = frame[KEYS].merge(store, on=KEYS, how="left", validate="one_to_one")
+    values = foal_age(frame, work.foaled.to_numpy(), work.age.to_numpy())
+    columns = [c for c in values if c not in KEYS]
+    whole = values.fa_days.notna().groupby(frame.race_id.to_numpy()).transform("all").to_numpy()
+    values.loc[~whole, columns] = np.nan
+    print(f"foal-age-clean: {whole.mean():.3f} of runners are in fully dated races", flush=True)
+    return values, columns

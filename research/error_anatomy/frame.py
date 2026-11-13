@@ -56,3 +56,24 @@ def race_table(frame, columns):
     races["winners"] = np.add.reduceat(won, bounds[:-1])
     races["rows"] = np.diff(bounds)
     return races
+
+
+def _use_current_store_if_study_store_is_gone():
+    """The dated study store (modelling_feature_store_20261109) was deleted on 12 November.
+
+    The screens read only identity and card columns from it (trainer, sire, form and the like), keyed
+    by race and horse. When it is absent, read those from the current feature store instead. Forecasts,
+    labels and prices still come from the study's own files, so earlier results are unaffected.
+    """
+    from pathlib import Path
+    from research.meta_learner import screen_candidates as sc
+    try:
+        missing = not sc.store_file().exists()
+    except Exception:
+        missing = True
+    if missing:
+        current = Path("data/processed/feature_store/featured.parquet")
+        sc.store_file = lambda: current
+
+
+_use_current_store_if_study_store_is_gone()
