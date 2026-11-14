@@ -141,3 +141,14 @@ def test_history_accepts_only_out_of_sample_forecasts(tmp_path):
     with pytest.raises(ValueError, match="whole field"):
         fh.append(half, source="run:a", recipe_signature="r1", training_last_date="2024-02-10", root=root)
     assert fh.status(root)["last_date"] == "2024-03-01"
+
+
+def test_walk_forward_accepts_inputs_also_present_in_the_frame():
+    frame, prices = make_frame(days=400, races_per_day=3)
+    frame["extra"] = np.arange(len(frame), dtype=float)          # a tracking column lives in both
+    values = frame[ci.KEYS].assign(extra=frame.extra)
+    adjustment, labels = cm.walk_forward(frame, values, ["extra"], first_scored="2024-10-01", rounds=5,
+                                         params={"min_data_in_leaf": 20}, seeds=(7,), threads=1)
+    scored = frame.race_date.ge("2024-10-01").to_numpy()
+    assert np.isfinite(adjustment[scored]).all() and np.isnan(adjustment[~scored]).all()
+    assert cm.compare(frame, adjustment)["races"] == frame.loc[scored].race_id.nunique()

@@ -184,7 +184,9 @@ def walk_forward(frame, values, columns, *, first_scored, probability="p_base", 
     ``frame`` holds settled races with a forecast only, in race order; ``values`` is row-aligned.
     Returns the adjustment (NaN before the first scored quarter) and the fold labels.
     """
-    data = pd.concat([frame.reset_index(drop=True), values[columns].reset_index(drop=True)], axis=1)
+    # Tracking columns are in both; keep the copy from ``values`` so no input name appears twice.
+    data = pd.concat([frame.drop(columns=[c for c in columns if c in frame]).reset_index(drop=True),
+                      values[columns].reset_index(drop=True)], axis=1)
     quarters = data.race_date.dt.to_period("Q").astype(str)
     labels = sorted(q for q in quarters.unique() if q >= str(pd.Timestamp(first_scored).to_period("Q")))
     before = int((pd.Index(sorted(quarters.unique())) < labels[0]).sum())

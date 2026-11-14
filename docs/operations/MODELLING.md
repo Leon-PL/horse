@@ -266,6 +266,24 @@ result of the race being forecast. The research recipe's same-day bias group is 
 earlier races on the same card and cannot be known in the morning. `scripts/project_status.py` warns
 when the history falls more than seven days behind results.
 
+### First pipeline measurement (14 November)
+
+Store rebuilt with the weight and margin fixes (`a040db5`); default 87-input recipe at native capacity,
+16 walk-forward quarters from 2022Q3 (50,387 races, race log loss 1.8446 over the whole span); correction
+walked forward over the four development quarters, 414 inputs. Outputs in
+`data/modelling/correction_20261113/`.
+
+| 11,905 races, 2025Q3 to 2026Q2 | Race log loss |
+|---|---|
+| Win model (87 inputs, native) | 1.82728 |
+| With the correction | 1.81268 |
+
+Difference -0.01460, 95% interval -0.01725 to -0.01203 (date-clustered), better in 4 of 4 quarters
+(-0.0088, -0.0157, -0.0199, -0.0159). The research figure was -0.01431 on the full 063 recipe with the
+same-day group included, so the gain carries over to this base and survives dropping that group. The
+research base was stronger (1.81937 native, 1.80506 corrected): the 063 recipe's 64 extra inputs are
+worth about 0.008 that this pipeline does not have. Development quarters only; the hold-out was not read.
+
 Not yet built: a served prediction path. `fit` saves the boosters, and `build_inputs` accepts unsettled
 card rows, but no command yet joins a live card to the history.
 
