@@ -29,19 +29,8 @@ ENTITIES = {"dam": ["dam"], "sire_fresh": ["sire", "_fresh"], "damsire_fresh": [
 
 def with_keys(frame, extra, entities, prefix):
     """``entity_inputs`` with extra key columns taken from ``extra`` (aligned to ``frame``)."""
-    original = er._keys
-
-    def keys(f):
-        made = original(f)
-        for column, values in extra.items():
-            made[column] = np.asarray(values)
-        return made
-
-    er._keys = keys
-    try:
-        return er.entity_inputs(frame, market="p_market", half_life=er.LONG_HALF_LIFE, entities=entities, prefix=prefix)
-    finally:
-        er._keys = original
+    return er.entity_inputs(frame, market="p_market", half_life=er.LONG_HALF_LIFE, entities=entities, prefix=prefix,
+                            extra_keys=extra)
 
 
 def newcomer_inputs(frame):

@@ -1115,6 +1115,46 @@ Not on the hold-out, which stays unread. The user intends a Sporting Life price 
 later; its first show sits nearest the exchange price an hour before the off, so that would be a
 different (later) forecast time and needs its own history before it can be fitted.
 
+## 17. One race read closely: stable change, discipline, Irish raiders, weight (14 November)
+
+The user asked why Dinoland (Cheltenham 12:35, 14 November) was 9.8% when he became favourite. The card
+price the model saw was 7.0, fourth in the betting (11.7% of the book), so the forecast was two points
+under the morning market; the rest was later money. His inputs were sound (26 runs, all correct). Three
+things about him are in no input, and the user added two more (race fitness, weight carried), so each
+was counted on the 11,905 scored races and then screened.
+
+Winners against the stored forecast and the closing price (1.00 = as expected):
+
+| Situation | Runners | Winners | Won / model | Won / market |
+|---|---|---|---|---|
+| First run for a new yard | 4,012 | 353 | 1.06 | 1.01 |
+| Runs 2-4 for a new yard | 9,310 | 935 | 1.02 | 1.02 |
+| Settled after a move, form up 0.15+ | 4,711 | 643 | 1.00 | 1.02 |
+| Today's race type beats career record by 0.15+ | 1,489 | 272 | 1.10 | 1.10 |
+| Chase, 2+ chase wins for this yard | 3,604 | 471 | 0.95 | 0.99 |
+| Rating up 15+ in six runs | 4,898 | 560 | 0.96 | 0.99 |
+| Irish yard in Britain | 1,128 | 109 | 0.92 | 0.84 |
+| Jumps handicap, ran within 21 days | 7,119 | 847 | 0.98 | 1.00 |
+| Jumps handicap, off 150+ days | 3,182 | 315 | 1.08 | 1.06 |
+| Jumps handicap, top third of the weights | 9,708 | 1,173 | 0.95 | 0.97 |
+| Jumps handicap, bottom third of the weights | 7,562 | 698 | 1.03 | 1.01 |
+| Chase 3m+, bottom third of the weights | 1,174 | 131 | 1.11 | 1.04 |
+
+The model is not low on horses improved since a stable change. It leans slightly high on top weights
+and low on bottom weights. Two groups, declared before scoring: `yard` (`yard_change.py`, 53 inputs:
+form by spell for the present yard and in today's race type, rating gains, the trainer's base, and
+residuals keyed by trainer with stage of the spell and with home/away) and `burden` (`burden.py`, 16
+inputs: weight against the field with trip, discipline and ground, and against weights carried before).
+
+| | Alone, vs twin (screen forecast) | Inside the joint correction (native) |
+|---|---|---|
+| `yard` | -0.00119 [-0.00228, -0.00017] 3/4 | |
+| `burden` | -0.00073 [-0.00123, -0.00026] 4/4 | |
+| both (`with-yard-burden`) | | +0.00003 [-0.00073, +0.00080] 2/4 |
+
+Both are small alone and nothing inside: 1.80508 against 1.80506. The store's `region` column is one
+constant ("UK") for every race; a trainer's base has to be derived from where its runners ran.
+
 ## What this means
 
 - The generalist is slow to learn about specific horses and stables. When the

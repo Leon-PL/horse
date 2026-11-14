@@ -80,6 +80,10 @@ VARIANTS = {
     # The first variant that cannot forecast before 11:00. Judged against more-groups-deeper on native.
     "with-1100": {"groups": (*MORE, "price-1100"), "rounds": 1000,
                   "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 14 November before scoring: the yard-change inputs (yard_change.py, -0.0012 alone, 3/4) and the
+    # weight-and-trip inputs (burden.py) together. Judged against more-groups-deeper on native.
+    "with-yard-burden": {"groups": (*MORE, "yard", "burden"), "rounds": 1000,
+                         "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"

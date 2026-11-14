@@ -116,14 +116,17 @@ def entity_keys(frame):
 
 
 def entity_inputs(frame, probability="p_single", *, entities=ENTITIES, shrink=SHRINK, half_life=None,
-                  market=None, prefix="er", lag_days=0, residual=None):
+                  market=None, prefix="er", lag_days=0, residual=None, extra_keys=None):
     """Shrunk prior-date signal means per entity key, plus field-relative versions.
 
     ``half_life`` (days) down-weights older runs. ``market`` names a column of race-normalised
     market probabilities; when given, the market-gap family ``mg_*`` is added. ``lag_days``
     ignores runs in the last that-many days before the race (a stress test for timing leaks).
+    ``extra_keys`` maps further key column names to values aligned with ``frame``.
     """
     work = entity_keys(frame)
+    for column, values in (extra_keys or {}).items():
+        work[column] = np.asarray(values)
     residual = run_residuals(frame, probability) if residual is None else residual
     signals = {"win": residual.win, "variance": residual.variance, "order": residual.order}
     known = residual.win.notna() & residual.order.notna()

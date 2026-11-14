@@ -2760,3 +2760,8 @@ Refuted or weakened in the same study:
   and null inside; the joint correction is saturated for records of entities
   and horses against the model's forecast. New information is needed, not
   new keys or weightings of the same residuals.
+- **Yard change, discipline for the present yard, Irish yards in Britain, weight
+  with trip** (14 November, from one race read closely): -0.0012 (3/4) and
+  -0.0007 (4/4) alone; both inside the joint correction +0.00003
+  [-0.0007, +0.0008], 2/4 on native. The model is not low on horses improved
+  since a stable change (won/model 1.00). Eight groups real alone, null inside.

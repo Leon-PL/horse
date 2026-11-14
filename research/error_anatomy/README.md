@@ -90,6 +90,9 @@ Fifth round (13 November), from reading what the feature selection dropped:
 - `horse_filter.py`, `market_rating.py`, `debut_choice.py`: filtered horse state,
   price ratings through shared rivals, race chosen for a newcomer (`filter`,
   `market-rating`, `debut-choice`, joint variant `with-three`); null inside.
+- `yard_change.py`, `burden.py`: form for the present yard and in today's race
+  type, Irish yards in Britain, weight with trip and ground (`yard`, `burden`,
+  joint variant `with-yard-burden`); small alone, null inside.
 - `morning_price.py`: the 11:00 exchange price of the race itself (`price-1100`,
   joint variant `with-1100`); −0.0259 on native inside the joint correction, 4/4,
   and −0.0075 against the raw 11:00 price. Forecasts then need the 11:00 price.

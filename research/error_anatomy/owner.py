@@ -75,18 +75,8 @@ def owner_inputs(frame):
     owners["horse_id"] = owners.horse_id.astype(frame.horse_id.dtype)
     work = frame.merge(owners, on=KEYS, how="left", validate="one_to_one")
     work.index = frame.index
-    original = er._keys
-
-    def keys(f):
-        made = original(f)
-        made["owner"] = f.owner
-        return made
-
-    er._keys = keys
-    try:
-        return er.entity_inputs(work, market="p_market", half_life=er.LONG_HALF_LIFE, entities=ENTITIES, prefix="ow")
-    finally:
-        er._keys = original
+    return er.entity_inputs(work, market="p_market", half_life=er.LONG_HALF_LIFE, entities=ENTITIES, prefix="ow",
+                            extra_keys={"owner": work.owner.to_numpy(object)})
 
 
 def load(frame):
