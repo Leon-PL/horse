@@ -46,23 +46,27 @@ def card_rows(featured, forecast, columns):
 
 
 def correct_card(settled, prices, card, model, tracking):
-    """Corrected probabilities for ``card`` rows placed after the ``settled`` history frame."""
+    """Corrected probabilities for ``card`` rows placed after the ``settled`` history frame.
+
+    The settled rows are history only; the wide input table is built for the card's rows alone.
+    """
     if card.race_date.min() <= settled.race_date.max():
         raise ValueError("The card must be dated after every settled race in the history frame")
     if set(card.race_id.astype(str)) & set(settled.race_id.astype(str)):
         raise ValueError("A card race is already in the settled history")
     card = card.astype({"race_id": settled.race_id.dtype, "horse_id": settled.horse_id.dtype})
-    shared = [c for c in settled.columns if c in card]
-    frame = pd.concat([settled[shared], card[shared]], ignore_index=True)
-    empty = pd.DataFrame(np.nan, index=range(len(card)), columns=prices.columns).assign(**{k: card[k].to_numpy() for k in KEYS})
+    shared = [c for c in card.columns if c in settled or c in tracking]
+    frame = pd.concat([settled[[c for c in shared if c in settled]], card[shared]], ignore_index=True)
+    empty = pd.DataFrame(np.nan, index=range(len(card)), columns=prices.columns)
+    empty = empty.assign(**{k: card[k].to_numpy() for k in KEYS})
     all_prices = pd.concat([prices, empty[prices.columns]], ignore_index=True)
-    values, columns = cm.build_inputs(frame, prices=all_prices, tracking=tracking)
+    rows = np.r_[np.zeros(len(settled), bool), np.ones(len(card), bool)]
+    values, columns = cm.build_inputs(frame, prices=all_prices, tracking=tracking, only=rows)
     if columns != model.columns:
         raise ValueError("The correction was fitted on different inputs than this store and history provide")
-    rows = np.arange(len(settled), len(frame))
-    part, part_values = frame.iloc[rows].reset_index(drop=True), values.iloc[rows].reset_index(drop=True)
+    part = frame.loc[rows].reset_index(drop=True)
     out = part[[*KEYS, "race_date", "p_base"]].copy()
-    out["adjustment"] = model.adjustment(part_values)
+    out["adjustment"] = model.adjustment(values)
     out["probability"] = cm.corrected(out.p_base.to_numpy(float), out.adjustment.to_numpy(), part.race_id.to_numpy())
     return out
 
@@ -78,11 +82,12 @@ def forecast(featured, candidate, model, *, store_root=None):
     if lag > MAX_HISTORY_LAG_DAYS:
         raise ValueError(f"The forecast history ends {lag} days before the card; run `python -m src.correction extend`")
     base = candidate.predict(featured)
-    settled, prices, tracking, receipt = data.assemble(store_root, forecasts=held, development=False)
+    settled, prices, store_last = data.settled_frame(store_root, forecasts=held)
+    tracking = [c for c in data.tracking_columns() if c in featured]
     columns = list(dict.fromkeys([*KEYS, "race_date", "horse_name", *ci.ENTITY_COLUMNS, *data.CARD_COLUMNS, *tracking]))
     card = card_rows(featured, base, columns)
     out = correct_card(settled, prices, card, model, tracking)
     names = card[[*KEYS, "horse_name"]].astype({"race_id": out.race_id.dtype, "horse_id": out.horse_id.dtype})
     out = out.merge(names, on=KEYS, validate="one_to_one")
-    return out, {"history_last_date": str(held.race_date.max().date()), "store_last_date": receipt["store_last_date"],
+    return out, {"history_last_date": str(held.race_date.max().date()), "store_last_date": store_last,
                  "correction_as_of": model.lineage.get("as_of"), "win_model_as_of": candidate.lineage.get("as_of")}

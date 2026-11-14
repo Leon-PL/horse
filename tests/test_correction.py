@@ -168,7 +168,7 @@ def test_card_path_matches_the_same_day_scored_as_history():
                            [c for c in featured.columns if c not in ("won", "finish_position")])
     settled = frame.loc[~last].reset_index(drop=True).assign(horse_name="x")
     original = cm.build_inputs
-    cm.build_inputs = lambda f, prices, tracking: original(f, prices=prices, groups=GROUPS)
+    cm.build_inputs = lambda f, prices, tracking, only=None: original(f, prices=prices, groups=GROUPS, only=only)
     try:
         out = serve.correct_card(settled, prices.loc[~last].reset_index(drop=True).assign(
             race_id=settled.race_id, horse_id=settled.horse_id), card, model, ())

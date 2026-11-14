@@ -59,13 +59,16 @@ def _objective(offset, bounds):
     return objective
 
 
-def build_inputs(frame, *, probability="p_base", market="p_market", prices=None, tracking=(), groups=GROUPS):
+def build_inputs(frame, *, probability="p_base", market="p_market", prices=None, tracking=(), groups=GROUPS,
+                 only=None):
     """Inputs for every row of ``frame`` (a history frame, see ``src.correction.inputs``).
 
     ``frame`` must hold every run needed as history (the franking group follows rivals through all of
     them) with the forecast NaN where a run has none. ``prices`` is row-aligned exchange snapshots for
     the past-moves group. ``tracking`` names feature-store columns already in ``frame`` passed through.
     Returns the values (KEYS plus inputs, rows aligned with ``frame``) and the ordered input names.
+    ``only`` (a boolean mask over ``frame``) keeps just those rows of the result: the whole frame is
+    still read as history, but nothing wide is built for rows nobody asked for (a day's card).
     """
     unknown = set(groups) - set(GROUPS)
     if unknown:
@@ -75,15 +78,19 @@ def build_inputs(frame, *, probability="p_base", market="p_market", prices=None,
     if (forecast & ~whole).any():
         raise ValueError("A race has forecasts for only part of its field")
     known = frame.loc[whole].reset_index(drop=True)   # races with a forecast: the rows inputs are built for
+    wanted = np.ones(len(known), bool) if only is None else np.asarray(only, bool)[whole]
+    residual = ci.run_residuals(known, probability)
     parts, names = [], {}
 
     def add(group, values):
         columns = [c for c in values if c not in KEYS]
         names[group] = columns
-        parts.append(values[[*KEYS, *columns]])
+        if not values[KEYS].equals(known[KEYS]):
+            raise ValueError(f"Group {group} changed the runner order")
+        parts.append(values.loc[wanted, [*KEYS, *columns]].reset_index(drop=True))
 
     if {"horse", "market-gap", "residual", "wave2"} & set(groups):
-        long = ci.long_inputs(known, probability, market)
+        long = ci.long_inputs(known, probability, market, residual)
         columns = [c for c in long if c not in KEYS]
         wave2 = [c for c in columns if any(c.startswith(f"er_{name}_") for name in ci.WAVE2)]
         horse = [c for c in columns if "_horse_" in c]
@@ -96,12 +103,12 @@ def build_inputs(frame, *, probability="p_base", market="p_market", prices=None,
     if "tracking" in groups:
         add("tracking", known[[*KEYS, *tracking]])
     if "horse-state" in groups:
-        add("horse-state", ci.horse_state(known, probability, market))
+        add("horse-state", ci.horse_state(known, probability, market, residual))
     if "entity-recent" in groups:
-        add("entity-recent", ci.entity_recent(known, probability, market))
+        add("entity-recent", ci.entity_recent(known, probability, market, residual))
     if "franking" in groups:
         runs = frame[[*KEYS, "race_date", "finish_position"]]
-        values = ci.franking_inputs(runs, known, market=market, probability=probability)
+        values = ci.franking_inputs(runs, known, market=market, probability=probability, residual=residual)
         values["race_id"] = values.race_id.astype(known.race_id.dtype)
         add("franking", known[KEYS].merge(values, on=KEYS, how="left", validate="one_to_one"))
     if "hidden-form" in groups:
@@ -111,16 +118,15 @@ def build_inputs(frame, *, probability="p_base", market="p_market", prices=None,
         if prices is None:
             raise ValueError("The market-moves group needs exchange snapshot prices")
         add("market-moves", ci.market_moves(known, prices.loc[whole].reset_index(drop=True)))
-    values = known[KEYS].copy()
+    values = known.loc[wanted, KEYS].reset_index(drop=True)
     columns = []
     for group in groups:                      # declared order fixes the model's input order
         part = parts[list(names).index(group)]
-        if not part[KEYS].equals(known[KEYS]):
-            raise ValueError(f"Group {group} changed the runner order")
         fresh = [c for c in names[group] if c not in values]
         values = pd.concat([values, part[fresh]], axis=1)
         columns += fresh
-    values = frame[KEYS].merge(values, on=KEYS, how="left", validate="one_to_one")
+    target = frame[KEYS] if only is None else frame.loc[np.asarray(only, bool), KEYS].reset_index(drop=True)
+    values = target.merge(values, on=KEYS, how="left", validate="one_to_one")
     return values, columns
 
 

@@ -116,7 +116,7 @@ def entity_keys(frame):
 
 
 def entity_inputs(frame, probability="p_single", *, entities=ENTITIES, shrink=SHRINK, half_life=None,
-                  market=None, prefix="er", lag_days=0):
+                  market=None, prefix="er", lag_days=0, residual=None):
     """Shrunk prior-date signal means per entity key, plus field-relative versions.
 
     ``half_life`` (days) down-weights older runs. ``market`` names a column of race-normalised
@@ -124,7 +124,7 @@ def entity_inputs(frame, probability="p_single", *, entities=ENTITIES, shrink=SH
     ignores runs in the last that-many days before the race (a stress test for timing leaks).
     """
     work = entity_keys(frame)
-    residual = run_residuals(frame, probability)
+    residual = run_residuals(frame, probability) if residual is None else residual
     signals = {"win": residual.win, "variance": residual.variance, "order": residual.order}
     known = residual.win.notna() & residual.order.notna()
     if market is not None:
@@ -137,8 +137,12 @@ def entity_inputs(frame, probability="p_single", *, entities=ENTITIES, shrink=SH
     weight = np.ones(len(frame)) if half_life is None else np.exp2((day - day.min()) / half_life)
     out = frame[KEYS].copy()
     for name, by in entities.items():
-        key = work[by].astype(str).agg("|".join, axis=1)
-        valid = known & work[by].notna().all(axis=1) & ~work[by].astype(str).isin(["", "nan", "None"]).any(axis=1)
+        text = [work[column].astype(str) for column in by]
+        key = text[0]
+        for part in text[1:]:
+            key = key + "|" + part
+        blank = np.logical_or.reduce([part.isin(["", "nan", "None"]).to_numpy() for part in text])
+        valid = known & work[by].notna().all(axis=1) & ~blank
         table = pd.DataFrame({"_key": key, "race_date": frame.race_date, "runs": weight})
         for signal, values in signals.items():
             table[signal] = values.to_numpy(float) * weight
@@ -162,12 +166,13 @@ def entity_inputs(frame, probability="p_single", *, entities=ENTITIES, shrink=SH
     return out
 
 
-def long_inputs(frame, probability="p_single", market="p_market"):
+def long_inputs(frame, probability="p_single", market="p_market", residual=None):
     """Residuals and market gap by connection, the horse's own record, and the finer second-wave keys."""
-    entity = entity_inputs(frame, probability, market=market, half_life=LONG_HALF_LIFE)
+    residual = run_residuals(frame, probability) if residual is None else residual
+    entity = entity_inputs(frame, probability, market=market, half_life=LONG_HALF_LIFE, residual=residual)
     horse = entity_inputs(frame, probability, market=market, half_life=LONG_HALF_LIFE, entities=HORSE,
-                          shrink=HORSE_SHRINK)
-    wave2 = entity_inputs(frame, probability, half_life=LONG_HALF_LIFE, entities=WAVE2)
+                          shrink=HORSE_SHRINK, residual=residual)
+    wave2 = entity_inputs(frame, probability, half_life=LONG_HALF_LIFE, entities=WAVE2, residual=residual)
     return entity.merge(horse, on=KEYS, validate="one_to_one").merge(wave2, on=KEYS, validate="one_to_one")
 
 
@@ -200,8 +205,8 @@ def moving_mean(group, values, alpha):
     return out
 
 
-def run_signals(frame, probability="p_single", market="p_market"):
-    residual = run_residuals(frame, probability)
+def run_signals(frame, probability="p_single", market="p_market", residual=None):
+    residual = run_residuals(frame, probability) if residual is None else residual
     with np.errstate(divide="ignore", invalid="ignore"):
         gap = np.log(frame[market].to_numpy(float)) - np.log(frame[probability].to_numpy(float))
     gap = pd.Series(np.where(np.isfinite(gap), gap, np.nan), index=frame.index).clip(-3, 3)
@@ -209,9 +214,9 @@ def run_signals(frame, probability="p_single", market="p_market"):
     return pd.DataFrame({"gap": gap, "order": residual.order, "win": residual.win}, index=frame.index)
 
 
-def horse_state(frame, probability="p_single", market="p_market"):
+def horse_state(frame, probability="p_single", market="p_market", residual=None):
     """One row per runner of ``frame`` (race order kept) with the horse's run-by-run state."""
-    work = pd.concat([frame[[*KEYS, "race_date"]], run_signals(frame, probability, market),
+    work = pd.concat([frame[[*KEYS, "race_date"]], run_signals(frame, probability, market, residual),
                       entity_keys(frame)[list(CONDITIONS)]], axis=1)
     work["_row"] = np.arange(len(work))
     work = work.sort_values(["horse_id", "race_date", "_row"], kind="stable").reset_index(drop=True)
@@ -250,11 +255,12 @@ def horse_state(frame, probability="p_single", market="p_market"):
     return out
 
 
-def entity_recent(frame, probability="p_single", market="p_market"):
+def entity_recent(frame, probability="p_single", market="p_market", residual=None):
     out = frame[KEYS].copy()
+    residual = run_residuals(frame, probability) if residual is None else residual
     for half_life in HALF_LIVES:
         values = entity_inputs(frame, probability, entities=RECENT, half_life=half_life, market=market,
-                               prefix=f"er{int(half_life)}")
+                               prefix=f"er{int(half_life)}", residual=residual)
         values = values.rename(columns={c: c.replace("mg_", f"mg{int(half_life)}_") for c in values if c.startswith("mg_")})
         out = out.merge(values, on=KEYS, validate="one_to_one")
     return out
@@ -319,13 +325,13 @@ def _frank(h_start, h_dates, cum, cum_n, race_of, pos_of_run, race_start, race_m
     return sums, counts
 
 
-def franking_inputs(history, forecasts, market=None, probability="p_single"):
+def franking_inputs(history, forecasts, market=None, probability="p_single", residual=None):
     """Shrunk means of past rivals' later residuals, split by whether the rival finished ahead or behind.
 
     ``history``: every run (race_id, horse_id, race_date, finish_position), all dates. ``forecasts``:
     a history frame of the runs that have a forecast. One output row per run of ``history``.
     """
-    residual = run_residuals(forecasts, probability)
+    residual = run_residuals(forecasts, probability) if residual is None else residual
     signals = pd.DataFrame({"order": residual.order, "win": residual.win}, index=forecasts.index)
     if market is not None:
         with np.errstate(divide="ignore", invalid="ignore"):

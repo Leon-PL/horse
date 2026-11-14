@@ -295,8 +295,13 @@ the win model, places it after the settled history (results and prices blanked, 
 the card carries) and applies the correction. Output: `data/forecasts/corrected_<date>.parquet` with
 the win-model probability, the adjustment and the corrected probability per runner. It refuses a win
 model of a different recipe than the history, a history ending more than seven days before the card,
-and a correction fitted on other inputs. First run, 14 November: 36 races, 323 runners. One run rebuilds
-the records over the whole history and takes over ten minutes; that is not yet optimised.
+and a correction fitted on other inputs. First run, 14 November: 36 races, 323 runners.
+
+A run reads past races through `data.settled_frame` (identity, result, price and connection columns
+only, kept in `data/processed/forecast_history/settled_cache/` until the store or history changes) and
+builds the wide input table for the card's runners alone. Measured on that card: 68 seconds once the
+past-race table is saved, 200 seconds the first time after a store refresh, against over ten minutes
+before; probabilities identical to the earlier path (maximum difference 0.0).
 
 The daily order is: collect results and prices, refresh the store, `extend`, then `forecast`.
 
