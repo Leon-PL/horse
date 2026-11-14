@@ -152,3 +152,28 @@ def test_walk_forward_accepts_inputs_also_present_in_the_frame():
     scored = frame.race_date.ge("2024-10-01").to_numpy()
     assert np.isfinite(adjustment[scored]).all() and np.isnan(adjustment[~scored]).all()
     assert cm.compare(frame, adjustment)["races"] == frame.loc[scored].race_id.nunique()
+
+
+def test_card_path_matches_the_same_day_scored_as_history():
+    from src.correction import serve
+    frame, prices = make_frame(days=80, seed=5)
+    last = frame.race_date.eq(frame.race_date.max()).to_numpy()
+    values, columns = build(frame, prices)
+    model = cm.CorrectionModel(columns).fit(frame.loc[~last], values.loc[~last], rounds=20,
+                                            params={"min_data_in_leaf": 20}, seeds=(7,), threads=1)
+    expected = model.predict(frame.loc[last].reset_index(drop=True), values.loc[last].reset_index(drop=True))
+    # The same day as a card: placeholder results (as the live path gives), no prices.
+    featured = frame.loc[last].drop(columns=["p_base", "p_market"]).assign(won=0, finish_position=0, horse_name="x")
+    card = serve.card_rows(featured, frame.loc[last, "p_base"].to_numpy(),
+                           [c for c in featured.columns if c not in ("won", "finish_position")])
+    settled = frame.loc[~last].reset_index(drop=True).assign(horse_name="x")
+    original = cm.build_inputs
+    cm.build_inputs = lambda f, prices, tracking: original(f, prices=prices, groups=GROUPS)
+    try:
+        out = serve.correct_card(settled, prices.loc[~last].reset_index(drop=True).assign(
+            race_id=settled.race_id, horse_id=settled.horse_id), card, model, ())
+    finally:
+        cm.build_inputs = original
+    assert np.allclose(out.probability.to_numpy(), expected)
+    with pytest.raises(ValueError, match="dated after"):
+        serve.correct_card(frame.reset_index(drop=True), prices, card, model, ())

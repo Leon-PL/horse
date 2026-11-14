@@ -4,6 +4,7 @@
     python -m src.correction evaluate --output DIR [--first-scored 2025-07-01] [--threads 6]
     python -m src.correction fit --as-of DATE --output DIR [--threads 6]
     python -m src.correction extend --run RUN_ID
+    python -m src.correction forecast --date DATE --run RUN_ID --correction DIR [--output FILE]
     python -m src.correction status
 
 ``seed`` starts the forecast history from a benchmark's walk-forward forecasts.
@@ -11,7 +12,8 @@
 ones, development races only. ``fit`` fits it on every settled race with a
 forecast up to a date and saves it. ``extend`` adds a fitted candidate's
 forecasts for races after its training cutoff to the history, so the records
-keep up with results. Nothing here promotes a model.
+keep up with results. ``forecast`` scores a day's card with the win model
+and the correction. Nothing here promotes a model.
 """
 import argparse
 import json
@@ -92,6 +94,27 @@ def extend(args):
     print(json.dumps({"added": added, **history.status()}, indent=2))
 
 
+def forecast(args):
+    from src.correction import serve
+    from src.ingestion.pipeline import get_scraped_racecards
+    from src.live_prediction import features_for_live_cards
+    from src.run_store import load_run_predictor
+    cards = get_scraped_racecards(date_str=args.date)
+    if cards is None or cards.empty:
+        raise SystemExit(f"No racecards for {args.date}")
+    featured = features_for_live_cards(cards, args.date)
+    model = serve.load_correction(Path(args.correction) / "correction.joblib")
+    out, lineage = serve.forecast(featured, load_run_predictor(args.run), model, store_root=args.store_root)
+    context = featured[[*KEYS, *[c for c in ("off_time", "track") if c in featured]]]
+    out = out.merge(context.astype({k: out[k].dtype for k in KEYS}), on=KEYS, validate="one_to_one")
+    target = Path(args.output or f"data/forecasts/corrected_{args.date}.parquet")
+    atomic_parquet(out, target)
+    atomic_json(target.with_suffix(".json"), {"date": args.date, "run": args.run, "races": int(out.race_id.nunique()),
+                                              "runners": int(len(out)), **lineage})
+    print(json.dumps({"file": str(target), "races": int(out.race_id.nunique()), "runners": int(len(out)), **lineage},
+                     indent=2))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
@@ -99,15 +122,20 @@ def main(argv=None):
     seed.add_argument("--benchmark", required=True)
     seed.add_argument("--component", default=None)
     seed.add_argument("--replace", action="store_true", help="start a new history, discarding the present one")
-    for name in ("evaluate", "fit", "extend"):
+    for name in ("evaluate", "fit", "extend", "forecast"):
         command = commands.add_parser(name)
         command.add_argument("--store-root", default=None)
-        if name != "extend":
+        if name in ("evaluate", "fit"):
             command.add_argument("--output", required=True)
             command.add_argument("--threads", type=int, default=6)
     commands.choices["evaluate"].add_argument("--first-scored", default="2025-07-01")
     commands.choices["fit"].add_argument("--as-of", required=True)
     commands.choices["extend"].add_argument("--run", required=True)
+    card = commands.choices["forecast"]
+    card.add_argument("--date", required=True)
+    card.add_argument("--run", required=True, help="the win model candidate, of the history's recipe")
+    card.add_argument("--correction", required=True, help="folder written by `fit`")
+    card.add_argument("--output", default=None)
     commands.add_parser("status")
     args = parser.parse_args(argv)
     if args.command == "seed":
@@ -116,7 +144,7 @@ def main(argv=None):
     elif args.command == "status":
         print(json.dumps(history.status(), indent=2))
     else:
-        {"evaluate": evaluate, "fit": fit, "extend": extend}[args.command](args)
+        {"evaluate": evaluate, "fit": fit, "extend": extend, "forecast": forecast}[args.command](args)
 
 
 if __name__ == "__main__":

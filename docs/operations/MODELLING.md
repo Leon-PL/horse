@@ -284,8 +284,21 @@ same-day group included, so the gain carries over to this base and survives drop
 research base was stronger (1.81937 native, 1.80506 corrected): the 063 recipe's 64 extra inputs are
 worth about 0.008 that this pipeline does not have. Development quarters only; the hold-out was not read.
 
-Not yet built: a served prediction path. `fit` saves the boosters, and `build_inputs` accepts unsettled
-card rows, but no command yet joins a live card to the history.
+### Daily forecasts
+
+```powershell
+.venv\Scripts\python.exe -m src.correction forecast --date 2026-11-14 --run <win candidate run id> --correction <fit output dir>
+```
+
+`serve.py` featurises the card through `src.live_prediction.features_for_live_cards`, forecasts it with
+the win model, places it after the settled history (results and prices blanked, whatever placeholders
+the card carries) and applies the correction. Output: `data/forecasts/corrected_<date>.parquet` with
+the win-model probability, the adjustment and the corrected probability per runner. It refuses a win
+model of a different recipe than the history, a history ending more than seven days before the card,
+and a correction fitted on other inputs. First run, 14 November: 36 races, 323 runners. One run rebuilds
+the records over the whole history and takes over ten minutes; that is not yet optimised.
+
+The daily order is: collect results and prices, refresh the store, `extend`, then `forecast`.
 
 ## Remaining research
 
