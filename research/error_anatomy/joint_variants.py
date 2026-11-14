@@ -84,6 +84,13 @@ VARIANTS = {
     # weight-and-trip inputs (burden.py) together. Judged against more-groups-deeper on native.
     "with-yard-burden": {"groups": (*MORE, "yard", "burden"), "rounds": 1000,
                          "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 14 November before scoring: the trainer-move inputs (research/trainer_moves_098: size of the
+    # move in trainer Elo, runs in the yard, the trainer's arrivals against SP) and their twin, shuffled
+    # within quarter. Judged against more-groups-deeper and against each other on native.
+    "with-trainer-move": {"groups": (*MORE, "trainer-move"), "rounds": 1000,
+                          "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    "with-trainer-move-twin": {"groups": (*MORE, "trainer-move-twin"), "rounds": 1000,
+                               "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"

@@ -1,5 +1,42 @@
 # Negative Results Ledger
 
+## 098. Trainer moves: size of the move — not admitted as inputs, null inside the correction (14 November 2026)
+
+[Report](research/TRAINER_MOVES_098.md). Inputs built only from earlier runs:
+the new trainer's Elo minus the old one's (all runs in the yard, and the
+first three only), runs for the current yard, and the trainer's earlier new
+arrivals against SP. A change between names sharing a surname (C & M
+Johnston → C Johnston) counts as the same yard.
+
+The forecasts mis-rate moves badly. On the 87-input model's out-of-sample
+forecasts (2022-07 to 2026-06-10, first three runs for a new yard, 42,728
+runners), the biggest upgrades won 1,234 against 1,000 forecast (z +8.5) and
+the biggest downgrades 461 against 573 (z −5.1). Betfair SP prices most of
+it: the same upgrades won 1,234 against 1,175 at BSP (z +2.0), and
+downgrades are priced exactly.
+
+As inputs to the model it does not pay (`src.modelling admit`, screen
+capacity, 2025Q3–2026Q2, 11,632 races):
+
+| Arm | Against baseline | Against shuffled twin |
+|---|---:|---:|
+| All five inputs | +0.00128 [−0.00093, +0.00317], 1/4 | −0.00086 [−0.00238, +0.00074], 4/4 |
+| First-three-runs Elo change only | +0.00147 [−0.00069, +0.00331], 0/4 | +0.00054 [−0.00097, +0.00195], 1/4 |
+
+The affected runners are 9% of the field. Rescaling their forecasts by their
+group's own miss gains only −0.00107 race log loss in-sample (an upper
+bound), about what a refit comparison can resolve.
+
+Inside the joint correction it adds nothing (`joint_variants`
+`with-trainer-move` against `with-trainer-move-twin`, inputs shuffled within
+quarter, native forecasts 2025Q3–2026Q2): 1.80531 against 1.80530,
++0.00001 [−0.00073, +0.00066], 2/4; against `more-groups-deeper` +0.00025
+[−0.00051, +0.00095]. The correction already recovers most of the miss: for
+the first three runs after the biggest upgrades the corrected forecast
+expects 264 winners (279 won, z +1.1), and for the biggest downgrades 118
+(106 won, z −1.2). With the `yard` group (93dcdfd), the stable-change line
+is closed: do not rebuild it as another input family.
+
 ## Cheap screens: relatives' form, going reasons, pairwise and completion models, improvement, store pedigree and first string — null (9 November 2026)
 
 The [cheap screens](research/CHEAP_SCREENS_2026-11-09.md) learn a small

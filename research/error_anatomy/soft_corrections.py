@@ -48,7 +48,7 @@ SEEDS = (7, 8, 9)
 TWIN_SEED = 11
 ERROR_GROUPS = ("horse", "market-gap", "residual", "wave2")
 STORE_GROUPS = ("tracking", "same-day-bias", "ability-lb", "own", "sale", "franking", "horse-state", "entity-recent",
-                "horse-state-gap", "horse-state-result", "horse-state-lags", "market-level", "market-moves", "hidden-form", "owner", "newcomer", "foal-age", "foal-age-clean", "pace-comments", "matched-form", "plot", "filter", "market-rating", "debut-choice", "price-1100", "yard", "burden")
+                "horse-state-gap", "horse-state-result", "horse-state-lags", "market-level", "market-moves", "hidden-form", "owner", "newcomer", "foal-age", "foal-age-clean", "pace-comments", "matched-form", "plot", "filter", "market-rating", "debut-choice", "price-1100", "yard", "burden", "trainer-move", "trainer-move-twin")
 
 
 def soft_boost(columns, *, target, base="p_single", rounds=100, params=None, threads=4, seeds=SEEDS):
@@ -120,6 +120,9 @@ def group_values(name, frame):
     if name == "yard":
         from research.error_anatomy.yard_change import load
         return load(frame)
+    if name in ("trainer-move", "trainer-move-twin"):
+        from research.trainer_moves_098.correction import load
+        return load(frame, twin=name.endswith("twin"))
     if name == "price-1100":
         from research.error_anatomy.morning_price import load
         return load(frame)
