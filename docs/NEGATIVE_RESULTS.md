@@ -1,5 +1,15 @@
 # Negative Results Ledger
 
+## 107. Hold-out: the 11:00 betting rule PASSES its registered test (15 November 2026)
+
+[Pre-registration and result](research/HOLDOUT_1100_107.md), registered in
+4079adf before scoring. Production correction plus the 11:00 price inputs,
+fitted once to 10 June, applied to 11 June–31 October (5,378 races). Rule:
+threshold 0.02, price one tick worse than last traded, odds ≤ 51. 1,944
+bets: geo CLV **1.0445**, one-sided lower bound 1.0357 (pass > 1.0); ROI
++8.3% [+0.7, +15.9]; every priced runner 0.880. Not yet settled: real fills,
+stake size, price impact.
+
 ## 106. The correction's teacher: market weight 0.5 or 0.9 instead of 0.75 — no change (15 November 2026)
 
 The joint correction with the 11:00 price (`with-1100`) refitted with its
