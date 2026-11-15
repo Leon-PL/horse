@@ -118,20 +118,6 @@ def test_live_card_changes_recompute_all_race_features(cache_dir, monkeypatch):
         live.features_for_live_cards(cards, "2026-10-10")
 
 
-def test_lookahead_includes_today(cache_dir, monkeypatch):
-    from src import feature_store
-    from src.ingestion import pipeline
-    monkeypatch.setattr(feature_store, "FeatureStore", lambda: SimpleNamespace(exists=lambda: True))
-    cards = pd.DataFrame({"horse_name": ["A"]})
-    monkeypatch.setattr(pipeline, "get_scraped_racecards", lambda date_str: cards.copy())
-    built = []
-    monkeypatch.setattr(live, "features_for_live_cards", lambda frame, day: built.append(day) or frame)
-    progress = []
-    result = live.build_lookahead_cache(days_ahead=1, progress_fn=lambda *args: progress.append(args))
-    today = live.datetime.now().date()
-    assert built == [today.isoformat(), (today + live.timedelta(days=1)).isoformat()]
-    assert len(result) == 2
-    assert progress[-1][:2] == (2, 2)
 
 
 def test_cache_rejects_parquet_from_another_writer(cache_dir):

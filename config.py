@@ -49,8 +49,7 @@ LIVE_FEATURE_CACHE_VERSION = 2
 
 # Date-stamped cache entries (live feature cache, lookahead cache,
 # racecards cache) older than this are deleted by
-# src.utils.cleanup_stale_caches, which scripts/build_lookahead.py runs before
-# each build (--no-cleanup skips it). The removed picks app ran it on start-up.
+# src.utils.cleanup_stale_caches.
 CACHE_TTL_DAYS = 30
 
 # Test set size
@@ -123,27 +122,6 @@ RECENT_PLACE_REFINEMENT = True
 # beta > 1 also corrects the favourite-longshot bias. Races without
 # complete odds fall back to the unanchored probabilities.
 MARKET_ANCHOR = False
-
-# --- Data-quality betting gates (src/quality_control.py) ---
-# Pre-bet gates that SUPPRESS bets where the model's inputs are unreliable (a
-# distinct concern from value/edge rules, which live in src/bet_settlement.py).
-# Surfaced + tunable in the Picks app's Quality Control panel, so the rules stay
-# visible and auditable rather than buried. Keys mirror QC_DEFAULTS in the
-# module; anything set here overrides the module defaults.
-#   thin_history: a foreign raider (e.g. a French horse at Cheltenham) has no
-#   form in our DB, so the model under-rates it and the whole race is mispriced.
-#   Block races containing a short-priced runner with too little DB history.
-# enabled=False: a 2026-06-22 walk-forward-style quantification showed the
-# thin-history gate does NOT improve betting results on the current (form-only,
-# no-edge) model — it hurt top-pick ROI in every threshold tested and only
-# marginally helped value bets. The real accuracy flaw it targets is not a
-# betting flaw (the model already declines to back the horses it under-rates).
-# Kept as documented, tunable infrastructure; turn on in the panel to use it.
-QC_DEFAULTS = {
-    "enabled": False,
-    "thin_history_contender_max_odds": 8.0,   # "contender" = SP at/below this
-    "thin_history_min_prev_races": 1,         # "thin" = <= this many prior DB runs
-}
 
 # --- Win-model market-probability distillation ---
 # When True, the win classifier trains on the market-implied win

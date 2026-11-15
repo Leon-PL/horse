@@ -314,13 +314,3 @@ def test_bootstrap_median_ci_geometric_mean_and_point_estimate():
     assert med["estimate"] == pytest.approx(1.0)
 
 
-def test_app_backtester_excludes_the_golden_holdout_by_default(monkeypatch):
-    """One Backtest-tab run over the hold-out would spend it."""
-    import config
-    from src.backtester import restrict_to_development
-
-    monkeypatch.setattr(config, "GOLDEN_HOLDOUT_START", "2026-06-11")
-    monkeypatch.setattr(config, "PURGE_DAYS", 7)
-    df = pd.DataFrame({"race_date": pd.to_datetime(["2026-05-01", "2026-06-05", "2026-07-01"])})
-    kept = restrict_to_development(df)
-    assert kept["race_date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-05-01"]

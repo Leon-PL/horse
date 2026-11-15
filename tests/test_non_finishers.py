@@ -67,30 +67,3 @@ def test_training_frame_keeps_non_finishers_as_unplaced_losers(featured_with_fal
         assert (data[f"y_{part}_rel"][part_dnf] == 0).all()
 
 
-def test_walk_forward_counts_a_bet_on_a_faller_as_a_loss(monkeypatch):
-    import src.backtester as bt
-
-    days = pd.date_range("2025-01-01", "2025-03-31")
-    frame = pd.DataFrame({
-        "race_id": np.repeat(np.arange(len(days)), 2), "race_date": np.repeat(days, 2),
-        "horse_name": np.tile(["faller", "winner"], len(days)),
-        "finish_position": np.tile([0, 1], len(days)), "won": np.tile([0, 1], len(days)),
-        "num_runners": 2, "odds": np.tile([3.0, 3.0], len(days)), "feature": 1.0,
-    })
-
-    class Predictor:
-        def __init__(self, **kwargs):
-            pass
-
-        def train_on_fold(self, X_train, X_test, *args, **kwargs):
-            # The model always prefers the horse that will fall.
-            return np.where(kwargs["test_df"]["horse_name"] == "faller", 0.7, 0.3), None
-
-    monkeypatch.setattr(bt, "RacePredictor", Predictor)
-    monkeypatch.setattr(bt, "get_feature_columns", lambda df: ["feature"])
-    result = bt.walk_forward_validation(frame, min_train_months=2, value_threshold=0.0)
-    bets = result["bets"]
-    top = bets[bets["strategy"] == "top_pick"]
-    assert not top.empty, "the faller's race vanished from the evaluation"
-    assert (top["horse_name"] == "faller").all()
-    assert (top["pnl"] < 0).all()

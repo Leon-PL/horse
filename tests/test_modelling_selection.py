@@ -6,7 +6,6 @@ import pytest
 from src.modelling.spec import ModelSpec
 from src.modelling.selection import select_features, matrix_signature
 from src.modelling.win import WinModel
-from src.modelling.text import TextExpert
 
 
 def data():
@@ -77,23 +76,6 @@ def test_matrix_signature_preserves_precision_and_order():
     assert kept == ["a", "b"]
 
 
-def test_explicit_text_expert_never_trains_at_prediction_and_masks_absent_races(monkeypatch):
-    frame, _, _, _ = data()
-    frame = frame.iloc[:240].copy()
-    frame["tf_comment"] = np.where(frame.won, "progressing well", "needs to improve")
-    frame["tf_verdict"] = "Horse 0 may go well."
-    expert = TextExpert(min_df=5).fit(frame)
-    assert expert.lineage["training_last_date"] == str(frame.race_date.max().date())
-    from src import rtv_text
-    def refuse(*args, **kwargs):
-        raise AssertionError("prediction tried fitting a text model")
-    monkeypatch.setattr(rtv_text, "fit_softmax", refuse)
-    predicted = expert.predict(frame)
-    np.testing.assert_allclose(pd.Series(predicted).groupby(frame.race_id).sum(), 1)
-    empty = frame.copy()
-    empty[["tf_comment", "tf_verdict"]] = None
-    assert np.isnan(expert.predict(empty)).all()
-    assert np.isnan(expert.predict(empty.drop(columns=["tf_comment", "tf_verdict"]))).all()
 
 
 def test_model_feature_catalog_distinguishes_learned_text_and_prior_market():

@@ -4,8 +4,8 @@ Bet Selection & Settlement Rules
 Single source of truth for the betting-strategy rules shared by:
 
 - the test-set betting simulation     (src/bet_analysis.py : analyse_test_set)
-- the walk-forward backtester         (src/backtester.py : walk_forward_validation)
 - each-way pick filtering             (src/each_way.py : ew_value_bets)
+- the Matchbook paper record          (src/matchbook/paper.py, value_bet_selection)
 
 Strategies
 ----------
@@ -17,7 +17,7 @@ Strategies
    sit inside the EW band.
 
 Keep every magic number here — never inline them at call sites, or the
-backtest stops matching live settlement.
+research results stop matching live settlement.
 """
 
 import numpy as np
@@ -73,9 +73,9 @@ def value_bet_selection(
     """Return the value-bet mask plus edge/CLV diagnostics.
 
     ``implied_prob`` defaults to raw ``1/odds`` (consistent with the
-    strategy calibrator).  The walk-forward backtester passes its
-    race-normalised (overround-corrected) implied probabilities instead;
-    supply that argument explicitly to keep an alternative convention.
+    strategy calibrator).  The Matchbook paper record passes the
+    race-normalised 11:00 share instead; supply that argument explicitly to keep
+    an alternative convention.
     """
     probs_arr = np.asarray(probs, dtype=np.float64)
     odds_arr = np.asarray(odds, dtype=np.float64)

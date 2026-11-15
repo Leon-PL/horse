@@ -27,30 +27,6 @@ def test_testset_does_not_bet_on_unpriced_top_pick(price):
     assert result["stats"]["top_pick"]["bets"] == 0
 
 
-def test_walkforward_keeps_prediction_metrics_without_priced_top_picks(monkeypatch):
-    import src.backtester as bt
-    days = pd.date_range("2025-01-01", "2025-03-31")
-    frame = pd.DataFrame({
-        "race_id": np.repeat(np.arange(len(days)), 2), "race_date": np.repeat(days, 2),
-        "horse_name": np.tile(["winner", "other"], len(days)),
-        "finish_position": np.tile([1, 2], len(days)), "won": np.tile([1, 0], len(days)),
-        "num_runners": 2, "odds": np.tile([np.nan, 4.0], len(days)), "feature": 1.0,
-    })
-
-    class Predictor:
-        def __init__(self, **kwargs):
-            pass
-
-        def train_on_fold(self, X_train, X_test, *args, **kwargs):
-            return np.where(kwargs["test_df"]["horse_name"] == "winner", 0.7, 0.3), None
-
-    monkeypatch.setattr(bt, "RacePredictor", Predictor)
-    monkeypatch.setattr(bt, "get_feature_columns", lambda df: ["feature"])
-    result = bt.walk_forward_validation(frame, min_train_months=2, value_threshold=0.99)
-    assert len(result["folds"]) == 1
-    assert result["folds"][0].top_pick_bets == 0
-    assert np.isfinite(result["folds"][0].log_loss)
-    assert result["bets"].empty
 
 
 def test_drawdown_includes_losses_before_first_profit():

@@ -7,8 +7,7 @@ curves, per-strategy stats and calibration tables consumed by the
 Experiments UI and the run store.
 
 Selection and settlement rules come from ``src.bet_settlement`` — the
-shared source of truth with the walk-forward backtester and live
-settlement.
+shared source of truth with research rehearsals and the Matchbook paper record.
 """
 
 import logging

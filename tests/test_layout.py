@@ -1,7 +1,7 @@
 """Guard: imports between the top-level folders run one way only.
 
 Research lives in ``research/`` and may import ``src``; nothing in ``src/``,
-``scripts/``, ``tests/``, ``train.py`` or ``config.py`` may import ``research``.
+``scripts/``, ``tests/`` or ``config.py`` may import ``research``.
 Before 2026-11-07 research and pipeline code shared ``src/`` and ``scripts/``,
 and a pipeline import of a research helper made neither side removable.
 
@@ -23,7 +23,6 @@ def _python_files(*folders):
 
 def _core_files():
     yield from _python_files(*CORE)
-    yield ROOT / "train.py"
     yield ROOT / "config.py"
 
 
@@ -54,7 +53,7 @@ def test_core_code_never_imports_research():
 
 
 def test_pipeline_never_imports_commands():
-    offenders = _offenders([*_python_files("src"), ROOT / "train.py", ROOT / "config.py"], "scripts")
+    offenders = _offenders([*_python_files("src"), ROOT / "config.py"], "scripts")
     assert not offenders, ("Pipeline code imports a command from scripts/; move the shared "
                            "code into src/:\n" + "\n".join(offenders))
 

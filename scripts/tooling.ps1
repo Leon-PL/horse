@@ -4,12 +4,11 @@ Examples: .\scripts\tooling.ps1 setup; .\scripts\tooling.ps1 test; .\scripts\too
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('setup', 'venv', 'lint', 'test', 'validate', 'benchmark')]
+    [ValidateSet('setup', 'venv', 'lint', 'test')]
     [string]$Action = 'setup',
-    [string[]]$TestPath = @('tests/test_data_contracts.py',
-                          'tests/test_generated_racing_invariants.py',
-                          'tests/test_data_query_benchmark.py'),
-    [int]$Days = 90
+    [string[]]$TestPath = @('tests/test_generated_racing_invariants.py',
+                          'tests/test_matchbook.py',
+                          'tests/test_layout.py')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -63,8 +62,6 @@ try {
         switch ($Action) {
             'lint' { & $toolPython -B -m ruff check . }
             'test' { & $toolPython -B -m pytest @TestPath -q -p no:cacheprovider }
-            'validate' { & $toolPython -B scripts/validate_data_contracts.py --eligible-only }
-            'benchmark' { & $toolPython -B scripts/benchmark_data_queries.py --days $Days }
         }
     }
     $toolExitCode = $LASTEXITCODE

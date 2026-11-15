@@ -38,7 +38,7 @@ def run(path):
             class FeatureProgress(logging.Handler):
                 last = 0
                 def emit(self, record):
-                    if record.name not in {"src.feature_engineer", "src.store_build", "src.ratings", "src.bha_events"} or time.monotonic()-self.last < 2:
+                    if record.name not in {"src.feature_engineer", "src.store_build", "src.ratings"} or time.monotonic()-self.last < 2:
                         return
                     self.last = time.monotonic()
                     try:
