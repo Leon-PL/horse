@@ -47,8 +47,8 @@ import json
 import logging
 import os
 import pickle
+import secrets
 import shutil
-import tempfile
 import threading
 from contextlib import contextmanager
 from datetime import datetime
@@ -66,6 +66,24 @@ from src.feature_semantics import distance_category
 logger = logging.getLogger(__name__)
 
 STORE_SCHEMA_VERSION = 2  # 2: carries counts_state.pkl for new-rows-only appends
+
+
+def _make_stage_dir(root: str) -> str:
+    """Create a unique ``.commit-*`` staging folder that inherits *root*'s permissions.
+
+    Not ``tempfile.mkdtemp``: since Python 3.13 its 0o700 mode gives the new
+    folder an owner-only ACL on Windows, and ``os.replace`` carries that ACL
+    onto the published store files. A store built by one account (the Codex
+    sandbox, 2026-11-11 and 2026-11-12) then could not be read by any other.
+    """
+    for _ in range(100):
+        stage = os.path.join(root, f".commit-{secrets.token_hex(4)}")
+        try:
+            os.mkdir(stage)  # default mode: no explicit ACL, inherits from root
+        except FileExistsError:
+            continue
+        return stage
+    raise FileExistsError(f"Could not create a unique staging folder in {root}")
 
 
 def _locked(method):
@@ -190,7 +208,7 @@ class FeatureStore:
         Requires room for both old and new files; no old-data copies are made.
         """
         with self._access():
-            stage = tempfile.mkdtemp(prefix=".commit-", dir=self.root)
+            stage = _make_stage_dir(self.root)
             try:
                 yield FeatureStore(stage)
                 # Flush all completed outputs before publishing the journal.
