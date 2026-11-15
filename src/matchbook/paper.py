@@ -65,8 +65,13 @@ def _book_prices(card, book):
     return out
 
 
-def eleven(day=None, *, snapshot=True):
-    """The 11:00 forecast and paper bets for ``day`` (UK date, default today)."""
+def prepare(day=None):
+    """Everything that does not need the 11:00 price, done ahead so 11:00 itself takes seconds.
+
+    Scrapes the card, featurises it, forecasts it with the win model and builds the correction's other
+    inputs (cold caches after a store refresh made this take up to ~27 minutes). Saves
+    ``prepared.parquet`` (keys, names, track, off time, the win-model forecast and those inputs).
+    """
     from src.correction import serve
     from src.ingestion.pipeline import get_scraped_racecards
     from src.live_prediction import features_for_live_cards
@@ -75,6 +80,46 @@ def eleven(day=None, *, snapshot=True):
     day = str(pd.Timestamp(day).date()) if day else str(record.uk_now().date())
     cfg = config()
     out = day_dir(day)
+    started = record.uk_now()
+    cards = get_scraped_racecards(date_str=day, force_refresh=True)
+    if cards is None or cards.empty:
+        atomic_json(out / "prepared.json", {"date": day, "status": "no racecards", "at": str(started)})
+        return None
+    featured = features_for_live_cards(cards, day)
+    captured = {}
+
+    def capture(part, values, columns):
+        captured["values"], captured["columns"] = values.reset_index(drop=True).copy(), list(columns)
+        blank = pd.DataFrame(np.nan, index=range(len(values)), columns=list(mm.PRICE_INPUTS), dtype="float32")
+        return pd.concat([values.reset_index(drop=True), blank], axis=1), [*columns, *mm.PRICE_INPUTS]
+
+    forecast, lineage = serve.forecast(featured, load_run_predictor(cfg["win_run"]), mm.load(cfg["correction"]),
+                                       extra=capture)
+    keys = ["race_id", "horse_id"]
+    values = captured["values"]
+    context = cards[[*keys, "track", "off_time"]].astype({k: forecast[k].dtype for k in keys})
+    frame = forecast[[*keys, "race_date", "p_base", "horse_name"]].merge(context, on=keys, how="left",
+                                                                         validate="one_to_one")
+    frame = frame.merge(values.astype({k: frame[k].dtype for k in keys}), on=keys, how="left", validate="one_to_one")
+    atomic_parquet(frame, out / "prepared.parquet")
+    atomic_json(out / "prepared.json", {"date": day, "status": "prepared", "columns": captured["columns"],
+                                        "card_races": int(frame.race_id.nunique()), "runners": int(len(frame)),
+                                        "started": str(started), "finished": str(record.uk_now()), **lineage})
+    return frame
+
+
+def eleven(day=None, *, snapshot=True):
+    """The 11:00 forecast and paper bets for ``day`` (UK date, default today); prepares first if needed."""
+    from src.correction import model as cm
+
+    day = str(pd.Timestamp(day).date()) if day else str(record.uk_now().date())
+    cfg = config()
+    out = day_dir(day)
+    if not (out / "prepared.parquet").exists() and prepare(day) is None:
+        atomic_json(out / "run.json", {"date": day, "status": "no racecards"})
+        return None
+    prep = pd.read_parquet(out / "prepared.parquet")
+    meta = json.loads((out / "prepared.json").read_text())
     if snapshot:
         path, book = record.snapshot("1100")
     else:
@@ -88,37 +133,36 @@ def eleven(day=None, *, snapshot=True):
         return None
     taken_at = str(book.taken_at.iloc[0].tz_convert(feed.LONDON))
 
-    cards = get_scraped_racecards(date_str=day, force_refresh=True)
-    if cards is None or cards.empty:
-        atomic_json(out / "run.json", {"date": day, "status": "no racecards"})
-        return None
-    linked, report = link.link(cards[["race_id", "horse_id", "horse_name", "track", "off_time"]], book)
+    linked, report = link.link(prep[["race_id", "horse_id", "horse_name", "track", "off_time"]], book)
     withdrawn = linked.runner_id.map(book.drop_duplicates("runner_id").set_index("runner_id").withdrawn)
     keep = ~withdrawn.fillna(False).astype(bool).to_numpy()
-    cards = cards.loc[keep].reset_index(drop=True)
-    linked = linked.loc[keep].reset_index(drop=True)
+    dropped = int((~keep).sum())          # withdrawn on Matchbook since the card was prepared
+    prep, linked = prep.loc[keep].reset_index(drop=True), linked.loc[keep].reset_index(drop=True)
     quotes = _book_prices(linked, book)
     price_1100 = feed.reference_price(quotes.back1, quotes.lay1)
     early_price = np.full(len(linked), np.nan)
     if not early.empty:
-        e = early.drop_duplicates("runner_id").set_index("runner_id")
-        eq = e.reindex(linked.runner_id.astype(object))
+        eq = early.drop_duplicates("runner_id").set_index("runner_id").reindex(linked.runner_id.astype(object))
         early_price = feed.reference_price(eq.back1.to_numpy(), eq.lay1.to_numpy())
     off_after = linked.off_time.map(normalise_off_time_key).gt(RULE["clock"]).to_numpy()
     price_1100 = np.where(off_after, price_1100, np.nan)
-    prices = linked[["race_id", "horse_id"]].assign(price_1100=price_1100, price_0800=early_price)
 
-    featured = features_for_live_cards(cards, day)
-    correction = mm.load(cfg["correction"])
-    forecast, lineage = serve.forecast(featured, load_run_predictor(cfg["win_run"]), correction,
-                                       extra=mm.card_extra(prices))
+    model = mm.load(cfg["correction"])
+    columns = meta["columns"]
+    if model.columns != [*columns, *mm.PRICE_INPUTS]:
+        raise ValueError("The prepared card was built for a different correction")
+    values = pd.concat([prep[columns].reset_index(drop=True),
+                        mm.price_inputs(prep.race_id, prep.p_base, price_1100, early_price)], axis=1)
+    adjustment = model.adjustment(values)
     keys = ["race_id", "horse_id"]
-    linked = linked.astype({k: forecast[k].dtype for k in keys})
-    frame = forecast.merge(linked[[*keys, "track", "off_time", "event_id", "runner_id"]], on=keys, how="left",
-                           validate="one_to_one")
-    quotes = quotes.assign(**{k: linked[k].to_numpy() for k in keys})
-    frame = frame.merge(quotes, on=keys, how="left", validate="one_to_one")
-    frame = frame.merge(prices.astype({k: frame[k].dtype for k in keys}), on=keys, how="left", validate="one_to_one")
+    frame = prep[[*keys, "race_date", "p_base", "horse_name", "track", "off_time"]].copy()
+    frame["adjustment"] = adjustment
+    frame["probability"] = cm.corrected(frame.p_base.to_numpy(float), adjustment, frame.race_id.to_numpy())
+    frame[["event_id", "runner_id"]] = linked[["event_id", "runner_id"]].to_numpy()
+    frame = pd.concat([frame, quotes.reset_index(drop=True)], axis=1)
+    frame["price_1100"], frame["price_0800"] = price_1100, early_price
+    lineage = {k: meta.get(k) for k in ("history_last_date", "store_last_date", "correction_as_of", "win_model_as_of")}
+    cards = prep
     race = frame.race_id.to_numpy()
     frame["p"] = frame.probability / frame.probability.groupby(race).transform("sum")
     # A race off before the forecast is ready could not have been bet at 11:00 prices.
@@ -149,6 +193,7 @@ def eleven(day=None, *, snapshot=True):
     run = {"date": day, "status": "forecast", "snapshot_1100": taken_at, "bettable_after": ready,
            "snapshot_0800": str(early.taken_at.iloc[0].tz_convert(feed.LONDON)) if not early.empty else None,
            "card_races": int(cards.race_id.nunique()), "matchbook_races": int(book.event_id.nunique()),
+           "prepared_at": meta.get("finished"), "withdrawn_since_prepared": dropped,
            "races_linked": int((report.status == "matched").sum()) if not report.empty else 0,
            "eligible_races": int(frame.loc[frame.eligible_race].race_id.nunique()), "bets": int(len(bets)),
            "tight_eligible_races": int(frame.loc[frame.eligible_race & frame.race_tight.ge(TIGHT)].race_id.nunique()),

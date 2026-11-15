@@ -4,6 +4,7 @@
     python -m src.matchbook fit --as-of DATE [--output data/matchbook/model] [--threads 6]
     python -m src.matchbook snapshot [--label manual]
     python -m src.matchbook watch
+    python -m src.matchbook prepare [--date DATE]         # card, features and inputs ahead of 11:00
     python -m src.matchbook eleven [--date DATE] [--no-snapshot]
     python -m src.matchbook settle [--date DATE]          # default: every unsettled day
     python -m src.matchbook summary
@@ -54,7 +55,7 @@ def settle_all():
             log(f"settle {day} failed: {exc!r}")
 
 
-REFRESH_DEADLINE = "12:00"
+PREPARE_BY = "10:30"   # start preparing the card by then even if the refresh has not finished
 
 
 def refresh_steps(win_run):
@@ -80,36 +81,40 @@ def stay_awake(on=True):
         pass
 
 
+def _guarded(stage, action):
+    try:
+        return action()
+    except Exception:
+        log(f"{stage} failed: " + traceback.format_exc().strip().splitlines()[-1])
+        atomic_json(paper.day_dir(record.uk_now().date()) / f"error_{stage}.json",
+                    {"stage": stage, "error": traceback.format_exc(), "at": str(record.uk_now())})
+
+
 def day(args):
+    """07:50 refresh starts; 08:00 snapshot; card prepared when the refresh ends (by PREPARE_BY); 11:00 bets.
+
+    Measured 15 November: a 14-day results sync took 35 min, a full store rebuild 30 min, and the card
+    forecast up to 27 min with cold caches (5 min warm). Only the price inputs and selection wait for 11:00.
+    """
     stay_awake()
     log("paper day started")
     settle_all()
+    worker = refresh_steps(paper.config()["win_run"]) if args.refresh else None
     if record.uk_now().strftime("%H:%M") < "08:00":
         sleep_until("08:00")
-    try:
-        path, frame = record.snapshot("0800")
-        log(f"snapshot {path} ({len(frame)} runners)")
-    except Exception as exc:
-        log(f"08:00 snapshot failed: {exc!r}")
-    worker = refresh_steps(paper.config()["win_run"]) if args.refresh else None
-    sleep_until(paper.RULE["clock"])
-    try:
-        path, frame = record.snapshot("1100")
-        log(f"snapshot {path} ({len(frame)} runners)")
-    except Exception as exc:
-        log(f"11:00 snapshot failed: {exc!r}")
-    while worker is not None and worker.poll() is None and record.uk_now().strftime("%H:%M") < REFRESH_DEADLINE:
+    taken = _guarded("snapshot_0800", lambda: record.snapshot("0800"))
+    if taken:
+        log(f"snapshot {taken[0]} ({len(taken[1])} runners)")
+    while worker is not None and worker.poll() is None and record.uk_now().strftime("%H:%M") < PREPARE_BY:
         time.sleep(30)
     if worker is not None:
         log("refresh " + (f"finished, exit {worker.returncode}" if worker.poll() is not None
-                          else f"still running at {REFRESH_DEADLINE}; forecasting without it"))
-    try:
-        run = paper.eleven(snapshot=False)
-        log("eleven: " + json.dumps({k: run.get(k) for k in ("status", "eligible_races", "bets")} if run else {}))
-    except Exception:
-        log("eleven failed: " + traceback.format_exc().strip().splitlines()[-1])
-        atomic_json(paper.day_dir(record.uk_now().date()) / "error.json",
-                    {"stage": "eleven", "error": traceback.format_exc(), "at": str(record.uk_now())})
+                          else f"still running at {PREPARE_BY}; preparing the card against the store as it is"))
+    prepared = _guarded("prepare", paper.prepare)
+    log(f"card prepared: {0 if prepared is None else prepared.race_id.nunique()} races")
+    sleep_until(paper.RULE["clock"])
+    run = _guarded("eleven", paper.eleven)
+    log("eleven: " + json.dumps({k: run.get(k) for k in ("status", "eligible_races", "bets", "made_at")} if run else {}))
     record.watch(log=log)
     log("paper day finished")
     stay_awake(False)
@@ -127,6 +132,7 @@ def main(argv=None):
     f.add_argument("--threads", type=int, default=6)
     commands.add_parser("snapshot").add_argument("--label", default="manual")
     commands.add_parser("watch")
+    commands.add_parser("prepare").add_argument("--date", default=None)
     e = commands.add_parser("eleven")
     e.add_argument("--date", default=None)
     e.add_argument("--no-snapshot", action="store_true")
@@ -145,6 +151,9 @@ def main(argv=None):
         print(f"{path}: {len(frame)} runners")
     elif args.command == "watch":
         record.watch()
+    elif args.command == "prepare":
+        frame = paper.prepare(args.date)
+        print("no racecards" if frame is None else f"{frame.race_id.nunique()} races, {len(frame)} runners prepared")
     elif args.command == "eleven":
         print(json.dumps(paper.eleven(args.date, snapshot=not args.no_snapshot), indent=2, default=str))
     elif args.command == "settle":

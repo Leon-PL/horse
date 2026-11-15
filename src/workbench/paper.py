@@ -38,8 +38,9 @@ class Paper:
             run = folder / "run.json"
             if run.exists():
                 info = json.loads(run.read_text())
-                if (folder / "error.json").exists():
-                    info["error"] = json.loads((folder / "error.json").read_text()).get("error", "").strip().splitlines()[-1:]
+                errors = sorted(folder.glob("error*.json"))
+                if errors:
+                    info["error"] = json.loads(errors[-1].read_text()).get("error", "").strip().splitlines()[-1:]
                 days.append({k: info.get(k) for k in ("date", "status", "card_races", "matchbook_races", "races_linked",
                                                       "eligible_races", "bets", "settled_bets", "snapshot_1100",
                                                       "error")})

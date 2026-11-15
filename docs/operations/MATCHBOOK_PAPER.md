@@ -17,10 +17,10 @@ repo-root `.env`, which is gitignored.
 
 | UK time | Step | Files |
 |---|---|---|
-| on start | settle earlier days whose Betfair SP file is out | `paper/<date>/settled.parquet` |
+| 07:50 | settle earlier days whose Betfair SP file is out; start the `--refresh` child: results sync (3 days), store append or rebuild, forecast-history extend | `paper/<date>/settled.parquet`, `logs/<date>_refresh.log` |
 | 08:00 | whole-market snapshot (for the 08:00→11:00 move) | `snapshots/<date>/080000_0800.parquet` |
-| 08:00–11:00 | with `--refresh`: results sync (3 days), store append, forecast-history extend | `logs/<date>.log` |
-| 11:00 | snapshot, card forecast, paper bets | `paper/<date>/{forecast,bets,links}.parquet`, `run.json` |
+| refresh done, by 10:30 at the latest | `prepare`: card, features, win model, correction inputs except price | `paper/<date>/prepared.{parquet,json}` |
+| 11:00 | snapshot, price inputs, correction, paper bets (about one second) | `paper/<date>/{forecast,bets,links}.parquet`, `run.json` |
 | to last off | near-off quotes each minute, whole snapshot each 30 min | `snapshots/<date>/*_close.parquet` |
 
 All under `data/matchbook/`. One command runs the day:
@@ -28,6 +28,20 @@ All under `data/matchbook/`. One command runs the day:
 ```powershell
 .venv\Scripts\python.exe -m src.matchbook day --refresh
 ```
+
+Timings measured on 15 November:
+
+| Step | Time |
+|---|---|
+| 14-day results sync | 35 min |
+| Full store rebuild | 30 min |
+| Card forecast, cold caches (as after a store refresh) | up to 27 min |
+| Card forecast, warm caches | 4–5 min |
+| 11:00 step after `prepare` | 1.1 s |
+
+Nothing slow waits for 11:00, so the bet prices are the 11:00 quotes. A runner
+withdrawn between `prepare` and 11:00 is dropped, and its race is
+renormalised. `run.json` counts these runners in `withdrawn_since_prepared`.
 
 It must run outside the Claude app (a process started from the app stops when
 the app closes): use a Windows scheduled task starting at 07:50.
