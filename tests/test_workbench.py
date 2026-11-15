@@ -176,6 +176,8 @@ def test_busy_bha_is_excluded_from_refresh_and_pedigree_needs_canonical_source(c
         jobs.validate("refresh", {"start": "2026-06-01", "end": "2026-06-02", "sources": ["bha"]})
     with pytest.raises(ValueError, match="Sporting Life"):
         jobs.validate("refresh", {"start": "2026-06-01", "end": "2026-06-02", "sources": ["fx"], "enrich": True})
+    assert jobs.validate("refresh", {"start": "2026-06-01", "end": "2026-06-02", "sources": ["rtv"], "enrich": True})["enrich"]
+    assert jobs.validate("foaling_backfill", {"start": "2026-06-01", "end": "2026-06-02"}) == {}
     assert jobs.validate("refresh", {"start": "2026-06-01", "end": "2026-06-02", "sources": ["sl"], "weather": True})["weather"]
 
 

@@ -1,4 +1,4 @@
-"""Durable source and feature jobs; existing owners retain locks and policies."""
+"""Durable project jobs; existing owners retain locks and policies."""
 from datetime import date, datetime, timedelta, timezone
 import os
 import re
@@ -10,6 +10,7 @@ import psutil
 
 from src.ingestion.storage import atomic_json, writer_lock
 from src.workbench.data import read_json, date_range
+from src.workbench.modelling import MODELLING_JOBS, Modelling
 
 
 def alive(pid, created_at=None):
@@ -24,9 +25,10 @@ def alive(pid, created_at=None):
 
 
 class Jobs:
-    def __init__(self, catalog):
+    def __init__(self, catalog, modelling=None):
         self.catalog = catalog
         self.root = catalog.root/"workbench/jobs"
+        self.modelling = modelling or Modelling(catalog)
 
     def list(self):
         output = []
@@ -42,7 +44,9 @@ class Jobs:
     def validate(self, kind, params):
         if not isinstance(params, dict):
             raise ValueError("Operation parameters must be a JSON object")
-        if kind not in {"refresh", "replay", "publish", "validate", "verify", "atr_resume", "feature_update", "feature_check"}:
+        if isinstance(kind, str) and kind in MODELLING_JOBS:
+            return self.modelling.validate_job(kind, params)
+        if kind not in {"refresh", "replay", "publish", "validate", "verify", "atr_resume", "feature_update", "feature_check", "foaling_backfill"}:
             raise ValueError("Unknown workbench operation")
         if kind in {"feature_update", "feature_check"}:
             from src.workbench.features import Features
@@ -79,8 +83,10 @@ class Jobs:
             busy = [w["label"] for w in self.catalog.workers() if w["source"] in sources and (w["active"] or w.get("process_alive") and w["status"].get("state") in {"running", "waiting"})]
             if busy:
                 raise ValueError(", ".join(busy)+" already owns its collector; choose other sources while it runs")
-            if (params.get("enrich") or params.get("weather")) and "sl" not in sources:
-                raise ValueError("Pedigree enrichment and weather collection require the Sporting Life source")
+            if params.get("enrich") and not {"sl", "rtv"}.intersection(sources):
+                raise ValueError("Pedigree enrichment requires Sporting Life or Racing TV")
+            if params.get("weather") and "sl" not in sources:
+                raise ValueError("Weather collection requires Sporting Life")
             params = {"start": params["start"], "end": params["end"], "sources": sources,
                       "recheck": bool(params.get("recheck")), "atr_max_races": min(max(int(params.get("atr_max_races", 50)), 1), 500),
                       "enrich": bool(params.get("enrich")), "weather": bool(params.get("weather"))}
@@ -98,7 +104,7 @@ class Jobs:
             if not manifest.get("id"):
                 raise ValueError("No accepted dataset is available to verify")
             params = {"dataset": manifest["id"]}
-        if kind == "publish":
+        if kind in {"publish", "foaling_backfill"}:
             params = {}
         return params
 
@@ -110,8 +116,9 @@ class Jobs:
                 raise ValueError("Job submission is busy; try again")
             active = [j for j in self.list() if j["state"] in {"queued", "running"}]
             # The regular coordinator also publishes; serialize those owners.
-            conflicts = {"refresh", "replay", "publish"}
-            if any(j["kind"] == kind or {j["kind"], kind}.issubset(conflicts) for j in active):
+            conflicts = {"refresh", "replay", "publish", "foaling_backfill"}
+            if any(j["kind"] == kind or {j["kind"], kind}.issubset(conflicts)
+                   or {j["kind"], kind}.issubset(MODELLING_JOBS) for j in active):
                 raise ValueError("A conflicting operation is already queued or running")
             identifier = uuid4().hex
             path = self.root/(identifier+".json")

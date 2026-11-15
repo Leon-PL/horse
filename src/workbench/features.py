@@ -110,7 +110,7 @@ class Features:
                     "rows": meta.get("featured_rows", pq.ParquetFile(store.featured_path).metadata.num_rows),
                     "columns": len(names), "last_date": meta.get("last_date"),
                     "built_at": meta.get("appended_at") or meta.get("built_at"),
-                    "signature": meta.get("fe_signature"), "dataset": stored_dataset,
+                    "signature": meta.get("fe_signature"), "data_signature": meta.get("data_signature"), "dataset": stored_dataset,
                     "build_id": self.build_id(store, meta),
                     "categorical_columns": len(meta.get("categorical_columns", []))}
                 for item in output["feature_sets"]:

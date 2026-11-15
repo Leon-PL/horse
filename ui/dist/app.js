@@ -1,4 +1,5 @@
 import {createFeaturesUI} from './features.js';
+import {createModellingUI} from './modelling.js';
 const $ = (q, root = document) => root.querySelector(q);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = value => value == null ? '—' : Number(value).toLocaleString('en-GB', {maximumFractionDigits: 2});
@@ -14,11 +15,12 @@ const icons = {
  sources:'<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
  coverage:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 10h18M8 10v11m8-11v11m-13-6h18"/>',
  features:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18M15 9v12M3 15h18"/>',
+ modelling:'<path d="M4 4v16h16M8 15l4-5 4 2 4-6"/>',
  jobs:'<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
  review:'<path d="M5 21V4m0 0c6-4 8 4 14 0v10c-6 4-8-4-14 0"/>'
 };
 const svgIcon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]}</svg>`;
-$('#navigation').innerHTML = Object.entries({overview:'Overview',races:'Races',sources:'Sources',coverage:'Coverage',features:'Features',jobs:'Jobs',review:'Review queue'}).map(([key,label]) => `<a href="#${key}" data-page="${key}">${svgIcon(key)}${label}</a>`).join('');
+$('#navigation').innerHTML = Object.entries({overview:'Overview',races:'Races',sources:'Sources',coverage:'Coverage',features:'Features',modelling:'Modelling',jobs:'Jobs',review:'Review queue'}).map(([key,label]) => `<a href="#${key}" data-page="${key}">${svgIcon(key)}${label}</a>`).join('');
 
 function badge(label, kind = '') { return `<span class="badge ${kind}">${esc(label)}</span>`; }
 function sourceIcon(id) { return `<span class="source-icon ${id}">${sourceShort[id]}</span>`; }
@@ -116,13 +118,16 @@ function dataTable(rows, provider, name) {
   pre:['horse_key','observed_at','rtv_pre_timeform_rating','rtv_pre_pace_position','match_status','availability_basis'],
   text:['horse_id','race_date','tf_comment','tf_verdict','match_status'],
   scores:['horse_id','race_date','rtv_text_logit','rtv_verdict_rank','match_status'],
-  horses:['horse_id','sire','dam','damsire','foaled'],
+  horses:['horse_name','foaled','foaling_date_source','sire','dam','damsire','rtv_country_of_foaling','rtv_coat_colour'],
  };
  const preferred = layouts[name] || ['horse_name','horse_id','sl_horse_id','race_date','finish_position','official_rating','atr_horse_id','atr_finishing_speed_pct','bsp','place_bsp','match_status','match_method','observed_at','available_at','availability_basis'];
  let columns = preferred.filter(c => rows.some(r => Object.hasOwn(r,c)));
  if (!columns.length) columns = Object.keys(rows[0]).filter(c=>!c.startsWith('_')).slice(0,7);
  columns = columns.slice(0,8);
- return `<div class="table-wrap"><table class="record-table"><thead><tr>${columns.map(c=>`<th>${esc(pretty(c))}</th>`).join('')}<th>Full record</th></tr></thead><tbody>${rows.map(r=>`<tr>${columns.map(c=>`<td class="data-cell" title="${esc(valueText(r[c]).slice(0,1000))}">${r[c] == null ? '<span class="muted">Unknown</span>' : esc(valueText(r[c]).slice(0,100))}</td>`).join('')}<td class="inspect-cell">${inspectButton(r,provider)}</td></tr>`).join('')}</tbody></table></div>`;
+ const headings = {foaled:'Foaling date',foaling_date_source:'Date source',rtv_country_of_foaling:'Country of foaling',rtv_coat_colour:'Coat colour'};
+ const dateSources = {racing_tv:'Racing TV',sporting_life:'Sporting Life',conflict:'Conflicting dates'};
+ const cellText = (row, column) => valueText(column==='foaling_date_source' ? dateSources[row[column]] || row[column] : row[column]);
+ return `<div class="table-wrap"><table class="record-table"><thead><tr>${columns.map(c=>`<th>${esc(headings[c] || pretty(c))}</th>`).join('')}<th>Full record</th></tr></thead><tbody>${rows.map(r=>`<tr>${columns.map(c=>`<td class="data-cell" title="${esc(cellText(r,c).slice(0,1000))}">${r[c] == null ? '<span class="muted">Unknown</span>' : esc(cellText(r,c).slice(0,100))}</td>`).join('')}<td class="inspect-cell">${inspectButton(r,provider)}</td></tr>`).join('')}</tbody></table></div>`;
 }
 function sourceTables(result) {
  const entries = Object.entries(result.tables || {});
@@ -176,6 +181,9 @@ async function sourcesPage(selected) {
  `<div class="source-profile">${metric('Accepted observations',number(p.entry?.rows),p.entry?.contract?.grain || 'Source-native grain')}${['runner','runner snapshot','canonical runner'].includes(p.entry?.contract?.grain)?metric('Linked runners',number(c.linked_runners),c.eligible_runners?`${number(c.eligible_runners)} eligible canonical runners`:'No canonical runner denominator'):metric('Identity grain',s.id==='bha'?'Fixture':s.id==='pedigree'?'Horse':'Reference','No canonical runner attribution is asserted')}${metric('Usable observations',number(c.usable_rows),c.latest_usable_event?`Latest event ${dateLabel(c.latest_usable_event)}`:'Availability not established')}</div>`+
  (s.adoption?.state==='error'?banner('Latest candidate was not accepted',s.adoption.error || 'The previous accepted version is retained.'):s.check_stale?banner('The collection check is overdue','Stored observations remain inspectable. A refresh is needed to establish current coverage.'):banner('Collection and publication are separate',`Last collection check: ${when(s.checked_at)}. Accepted publication: ${dateLabel(s.published_at)}.`,s.accepted_version?'good':''))+
  `<div class="two-column"><section class="panel"><div class="panel-head"><h2>Accepted tables &amp; contracts</h2></div><div class="table-wrap"><table><thead><tr><th>Table</th><th>Rows</th><th>Grain / role</th><th>Declared identity</th><th></th></tr></thead><tbody>${Object.entries(s.tables || {}).filter(([name])=>!name.startsWith('links_')&&!name.startsWith('observations_')).map(([name,e])=>`<tr><td>${esc(name)}</td><td>${number(e.rows)}</td><td>${esc(e.contract?.grain || 'Reference')}<div class="race-meta">${esc(e.contract?.role || 'history')}</div></td><td class="mono">${esc((e.contract?.keys || []).join(', ') || 'See source receipt')}</td><td>${inspectButton({table:name,...e},s.id,'Schema')}</td></tr>`).join('') || '<tr><td colspan="5">No accepted version in this dataset.</td></tr>'}</tbody></table></div><div class="table-foot mono">${esc(s.accepted_version || 'Not published')}</div></section><div><section class="panel"><div class="panel-head"><h2>Identity &amp; missingness</h2></div><div class="panel-body">${Object.keys(c.link_reasons || {}).length?Object.entries(c.link_reasons).map(([reason,count])=>`<div class="stat-pair"><span>${esc(pretty(reason))}</span><strong>${number(count)}</strong></div>`).join(''):'<p class="hint">This table has no runner crosswalk. Its source-native grain is preserved.</p>'}<hr class="subtle-divider">${Object.entries(c.missing_values_by_column || {}).slice(0,10).map(([name,count])=>`<div class="stat-pair"><span>${esc(pretty(name))}</span><strong>${number(count)}</strong></div>`).join('') || '<p class="hint">No missing-field summary is recorded for this table.</p>'}</div></section>${s.worker?`<section class="panel"><div class="panel-head"><h2>Source worker</h2></div>${workerCard(s.worker,true)}</section>`:''}</div></div><details class="panel"><summary class="panel-head"><h2>Source provenance</h2></summary><div class="panel-body"><pre class="mono">${esc(JSON.stringify(s.provenance,null,2))}</pre></div></details>${s.id==='bha'?`<div class="section-toolbar"><div><h2>Stewards’ fixture reports</h2><p class="hint no-margin">Enquiries, runner notes, fixture comments, incidents and PDF race notes.</p></div>${layerPicker()}</div><div id="bha-fixtures" class="loading">Reading retained BHA reports…</div>`:''}`;
+ const foaling=s.provenance?.foaling_coverage;
+ if(s.id==='pedigree' && foaling) $('.source-profile').insertAdjacentHTML('afterend',
+  `<div class="source-profile">${metric('Racing TV foaling dates',number(foaling.racing_tv),`${number(foaling.recovered_from_january_1)} recovered from 1 January`)}${metric('Sporting Life dates',number(foaling.sporting_life),'Full dates from Sporting Life')}${metric('Unresolved dates',number(foaling.unresolved+foaling.conflict),`${number(foaling.conflict)} conflicting source dates`)}</div>`);
  if(s.id==='bha') {try {const r=await api('bha/fixtures',{layer:state.layer});if($('#bha-fixtures')) $('#bha-fixtures').innerHTML=sourceTables(r);}catch(e){if($('#bha-fixtures'))$('#bha-fixtures').innerHTML=banner(e.message,'','error');}}
 }
 async function coveragePage() {
@@ -183,12 +191,29 @@ async function coveragePage() {
  $('#main').innerHTML=heading('Coverage explorer','Follow the gaps from a source and date straight into the affected races.')+banner('Every source keeps its own grain',result.message)+`<section class="panel"><div class="panel-head"><div><h2>Accepted observations by day</h2><p>Click a cell to inspect that date’s canonical races.</p></div>${badge(`${result.days.length} days`,'neutral')}</div><div class="table-wrap"><table class="coverage-table"><thead><tr><th>Source / grain</th>${result.days.map(d=>`<th title="${d}">${d.slice(8)}<br>${new Date(d+'T12:00:00').toLocaleDateString('en-GB',{month:'short'})}</th>`).join('')}</tr></thead><tbody>${result.sources.map(s=>`<tr><td><button class="link-button" data-nav="sources/${s.source}">${esc(s.label)}</button><div class="race-meta">${esc(s.grain)}</div></td>${s.cells.map(c=>`<td><button class="heat-cell ${c.state}" data-action="coverage-day" data-day="${c.day}" data-source="${s.source}" aria-label="${esc(s.label)} ${c.day}: ${c.count} observations; ${pretty(c.state)}" title="${esc(`${s.label} · ${c.day}\n${c.count} ${s.grain} observations\n${pretty(c.state)}\nCanonical: ${c.canonical.races} races / ${c.canonical.runners} runners`)}">${c.state==='observed' ? number(c.count) : c.state==='awaiting_publication'?'◷':c.state==='reference'?'·':'—'}</button></td>`).join('')}</tr>`).join('')}</tbody></table></div><div class="legend"><span><i style="background:#b7d7a4"></i>Observations present</span><span><i style="background:#f8e8be"></i>Unverified gap</span><span><i style="background:#e1edf6"></i>Publication window</span><span><i style="background:#eef2ea"></i>No canonical races / reference</span></div></section>`;
  for(const source of result.sources.filter(s=>s.error))$('#main').insertAdjacentHTML('beforeend',banner(`${source.label} coverage could not be read`,source.error,'error'));
 }
+function jobProgress(job) {
+ const coverage=job.result?.foaling_coverage;
+ if(job.kind==='foaling_backfill' && coverage){
+  return `${number(coverage.recovered_from_january_1)} dates recovered · ${number(coverage.unresolved+coverage.conflict)} unresolved`;
+ }
+ if(job.progress) return [job.progress.message || job.progress.source,job.progress.phase || job.progress.state].filter(Boolean).join(' · ');
+ return '';
+}
+function modellingJobLink(job) {
+ if(job.result?.benchmark_id) return `<a class="button small" href="#modelling/benchmarks/${esc(job.result.benchmark_id)}">Open benchmark</a>`;
+ if(job.result?.run_id) return `<a class="button small" href="#modelling/runs/${esc(job.result.run_id)}">Open fitted run</a>`;
+ return '';
+}
 async function jobsPage() {
  const result=await api('jobs');
  const busySources=new Set(result.workers.filter(w=>w.active || w.process_alive && ['running','waiting'].includes(w.status.state)).map(w=>w.source));
- $('#main').innerHTML=heading('Project jobs','Follow source collection, feature builds and recorded validation outcomes.')+
- `<div class="two-column"><div><section class="panel"><div class="panel-head"><div><h2>Refresh a date range</h2><p>Uses the dates selected above and the existing source coordinator.</p></div></div><form class="panel-body" data-form="refresh"><div class="check-grid">${['sl','rtv','atr','betfair','fx','bha'].map(id=>`<label><input name="source" type="checkbox" value="${id}" ${busySources.has(id)?'disabled':'checked'}>${esc(sourceLabels[id])}</label>`).join('')}</div>${busySources.size?`<p class="hint">Active collectors are reserved: ${[...busySources].map(id=>esc(sourceLabels[id])).join(', ')}. Their existing jobs continue independently.</p>`:''}<label class="hint"><input type="checkbox" id="recheck"> Recheck already collected records in this range</label><p class="hint">BHA stewards is included when its collector is free. Historical ranges are limited to 31 settled days per job; provider publication delays and cooldowns are retained.</p><button class="button primary">Queue source refresh</button></form></section><section class="panel"><div class="panel-head"><div><h2>Local data operations</h2><p>Long operations continue independently of this page.</p></div></div><div class="panel-body"><div class="actions"><button class="button" data-action="queue" data-kind="publish">Publish accepted sources</button><button class="button" data-action="queue" data-kind="verify">Verify publication hashes</button><button class="button" data-action="queue" data-kind="validate">Check race fields</button><button class="button" data-action="queue" data-kind="replay">Replay retained SL responses</button></div><p class="hint">Publication adopts local stores and promotes qualified ATR observations. It does not download data. Replay reparses retained Sporting Life responses through the existing ingestion path.</p></div></section><section class="panel"><div class="panel-head"><h2>Workbench job history</h2>${badge(result.rows.length,'neutral')}</div>${result.rows.length?result.rows.map(j=>`<div class="job-row"><header><strong>${esc(pretty(j.kind))}</strong>${badge(pretty(j.state),j.state==='failed'?'error':j.state==='partial'?'warning':j.state==='running'?'blue':'')}</header><div class="race-meta">${esc(when(j.created_at))} · ${esc(j.params?.start || '')}${j.params?.end?' → '+esc(j.params.end):''}</div>${j.error?`<p>${esc(j.error)}</p>`:''}${j.progress?`<p>${esc(j.progress.message || j.progress.source || '')} · ${esc(j.progress.phase || j.progress.state || '')}</p>`:''}<div class="actions"><button class="button small" data-action="job-log" data-job="${j.id}">View log</button>${inspectButton(j,'','Receipt')}</div></div>`).join(''):empty('No workbench jobs yet','Existing source workers are shown separately. Page loads never queue operations.')}</section></div><div>${result.workers.map(w=>`<section class="panel"><div class="panel-head"><h2>${esc(w.label)} worker</h2></div>${workerCard(w,true)}</section>`).join('')}</div></div>`;
- $('#recheck').closest('label').insertAdjacentHTML('beforebegin','<label class="hint checkbox-line"><input type="checkbox" id="enrich"> Enrich pedigree for collected runners</label><label class="hint checkbox-line"><input type="checkbox" id="weather"> Collect weather observations (research)</label>');
+ $('#main').innerHTML=heading('Project jobs','Follow source collection, feature builds and modelling jobs.')+
+ `<div class="two-column"><div><section class="panel"><div class="panel-head"><div><h2>Refresh a date range</h2><p>Uses the dates selected above and the existing source coordinator.</p></div></div><form class="panel-body" data-form="refresh"><div class="check-grid">${['sl','rtv','atr','betfair','fx','bha'].map(id=>`<label><input name="source" type="checkbox" value="${id}" ${busySources.has(id)?'disabled':'checked'}>${esc(sourceLabels[id])}</label>`).join('')}</div>${busySources.size?`<p class="hint">Active collectors are reserved: ${[...busySources].map(id=>esc(sourceLabels[id])).join(', ')}. Their existing jobs continue independently.</p>`:''}<label class="hint"><input type="checkbox" id="recheck"> Recheck already collected records in this range</label><p class="hint">BHA stewards is included when its collector is free. Historical ranges are limited to 31 settled days per job; provider publication delays and cooldowns are retained.</p><button class="button primary">Queue source refresh</button></form></section><section class="panel"><div class="panel-head"><div><h2>Local data operations</h2><p>Long operations continue independently of this page.</p></div></div><div class="panel-body"><div class="actions"><button class="button" data-action="queue" data-kind="publish">Publish accepted sources</button><button class="button" data-action="queue" data-kind="verify">Verify publication hashes</button><button class="button" data-action="queue" data-kind="validate">Check race fields</button><button class="button" data-action="queue" data-kind="replay">Replay retained SL responses</button></div><p class="hint">Publication adopts local stores and promotes qualified ATR observations. It does not download data. Replay reparses retained Sporting Life responses through the existing ingestion path.</p></div></section><section class="panel"><div class="panel-head"><h2>Workbench job history</h2>${badge(result.rows.length,'neutral')}</div>${result.rows.length?result.rows.map(j=>`<div class="job-row"><header><strong>${esc(pretty(j.kind))}</strong>${badge(pretty(j.state),j.state==='failed'?'error':j.state==='partial'?'warning':j.state==='running'?'blue':'')}</header><div class="race-meta">${esc(when(j.created_at))} · ${esc(j.params?.start || '')}${j.params?.end?' → '+esc(j.params.end):''}</div>${j.error?`<p>${esc(j.error)}</p>`:''}${jobProgress(j)?`<p>${esc(jobProgress(j))}</p>`:''}<div class="actions"><button class="button small" data-action="job-log" data-job="${j.id}">View log</button>${modellingJobLink(j)}${inspectButton(j,'','Receipt')}</div></div>`).join(''):empty('No workbench jobs yet','Existing source workers are shown separately. Page loads never queue operations.')}</section></div><div>${result.workers.map(w=>`<section class="panel"><div class="panel-head"><h2>${esc(w.label)} worker</h2></div>${workerCard(w,true)}</section>`).join('')}</div></div>`;
+ $('#recheck').closest('label').insertAdjacentHTML('beforebegin','<label class="hint checkbox-line"><input type="checkbox" id="enrich"> Enrich pedigree and foaling dates for collected runners</label><label class="hint checkbox-line"><input type="checkbox" id="weather"> Collect weather observations (research)</label>');
+ const profileButton=$('[data-kind="publish"]');
+ const profileRunning=result.rows.some(j=>['refresh','replay','publish','foaling_backfill'].includes(j.kind) && ['queued','running'].includes(j.state));
+ profileButton.insertAdjacentHTML('afterend',`<button class="button" data-action="queue" data-kind="foaling_backfill" ${profileRunning?'disabled':''}>Backfill foaling dates</button>`);
+ profileButton.closest('.panel-body').insertAdjacentHTML('beforeend','<p class="hint">The foaling-date backfill looks up Racing TV profiles for unresolved horses across the archive. Completed profile lookups are reused when a job is rerun.</p>');
 }
 async function reviewPage() {
  const [issues,review]=await Promise.all([api('issues'),api('review')]);
@@ -220,14 +245,15 @@ function inspectRecord(record,provider='') {
  if(record.sha256)evidence.push({sha256:record.sha256,kind:'Retained document'});
  if(Array.isArray(payloads))evidence.push(...payloads);
  const links=evidence.filter(e=>/^[a-f0-9]{64}$/.test(e.sha256 || '')).map(e=>`<a class="button small" href="/api/evidence?source=${provider}&amp;sha=${e.sha256}">${esc(pretty(e.kind || 'Source'))} evidence ↓</a>`).join('');
- const external=safeURL(record.source_url || record.pdf_report_url || record.url);
+ const external=safeURL(record.source_url || record.rtv_profile_url || record.pdf_report_url || record.url);
  const tabCoverage=Array.isArray(payloads)&&payloads.length?`<div class="chip-stack bottom-space">${payloads.map(p=>badge(`${pretty(p.kind)}: ${p.state==='empty'?'confirmed empty':pretty(p.state || 'unknown')}`,p.state==='data'?'':p.state==='empty'?'neutral':'warning')).join('')}</div>`:'';
  $('#inspector-body').innerHTML=tabCoverage+charts+`<div class="actions bottom-space">${links}${external?`<a class="button small" href="${esc(external)}" target="_blank" rel="noopener noreferrer">Open original source ↗</a>`:''}<button class="button small" data-action="copy-record" data-record="${storeRecord(record,provider)}">Copy JSON</button></div><dl class="property-grid">${Object.entries(record).map(([key,value])=>`<dt>${esc(pretty(key))}</dt><dd>${esc(valueText(value))}</dd>`).join('')}</dl>`;
  if(!$('#inspector').open)$('#inspector').showModal();
 }
 async function queue(kind,params={}) {
  const result=await api('jobs',{}, {kind,params:{start:$('#start-date').value,end:$('#end-date').value,dataset:state.boundDataset,...params}});
- toast(`${pretty(kind)} queued. Follow its progress in Jobs.`);
+ const label=({model_benchmark:'Benchmark',model_fit:'Candidate fit'})[kind] || pretty(kind);
+ toast(`${label} queued. Follow its progress in Jobs.`);
  if(state.page==='jobs')await render(false);else location.hash='jobs';
  return result;
 }
@@ -292,7 +318,8 @@ async function render(showLoading=true) {
  state.abort?.abort();state.abort=new AbortController();
  const ticket=++state.ticket,segments=(location.hash.slice(1)||'overview').split('/');
  state.page=segments[0];
- if(!['overview','races','race','sources','coverage','features','jobs','review'].includes(state.page)){location.hash='overview';return;}
+ if(!['overview','races','race','sources','coverage','features','modelling','jobs','review'].includes(state.page)){location.hash='overview';return;}
+ $('.contextbar').classList.toggle('modelling-context',state.page==='modelling');
  $$('#navigation a').forEach(a=>a.classList.toggle('active',a.dataset.page===(state.page==='race'?'races':state.page)));
  if(showLoading)$('#main').innerHTML='<div class="loading"><span class="spinner"></span>Reading your local data…</div>';
  try{
@@ -300,12 +327,15 @@ async function render(showLoading=true) {
    const summary=await api('features/overview',{dataset:state.dataset});if(ticket!==state.ticket)return;
    state.boundDataset=state.dataset || summary.selected_dataset || '';
    await featureUI.render(segments[1],decodeURIComponent(segments[2]||''),summary);
+  } else if(state.page==='modelling') {
+   await modellingUI.render(segments[1],segments[2],ticket);
+   if(ticket!==state.ticket)return;
   } else {
    const o=await api('overview',{dataset:state.dataset});if(ticket!==state.ticket)return;
    state.overview=o;state.boundDataset=state.dataset || o.dataset.id || '';
    if(state.page==='overview')await overviewPage();else if(state.page==='races')await racesPage();else if(state.page==='race')await racePage(decodeURIComponent(segments[1]||''));else if(state.page==='sources')await sourcesPage(segments[1]);else if(state.page==='coverage')await coveragePage();else if(state.page==='jobs')await jobsPage();else if(state.page==='review')await reviewPage();
   }
-  $('.breadcrumb').innerHTML=state.page==='features'?'Project <span>/</span> Features':'Project <span>/</span> Ingestion';
+  $('.breadcrumb').innerHTML=`Project <span>/</span> ${({features:'Features',modelling:'Modelling'})[state.page] || 'Ingestion'}`;
   $('#last-checked').textContent=`Checked ${new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} · Local workspace`;
   document.title=`${state.page==='race'?'Race inspection':pretty(state.page)} · Racing Workbench`;
  }catch(e){if(ticket===state.ticket)$('#main').innerHTML=heading('Unable to load this view','Your source data has not been changed.')+banner(e.message,'Check the selected date range, dataset or local source availability.','error')+'<button class="button" data-nav="overview">Back to overview</button>';}
@@ -320,5 +350,6 @@ $('#dataset').addEventListener('change',e=>{state.dataset=e.target.value;render(
 window.addEventListener('hashchange',()=>{render();window.scrollTo(0,0);});
 setInterval(()=>{if(state.auto && (['overview','jobs'].includes(state.page) || state.page==='features' && ['overview','builds'].includes(location.hash.split('/')[1] || 'overview')) && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName) && !$('#inspector').open)render(false);},30000);
 const featureUI=createFeaturesUI({api,url,esc,number,pretty,banner,badge,empty,metric,toast,state,heading,queue,render,raceContent});
+const modellingUI=createModellingUI({api,esc,number,pretty,banner,badge,empty,metric,toast,state,heading,queue,dateLabel});
 async function boot(){try{const session=await api('session');token=session.token;const yesterday=new Date();yesterday.setDate(yesterday.getDate()-1);const end=yesterday.toISOString().slice(0,10);yesterday.setDate(yesterday.getDate()-6);$('#start-date').value=yesterday.toISOString().slice(0,10);$('#end-date').value=end;const sets=await api('datasets');$('#dataset').insertAdjacentHTML('beforeend',sets.rows.map(s=>`<option value="${s.id}">${dateLabel(s.created_at)} · ${s.id.slice(0,10)}</option>`).join(''));await render();}catch(e){$('#main').innerHTML=heading('Workspace connection unavailable','Start the local workbench server and reload this page.')+banner(e.message,'','error');}}
 boot();

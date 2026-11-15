@@ -52,6 +52,13 @@ def run(path):
             finally:
                 logging.getLogger().removeHandler(handler)
             state = "complete"
+        elif kind in {"model_benchmark", "model_fit"}:
+            from src.workbench.modelling import Modelling, run_modelling_job
+            try:
+                result = run_modelling_job(Modelling(catalog), job, lambda **values: stamp(progress=values))
+            except SystemExit as exc:
+                raise ValueError("The modelling command rejected the settings. See the job log.") from exc
+            state = "complete"
         elif kind == "feature_check":
             from src.workbench.features import Features
             service = Features(catalog)
@@ -69,6 +76,15 @@ def run(path):
                 enrich=params.get("enrich", False), weather=params.get("weather", False),
                 atr_max_races=params.get("atr_max_races", 50),
                 progress_callback=lambda source, body: stamp(progress={"source": source, **body}))
+            state = "complete" if result["state"] in {"ok", "cached"} else "partial"
+        elif kind == "foaling_backfill":
+            from src.ingestion.pedigree import backfill_rtv_foaling_and_publish
+
+            def profile_progress(body):
+                stamp(progress={**body, "source": "Racing TV",
+                                "message": f"{body['ok']:,} profiles fetched · {body['pending']:,} pending"})
+
+            result = backfill_rtv_foaling_and_publish(progress=profile_progress)
             state = "complete" if result["state"] in {"ok", "cached"} else "partial"
         elif kind == "publish":
             from src.source_dataset import capture_dataset

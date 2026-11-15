@@ -11,6 +11,7 @@ from src.workbench.data import Catalog
 from src.workbench.jobs import Jobs
 from src.workbench.review import ReviewStore
 from src.workbench.features import Features
+from src.workbench.modelling import Modelling
 
 
 class WorkbenchServer(ThreadingHTTPServer):
@@ -20,9 +21,10 @@ class WorkbenchServer(ThreadingHTTPServer):
         if address[0] not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("Racing Workbench must bind to loopback")
         self.catalog = catalog
-        self.jobs = Jobs(catalog)
-        self.review = ReviewStore(catalog.root/"workbench/review.sqlite")
         self.features = Features(catalog)
+        self.modelling = Modelling(catalog, self.features)
+        self.jobs = Jobs(catalog, modelling=self.modelling)
+        self.review = ReviewStore(catalog.root/"workbench/review.sqlite")
         self.static_dir = Path(static_dir)
         self.token = secrets.token_urlsafe(32)
         super().__init__(address, Handler)
@@ -87,11 +89,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if mutation:
                 raise FileNotFoundError("Unknown action")
-            name = {"/": "index.html", "/app.js": "app.js", "/features.js": "features.js", "/style.css": "style.css"}.get(parsed.path)
+            name = {"/": "index.html", "/app.js": "app.js", "/features.js": "features.js",
+                    "/modelling.js": "modelling.js", "/style.css": "style.css"}.get(parsed.path)
             if not name:
                 raise FileNotFoundError("Page was not found")
-            kind = {"index.html": "text/html; charset=utf-8", "app.js": "text/javascript; charset=utf-8", "features.js": "text/javascript; charset=utf-8", "style.css": "text/css; charset=utf-8"}[name]
-            self.send((self.server.static_dir/name).read_bytes(), content_type=kind)
+            kind = {"html": "text/html", "js": "text/javascript", "css": "text/css"}[name.rsplit(".", 1)[1]]
+            self.send((self.server.static_dir/name).read_bytes(), content_type=f"{kind}; charset=utf-8")
         except FileNotFoundError as exc:
             self.send({"error": str(exc)}, 404)
         except (ValueError, KeyError, TypeError) as exc:
@@ -131,6 +134,19 @@ class Handler(BaseHTTPRequestHandler):
             return {"rows": catalog.manifests()}
         if route == "features/overview":
             return self.server.features.overview(dataset)
+        if parts[:1] == ["modelling"]:
+            modelling = self.server.modelling
+            if route == "modelling/overview":
+                return modelling.overview(dataset)
+            if route == "modelling/benchmarks":
+                return modelling.benchmarks(dataset)
+            if route == "modelling/runs":
+                return modelling.runs(dataset)
+            if len(parts) == 3 and parts[1] == "benchmarks":
+                return modelling.benchmark(parts[2], dataset)[0]
+            if len(parts) == 3 and parts[1] == "runs":
+                return modelling.run(parts[2], dataset)
+            raise FileNotFoundError("Modelling view was not found")
         if route == "features/catalog":
             return self.server.features.catalog_rows(params.get("feature_set"), params.get("query", ""),
                 params.get("family", ""), params.get("offset", 0), params.get("limit", 60))
