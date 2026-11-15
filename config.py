@@ -202,21 +202,11 @@ FEATURE_CORR_THRESHOLD = 0.95
 # run from a pilot model. None = use all features.
 #
 # Accepts a list of names or a path to a file (one name per line, '#'
-# comments allowed, or a JSON list). The current list comes from
-#   the historical 048 selection experiment (its command is retired).
-# Supported selection now uses `python -m src.modelling prepare` and `select`;
-# see docs/operations/MODELLING.md. It writes candidate lists for explicit review.
-# (out-of-sample race log loss, docs/FEATURE_SELECTION_048.md); it beat the old
-# hand-edited win.txt by 0.0194 race LL at native capacity. Applied AFTER it,
-# FEATURE_PRUNE_FRACTION still trims within the allow-list (set it to 0.0 to
-# keep exactly the list). Versioned selection: fresh checkouts must use the
-# same features as research runs. New experimental lists can still be supplied
-# here explicitly. win_selected_056.txt is that list plus the three Timeform
-# comment-score inputs (src/rtv_text.py, experiment 052).
-# win_with_rider_context.txt is 056 plus reported rider claims and race-title eligibility.
-# The current list, win_selected_20261112.txt, is the 2026-11-12 selection over the whole
-# store: 87 inputs that match those 133 at native capacity (1.82446 against 1.82491 on
-# 11,632 later races). None of the rider-context inputs was selected.
+# comments allowed, or a JSON list). win_selected_20261112.txt holds the 87
+# inputs of the live win model (run 20261114_122027_967139, which the Matchbook
+# paper record serves). Earlier lists are in git at tag pre-cleanup-2026-11.
+# New selections come from `python -m src.modelling prepare` and `select`
+# (docs/operations/MODELLING.md).
 FEATURE_ALLOWLIST = os.path.join(BASE_DIR, "feature_sets", "win_selected_20261112.txt")
 
 # BHA retrospective feature availability: an explicit assumption, not a claim
