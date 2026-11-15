@@ -223,12 +223,14 @@ def _save_inputs(store: FeatureStore, processed: pd.DataFrame, cutoff) -> dict:
     mid-build shows up as a mismatch, where a signature taken at the end hid it.
     """
     _stringify_objects(processed).to_parquet(store.processed_path, index=False, engine="pyarrow")
+    from src.foreign_form import signature as foreign_form_signature
     return {
         "data_signature": data_signature(processed, cutoff=cutoff),
         # The sectional cache is read inside FE, outside both signatures.
         "atr_signature": {"cutoff": str(cutoff.date()), "sig": atr_cache_signature(cutoff)},
         "rtv_signature": {"cutoff": str(cutoff.date()), "sig": rtv_cache_signature(cutoff)},
         "bha_signature": _bha_signature(cutoff),
+        "foreign_form_signature": foreign_form_signature(cutoff),
     }
 
 

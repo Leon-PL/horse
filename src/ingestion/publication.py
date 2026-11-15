@@ -16,7 +16,7 @@ import pandas as pd
 import config
 from src.source_contracts import TableContract, coverage_report, observation_metadata, resolve_runners
 from src.source_dataset import publish_source, registry_root
-from src.ingestion.storage import read_json
+from src.ingestion.storage import read_json, writer_lock
 
 SIDECAR = TableContract("source row", ("source_row",), ("source_row",), role="quality")
 logger = logging.getLogger(__name__)
@@ -232,6 +232,43 @@ def publish_rtv(canonical, identity_reference=None):
     return _publish("rtv", tables, contracts, reference, eligible=len(reference))
 
 
+def _publish_sl(canonical, revision):
+    from src.database import RESULTS_SNAPSHOT_COLUMNS
+    tables = {"results": canonical}
+    contracts = {"results": TableContract("canonical runner", tuple(RESULTS_SNAPSHOT_COLUMNS),
+                                          ("race_id", "horse_id"))}
+    from src.ingestion.foreign_form import COLUMNS, accepted_foreign_form, native_path
+    foreign_path = native_path()
+    if foreign_path.is_file():
+        # Every runner is published, not only horses already in the domestic
+        # archive: a raider's overseas form must not depend on whether it has
+        # run here yet, and rating sweeps need complete fields.
+        tables["foreign_form"] = accepted_foreign_form(pd.read_parquet(foreign_path))
+        contracts["foreign_form"] = TableContract(
+            "horse start", COLUMNS, ("horse_id", "race_date"), role="history",
+        )
+    return _publish("sl", tables, contracts, canonical, provenance=revision, eligible=len(canonical))
+
+
+def publish_foreign_form_dataset():
+    """Attach the collected starts to the committed dataset's domestic results."""
+    from src.database import read_results_snapshot
+    from src.source_dataset import committed_dataset, save_manifest, source_path, use_manifest
+
+    with writer_lock(registry_root() / ".adoption.lock") as acquired:
+        if not acquired:
+            raise RuntimeError("Source publication is already running")
+        current = committed_dataset()
+        if not current:
+            raise RuntimeError("Publish the domestic source dataset before adopting foreign form")
+        sources = dict(current["sources"])
+        revision = {key: sources["sl"]["provenance"][key] for key in ("database_id", "revision")}
+        with use_manifest(current):
+            canonical = read_results_snapshot(source_path("sl", "results"))
+        sources["sl"] = _publish_sl(canonical, revision)
+        return save_manifest(sources, purpose=current["purpose"])
+
+
 def capture_sources(*, include_prices=False, canonical_cards=None):
     """Adopt accepted native stores into one immutable consumer boundary."""
     canonical, pedigree, revision = canonical_snapshot()
@@ -240,11 +277,7 @@ def capture_sources(*, include_prices=False, canonical_cards=None):
         required = ["race_id", "horse_id", "horse_name", "race_date", "track", "off_time"]
         cards = canonical_cards[required]
         identity_reference = pd.concat([canonical[required], cards], ignore_index=True).drop_duplicates(["race_id", "horse_id"], keep="last")
-    sources = {}
-    from src.database import RESULTS_SNAPSHOT_COLUMNS
-    sources["sl"] = _publish("sl", {"results": canonical},
-        {"results": TableContract("canonical runner", tuple(RESULTS_SNAPSHOT_COLUMNS), ("race_id", "horse_id"))},
-        canonical, provenance=revision, eligible=len(canonical))
+    sources = {"sl": _publish_sl(canonical, revision)}
     sources["pedigree"] = _publish("pedigree", {"horses": pedigree},
         {"horses": TableContract("horse", ("horse_id", "sire", "dam", "damsire"), ("horse_id",), role="reference")}, canonical)
     weather_columns = [c for c in canonical if c.startswith("weather_")]

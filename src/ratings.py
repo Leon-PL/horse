@@ -364,7 +364,7 @@ def _apply_entity_update(
 
 # ── Public API ────────────────────────────────────────────────────────────
 
-def compute_elo_features(
+def _compute_elo_features(
     df: pd.DataFrame,
     k: float = K_FACTOR,
     *,
@@ -1213,7 +1213,7 @@ def _trueskill_pass(
     return mu_col, sigma_col, has_col
 
 
-def compute_glicko_features(
+def _compute_glicko_features(
     df: pd.DataFrame,
     *,
     glicko_state: dict | None = None,
@@ -1425,3 +1425,122 @@ if __name__ == "__main__":
     latest = df.sort_values("race_date").drop_duplicates("horse_name", keep="last")
     top = latest.nlargest(10, "horse_elo")[["horse_name", "horse_elo"]]
     print(top.to_string(index=False))
+
+
+# ── French and UAE races (rating-only) ────────────────────────────────────
+# Horses travel between Britain/Ireland and France or the UAE. Their overseas
+# races are swept with the domestic ones so a raider arrives with a rating
+# earned against its overseas opponents, and a British horse's French run
+# updates it too. These rows only update ratings: they are removed before
+# the frame is returned, so they never become training or evaluation rows.
+FOREIGN_STATE_KEY = "foreign_races"  # {"through": ISO day the sweep has covered}
+
+
+def _foreign_races(df: pd.DataFrame, state: dict | None):
+    """French/UAE runners released before this frame's decision day and not
+    already swept into *state* (``None`` when the selected dataset holds no
+    foreign races), plus the day the sweep has now covered."""
+    from src.source_dataset import current_manifest
+    if current_manifest() is None or "horse_id" not in df.columns or df.empty:
+        return None, None
+    from src.foreign_form import history, version
+    through = pd.to_datetime(df["race_date"]).max().normalize()
+    if "prediction_as_of" in df.columns:
+        decision = pd.to_datetime(df["prediction_as_of"], utc=True, errors="raise").dt.tz_localize(None)
+        if pd.notna(decision.min()):
+            through = min(through, decision.min().normalize())
+    after = ((state or {}).get(FOREIGN_STATE_KEY) or {}).get("through")
+    if version() is None:
+        return None, through if after is None else max(through, pd.Timestamp(after))
+    foreign = history(through=through, after=after)
+    if state and after is None and not foreign.empty:
+        raise ValueError("Rating state predates foreign races; rebuild the feature store")
+    if after is not None:
+        through = max(through, pd.Timestamp(after))
+    return foreign, through
+
+
+def _interleave_foreign(df: pd.DataFrame, foreign: pd.DataFrame) -> pd.DataFrame:
+    """*df* (already in sweep order) with foreign runners placed by release time."""
+    from src.feature_semantics import distance_category
+    rows = pd.DataFrame({
+        "race_id": ("foreign:" + foreign.provider + ":" + foreign.native_race_id).to_numpy(),
+        "horse_id": foreign.horse_id.astype(df["horse_id"].dtype).to_numpy(),
+        "horse_name": foreign.horse_name.to_numpy(),
+        "race_date": pd.to_datetime(foreign.race_date).to_numpy(),
+        "_event_dt": foreign._event_dt.to_numpy(),
+        "finish_position": foreign.finish_position.to_numpy(),
+        "lengths_behind": foreign.lengths_behind.to_numpy(),
+        "beaten_lengths": foreign.beaten_lengths.to_numpy(),
+        "distance_furlongs": foreign.distance_furlongs.to_numpy(),
+        "race_type": foreign.race_type.to_numpy(),
+        "surface": foreign.surface.to_numpy(),
+        "num_runners": foreign.num_runners.to_numpy(),
+    })
+    rows["dist_category"] = distance_category(rows["distance_furlongs"])
+    rows = rows.reindex(columns=df.columns).sort_values(["_event_dt", "race_id"], kind="stable")
+    work = pd.concat([df, rows], ignore_index=True)
+    work["_foreign_rating_row"] = np.r_[np.zeros(len(df), bool), np.ones(len(rows), bool)]
+    order = np.argsort(pd.to_datetime(work["_event_dt"]).to_numpy(), kind="stable")
+    return work.iloc[order].reset_index(drop=True)
+
+
+def _with_foreign_races(core, df, state, return_state, *, sort_domestic, **kwargs):
+    foreign, through = _foreign_races(df, state)
+    if foreign is None or foreign.empty:
+        result = core(df, **kwargs, return_state=return_state)
+        if return_state and through is not None:
+            result[1][FOREIGN_STATE_KEY] = {"through": through.date().isoformat()}
+        return result
+    had_event = "_event_dt" in df.columns
+    domestic = sort_domestic(df)
+    result = core(_interleave_foreign(domestic, foreign), **kwargs, return_state=return_state)
+    rated, new_state = result if return_state else (result, None)
+    keep = ~rated.pop("_foreign_rating_row").to_numpy(dtype=bool)
+    rated = rated.loc[keep].reset_index(drop=True)
+    if not had_event and "_event_dt" in rated.columns and "_event_dt" in domestic.columns:
+        rated = rated.drop(columns="_event_dt")
+    # Concatenating foreign rows can widen a domestic column's type.
+    for col in rated.columns.intersection(domestic.columns):
+        if rated[col].dtype != domestic[col].dtype:
+            rated[col] = rated[col].astype(domestic[col].dtype)
+    if return_state:
+        new_state[FOREIGN_STATE_KEY] = {"through": through.date().isoformat()}
+        return rated, new_state
+    return rated
+
+
+def _elo_order(df):
+    out = df
+    if "_event_dt" not in out.columns:
+        out = out.copy()
+        out["_event_dt"] = _event_sort_key(out)
+    out["race_date"] = pd.to_datetime(out["race_date"])
+    if not pd.to_datetime(out["_event_dt"], errors="coerce").is_monotonic_increasing:
+        out = out.sort_values(["_event_dt", "race_id"]).reset_index(drop=True)
+    return out
+
+
+def _glicko_order(df):
+    event = (pd.to_datetime(df["_event_dt"], errors="coerce") if "_event_dt" in df.columns
+             else _event_sort_key(df))
+    out = df.copy()
+    out["_event_dt"] = event.to_numpy()
+    if not event.is_monotonic_increasing:
+        out = out.iloc[np.argsort(event.values, kind="stable")].reset_index(drop=True)
+    return out
+
+
+def compute_elo_features(df: pd.DataFrame, k: float = K_FACTOR, *, elo_state: dict | None = None,
+                         return_state: bool = False):
+    """Elo features (see ``_compute_elo_features``) swept with French/UAE races."""
+    return _with_foreign_races(lambda frame, **kw: _compute_elo_features(frame, k, **kw), df,
+                               elo_state, return_state, sort_domestic=_elo_order, elo_state=elo_state)
+
+
+def compute_glicko_features(df: pd.DataFrame, *, glicko_state: dict | None = None,
+                            return_state: bool = False):
+    """Glicko/TrueSkill features (see ``_compute_glicko_features``) swept with French/UAE races."""
+    return _with_foreign_races(_compute_glicko_features, df, glicko_state, return_state,
+                               sort_domestic=_glicko_order,
+                               glicko_state=glicko_state)

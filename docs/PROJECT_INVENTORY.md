@@ -1,3 +1,6 @@
+**French and UAE races, 14 November:** [collection and rating-only use](operations/FOREIGN_RACES.md).
+`src/ingestion/foreign_form.py` collects complete fields; `src/ratings.py` sweeps them without adding rows.
+
 # Project inventory
 
 **Shared source publication, 7 November:** [contract, operations and qualification](operations/SOURCE_PUBLICATION_2026-11-07.md).

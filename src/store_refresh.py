@@ -39,6 +39,9 @@ def append_current_store(processed, *, store=None):
         last = store.last_date()
         if last is None or data_signature(processed, cutoff=last) != meta.get("data_signature"):
             return rebuild("processed_history_changed")
+        from src.foreign_form import signature as foreign_form_signature
+        if meta.get("foreign_form_signature") != foreign_form_signature(last):
+            return rebuild("foreign_form_history_changed")
         atr = meta.get("atr_signature")
         if not atr or atr != _atr_signature(last):
             return rebuild("atr_history_changed")
@@ -51,6 +54,15 @@ def append_current_store(processed, *, store=None):
         dates = pd.to_datetime(processed.race_date)
         new = processed.loc[dates.gt(last)].copy()
         if new.empty:
+            # A foreign start after the training cutoff can affect a live
+            # card even when there is no new domestic row to append.
+            from src.foreign_form import version as foreign_form_version
+            from src.source_dataset import require_manifest, use_manifest
+            current = require_manifest()
+            with use_manifest(meta["dataset_manifest"]):
+                old_foreign = foreign_form_version()
+            if old_foreign != foreign_form_version():
+                _stamp(store, signature, meta["data_signature"])
             return True
         logger.info("Engineering %d new rows with native carried state", len(new))
         featured, advanced, counts = store._fast_featurize(new)

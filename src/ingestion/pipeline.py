@@ -27,7 +27,7 @@ from src.ingestion.rtv_storage import history_manifest, generation, accepted_day
 from src.ingestion.storage import writer_lock, atomic_json
 
 logger = logging.getLogger(__name__)
-DEFAULT_SOURCES = ("sl", "rtv", "atr", "betfair", "fx", "bha")
+DEFAULT_SOURCES = ("sl", "rtv", "atr", "betfair", "fx", "bha", "foreign")
 
 
 def pipeline_dir():
@@ -284,17 +284,18 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
     from src.ingestion.auxiliary import refresh_atr, refresh_betfair
     from src.ingestion.fx import refresh_prize_references
     from src.ingestion.bha_stewards import refresh_reports
+    from src.ingestion.foreign_form import refresh_foreign_form
     allowed = set(DEFAULT_SOURCES)
     if days_back < 0 or set(sources)-allowed or not sources:
-        raise ValueError("Choose nonnegative days and sources from sl, rtv, atr, betfair, fx, bha")
+        raise ValueError("Choose nonnegative days and sources from sl, rtv, atr, betfair, fx, bha, foreign")
     if atr_max_races < 1 or pedigree_limit < 1:
         raise ValueError("ATR and pedigree budgets must be positive")
     if max_source_workers < 1:
         raise ValueError("Source worker count must be positive")
     if sl_backlog_max_races < 0 or (sl_backlog_max_races and "sl" not in sources):
         raise ValueError("SL historical recovery needs a non-negative budget and the sl source")
-    if offline and not set(sources).issubset({"sl", "rtv"}):
-        raise ValueError("Offline replay supports --sources sl,rtv")
+    if offline and not set(sources).issubset({"sl", "rtv", "foreign"}):
+        raise ValueError("Offline replay supports --sources sl,rtv,foreign")
     last = date.fromisoformat(end) if end else date.today()-timedelta(days=1)
     first = date.fromisoformat(start) if start else last-timedelta(days=max(days_back-1, 0))
     if first > last or last >= date.today():
@@ -320,6 +321,8 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
             "betfair": lambda: refresh_betfair(first.isoformat(), last.isoformat()),
             "fx": refresh_prize_references,
             "bha": lambda: refresh_reports(first.isoformat(), last.isoformat(), recheck=recheck),
+            # Complete French/UAE fields: raiders' overseas form and rating-only races.
+            "foreign": lambda: refresh_foreign_form(first.isoformat(), last.isoformat(), replay=offline),
         }
         def execute(source):
             source_started = time.monotonic()
@@ -351,7 +354,7 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
         if "sl" in sources:
             record("sl", {"state": "running"})
             record("sl", execute("sl"))
-        independent = [name for name in ("fx", "betfair", "rtv", "atr", "bha") if name in sources]
+        independent = [name for name in ("fx", "betfair", "rtv", "atr", "bha", "foreign") if name in sources]
         if independent:
             with ThreadPoolExecutor(max_workers=min(max_source_workers, len(independent))) as pool:
                 jobs = {}
@@ -483,6 +486,10 @@ def main():
     parser.add_argument("--publish-sources", action="store_true", help="Publish local accepted sources and promote validated ATR work; no network")
     parser.add_argument("--source-status", action="store_true", help="Show accepted source versions and quality; no network")
     parser.add_argument("--rtv-only", action="store_true")
+    parser.add_argument("--foreign-form", action="store_true",
+                        help="Backfill complete France and UAE results through Sporting Life (history only, never training rows)")
+    parser.add_argument("--publish-foreign-form", action="store_true",
+                        help="Publish retained overseas form alongside the committed domestic results")
     parser.add_argument("--results-only", action="store_true", help="Skip optional pedigree/weather; required sources are still collected")
     parser.add_argument("--snapshot", action="store_true")
     parser.add_argument("--start", help="Explicit first historical date")
@@ -496,6 +503,21 @@ def main():
     parser.add_argument("--recheck", action="store_true", help="Revalidate completed SL races in the requested range")
     parser.add_argument("--replay", action="store_true", help="Offline SL parser replay from retained responses")
     args = parser.parse_args()
+    if args.foreign_form:
+        if not args.start or not args.end or args.sync is not None or args.rtv_only:
+            parser.error("--foreign-form requires --start and --end and runs independently of domestic sync")
+        from src.ingestion.foreign_form import refresh_foreign_form
+        from src.ingestion.publication import publish_foreign_form_dataset
+        logging.basicConfig(level=logging.INFO)
+        result = refresh_foreign_form(args.start, args.end, replay=args.replay)
+        manifest = publish_foreign_form_dataset()
+        result["dataset_manifest_id"] = manifest["id"]
+        print(json.dumps(result, indent=2))
+        raise SystemExit(0 if result["state"] == "ok" else 1)
+    if args.publish_foreign_form:
+        from src.ingestion.publication import publish_foreign_form_dataset
+        manifest = publish_foreign_form_dataset()
+        print(json.dumps({"dataset_manifest_id": manifest["id"]}, indent=2))
     if args.publish_sources:
         from src.source_dataset import capture_dataset
         manifest = capture_dataset(include_prices=True)

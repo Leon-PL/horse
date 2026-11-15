@@ -491,7 +491,7 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=1)
-def _published_history(results_version, atr_version):
+def _published_history(results_version, atr_version, foreign_version):
     """Small scalar history, with every canonical start retained as a window slot."""
     from src.source_dataset import read_table
     canonical = read_table("sl", "results")
@@ -511,6 +511,16 @@ def _published_history(results_version, atr_version):
     scalars = pd.concat([context[keys + ["_available"]].reset_index(drop=True), run.reindex(columns=columns).reset_index(drop=True)], axis=1)
     history = canonical[["sl_race_id", "sl_horse_id", "race_date", "off_time"]].merge(scalars, on=keys, how="left", validate="one_to_one")
     history["_event"] = pd.to_datetime(history.race_date.astype(str).str[:10] + " " + history.off_time.map(_normalise_off_time_key), utc=True)
+    if foreign_version is not None:
+        from src.foreign_form import history as foreign_history
+        foreign = foreign_history()
+        if not foreign.empty:
+            slots = pd.DataFrame({
+                "sl_horse_id": foreign.horse_id.astype("string"),
+                "sl_race_id": "foreign:" + foreign.provider + ":" + foreign.native_race_id,
+                "_event": pd.to_datetime(foreign._event_dt, utc=True),
+            })
+            history = pd.concat([history, slots], ignore_index=True)
     history = history.sort_values(["sl_horse_id", "_event", "sl_race_id"], kind="stable").reset_index(drop=True)
     history["_position"] = np.arange(len(history))
     # Plain object IDs, like the target's, however the links were read back
@@ -540,7 +550,9 @@ def published_atr_rolling(frame):
         output["atr_observation_count_5"] = np.zeros(len(frame))
         output["atr_days_since_observation"] = np.full(len(frame), np.nan)
         return output
-    history = _published_history(manifest["sources"]["sl"]["version"], manifest["sources"]["atr"]["version"])
+    from src.foreign_form import version as foreign_version
+    history = _published_history(manifest["sources"]["sl"]["version"],
+                                 manifest["sources"]["atr"]["version"], foreign_version())
     target = pd.DataFrame({"_row": np.arange(len(frame)),
         "sl_horse_id": frame.horse_id.astype("string").str.replace(r"\.0$", "", regex=True).to_numpy()})
     target["_event"] = pd.to_datetime(frame.race_date.astype(str).str[:10] + " " + frame.off_time.map(_normalise_off_time_key), utc=True).to_numpy()

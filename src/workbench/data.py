@@ -22,7 +22,8 @@ from src.source_health import POLICIES, consumer_readiness
 
 SOURCES = {"sl": "Sporting Life", "rtv": "Racing TV", "atr": "At The Races",
            "betfair": "Betfair", "bha": "BHA stewards", "pedigree": "Pedigree",
-           "fx": "Currency references", "weather": "Weather"}
+           "fx": "Currency references", "weather": "Weather",
+           "foreign": "France/UAE results"}
 HEX = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -235,7 +236,8 @@ class Catalog:
         paths = {"sl": self.db, "pedigree": self.db, "weather": self.db,
                  "atr": self.root/"atr_cache/rebuild_v2/rebuild.sqlite", "bha": self.root/"bha/reports.sqlite",
                  "rtv": self.native_rtv("runs"), "betfair": self.root/"processed/betfair_bsp.parquet",
-                 "fx": self.base/"reference/ecb_gbp_per_eur.csv"}
+                 "fx": self.base/"reference/ecb_gbp_per_eur.csv",
+                 "foreign": self.root/"foreign_form/races_v2.parquet"}
         return paths[provider].exists()
 
     def races(self, start, end, query="", track="", limit=50, offset=0):

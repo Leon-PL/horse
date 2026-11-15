@@ -12,6 +12,8 @@ POLICIES = {
     "rtv": {"required_for": (), "publication_lag_days": 2},
     "betfair": {"required_for": (), "publication_lag_days": 6},
     "bha": {"required_for": (), "publication_lag_days": 1},
+    # French/UAE results: history and rating-only races, never training rows.
+    "foreign": {"required_for": (), "publication_lag_days": 0},
 }
 
 

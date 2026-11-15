@@ -21,7 +21,8 @@ import config
 from src.feature_store import FeatureStore
 from src.featured_dataset import fe_signature, _portable_config_value
 
-COMPONENT_FILES = ("src/ratings.py", "src/result_margins.py", "src/utils.py", "src/runner_identity.py")
+COMPONENT_FILES = ("src/ratings.py", "src/result_margins.py", "src/utils.py", "src/runner_identity.py",
+                   "src/foreign_form.py", "src/feature_semantics.py")
 
 
 def digest(path):
@@ -76,6 +77,12 @@ class ValidatedRatingCache:
         self.final_state = None
 
     def prepare(self, processed):
+        # French/UAE races are swept with the domestic ones, so the cached
+        # ratings are reusable only over the same foreign history.
+        from src.foreign_form import signature as foreign_form_signature
+        meta = self.store.meta()
+        if meta.get("foreign_form_signature") != foreign_form_signature(pd.Timestamp(meta["last_date"])):
+            raise ValueError("Rating input changed: foreign races")
         previous = self.store.load_processed()
         if len(previous) != len(processed) or set(previous) - set(processed):
             raise ValueError("Rating reuse requires the same processed records")

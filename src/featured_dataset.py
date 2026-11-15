@@ -58,6 +58,7 @@ _FE_SOURCE_FILES = (
     "src/data_processor.py", "src/feature_engineer.py", "src/ratings.py",
     "src/feature_schema.py",
     "src/feature_context.py",
+    "src/foreign_form.py",
     "src/trueskill_kernel.py",
     "src/result_margins.py", "src/runner_identity.py",
     "src/result_status.py", "src/rating_reuse.py",
@@ -100,6 +101,7 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "ingestion.betfair_streams": "parses native market streams; accepted evaluation prices are fingerprinted separately",
     "ingestion.pedigree": "collects and stores native pedigree records; accepted pedigree values enter data_signature",
     "ingestion.results": "collects and stores native result records; accepted result values enter data_signature",
+    "ingestion.foreign_form": "collector only; accepted overseas starts are fingerprinted separately",
     "ingestion.rtv_observations": "source-stage materialisation only; published run/card/text values are covered by rtv_cache_signature",
     "ingestion.bha_stewards": "source collection only; published BHA observations are covered by bha_signature and dataset manifests",
     "ingestion.bha_reports": "source PDF extraction only; accepted extracted text is fingerprinted as BHA source content",
@@ -298,9 +300,11 @@ def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
         m["prize_reference_signature"] = reference_signature()
         last = store.last_date()
         if last is not None:
+            from src.foreign_form import signature as foreign_form_signature
             m["atr_signature"] = _atr_signature(last)
             m["rtv_signature"] = _rtv_signature(last)
             m["bha_signature"] = _bha_signature(last)
+            m["foreign_form_signature"] = foreign_form_signature(last)
         fd, temporary = tempfile.mkstemp(prefix=".meta-", suffix=".json", dir=store.root)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
