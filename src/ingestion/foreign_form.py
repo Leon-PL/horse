@@ -46,6 +46,10 @@ _EXCLUDED = re.compile(r"\b(?:attel[eé]|mont[eé]|trot(?:ting)?|purebred\s+arab
 _SURFACES = {"turf": "Turf", "polytrack": "Polytrack", "tapeta": "Tapeta", "fibresand": "Fibresand",
              "sand": "Sand", "dirt": "Dirt", "all weather": "Allweather", "allweather": "Allweather"}
 _FAILURES = (requests.RequestException, ValueError, TypeError, KeyError, FileNotFoundError)
+# Sporting Life keeps some foreign result pages permanently empty. After this
+# many days an empty page is recorded as unavailable instead of failing every
+# refresh; a recent one stays a failure because it may still be published.
+EMPTY_RESULT_GRACE_DAYS = 3
 
 
 def native_path() -> Path:
@@ -119,7 +123,7 @@ def refresh_foreign_form(start, end, *, replay=False):
         scraper = SportingLifeScraper()
         scraper.raw_store_path = Path(config.DATA_DIR) / "sl_cache" / "raw.sqlite"
         scraper.offline = replay
-        races, failures = [], []
+        races, failures, unavailable = [], [], []
         days = [(first + timedelta(days=offset)).isoformat() for offset in range((last - first).days + 1)]
         # One pool for the whole range: the scraper's own limiter still caps
         # concurrency and spacing, but workers no longer idle between days.
@@ -142,6 +146,10 @@ def refresh_foreign_form(start, end, *, replay=False):
                 try:
                     race = job.result()
                 except _FAILURES as exc:
+                    settled = date.fromisoformat(day) <= date.today() - timedelta(days=EMPTY_RESULT_GRACE_DAYS)
+                    if settled and str(exc) == "Empty or incomplete result response":
+                        unavailable.append(f"sl {info['race_id']} ({day})")
+                        continue
                     failures.append(f"sl {info['race_id']}: {exc}")
                     collected.discard(day)
                     continue
@@ -168,7 +176,7 @@ def refresh_foreign_form(start, end, *, replay=False):
                 "retained_runners": len(accepted),
                 "retained_races_by_country": accepted.drop_duplicates("native_race_id")
                 .country.value_counts().to_dict(),
-                "failures": failures}
+                "unavailable": unavailable, "failures": failures}
 
 
 def accepted_foreign_form(frame):

@@ -197,3 +197,29 @@ def test_store_rows_stay_domestic_ratings_see_foreign_races_and_backfill_invalid
     _publish(publish_dataset, raw, overseas + _field(first.date().isoformat(), "f0", [9001, 9002]))
     assert not append_current_store(processed, store=store)
     assert store._rebuild_reason == "foreign_form_history_changed"
+
+
+def test_an_old_empty_result_page_is_unavailable_not_a_failure(tmp_path, monkeypatch):
+    import config
+    from datetime import date, timedelta
+    from src.ingestion import foreign_form
+
+    class EmptyPages:
+        def __init__(self):
+            self.result_listing_evidence = {}
+
+        def get_results_urls(self, day, countries):
+            self.result_listing_evidence[day] = True
+            return [{"race_id": day, "race_name": "Prix Test", "url": "fixture", "country": "France"}]
+
+        def scrape_race_result(self, url, day, raise_if_not_run=True):
+            return []
+
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(foreign_form, "SportingLifeScraper", EmptyPages)
+    old = (date.today() - timedelta(days=10)).isoformat()
+    recent = (date.today() - timedelta(days=1)).isoformat()
+    result = foreign_form.refresh_foreign_form(old, old)
+    assert result["state"] == "ok" and result["unavailable"] == [f"sl {old} ({old})"]
+    result = foreign_form.refresh_foreign_form(recent, recent)
+    assert result["state"] == "partial" and result["failures"]
