@@ -1,5 +1,6 @@
 import {createFeaturesUI} from './features.js';
 import {createModellingUI} from './modelling.js';
+import {createPaperUI} from './paper.js';
 const $ = (q, root = document) => root.querySelector(q);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = value => value == null ? '—' : Number(value).toLocaleString('en-GB', {maximumFractionDigits: 2});
@@ -16,11 +17,12 @@ const icons = {
  coverage:'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 10h18M8 10v11m8-11v11m-13-6h18"/>',
  features:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18M15 9v12M3 15h18"/>',
  modelling:'<path d="M4 4v16h16M8 15l4-5 4 2 4-6"/>',
+ paper:'<path d="M4 19h16M6 15l4-4 3 3 5-6"/><circle cx="18" cy="8" r="1.5"/>',
  jobs:'<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
  review:'<path d="M5 21V4m0 0c6-4 8 4 14 0v10c-6 4-8-4-14 0"/>'
 };
 const svgIcon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]}</svg>`;
-$('#navigation').innerHTML = Object.entries({overview:'Overview',races:'Races',sources:'Sources',coverage:'Coverage',features:'Features',modelling:'Modelling',jobs:'Jobs',review:'Review queue'}).map(([key,label]) => `<a href="#${key}" data-page="${key}">${svgIcon(key)}${label}</a>`).join('');
+$('#navigation').innerHTML = Object.entries({overview:'Overview',races:'Races',sources:'Sources',coverage:'Coverage',features:'Features',modelling:'Modelling',paper:'Paper record',jobs:'Jobs',review:'Review queue'}).map(([key,label]) => `<a href="#${key}" data-page="${key}">${svgIcon(key)}${label}</a>`).join('');
 
 function badge(label, kind = '') { return `<span class="badge ${kind}">${esc(label)}</span>`; }
 function sourceIcon(id) { return `<span class="source-icon ${id}">${sourceShort[id]}</span>`; }
@@ -318,7 +320,7 @@ async function render(showLoading=true) {
  state.abort?.abort();state.abort=new AbortController();
  const ticket=++state.ticket,segments=(location.hash.slice(1)||'overview').split('/');
  state.page=segments[0];
- if(!['overview','races','race','sources','coverage','features','modelling','jobs','review'].includes(state.page)){location.hash='overview';return;}
+ if(!['overview','races','race','sources','coverage','features','modelling','paper','jobs','review'].includes(state.page)){location.hash='overview';return;}
  $('.contextbar').classList.toggle('modelling-context',state.page==='modelling');
  $$('#navigation a').forEach(a=>a.classList.toggle('active',a.dataset.page===(state.page==='race'?'races':state.page)));
  if(showLoading)$('#main').innerHTML='<div class="loading"><span class="spinner"></span>Reading your local data…</div>';
@@ -327,6 +329,8 @@ async function render(showLoading=true) {
    const summary=await api('features/overview',{dataset:state.dataset});if(ticket!==state.ticket)return;
    state.boundDataset=state.dataset || summary.selected_dataset || '';
    await featureUI.render(segments[1],decodeURIComponent(segments[2]||''),summary);
+  } else if(state.page==='paper') {
+   await paperUI.render();
   } else if(state.page==='modelling') {
    await modellingUI.render(segments[1],segments[2],ticket);
    if(ticket!==state.ticket)return;
@@ -335,7 +339,7 @@ async function render(showLoading=true) {
    state.overview=o;state.boundDataset=state.dataset || o.dataset.id || '';
    if(state.page==='overview')await overviewPage();else if(state.page==='races')await racesPage();else if(state.page==='race')await racePage(decodeURIComponent(segments[1]||''));else if(state.page==='sources')await sourcesPage(segments[1]);else if(state.page==='coverage')await coveragePage();else if(state.page==='jobs')await jobsPage();else if(state.page==='review')await reviewPage();
   }
-  $('.breadcrumb').innerHTML=`Project <span>/</span> ${({features:'Features',modelling:'Modelling'})[state.page] || 'Ingestion'}`;
+  $('.breadcrumb').innerHTML=`Project <span>/</span> ${({features:'Features',modelling:'Modelling',paper:'Paper record'})[state.page] || 'Ingestion'}`;
   $('#last-checked').textContent=`Checked ${new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})} · Local workspace`;
   document.title=`${state.page==='race'?'Race inspection':pretty(state.page)} · Racing Workbench`;
  }catch(e){if(ticket===state.ticket)$('#main').innerHTML=heading('Unable to load this view','Your source data has not been changed.')+banner(e.message,'Check the selected date range, dataset or local source availability.','error')+'<button class="button" data-nav="overview">Back to overview</button>';}
@@ -350,6 +354,7 @@ $('#dataset').addEventListener('change',e=>{state.dataset=e.target.value;render(
 window.addEventListener('hashchange',()=>{render();window.scrollTo(0,0);});
 setInterval(()=>{if(state.auto && (['overview','jobs'].includes(state.page) || state.page==='features' && ['overview','builds'].includes(location.hash.split('/')[1] || 'overview')) && !['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName) && !$('#inspector').open)render(false);},30000);
 const featureUI=createFeaturesUI({api,url,esc,number,pretty,banner,badge,empty,metric,toast,state,heading,queue,render,raceContent});
+const paperUI=createPaperUI({api,esc,number,banner,badge,empty,metric,heading});
 const modellingUI=createModellingUI({api,esc,number,pretty,banner,badge,empty,metric,toast,state,heading,queue,dateLabel});
 async function boot(){try{const session=await api('session');token=session.token;const yesterday=new Date();yesterday.setDate(yesterday.getDate()-1);const end=yesterday.toISOString().slice(0,10);yesterday.setDate(yesterday.getDate()-6);$('#start-date').value=yesterday.toISOString().slice(0,10);$('#end-date').value=end;const sets=await api('datasets');$('#dataset').insertAdjacentHTML('beforeend',sets.rows.map(s=>`<option value="${s.id}">${dateLabel(s.created_at)} · ${s.id.slice(0,10)}</option>`).join(''));await render();}catch(e){$('#main').innerHTML=heading('Workspace connection unavailable','Start the local workbench server and reload this page.')+banner(e.message,'','error');}}
 boot();

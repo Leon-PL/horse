@@ -12,6 +12,7 @@ from src.workbench.jobs import Jobs
 from src.workbench.review import ReviewStore
 from src.workbench.features import Features
 from src.workbench.modelling import Modelling
+from src.workbench.paper import Paper
 
 
 class WorkbenchServer(ThreadingHTTPServer):
@@ -23,6 +24,7 @@ class WorkbenchServer(ThreadingHTTPServer):
         self.catalog = catalog
         self.features = Features(catalog)
         self.modelling = Modelling(catalog, self.features)
+        self.paper = Paper()
         self.jobs = Jobs(catalog, modelling=self.modelling)
         self.review = ReviewStore(catalog.root/"workbench/review.sqlite")
         self.static_dir = Path(static_dir)
@@ -90,7 +92,8 @@ class Handler(BaseHTTPRequestHandler):
             if mutation:
                 raise FileNotFoundError("Unknown action")
             name = {"/": "index.html", "/app.js": "app.js", "/features.js": "features.js",
-                    "/modelling.js": "modelling.js", "/style.css": "style.css"}.get(parsed.path)
+                    "/modelling.js": "modelling.js", "/paper.js": "paper.js",
+                    "/style.css": "style.css"}.get(parsed.path)
             if not name:
                 raise FileNotFoundError("Page was not found")
             kind = {"html": "text/html", "js": "text/javascript", "css": "text/css"}[name.rsplit(".", 1)[1]]
@@ -132,6 +135,8 @@ class Handler(BaseHTTPRequestHandler):
             return catalog.overview(dataset)
         if route == "datasets":
             return {"rows": catalog.manifests()}
+        if route == "paper":
+            return self.server.paper.overview()
         if route == "features/overview":
             return self.server.features.overview(dataset)
         if parts[:1] == ["modelling"]:

@@ -45,10 +45,11 @@ def card_rows(featured, forecast, columns):
     return rows.sort_values(["race_date", "race_id"], kind="stable").reset_index(drop=True)
 
 
-def correct_card(settled, prices, card, model, tracking):
+def correct_card(settled, prices, card, model, tracking, extra=None):
     """Corrected probabilities for ``card`` rows placed after the ``settled`` history frame.
 
     The settled rows are history only; the wide input table is built for the card's rows alone.
+    ``extra(card_rows, values, columns)`` may append inputs known only on the day (returns values, columns).
     """
     if card.race_date.min() <= settled.race_date.max():
         raise ValueError("The card must be dated after every settled race in the history frame")
@@ -62,16 +63,18 @@ def correct_card(settled, prices, card, model, tracking):
     all_prices = pd.concat([prices, empty[prices.columns]], ignore_index=True)
     rows = np.r_[np.zeros(len(settled), bool), np.ones(len(card), bool)]
     values, columns = cm.build_inputs(frame, prices=all_prices, tracking=tracking, only=rows)
+    part = frame.loc[rows].reset_index(drop=True)
+    if extra is not None:
+        values, columns = extra(part, values, columns)
     if columns != model.columns:
         raise ValueError("The correction was fitted on different inputs than this store and history provide")
-    part = frame.loc[rows].reset_index(drop=True)
     out = part[[*KEYS, "race_date", "p_base"]].copy()
     out["adjustment"] = model.adjustment(values)
     out["probability"] = cm.corrected(out.p_base.to_numpy(float), out.adjustment.to_numpy(), part.race_id.to_numpy())
     return out
 
 
-def forecast(featured, candidate, model, *, store_root=None):
+def forecast(featured, candidate, model, *, store_root=None, extra=None):
     """Win-model and corrected forecasts for a featurised card (one date)."""
     member = win_member(candidate)
     held = history.read()
@@ -86,7 +89,7 @@ def forecast(featured, candidate, model, *, store_root=None):
     tracking = [c for c in data.tracking_columns() if c in featured]
     columns = list(dict.fromkeys([*KEYS, "race_date", "horse_name", *ci.ENTITY_COLUMNS, *data.CARD_COLUMNS, *tracking]))
     card = card_rows(featured, base, columns)
-    out = correct_card(settled, prices, card, model, tracking)
+    out = correct_card(settled, prices, card, model, tracking, extra=extra)
     names = card[[*KEYS, "horse_name"]].astype({"race_id": out.race_id.dtype, "horse_id": out.horse_id.dtype})
     out = out.merge(names, on=KEYS, validate="one_to_one")
     return out, {"history_last_date": str(held.race_date.max().date()), "store_last_date": store_last,
