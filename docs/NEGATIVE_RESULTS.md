@@ -1,5 +1,54 @@
 # Negative Results Ledger
 
+## 104. Price timing: a fixed hour before the off beats 11:00; hours-to-off adds nothing (15 November 2026)
+
+[Report](research/PRICE_TIMING_104.md). Inside the joint correction, native,
+11,905 races: against the 11:00 price arm (1.77915), adding hours from 11:00
+to the off +0.00006 [−0.00021, +0.00033] (null); the price one hour before
+the off −0.00979 [−0.01263, −0.00699], 4/4; five minutes before −0.01797,
+4/4. T-60 closes ~59% of the gap to BSP against 43% at 11:00. Not yet
+checked as CLV. The 11:00 group includes 43 races off before 11:00, where
+the price can be in-play (tiny; fixed in the new groups).
+
+## 103. Model form: elastic net far behind, linear trees a tie (15 November 2026)
+
+[Report](research/MODEL_FORM_103.md). 87 inputs, admission folds 2025Q3–2026Q2
+(11,632 races), against screen LightGBM (1.82894). A race-wise elastic-net
+conditional logit: +0.02261 [+0.01836, +0.02680], 0/4. LightGBM with
+`linear_tree=True`: −0.00056 [−0.00243, +0.00136], 3/4, within noise. Keep
+plain LightGBM; linear trees only worth a native-capacity check.
+
+## 101. Debutants: Timeform's pre-race comment adds nothing beyond the text score (14 November 2026)
+
+[Report](research/DEBUTANT_TEXT_101.md). On 15,477 debutants no comment
+phrase (market interest, price, family, positive or negative wording) misses
+the stored forecast or BSP by more than z 1.6. A debutant-only TF-IDF ridge
+on won − forecast, fitted on earlier dates with its strength fitted on a
+held-out later slice, gets weight 0 in two of three periods and +0.0019
+[−0.0021, +0.0061] in the third. The 87-input `rtv_text_logit` already reads
+the comment. With sibling form, sale price, debut records, connection
+profiles and morning money all closed, the debutant gap is private money.
+Do not retry public debutant signals.
+
+## 100. Irish races without a class: effective class from prize money — not admitted (14 November 2026)
+
+[Report](research/IRISH_CLASS_100.md). Irish races have no class (92% blank),
+so `class_change_vs_field` is missing for 95% of Irish runners. A class read
+off prize money against the previous year's British scale cuts that to 9%.
+`admit`, 2025Q3–2026Q2: +0.00029 [−0.00150, +0.00200] against baseline,
+−0.00097 [−0.00225, +0.00031] against twin (3/4); in Irish races alone
++0.00136 against baseline and +0.00011 against twin (2,630 races). Also
+checked: the Irish flat draw gap (9.2% against 3.0%) is bumpers, which have
+no stalls, not missing data.
+
+## 099. Seasonal comebacks: the horse's own reappearance record — null inside the correction (14 November 2026)
+
+[Report](research/COMEBACKS_099.md). Percentile and residual on earlier
+comebacks (90+ days off), on the run after them, and against the rest of the
+career. Alone against its twin −0.00082 [−0.00181, +0.00007], 3/4. Inside the
+joint correction +0.00001 [−0.00030, +0.00029] against twin, 2/4 (11,905
+races). The seventh group that is real alone and null inside.
+
 ## 098. Trainer moves: size of the move — not admitted as inputs, null inside the correction (14 November 2026)
 
 [Report](research/TRAINER_MOVES_098.md). Inputs built only from earlier runs:

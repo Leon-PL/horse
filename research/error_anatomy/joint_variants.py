@@ -91,6 +91,21 @@ VARIANTS = {
                           "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
     "with-trainer-move-twin": {"groups": (*MORE, "trainer-move-twin"), "rounds": 1000,
                                "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 14 November before scoring: the horse's record on earlier reappearances (research/comebacks_099,
+    # -0.00082 alone vs twin, 3/4) and its twin shuffled within quarter. Judged against each other on native.
+    "with-comeback": {"groups": (*MORE, "comeback"), "rounds": 1000,
+                      "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    "with-comeback-twin": {"groups": (*MORE, "comeback-twin"), "rounds": 1000,
+                           "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 14 November before scoring (price timing, ERROR_ANATOMY next step 5): the 11:00 inputs plus hours
+    # from 11:00 to the off, the same inputs one hour before the off, and five minutes before (upper reference).
+    # Each judged against with-1100 on native; the fixed-offset arms read the move from the first recorded price.
+    "with-1100-hours": {"groups": (*MORE, "price-1100-hours"), "rounds": 1000,
+                        "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    "with-3600": {"groups": (*MORE, "price-3600"), "rounds": 1000,
+                  "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    "with-300": {"groups": (*MORE, "price-300"), "rounds": 1000,
+                 "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"
