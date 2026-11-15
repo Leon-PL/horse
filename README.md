@@ -71,8 +71,10 @@ checks identities and publishes source coverage. Independent providers run
 with bounded concurrency after canonical results are available. A partial
 report returns a nonzero exit code.
 
-`--enrich` drains a bounded pedigree queue; `--weather` explicitly collects
-research weather. `--start` and `--end` select an historical range.
+`--enrich` collects a bounded batch of pedigrees and Racing TV foaling dates.
+`--weather` collects research weather. `--start` and `--end` select a historical range.
+Run `python -m src.ingestion --rtv-profile-backfill` for the foaling-date backlog
+across the archive. Pass a profile count after the option to bound the run.
 `--sl-backlog-max-races` bounds older result recovery and `--atr-max-races`
 bounds the normal ATR queue. The separate full ATR backfill uses its own durable
 queue. Use `--help` for the complete options.

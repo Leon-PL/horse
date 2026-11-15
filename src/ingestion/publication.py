@@ -98,15 +98,21 @@ def _publish(provider, tables, contracts, canonical, *, provenance=None, eligibl
     return publish_source(provider, tables, contracts=contracts, provenance=provenance, reports=reports)
 
 
+def _native_pedigree(con):
+    columns = ["horse_id", "horse_name", "sire", "dam", "damsire", "foaled", "sl_foaled_observed_at"]
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='horse_pedigree'").fetchone():
+        return pd.DataFrame(columns=columns)
+    return pd.read_sql_query(
+        "SELECT horse_id,horse_name,sire,dam,damsire,foaled,fetched_at AS sl_foaled_observed_at FROM horse_pedigree", con)
+
+
 def canonical_snapshot():
     """Results and pedigree from one database read transaction."""
     from src import database
     with database._get_conn() as con:
         con.execute("BEGIN")
         results = pd.read_sql_query("SELECT * FROM results ORDER BY race_date", con).drop(columns="scraped_at", errors="ignore")
-        tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        pedigree = (pd.read_sql_query("SELECT horse_id,sire,dam,damsire,foaled FROM horse_pedigree", con)
-                    if "horse_pedigree" in tables else pd.DataFrame(columns=["horse_id", "sire", "dam", "damsire", "foaled"]))
+        pedigree = _native_pedigree(con)
         revision = con.execute("SELECT database_id,revision FROM result_source_state WHERE id=1").fetchone()
     return database.results_snapshot_frame(results), pedigree, {"database_id": revision[0], "revision": revision[1]}
 
@@ -232,6 +238,41 @@ def publish_rtv(canonical, identity_reference=None):
     return _publish("rtv", tables, contracts, reference, eligible=len(reference))
 
 
+def publish_pedigree(canonical, pedigree):
+    from src.ingestion.pedigree import racing_tv_foaling_observations, resolve_foaling_dates
+
+    horses = resolve_foaling_dates(pedigree, racing_tv_foaling_observations())
+    contract = TableContract("horse", ("horse_id", "sire", "dam", "damsire", "foaled", "foaling_date_source"),
+                             ("horse_id",), role="reference")
+    source = horses.foaling_date_source
+    coverage = {name: int(source.eq(name).sum()) for name in ("racing_tv", "sporting_life", "conflict")}
+    coverage["unresolved"] = int(source.isna().sum())
+    coverage["recovered_from_january_1"] = int(
+        (source.eq("racing_tv") & horses.foaled_sporting_life.str.endswith("-01-01", na=False)).sum())
+    return _publish("pedigree", {"horses": horses}, {"horses": contract}, canonical,
+                    provenance={"foaling_coverage": coverage})
+
+
+def capture_pedigree_dataset():
+    """Commit a profile-only update against the selected canonical results."""
+    from src import database
+    from src.source_dataset import capture_dataset, committed_dataset, save_manifest, source_path, use_manifest
+
+    with writer_lock(registry_root() / ".adoption.lock") as acquired:
+        if not acquired:
+            raise RuntimeError("Source publication is already running; retry publication shortly")
+        current = committed_dataset()
+        if current and "sl" in current["sources"]:
+            with use_manifest(current):
+                canonical = pd.read_parquet(source_path("sl", "results"), columns=[
+                    "race_id", "horse_id", "horse_name", "race_date", "track", "off_time"])
+            with database._get_conn() as con:
+                pedigree = _native_pedigree(con)
+            receipt = publish_pedigree(canonical, pedigree)
+            return save_manifest({**current["sources"], "pedigree": receipt}, purpose=current["purpose"])
+    return capture_dataset(include_prices=True)
+
+
 def _publish_sl(canonical, revision):
     from src.database import RESULTS_SNAPSHOT_COLUMNS
     tables = {"results": canonical}
@@ -278,8 +319,7 @@ def capture_sources(*, include_prices=False, canonical_cards=None):
         cards = canonical_cards[required]
         identity_reference = pd.concat([canonical[required], cards], ignore_index=True).drop_duplicates(["race_id", "horse_id"], keep="last")
     sources = {"sl": _publish_sl(canonical, revision)}
-    sources["pedigree"] = _publish("pedigree", {"horses": pedigree},
-        {"horses": TableContract("horse", ("horse_id", "sire", "dam", "damsire"), ("horse_id",), role="reference")}, canonical)
+    sources["pedigree"] = publish_pedigree(canonical, pedigree)
     weather_columns = [c for c in canonical if c.startswith("weather_")]
     weather = canonical[["race_id", "race_date", *weather_columns]].drop_duplicates("race_id")
     sources["weather"] = _publish("weather", {"races": weather},

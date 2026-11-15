@@ -102,7 +102,7 @@ _NEXT_DATA_RE = re.compile(
 # Countries we consider UK & Ireland
 UK_IRE_COUNTRIES = {
     "england", "scotland", "wales", "northern ireland", "ireland",
-    "great britain", "united kingdom",
+    "great britain", "united kingdom", "eire",
 }
 
 # Fallback track-slug list for UK & Ireland courses
@@ -399,8 +399,8 @@ def _is_uk_ire_meeting(meeting: dict) -> bool:
     country = course.get("country", {})
     if isinstance(country, dict):
         long_name = country.get("long_name", "")
-        if long_name and long_name.lower() in UK_IRE_COUNTRIES:
-            return True
+        if long_name:
+            return long_name.strip().lower() in UK_IRE_COUNTRIES
 
     # Method 2: track slug in known list
     course_name = course.get("name", "")
@@ -579,7 +579,7 @@ class SportingLifeScraper:
     # ==================================================================
 
     def get_results_urls(
-        self, date_str: str, uk_only: bool = True
+        self, date_str: str, uk_only: bool = True, *, countries=None,
     ) -> list[dict]:
         """
         Return race-result URL info for every race on *date_str*.
@@ -604,10 +604,13 @@ class SportingLifeScraper:
             if data["props"]["pageProps"].get("meetings") == []:
                 self.empty_result_dates.add(date_str)
             for meeting in meetings:
-                if uk_only and not _is_uk_ire_meeting(meeting):
-                    continue
-
                 ms = meeting.get("meeting_summary", {})
+                country = ((ms.get("course") or {}).get("country") or {}).get("long_name", "")
+                if countries is not None:
+                    if country.strip().lower() not in countries:
+                        continue
+                elif uk_only and not _is_uk_ire_meeting(meeting):
+                    continue
                 meeting_date = str(ms.get("date") or "")[:10]
                 if meeting_date and meeting_date != date_str:
                     raise ValueError("Results listing belongs to another meeting date")
@@ -651,6 +654,7 @@ class SportingLifeScraper:
                         "race_name": race_name,
                         "time": off_time,
                         "race_id": str(race_id),
+                        "country": country,
                     })
         except (KeyError, TypeError) as e:
             logger.warning(f"Error parsing results listing: {e}")

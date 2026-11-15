@@ -310,13 +310,22 @@ def refresh_sources(days_back=14, *, enrich=False, start=None, end=None, recheck
         report = {"state": "running", "checked_at": _now().isoformat(), "start": first.isoformat(),
                   "end": last.isoformat(), "required_sources": list(sources),
                   "sources": {name: {"state": "pending"} for name in sources}}
+
+        def refresh_rtv():
+            history = refresh_rtv_history(days_back=max(days_back, rtv.RECENT_DAYS) if days_back else 0,
+                **({"start": first.isoformat(), "end": last.isoformat()} if start or end else {}),
+                **({"reparse": True} if offline else {}))
+            if enrich and not offline and history.get("state") in {"ok", "cached"}:
+                from src.ingestion.pedigree import backfill_rtv_foaling_profiles
+                history["foaling_profiles"] = _optional(backfill_rtv_foaling_profiles, limit=pedigree_limit,
+                    start=first.isoformat(), end=last.isoformat())
+            return history
+
         operations = {
             "sl": lambda: results.sync_database(days_back=days_back, enrich=enrich,
                 start=start, end=end, recheck=recheck or offline, pedigree_limit=pedigree_limit, weather=weather, offline=offline,
                 backlog_max_races=sl_backlog_max_races),
-            "rtv": lambda: refresh_rtv_history(days_back=max(days_back, rtv.RECENT_DAYS) if days_back else 0,
-                **({"start": first.isoformat(), "end": last.isoformat()} if start or end else {}),
-                **({"reparse": True} if offline else {})),
+            "rtv": refresh_rtv,
             "atr": lambda: refresh_atr(first.isoformat(), last.isoformat(), max_races=atr_max_races),
             "betfair": lambda: refresh_betfair(first.isoformat(), last.isoformat()),
             "fx": refresh_prize_references,
@@ -498,7 +507,9 @@ def main():
     parser.add_argument("--atr-max-races", type=int, default=50)
     parser.add_argument("--sl-backlog-max-races", type=int, default=0,
                         help="Recover this many due historical SL jobs using their persisted URLs")
-    parser.add_argument("--enrich", action="store_true", help="Drain a bounded pedigree queue")
+    parser.add_argument("--enrich", action="store_true", help="Collect bounded pedigree and foaling-date batches")
+    parser.add_argument("--rtv-profile-backfill", nargs="?", const=True, type=int, metavar="LIMIT",
+                        help="Collect and publish missing Racing TV foaling dates across the archive")
     parser.add_argument("--weather", action="store_true", help="Explicit research weather collection")
     parser.add_argument("--recheck", action="store_true", help="Revalidate completed SL races in the requested range")
     parser.add_argument("--replay", action="store_true", help="Offline SL parser replay from retained responses")
@@ -518,6 +529,17 @@ def main():
         from src.ingestion.publication import publish_foreign_form_dataset
         manifest = publish_foreign_form_dataset()
         print(json.dumps({"dataset_manifest_id": manifest["id"]}, indent=2))
+    if args.rtv_profile_backfill is not None:
+        from src.ingestion.pedigree import backfill_rtv_foaling_and_publish
+        limit = None if args.rtv_profile_backfill is True else args.rtv_profile_backfill
+        if limit is not None and limit < 1:
+            parser.error("--rtv-profile-backfill LIMIT must be positive")
+        logging.basicConfig(level=logging.INFO)
+        result = backfill_rtv_foaling_and_publish(limit=limit,
+                                      progress=lambda value: logger.info("RTV profiles %s", value))
+        print(json.dumps(result, indent=2))
+        if result["state"] not in {"ok", "cached"}:
+            raise SystemExit(1)
     if args.publish_sources:
         from src.source_dataset import capture_dataset
         manifest = capture_dataset(include_prices=True)

@@ -9,6 +9,8 @@ def feature_metadata(name):
         family, source, kind = "rtv", "Timeform comment/verdict model", "learned_prediction"
     elif name.startswith(("rtv_card_", "rtv_pre_")):
         family, source, kind = "rtv", "captured RTV card", "snapshot"
+    elif name.startswith("rtv_profile_"):
+        family, source, kind = "rtv", "captured RTV horse profile", "snapshot"
     elif name.startswith(("rtv_", "atr_", "bha_")):
         family = name.split("_", 1)[0]
         source = {"rtv": "prior RTV observations", "atr": "prior ATR observations", "bha": "prior BHA reports"}[family]
@@ -16,6 +18,8 @@ def feature_metadata(name):
         family, source = "ratings", "prior canonical results"
     elif name.startswith(("trainer_", "jockey_", "jt_", "connections_")):
         family, source = "connections", "prior canonical results and runner connections"
+    elif name.startswith("profile_"):
+        family, source, kind = "pedigree", "captured Racing TV or Sporting Life horse profiles", "snapshot"
     elif name.startswith(("sire_", "dam_", "damsire_", "pedigree_")):
         family, source = "pedigree", "pedigree and prior family results"
     elif name.startswith(("horse_", "days_since_", "prev_", "form_", "career_")):
@@ -24,7 +28,7 @@ def feature_metadata(name):
         family, source, kind = "race", "Sporting Life, Racing TV and verified race conditions", "context"
     elif name.startswith(("race_", "field_", "course_", "track_", "going_", "surface_", "sex_", "region_", "season_")):
         family, source, kind = "race", "race context and derived history", "context_or_history"
-    elif name in {"num_runners", "age", "weight_lbs", "distance_furlongs", "official_rating", "draw", "handicap"}:
+    elif name in {"num_runners", "age", "claim_adjusted_weight_lbs", "distance_furlongs", "official_rating", "draw", "handicap"}:
         family, source, kind = "race", "recorded runner/race context", "context"
     return {"name": name, "family": family, "kind": kind, "source_family": source,
             "dependency_status": "family_only", "individual_dependencies": None,

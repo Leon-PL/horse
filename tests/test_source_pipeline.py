@@ -1,6 +1,7 @@
 """Source collection must not alter canonical values or invent identity joins."""
-from datetime import date, datetime, timezone
+from datetime import date
 import json
+import sqlite3
 from types import SimpleNamespace
 
 import pandas as pd
@@ -58,6 +59,46 @@ def test_unified_refresh_runs_results_then_rtv_without_weather(isolated, monkeyp
     assert calls[0]["days_back"] == 3 and calls[0]["enrich"] is False
     assert calls[1] == {"days_back": 10}
     assert report["state"] == "ok"
+
+
+def test_enriched_refresh_collects_profiles_after_rtv_history(isolated, monkeypatch):
+    from src.ingestion import pedigree
+
+    calls = []
+    monkeypatch.setattr(results, "sync_database", lambda **kw: calls.append("sl") or {"state": "ok"})
+    monkeypatch.setattr(sources, "refresh_rtv_history", lambda **kw: calls.append("rtv") or {"state": "ok"})
+    monkeypatch.setattr(pedigree, "backfill_rtv_foaling_profiles",
+                        lambda **kw: calls.append(kw) or {"state": "ok", "ok": 1})
+    report = sources.refresh_sources(enrich=True, start="2026-10-29", end="2026-10-29",
+                                     sources=("sl", "rtv"), pedigree_limit=5)
+    assert calls == ["sl", "rtv", {"limit": 5, "start": "2026-10-29", "end": "2026-10-29"}]
+    assert report["sources"]["rtv"]["foaling_profiles"]["ok"] == 1
+
+
+def test_profile_backfill_uses_linked_slug_and_resumes_cached_response(isolated, monkeypatch):
+    from src.ingestion import pedigree, rtv_observations
+
+    races, runners, canonical = frames()
+    with sqlite3.connect(isolated/"races.db") as con:
+        canonical.to_sql("results", con, index=False)
+        pd.DataFrame({"horse_id": ["303"], "horse_name": ["Test Horse"], "sire": ["Sire"],
+                      "dam": ["Dam"], "foaled": ["2022-01-01"]}).to_sql("horse_pedigree", con, index=False)
+    runners = runners.assign(horse_id=700, in_results=True, is_nonrunner=False, res_horse__slug="/test-horse")
+    monkeypatch.setattr(rtv_observations, "observation_tables", lambda *a, **kw: {"races": races, "runners": runners})
+    assert pedigree.rtv_profile_targets() == ["test-horse"]
+
+    calls = []
+    payload = {"horse": {"id": 700, "name": "Test Horse", "sire_name": "Sire", "dam_name": "Dam",
+                         "foaling_date": "2022-04-19"}}
+    monkeypatch.setattr(sources.rtv, "RTVClient", lambda: SimpleNamespace(
+        get=lambda path: (calls.append(path) or 200, json.dumps(payload).encode())))
+    first = pedigree.backfill_rtv_foaling_profiles(limit=1)
+    second = pedigree.backfill_rtv_foaling_profiles()
+    assert (first["state"], first["ok"], first["pending"]) == ("ok", 1, 0)
+    assert (second["state"], second["requested"]) == ("cached", 0)
+    assert calls == ["/horses/test-horse"]
+    runners.loc[0, "horse_name"] = "Different horse"
+    assert pedigree.rtv_profile_targets() == []
 
 
 def test_rtv_outage_does_not_prevent_canonical_sync(isolated, monkeypatch, caplog):

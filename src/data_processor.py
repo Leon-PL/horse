@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 from src.source_dataset import processing_inputs
 from src.feature_schema import CATEGORICAL_FIELDS, FIXED_DOMAINS
+from src.utils import normalise_off_time_key
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -79,6 +80,60 @@ def load_database_history() -> pd.DataFrame:
     return results_snapshot_frame(load_from_database())
 
 
+_PROFILE_FEATURE_INPUTS = {
+    "profile_exact_age_days": "foaled",
+    "profile_foaling_day_of_year": "foaled",
+    "rtv_profile_foaled_abroad": "rtv_country_of_foaling",
+    "rtv_profile_known_overseas_starts": "rtv_profile_overseas_starts",
+    "rtv_profile_days_since_overseas_start": "rtv_profile_last_overseas_start",
+}
+
+
+def _profile_features(df: pd.DataFrame, pedigree: pd.DataFrame) -> pd.DataFrame:
+    """Materialise only facts from a profile captured before the race cutoff."""
+    result = pd.DataFrame(np.nan, index=df.index, columns=_PROFILE_FEATURE_INPUTS, dtype="float32")
+    if not {"rtv_foaled_observed_at", "sl_foaled_observed_at"}.intersection(pedigree) or not {"horse_id", "race_date"}.issubset(df):
+        return result
+    ids = df.horse_id.astype(str)
+    day = pd.to_datetime(df.race_date, utc=True, errors="coerce").dt.normalize()
+    off = df.off_time.map(normalise_off_time_key) if "off_time" in df else pd.Series("", index=df.index)
+    scheduled = pd.to_datetime(day.dt.strftime("%Y-%m-%d") + " " + off.where(off.ne(""), "00:00"),
+                               format="%Y-%m-%d %H:%M", utc=True, errors="coerce")
+    cutoff = scheduled.fillna(day) - pd.Timedelta(minutes=5)
+    if "prediction_as_of" in df:
+        as_of = pd.to_datetime(df.prediction_as_of, utc=True, errors="raise")
+        cutoff = cutoff.mask(as_of.lt(cutoff), as_of)
+    fields = pedigree.reindex(columns=dict.fromkeys([
+        *_PROFILE_FEATURE_INPUTS.values(), "foaling_date_source", "foaled_sporting_life",
+        "rtv_foaled_observed_at", "sl_foaled_observed_at",
+    ]))
+    observed = pd.to_datetime(ids.map(fields.rtv_foaled_observed_at), utc=True, errors="coerce")
+    eligible = observed.le(cutoff)
+    # Sporting Life's retained capture timestamps are local and have no offset.
+    # Use an earlier recorded day so same-day evidence cannot pass on a guessed time.
+    sl_capture_day = pd.to_datetime(ids.map(fields.sl_foaled_observed_at).astype("string").str[:10],
+                                    format="%Y-%m-%d", utc=True, errors="coerce")
+    sl_birth = pd.to_datetime(ids.map(fields.foaled_sporting_life), utc=True, errors="coerce")
+    birth = pd.to_datetime(ids.map(fields.foaled), utc=True, errors="coerce")
+    age = (day - birth).dt.days
+    rtv_exact = eligible & ids.map(fields.foaling_date_source).eq("racing_tv")
+    sl_exact = sl_capture_day.lt(cutoff.dt.normalize()) & sl_birth.eq(birth)
+    exact = (rtv_exact | sl_exact) & ~(birth.dt.month.eq(1) & birth.dt.day.eq(1)) & age.gt(0)
+    result["profile_exact_age_days"] = age.where(exact).astype("float32")
+    result["profile_foaling_day_of_year"] = birth.dt.dayofyear.where(exact).astype("float32")
+
+    country = ids.map(fields.rtv_country_of_foaling).astype("string").str.upper()
+    known_country = eligible & country.str.fullmatch(r"[A-Z]{3}", na=False) & ~country.isin(["UNK", "XXX"])
+    result["rtv_profile_foaled_abroad"] = (~country.isin(["GBR", "IRE"])).where(known_country).astype("float32")
+
+    starts = pd.to_numeric(ids.map(fields.rtv_profile_overseas_starts), errors="coerce")
+    last = pd.to_datetime(ids.map(fields.rtv_profile_last_overseas_start), utc=True, errors="coerce")
+    known_form = eligible & starts.gt(0) & last.lt(observed.dt.normalize()) & last.lt(day)
+    result["rtv_profile_known_overseas_starts"] = starts.where(known_form).astype("float32")
+    result["rtv_profile_days_since_overseas_start"] = (day-last).dt.days.where(known_form).astype("float32")
+    return result
+
+
 def apply_pedigree(df: pd.DataFrame) -> pd.DataFrame:
     """Fill sire/dam/damsire (and foaled) from the selected dataset's pedigree."""
     if "horse_id" not in df.columns:
@@ -86,7 +141,7 @@ def apply_pedigree(df: pd.DataFrame) -> pd.DataFrame:
     from src.source_dataset import read_table
     ped = read_table("pedigree", "horses")
     if ped.empty:
-        return df
+        return df.assign(**_profile_features(df, ped))
     ped["horse_id"] = ped["horse_id"].astype(str)
     # Plain mapping avoids merge suffix headaches with existing null columns.
     idx = ped.set_index("horse_id")
@@ -101,7 +156,7 @@ def apply_pedigree(df: pd.DataFrame) -> pd.DataFrame:
         df["foaled"] = hid.map(idx["foaled"])
     coverage = df["sire"].notna().mean()
     logger.info("Pedigree applied: %.1f%% of rows have a sire", 100 * coverage)
-    return df
+    return df.assign(**_profile_features(df, idx))
 
 
 # ── Going normalisation map ──────────────────────────────────────────────

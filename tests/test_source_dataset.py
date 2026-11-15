@@ -1,6 +1,7 @@
 """Publication, replay and cross-provider input-boundary regressions."""
 import hashlib
 import json
+import sqlite3
 from multiprocessing import get_context
 from concurrent.futures import ProcessPoolExecutor
 
@@ -62,6 +63,91 @@ def test_invalid_identity_cannot_replace_accepted_data(sources):
             contracts={"runners": TableContract("runner", ("id",), ("id",))})
     assert json.loads((sources/"sources/test/latest.json").read_text())["version"] == first["version"]
     assert not list((sources/"sources/test").glob(".stage-*"))
+
+
+def test_published_foaling_dates_use_matched_explicit_profiles(sources, monkeypatch):
+    from src import database
+    from src.data_processor import apply_pedigree
+    from src.ingestion.racing_tv import RawStore
+
+    pedigree = pd.DataFrame({
+        "horse_id": ["1", "2", "3", "4", "5", "6", "7", "8"],
+        "horse_name": ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta"],
+        "sire": ["Sire"] * 8, "dam": ["Dam"] * 8, "damsire": ["Damsire"] * 8,
+        "foaled": ["2020-01-01", "2021-03-07", "2019-05-11", "2020-01-01", "2020-01-01",
+                   "2020-01-01", "2019-06-14", "2021-01-01"],
+        "fetched_at": ["2026-01-02T12:00:00", "2026-01-01T12:00:00", "2026-01-01T12:00:00",
+                       "2026-01-01T12:00:00", "2026-01-01T12:00:00", "2026-01-01T12:00:00",
+                       "2026-01-02T08:00:00", "2026-01-01T12:00:00"],
+    })
+    raw = RawStore(str(sources / "rtv_cache" / "rtv_raw.sqlite"))
+    try:
+        for identifier, name, dam, foaled in [
+            (100, "ALPHA", "Dam (IRE)", "2020-04-15"),
+            (101, "Beta", "Dam", "2021-03-07"),
+            (102, "Gamma", "Dam", "2019-05-12"),
+            (103, "Delta", "Dam", "2020-01-01"),
+            (104, "Epsilon", "Other Dam", "2020-04-17"),
+            (105, "Zeta", "Dam", "2020-04-18"),
+            (106, "Zeta", "Dam", "2020-04-19"),
+            (107, "Theta", "Dam", "2022-03-01"),
+        ]:
+            payload = {"horse": {"id": identifier, "name": name, "sire_name": "Sire",
+                                 "dam_name": dam, "foaling_date": foaled, "age_days": 1234,
+                                 "slug": "/horse", "country_code": {"racing": "IRE"},
+                                 "display_colors": ["Bay"], "sire_country_code": "gb"}}
+            if identifier == 100:
+                foreign = {"id": 99, "non_runner": False, "meeting_date": "2025-12-30",
+                           "track": {"country_code": {"racing": "FRA"}}}
+                payload["horse"]["performances"] = [foreign, foreign,
+                    {**foreign, "id": 101, "non_runner": True},
+                    {**foreign, "id": 102, "meeting_date": "2026-01-02"},
+                    {**foreign, "id": 103, "meeting_date": "2026-01-04"}]
+            raw.put(f"/horses/{identifier}", "horse", "2026-01-01", 200, json.dumps(payload).encode())
+        raw.con.execute("UPDATE responses SET fetched_at='2026-01-02T12:00:00+00:00'")
+        raw.con.commit()
+    finally:
+        raw.close()
+
+    monkeypatch.setattr(database, "DB_PATH", str(sources/"races.db"))
+    with sqlite3.connect(database.DB_PATH) as con:
+        pedigree.to_sql("horse_pedigree", con, index=False)
+    results = datasets.publish_source("sl", {"results": canonical()},
+        contracts={"results": TableContract("canonical runner", ("race_id", "horse_id"), ("race_id", "horse_id"))})
+    previous = datasets.save_manifest({"sl": results})
+    manifest = publication.capture_pedigree_dataset()
+    receipt = manifest["sources"]["pedigree"]
+    assert manifest["sources"]["sl"] == previous["sources"]["sl"]
+    with datasets.use_manifest(manifest):
+        horses = datasets.read_table("pedigree", "horses").set_index("horse_id")
+        assert horses.foaled.fillna("").tolist() == ["2020-04-15", "2021-03-07", "", "", "", "", "2019-06-14", ""]
+        assert horses.foaling_date_source.fillna("").tolist() == [
+            "racing_tv", "racing_tv", "conflict", "", "", "", "sporting_life", ""]
+        assert horses.loc["1", "rtv_horse_id"] == "100"
+        assert horses.loc["1", "rtv_foaled_observed_at"]
+        assert horses.loc["1", "rtv_country_of_foaling"] == "IRE"
+        assert horses.loc["1", "rtv_coat_colour"] == "Bay"
+        assert horses.loc["1", "rtv_sire_country"] == "gb"
+        assert horses.loc["3", "foaled_sporting_life"] == "2019-05-11"
+        assert horses.loc["3", "foaled_rtv"] == "2019-05-12"
+        assert apply_pedigree(canonical()).foaled.tolist() == ["2020-04-15", "2021-03-07", "2020-04-15"]
+        assert horses.loc["1", "rtv_profile_overseas_starts"] == 1
+        assert horses.loc["1", "rtv_profile_last_overseas_start"] == "2025-12-30"
+        races = pd.DataFrame({"horse_id": [1, 1, 1, 1, 4, 7, 2, 3], "race_date": ["2026-01-02"]*8,
+                              "off_time": ["12:04", "12:05", "12:07", "bad time", "14:00", "14:00", "10:00", "14:00"],
+                              "prediction_as_of": [None, None, "2026-01-02T11:59:00Z", None, None, None, None, None]})
+        features = apply_pedigree(races)
+        assert features.profile_exact_age_days.notna().tolist() == [False, True, False, False, False, False, True, False]
+        assert features.loc[1, "profile_exact_age_days"] == (pd.Timestamp("2026-01-02")-pd.Timestamp("2020-04-15")).days
+        assert features.loc[1, "profile_foaling_day_of_year"] == 106
+        assert features.loc[1, "rtv_profile_foaled_abroad"] == 0
+        assert features.loc[1, "rtv_profile_known_overseas_starts"] == 1
+        assert features.loc[1, "rtv_profile_days_since_overseas_start"] == 3
+        assert features.loc[4, "rtv_profile_foaled_abroad"] == 0
+        assert pd.isna(features.loc[4, "rtv_profile_known_overseas_starts"])
+    assert receipt["provenance"]["foaling_coverage"] == {
+        "racing_tv": 2, "sporting_life": 1, "conflict": 1, "unresolved": 4, "recovered_from_january_1": 1,
+    }
 
 
 def test_write_failure_keeps_pointer_and_prior_observations(sources, monkeypatch):

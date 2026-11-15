@@ -68,6 +68,7 @@ from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from fractions import Fraction
+from pathlib import Path
 from typing import Any, Iterable, Iterator, NamedTuple
 from zoneinfo import ZoneInfo
 
@@ -293,9 +294,12 @@ class RTVClient:
 class RawStore:
     """SQLite store of raw API responses, keyed by API path."""
 
-    def __init__(self, path: str = RAW_DB_PATH) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+    def __init__(self, path: str = RAW_DB_PATH, *, readonly: bool = False) -> None:
         self.path = path
+        if readonly:
+            self.con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+            return
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         self.con = sqlite3.connect(path)
         self.con.execute("PRAGMA journal_mode=WAL")
         self.con.executescript(
@@ -397,6 +401,15 @@ class RawStore:
             sql += " AND race_date<=?"
             args.append(end)
         return [(p, d) for p, d in self.con.execute(sql + " ORDER BY race_date, path", args)]
+
+    def horse_profiles(self) -> Iterator[tuple[str, str, dict]]:
+        """Yield the capture day, capture timestamp and payload from one read."""
+        sql = ("SELECT race_date, fetched_at, body FROM responses "
+               "WHERE kind='horse' AND http_status=200 AND body IS NOT NULL ORDER BY race_date, path")
+        for day, fetched_at, body in self.con.execute(sql):
+            horse = json.loads(zlib.decompress(body)).get("horse")
+            if isinstance(horse, dict):
+                yield day, fetched_at, horse
 
     def mark_day(self, race_date: str, status: str, n_meetings: int, n_races: int, n_done: int,
                  *, profile="research") -> None:
@@ -1210,7 +1223,9 @@ def scrape_horse_profiles(
     finally:
         if own_store:
             store.close()
-    return {"requested": len(tasks), "ok": sum(1 for s in statuses.values() if s == 200)}
+    return {"requested": len(tasks), "ok": sum(s == 200 for s in statuses.values()),
+            "unavailable": sum(s == 404 for s in statuses.values()),
+            "retryable": sum(s not in FINAL_STATUSES for s in statuses.values())}
 
 
 def build_snapshot_tables(start: str | None = None, end: str | None = None,
@@ -1271,8 +1286,7 @@ def build_profile_tables(store: RawStore | None = None) -> dict[str, pd.DataFram
     store = store or RawStore()
     profiles, perfs, stats = [], [], []
     try:
-        for path, scraped in store.paths("horse"):
-            horse = (store.get_json(path) or {}).get("horse") or {}
+        for scraped, _, horse in store.horse_profiles():
             hid = horse.get("id")
             profiles.append({"horse_id": hid, "scraped_on": scraped,
                              **_flatten(horse, "scrape_horse", {"performances", "statistics", "future_runners"})})
