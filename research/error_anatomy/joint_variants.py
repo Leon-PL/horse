@@ -106,6 +106,12 @@ VARIANTS = {
                   "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
     "with-300": {"groups": (*MORE, "price-300"), "rounds": 1000,
                  "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    # Declared 15 November before scoring: the correction's teacher at other market weights (0.75 everywhere else),
+    # on the 11:00 recipe. Judged against with-1100 on native log loss and on 11:00 CLV (research 105).
+    "with-1100-blend50": {"groups": (*MORE, "price-1100"), "rounds": 1000, "target": "y_soft50",
+                          "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
+    "with-1100-blend90": {"groups": (*MORE, "price-1100"), "rounds": 1000, "target": "y_soft90",
+                          "params": {**WIDE["params"], "num_leaves": 31, "min_data_in_leaf": 400}},
 }
 SAVED = OUT / "joint_variants.parquet"
 REPORT = OUT / "joint_variants.json"
@@ -181,7 +187,7 @@ def main():
         recipe = VARIANTS[name]
         frame, columns = inputs(base, recipe["groups"])
         print(f"{name}: {len(columns)} inputs", flush=True)
-        fit = soft.soft_boost(columns, target="y_soft", rounds=recipe["rounds"], params=recipe["params"],
+        fit = soft.soft_boost(columns, target=recipe.get("target", "y_soft"), rounds=recipe["rounds"], params=recipe["params"],
                               threads=args.threads)
         correction, _ = s.walk_forward(frame, fit)
         saved[name] = correction[frame.quarter.isin(s.SCORED).to_numpy()]

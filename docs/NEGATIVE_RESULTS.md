@@ -1,5 +1,17 @@
 # Negative Results Ledger
 
+## 106. The correction's teacher: market weight 0.5 or 0.9 instead of 0.75 — no change (15 November 2026)
+
+The joint correction with the 11:00 price (`with-1100`) refitted with its
+target at 0.5 and 0.9 market weight (`with-1100-blend50`, `-blend90` in
+`research/error_anatomy/joint_variants.py`, declared before scoring;
+`research/blend_weight_106/clv.py`). Native log loss against 0.75
+(1.77915): 0.5 +0.00042 [−0.00020, +0.00108] 1/4; 0.9 +0.00007 [−0.00031,
++0.00048] 2/4. The research 105 betting test at 11:00 moves in step with the
+weight but within noise: threshold 0.02, one tick worse, ROI +3.7% (0.5),
++5.4% (0.75), +5.9% (0.9); geo CLV 1.018, 1.026, 1.028. Keep 0.75; the
+weight is not a lever.
+
 ## 105. Betting the corrected forecast at a morning price: beats the close retrospectively; 11:00 beats T-60 (15 November 2026)
 
 [Report](research/T60_CLV_105.md). Scored quarters 2025Q3–2026Q2, value rule

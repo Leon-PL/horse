@@ -87,6 +87,9 @@ def frames():
     won = long.won.to_numpy(float)
     market = long.p_market.to_numpy(float)
     long["y_soft"] = np.where(np.isfinite(market), BLEND * market + (1 - BLEND) * won, won)
+    # Other market weights for the correction's teacher (declared 15 November; joint_variants blend arms).
+    for weight in (.5, .9):
+        long[f"y_soft{int(weight * 100)}"] = np.where(np.isfinite(market), weight * market + (1 - weight) * won, won)
     short = s.attach(short, long[[*KEYS, "y_soft", "p_market"]])
     return {"short": short, "long": long}
 
