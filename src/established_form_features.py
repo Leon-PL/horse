@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 from src.surface_features import synthetic_surface
-from src.feature_semantics import observed_rating
+from src.feature_semantics import claim_adjusted_weight, observed_rating
 from src.result_status import NONSTARTER_LABELS, result_labels
 from src.utils import normalise_horse_key
 
@@ -102,11 +102,7 @@ def established_form_features(frame, *, state=None, return_state=False):
         | title.str.contains(r"\bbeginners?\s+chase\b", regex=True)
     ).to_numpy(float)
     marks = observed_rating(frame).to_numpy(float) if "official_rating" in frame else np.full(n, np.nan)
-    weight = pd.to_numeric(frame.get("weight_lbs", pd.Series(np.nan, index=frame.index)), errors="coerce")
-    known_weight = weight.between(50, 220)
-    if "has_observed_weight" in frame:
-        known_weight &= frame.has_observed_weight.eq(1)
-    weights = weight.where(known_weight).to_numpy(float)
+    weights = claim_adjusted_weight(frame).to_numpy(float)
     handicap = pd.to_numeric(frame.get("handicap", pd.Series(0, index=frame.index)), errors="coerce").eq(1).to_numpy()
     finish = pd.to_numeric(frame.finish_position, errors="coerce").to_numpy(float)
     fields = pd.to_numeric(frame.num_runners, errors="coerce").to_numpy(float)

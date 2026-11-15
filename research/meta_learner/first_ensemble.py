@@ -12,6 +12,7 @@ import pandas as pd
 
 from research.meta_learner import features_063
 from src.feature_selection import race_groups
+from src.feature_semantics import CLAIM_ADJUSTED_WEIGHT_INPUTS
 from src.forecast_evaluation import paired_interval, probability_metrics
 from src.ingestion.storage import atomic_json, atomic_parquet, writer_lock
 from src.modelling.data import CONTEXT, load_dataset
@@ -79,7 +80,7 @@ def prepare(root, store):
     compact = replace(baseline, id="rating-063", features=(*baseline.features, *rating.columns), soft_label_blend=.75)
     full = replace(compact, id="full-063", features=(*baseline.features, *extra.columns))
     keep = list(dict.fromkeys([*CONTEXT, *baseline.features, *TRAINING_COLUMNS, "handicap",
-                               "official_rating", "weight_lbs", "has_official_rating", "has_observed_weight"]))
+                               "official_rating", "has_official_rating", *CLAIM_ADJUSTED_WEIGHT_INPUTS]))
     prepared = pd.concat([frame[keep], extra], axis=1)
     prepared.attrs = {}
     atomic_parquet(prepared, root / "input.parquet")

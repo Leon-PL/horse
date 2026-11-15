@@ -349,8 +349,11 @@ def _history_observations(runs):
     result["rtv_time_fig_best3"] = best[:, measured.index("time_fig")]
     # The latest figure the horse has, however many untimed runs followed it.
     result["rtv_time_fig_last"] = group.time_fig.ffill()
+    # Match the three-observation window used by the rolling features. A
+    # newer observation carrying only other metrics does not erase this one.
+    latest = group[list(LAST_METRICS)].ffill(limit=2)
     for name in LAST_METRICS:
-        result["rtv_"+name+"_last"] = runs[name]
+        result["rtv_"+name+"_last"] = latest[name]
     result["rtv_history_count3"] = (group.cumcount()+1).clip(upper=3)
     for short, name in (("jumps", "jump_index"), ("sectional", "late_speed_ratio")):
         result["rtv_"+short+"_count3"] = support[:, measured.index(name)]

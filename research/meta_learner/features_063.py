@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from numba import njit
 
+from src.feature_semantics import CLAIM_ADJUSTED_WEIGHT_INPUTS, claim_adjusted_weight
 from src.modelling.performance import PerformanceSpec, performance_targets
 
 
-RATING_INPUTS = ("rtv_card_tf_rating", "official_rating", "weight_lbs")
+RATING_INPUTS = ("rtv_card_tf_rating", "official_rating")
 GAP_INPUTS = ("rtv_text_logit", "horse_glicko_lcb", "horse_ts_lcb", "horse_elo_surface",
               "horse_elo_dist_cat", "horse_elo_rt", "horse_avg_pos_20", "rtv_time_fig_mean3",
               "rtv_time_fig_best3", "rtv_time_fig_last")
@@ -17,7 +18,7 @@ MODERATORS = (
     "surface_Turf", "surface_Allweather", "month_sin", "month_cos", "field_avg_or",
     "field_std_or", "field_top2_or_gap", "field_std_elo", "field_top2_elo_gap", "field_experience_gap",
 )
-HISTORY = ("race_type", "surface", "beaten_lengths", "has_official_rating", "has_observed_weight")
+HISTORY = ("race_type", "surface", "beaten_lengths", "has_official_rating", *CLAIM_ADJUSTED_WEIGHT_INPUTS)
 NUMERIC_INPUTS = tuple(dict.fromkeys((*RATING_INPUTS, *GAP_INPUTS, *MODERATORS, "horse_elo")))
 
 
@@ -25,7 +26,7 @@ def rating_gaps(frame):
     race = frame.race_id
     rating = frame.rtv_card_tf_rating
     mark = frame.official_rating.where(frame.has_official_rating.eq(1) & frame.official_rating.gt(0))
-    weight = frame.weight_lbs.where(frame.has_observed_weight.eq(1))
+    weight = claim_adjusted_weight(frame)
     at_weights, edge = mark - weight, rating - mark
     group = rating.groupby(race, sort=False)
     result = {"tf_vs_field": rating - group.transform("mean"), "tf_vs_best": rating - group.transform("max"),
@@ -138,7 +139,7 @@ def context_form(frame, raw_going):
     race = frame.race_id
     field = ctx.groupby(race, sort=False)
     pref = ctx - overall
-    adj = ctx - frame.weight_lbs.where(frame.has_observed_weight.eq(1))
+    adj = ctx - claim_adjusted_weight(frame)
     out = {"fc_ctx_vs_field": ctx - field.transform("mean"), "fc_ctx_vs_best": ctx - field.transform("max"),
            "fc_ctx_rank_pct": field.rank(pct=True),
            "fc_all_vs_field": overall - overall.groupby(race, sort=False).transform("mean"),

@@ -33,6 +33,21 @@ def test_current_race_and_publication_lag_are_excluded():
     assert np.isnan(out.loc[4, "rtv_fsp_mean3"])
 
 
+def test_latest_metric_survives_gaps_within_three_observations():
+    runs = observations()
+    runs["late_speed_ratio"] = [1.05, 1.25, np.nan, np.nan]
+    later = runs.iloc[[3]].assign(race_id="f", race_date=pd.Timestamp("2025-02-10"),
+                                available_date=pd.Timestamp("2025-02-12"))
+    runs = pd.concat([runs, later], ignore_index=True)
+    frame = pd.DataFrame({"horse_id": [1, 2, 1, 1, 1, 3],
+                          "race_date": pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-12",
+                                                       "2025-02-03", "2025-02-12", "2025-02-12"])})
+    out = rtv.add_history_features(frame, runs=runs)
+    np.testing.assert_allclose(out.rtv_late_speed_ratio_last, [np.nan, 1.25, 1.05, 1.05, np.nan, np.nan])
+    pd.testing.assert_series_equal(out.rtv_late_speed_ratio_last.notna(), out.rtv_late_speed_ratio_mean3.notna(),
+                                   check_names=False)
+
+
 def test_future_current_labels_prices_and_row_order_cannot_change_prior_features():
     frame, runs = cards(), observations()
     baseline = rtv.add_history_features(frame, runs=runs)[list(rtv.HISTORY_FEATURES)]

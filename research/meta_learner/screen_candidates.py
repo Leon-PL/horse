@@ -30,6 +30,7 @@ from research.meta_learner.candidate_features import relatives_form, same_day_bi
 from research.meta_learner.ability import (ability_in_pounds, ability_in_pounds_jumps, bounce_inputs,
                                           ground_from_withdrawals, improvement_inputs, jumps_margin_inputs,
                                           relatives_ratings)
+from src.feature_semantics import CLAIM_ADJUSTED_WEIGHT_INPUTS
 from src.ingestion.storage import atomic_json, atomic_parquet
 
 OUT = Path("data/research/meta_learner/screens_20261109")
@@ -110,8 +111,8 @@ def pedigree_columns():
     return allowed([n for n in names if n.startswith(("sire_", "dam_", "damsire_")) and n not in full])
 
 
-ABILITY_INPUTS = ["off_time", "race_type", "distance_furlongs", "finish_position", "beaten_lengths", "weight_lbs",
-                  "official_rating", "age", "trainer", "dam", "damsire"]
+ABILITY_INPUTS = ["off_time", "race_type", "distance_furlongs", "finish_position", "beaten_lengths",
+                  *CLAIM_ADJUSTED_WEIGHT_INPUTS, "official_rating", "age", "trainer", "dam", "damsire"]
 
 
 def going_store_columns():

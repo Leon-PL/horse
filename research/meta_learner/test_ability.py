@@ -25,7 +25,8 @@ def synthetic_history(seed=0, days=40, horses=60, field=8):
                     "race_id": race, "horse_id": int(horse), "race_date": pd.Timestamp("2024-03-01") + pd.Timedelta(days=day),
                     "off_time": "14:00" if slot == 0 else "15:30", "race_type": "Flat", "distance_furlongs": 8.,
                     "finish_position": int(np.flatnonzero(order == i)[0] + 1), "beaten_lengths": float(behind[i]),
-                    "weight_lbs": float(weight[i]), "official_rating": float(np.round(ability[horse])), "age": 4,
+                    "weight_lbs": float(weight[i]), "reported_jockey_claim_lbs": 0.,
+                    "official_rating": float(np.round(ability[horse])), "age": 4,
                     "trainer": f"T{horse // 10}", "dam": f"Dam{horse // 3}", "damsire": "Sire", "sire": f"S{horse % 5}", "won": 0,
                     "going": ["Good", "Soft", "Heavy", "Fast"][day % 4], "track": "Ascot"})
             race += 1

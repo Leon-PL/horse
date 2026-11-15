@@ -88,3 +88,13 @@ def test_amateur_restrictions_account_for_race_conditions_and_date():
                       "Fulke Walwyn Kim Muir Challenge Cup Handicap Chase"],
     })
     assert rider_restriction_features(frame).race_amateur_riders.tolist() == [1, 0, 1, 0, 1, 0, 1]
+
+
+def test_claim_adjusted_weight_requires_observed_allocation_and_claim():
+    from src.feature_semantics import claim_adjusted_weight
+
+    f = pd.DataFrame({"weight_lbs": [140, 140, 140, 140, 1, 140, 140],
+                      "reported_jockey_claim_lbs": [7, 0, None, 3, 3, -5, 3.5],
+                      "has_observed_weight": [1, 1, 1, 0, 1, 1, 1]})
+    np.testing.assert_allclose(claim_adjusted_weight(f), [133, 140, np.nan, np.nan, np.nan, np.nan, np.nan])
+    assert claim_adjusted_weight(f.drop(columns="reported_jockey_claim_lbs")).isna().all()

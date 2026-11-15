@@ -12,7 +12,7 @@ from src.feature_engineer import add_established_form_features, counts_state_sco
 def frame(rows):
     defaults = dict(horse_id=123, horse_name="Known Horse", race_type="Flat", race_name="Handicap",
         surface="Turf", handicap=1, official_rating=80., has_official_rating=1,
-        weight_lbs=130., has_observed_weight=1, finish_position=2, num_runners=8,
+        weight_lbs=130., has_observed_weight=1, reported_jockey_claim_lbs=0., finish_position=2, num_runners=8,
         finish_pos_label="", off_time="14:00")
     return pd.DataFrame([{**defaults, "race_id": i, "race_date": f"2025-01-{i+1:02d}", **row}
                          for i, row in enumerate(rows)])
@@ -48,6 +48,20 @@ def test_missing_marks_and_weights_are_not_zero_changes():
     assert out.loc[1, ["or_vs_last_win_mark", "handicap_weight_vs_last_win", "below_last_win_mark"]].isna().all()
     assert out.loc[1, "handicap_mark_support_5"] == 0
     assert out.loc[2, ["or_vs_last_place_mark", "or_vs_career_high_prev", "above_career_high_or"]].isna().all()
+
+
+def test_last_winning_weight_uses_both_claims_and_retains_missing_values():
+    f = frame([
+        dict(finish_position=1, weight_lbs=138, reported_jockey_claim_lbs=7),
+        dict(weight_lbs=137, reported_jockey_claim_lbs=3),
+        dict(finish_position=1, reported_jockey_claim_lbs=np.nan),
+        dict(weight_lbs=136, reported_jockey_claim_lbs=0),
+    ])
+    out = established_form_features(f)
+    assert out.loc[1, "handicap_weight_vs_last_win"] == 3
+    assert out.loc[2:, "handicap_weight_vs_last_win"].isna().all()
+    _, state = established_form_features(f.iloc[:1], return_state=True)
+    pd.testing.assert_frame_equal(out.iloc[1:], established_form_features(f.iloc[1:], state=state))
 
 
 def test_conditions_win_is_not_a_winning_handicap_mark():

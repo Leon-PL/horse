@@ -4,7 +4,7 @@ All three use only information available before the race:
 
 - ``ability_in_pounds`` runs a Kalman filter per horse and code (Flat or jumps)
   over races in time order. A run's performance is pounds behind the winner (the
-  performance model's 15/furlongs scale, capped at 30 lb) plus weight carried.
+  performance model's 15/furlongs scale, capped at 30 lb) plus claim-adjusted weight.
   Each race's level is estimated from the runners' prior abilities, so the
   scale follows official ratings. Young or lightly raced horses get more
   process noise and so move faster. Features read the state before the race.
@@ -21,6 +21,7 @@ import pandas as pd
 from numba import njit
 
 from research.meta_learner.candidate_features import _name, _off_minutes
+from src.feature_semantics import claim_adjusted_weight
 
 KEYS = ["race_id", "horse_id"]
 LB_PER_LENGTH_FURLONGS = 15.  # src.modelling.performance scale
@@ -56,7 +57,7 @@ def performance_lb(h):
     position = pd.to_numeric(h.finish_position, errors="coerce").to_numpy(float)
     lengths = pd.to_numeric(h.beaten_lengths, errors="coerce").to_numpy(float)
     distance = pd.to_numeric(h.distance_furlongs, errors="coerce").to_numpy(float)
-    weight = pd.to_numeric(h.weight_lbs, errors="coerce").to_numpy(float)
+    weight = claim_adjusted_weight(h).to_numpy(float)
     lengths = np.where(position == 1, 0., lengths)
     behind = np.minimum(lengths * LB_PER_LENGTH_FURLONGS / np.maximum(distance, 5.), MARGIN_CAP_LB)
     valid = (np.isfinite(position) & (position >= 1) & np.isfinite(lengths) & (lengths >= 0)
@@ -183,7 +184,7 @@ def ability_in_pounds(history, settings=SETTINGS, return_post=False):
     f["ab_mu"], f["ab_sd"], f["ab_runs"] = f_mu, f_sd, f_runs
     f["ab_peak"], f["ab_last_change"], f["ab_days_since"] = f_peak, f_change, f_days
     f["ab_below_peak"] = f_mu - f_peak
-    weight = pd.to_numeric(h.weight_lbs, errors="coerce").to_numpy(float)
+    weight = claim_adjusted_weight(h).to_numpy(float)
     f["_at_weights"] = f_mu - weight
     f["_vs_mark"] = f_mu - rating
     f["ab_mu_vs_field"], f["ab_mu_vs_best"], f["ab_mu_rank_pct"] = _field(f, "ab_mu")

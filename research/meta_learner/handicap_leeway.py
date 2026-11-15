@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from src.feature_selection import race_groups
+from src.feature_semantics import CLAIM_ADJUSTED_WEIGHT_INPUTS, claim_adjusted_weight, observed_rating
 from src.model import compute_recency_sample_weights
 from src.modelling.data import numeric_matrix
 from src.modelling.performance import PerformanceSpec, figure_rows, performance_targets
@@ -13,17 +14,16 @@ from src.rtv_text import fit_scale
 
 
 logger = logging.getLogger(__name__)
-INPUTS = ("handicap", "official_rating", "weight_lbs", "has_official_rating", "has_observed_weight")
+INPUTS = ("handicap", "official_rating", "has_official_rating", *CLAIM_ADJUSTED_WEIGHT_INPUTS)
 
 
 def supported_fields(frame):
-    observed = (frame.handicap.eq(1) & frame.has_official_rating.eq(1) & frame.has_observed_weight.eq(1)
-                & frame.official_rating.gt(0) & frame.weight_lbs.gt(0))
+    observed = frame.handicap.eq(1) & np.isfinite(offset(frame))
     return observed.groupby(frame.race_id, sort=False).transform("all")
 
 
 def offset(frame):
-    return (frame.official_rating - frame.weight_lbs).to_numpy(dtype=float)
+    return (observed_rating(frame) - claim_adjusted_weight(frame)).to_numpy(dtype=float)
 
 
 def fit_predict(train, test, spec, dataset_start, capacity, threads):

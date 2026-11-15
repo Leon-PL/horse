@@ -355,6 +355,7 @@ def _suggest_from_autotune_space(trial, specs: list[dict]) -> dict:
 # Columns to exclude from features (identifiers, targets, leaky features)
 EXCLUDE_COLUMNS = [
     "prize_money_original", "prize_currency", "prize_fx_date",
+    "weight_lbs",  # allocated source weight; claim_adjusted_weight_lbs is the burden input
     "race_id",
     "race_date",
     "horse_name",
