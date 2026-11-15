@@ -69,13 +69,14 @@ _FE_SOURCE_FILES = (
     "src/fe_incremental.py", "src/feature_store.py", "src/featured_dataset.py",
     "src/atr_features.py",
     "src/rtv_features.py", "src/rtv_text.py",
-    "src/bha_features.py", "src/bha_events.py",
     "src/track_config.py", "src/utils.py",
+    # Which numeric features the store keeps; saved history results (keyed by inputs and code).
+    "src/store_columns.py", "src/fe_cache.py",
     # Column and cache contract read by the sectional join in atr_features.
     "src/ingestion/atr_tabs.py",
     # Raw collection modules are exempt below because accepted source values
-    # are fingerprinted separately. BHA's feature derivation modules are hashed
-    # above; editing them must invalidate stored feature values.
+    # are fingerprinted separately. BHA report features were removed from the
+    # pipeline on 2026-11-15 (research 109: no model reads them, 42% of build time).
 )
 
 #: Modules reachable from the FE entry points that provably cannot change a
@@ -103,7 +104,7 @@ FE_SIGNATURE_EXEMPT: dict[str, str] = {
     "ingestion.results": "collects and stores native result records; accepted result values enter data_signature",
     "ingestion.foreign_form": "collector only; accepted overseas starts are fingerprinted separately",
     "ingestion.rtv_observations": "source-stage materialisation only; published run/card/text values are covered by rtv_cache_signature",
-    "ingestion.bha_stewards": "source collection only; published BHA observations are covered by bha_signature and dataset manifests",
+    "ingestion.bha_stewards": "source collection only; no feature stage reads BHA observations since 2026-11-15",
     "ingestion.bha_reports": "source PDF extraction only; accepted extracted text is fingerprinted as BHA source content",
     "wf_eval": "evaluation and source text-fit scheduling; published comment scores are covered by rtv_cache_signature",
     "clv": "downstream evaluation metrics only; cannot change feature values",
@@ -283,11 +284,6 @@ def _rtv_signature(cutoff) -> dict:
     return {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": rtv_cache_signature(cutoff)}
 
 
-def _bha_signature(cutoff) -> dict:
-    from src.bha_features import cache_signature
-    return {"cutoff": str(pd.Timestamp(cutoff).date()), "sig": cache_signature(cutoff)}
-
-
 def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
     """Atomically stamp metadata while retaining the dataset operation's lock."""
     with store._access():
@@ -303,7 +299,6 @@ def _stamp(store: FeatureStore, fe_sig: str, data_sig: str) -> None:
             from src.foreign_form import signature as foreign_form_signature
             m["atr_signature"] = _atr_signature(last)
             m["rtv_signature"] = _rtv_signature(last)
-            m["bha_signature"] = _bha_signature(last)
             m["foreign_form_signature"] = foreign_form_signature(last)
         fd, temporary = tempfile.mkstemp(prefix=".meta-", suffix=".json", dir=store.root)
         try:

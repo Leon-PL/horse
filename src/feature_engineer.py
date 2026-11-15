@@ -27,7 +27,6 @@ from src.ratings import compute_elo_features, compute_glicko_features
 from src.fe_incremental import cumulative_counts, cumulative_counts_plain
 from src.track_config import get_track_config, direction_code, shape_code
 from src.rtv_features import add_rtv_features
-from src.bha_features import add_bha_features
 
 import config
 from src.source_dataset import dataset_build
@@ -4948,7 +4947,6 @@ def engineer_features(
         apply_conditional_feature_masks,   # zero irrelevant features
         add_prior_market_features,         # independent prior-day history, appended after existing stages
         add_rtv_features,                  # quality-filtered mature prior runs and observed pre-race context
-        add_bha_features,                  # prior BHA reports under the configured availability policy
     ]
     if half is not None:
         handover = stages.index(add_atr_features) + 1
@@ -5030,6 +5028,11 @@ def engineer_features(
         "_result_start_for_history",
         "_non_finisher_for_history",
     ])
+
+    # Keep only numeric features something reads (src/store_columns.py, research 109): every stage still
+    # runs, so later stages see their inputs, but unread columns are not stored or served.
+    from src.store_columns import prune
+    df = prune(df)
 
     if save:
         output_path = os.path.join(

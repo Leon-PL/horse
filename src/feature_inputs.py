@@ -39,8 +39,18 @@ def _sidecar_signature(provider, table, cutoff):
     return _cached_sidecar_signature(str(path), stat.st_mtime_ns, stat.st_size, tuple(files), str(cutoff) if cutoff is not None else None)
 
 
+def _saved(name, compute, *key):
+    """Disk memo of a signature: the key names immutable files (path, mtime, size) and the cutoff."""
+    from src import fe_cache
+    return fe_cache.memo(name, [*key, fe_cache.source_hash(__file__)], compute)
+
+
 @lru_cache(maxsize=64)
 def _cached_sidecar_signature(path, modified, size, files, cutoff):
+    return _saved("sidecar_signature", lambda: _sidecar_digest(path, files, cutoff), path, modified, size, files, cutoff)
+
+
+def _sidecar_digest(path, files, cutoff):
     import pyarrow.parquet as pq
     columns = pq.read_schema(path).names
     date_column = "available_date" if "available_date" in columns else "race_date" if "race_date" in columns else None
@@ -61,6 +71,10 @@ def _cached_sidecar_signature(path, modified, size, files, cutoff):
 
 @lru_cache(maxsize=32)
 def _rtv_part_signature(path, modified, size, cutoff):
+    return _saved("rtv_signature", lambda: _rtv_part_digest(path, cutoff), path, modified, size, cutoff)
+
+
+def _rtv_part_digest(path, cutoff):
     frame = pd.read_parquet(path)
     if cutoff is not None and not frame.empty:
         dated = frame["available_date"] if "available_date" in frame else frame.race_date
@@ -109,6 +123,11 @@ def atr_cache_signature(cutoff) -> str | None:
 
 @lru_cache(maxsize=32)
 def _atr_content_signature(path, modified, size, cutoff, sidecar):
+    return _saved("atr_signature", lambda: _atr_content_digest(path, cutoff, sidecar), path, modified, size, cutoff,
+                  sidecar)
+
+
+def _atr_content_digest(path, cutoff, sidecar):
     cache = pd.read_parquet(path)
     dates = pd.to_datetime(cache["race_date"], errors="coerce")
     sub = cache[dates <= pd.Timestamp(cutoff)]

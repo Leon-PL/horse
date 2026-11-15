@@ -492,7 +492,21 @@ def compute_atr_run_features(df: pd.DataFrame) -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def _published_history(results_version, atr_version, foreign_version):
-    """Small scalar history, with every canonical start retained as a window slot."""
+    """Small scalar history, with every canonical start retained as a window slot.
+
+    Saved per (dataset versions, this module's code) in ``src.fe_cache``: every process and live card reads it
+    back instead of rescoring all published sectionals (~30 s).
+    """
+    from src import fe_cache
+    from src.ingestion import atr_tabs
+    key = [results_version, atr_version, foreign_version, fe_cache.source_hash(__file__),
+           fe_cache.source_hash(atr_tabs.__file__)]
+    history = fe_cache.frame("atr_history", key, lambda: _compute_published_history(foreign_version))
+    history[["sl_race_id", "sl_horse_id"]] = history[["sl_race_id", "sl_horse_id"]].astype(object)
+    return history
+
+
+def _compute_published_history(foreign_version):
     from src.source_dataset import read_table
     canonical = read_table("sl", "results")
     raw = read_table("atr", "sectionals", linked=True)

@@ -138,8 +138,6 @@ class Features:
             pass
         names = set(self.eligible(schema))
         names.update(n for item in registry["feature_sets"] for n in item["features"])
-        from src.bha_features import FEATURES as BHA_FEATURES
-        names.update(BHA_FEATURES)
         if selected:
             names &= set(selected["features"])
         rows = []

@@ -36,6 +36,16 @@ def _publish_fx():
         "units": base / "track_prize_currency.json", "rates": base / "ecb_gbp_per_eur.csv"})
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _private_fe_cache(tmp_path_factory):
+    """Saved feature histories go to a temporary folder, never the real ``data/processed/fe_cache``."""
+    from src import fe_cache
+    saved = fe_cache.ROOT
+    fe_cache.ROOT = tmp_path_factory.mktemp("fe_cache")
+    yield
+    fe_cache.ROOT = saved
+
+
 @pytest.fixture(scope="session")
 def reference_dataset(tmp_path_factory):
     """FX published from the committed reference files into a session registry."""

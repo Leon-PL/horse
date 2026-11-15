@@ -365,9 +365,11 @@ def _history_observations(runs):
 
 @lru_cache(maxsize=2)
 def _cached_history(path, modified, size):
-    # The path names one immutable version of the selected dataset's table.
+    # The path names one immutable version of the selected dataset's table; saved per version and code.
+    from src import fe_cache
     from src.source_dataset import model_table
-    return _history_observations(model_table("rtv", "runs"))
+    return fe_cache.frame("rtv_history", [path, modified, size, fe_cache.source_hash(__file__)],
+                          lambda: _history_observations(model_table("rtv", "runs")))
 
 
 def add_history_features(frame, *, runs=None):

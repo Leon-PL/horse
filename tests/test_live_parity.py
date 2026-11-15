@@ -24,6 +24,7 @@ from src.data_processor import process_data
 from src.feature_engineer import engineer_features
 from src.live_prediction import feature_engineer_with_history_core
 from src.model import get_feature_columns
+from src.store_columns import unpruned
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +114,12 @@ def parity_frames():
     prior = raw.index[raw.horse_id.eq(horse) & raw.race_date.lt(last_date)][-1]
     raw.loc[prior, "reported_jockey_claim_lbs"] = 3
 
+    # Unpruned, so parity and the rider-input checks cover columns the store drops.
+    with unpruned():
+        return _parity_frames(raw, last_date)
+
+
+def _parity_frames(raw, last_date):
     # ── Training path: everything processed and featured together ──
     feat_train = engineer_features(process_data(raw.copy()), save=False)
 

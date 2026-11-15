@@ -80,11 +80,10 @@ def load_dataset(store_root=None, *, features=None, development=True, start=None
         # than today's moving collector pointers. Never append in a read.
         with use_manifest(manifest):
             processed = process_data()
-            from src.featured_dataset import data_signature, _atr_signature, _rtv_signature, _bha_signature
+            from src.featured_dataset import data_signature, _atr_signature, _rtv_signature
             last = meta["last_date"]
             checks = {"data_signature": data_signature(processed, cutoff=last),
-                      "atr_signature": _atr_signature(last), "rtv_signature": _rtv_signature(last),
-                      "bha_signature": _bha_signature(last)}
+                      "atr_signature": _atr_signature(last), "rtv_signature": _rtv_signature(last)}
             if any(meta.get(k) != v for k, v in checks.items()):
                 raise ValueError("Feature history does not match its accepted inputs; rebuild the store")
         schema = pq.read_schema(store.featured_path)

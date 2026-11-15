@@ -91,8 +91,10 @@ def test_missing_or_invalid_market_price_is_not_invented(odds):
 
 
 def test_cold_start_speed_features_stay_unknown():
+    from src.store_columns import unpruned
     raw = _synthetic_raw(n_days=3, races_per_day=1, field=6)
-    featured = engineer_features(process_data(raw), save=False)
+    with unpruned():   # the speed-figure averages are computed but not stored
+        featured = engineer_features(process_data(raw), save=False)
     first_runs = featured["horse_prev_races"] == 0
     cols = ["speed_fig_avg_5", "speed_fig_avg_10", "speed_fig_best_5", "speed_fig_adj_best_5"]
     assert cols

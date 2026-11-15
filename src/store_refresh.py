@@ -12,7 +12,7 @@ import pandas as pd
 from src.data_processor import process_data
 from src.feature_store import FeatureStore, STORE_SCHEMA_VERSION, _stringify_objects
 from src.featured_dataset import (
-    _atr_signature, _rtv_signature, _bha_signature, _model_load_columns, _stamp, data_signature, fe_signature,
+    _atr_signature, _rtv_signature, _model_load_columns, _stamp, data_signature, fe_signature,
 )
 from src.parquet_io import combine_parquet_parts
 from src.source_dataset import dataset_build
@@ -48,9 +48,6 @@ def append_current_store(processed, *, store=None):
         current_rtv = _rtv_signature(last)
         if (meta.get("rtv_signature") is not None or any(current_rtv["sig"].values())) and meta.get("rtv_signature") != current_rtv:
             return rebuild("rtv_history_changed")
-        current_bha = _bha_signature(last)
-        if (meta.get("bha_signature") is not None or any(current_bha["sig"].values())) and meta.get("bha_signature") != current_bha:
-            return rebuild("bha_history_changed")
         dates = pd.to_datetime(processed.race_date)
         new = processed.loc[dates.gt(last)].copy()
         if new.empty:

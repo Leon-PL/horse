@@ -286,19 +286,17 @@ def test_two_day_policy_is_order_and_chunk_invariant():
                                   policy='race_plus_48h').sort_index())
 
 
-def test_two_day_assumption_is_in_feature_code_and_history_signatures(tmp_path, monkeypatch):
+def test_two_day_assumption_is_in_the_history_signature(tmp_path, monkeypatch):
+    # BHA features left the feature store in research 109, so the policy no longer enters fe_signature.
     import config
-    from src.featured_dataset import fe_signature
     monkeypatch.setattr(config, 'DATA_DIR', str(tmp_path))
     rows = pd.DataFrame([report(available='2026-11-07T17:55:00Z')])
     contract = TableContract('fixture report', ('report_key', 'available_at'), ('report_key',))
     receipt = publish_source('bha', {'reports': rows}, contracts={'reports': contract})
     with use_manifest({'sources': {'bha': receipt}}):
         recorded = features.cache_signature('2026-06-03')
-        signature = fe_signature()
         monkeypatch.setattr(config, 'BHA_FEATURE_AVAILABILITY_POLICY', 'race_plus_48h')
         assert features.cache_signature('2026-06-03') != recorded
-        assert fe_signature() != signature
 
 
 def test_historical_writer_records_the_policy_and_real_runner_keys(tmp_path, monkeypatch):
