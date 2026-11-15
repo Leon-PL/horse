@@ -77,7 +77,7 @@ The new feature-schema and context modules are registered in the feature-code
 signature. Existing stores need the normal rebuild and matching model refit
 before use with the new generation. No model is automatically promoted.
 
-The [review and follow-up](../research/FEATURE_ENGINEERING_CONSOLIDATION_REVIEW_2026-11-07.md)
+The [review and follow-up](../archive/research/FEATURE_ENGINEERING_CONSOLIDATION_REVIEW_2026-11-07.md)
 record the original findings. A complete column-level dependency catalog,
 family extraction, persisted frequency encoders and finer artifact lineage
 remain further consolidation work. The changes here establish checked source,

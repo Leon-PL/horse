@@ -7,7 +7,7 @@ providers. Its source key is `bha`; it is no longer a standalone CSV-only tool.
 
 **Feature derivation update:** 161 prior-history numeric candidates are now wired
 into ordinary feature building for normal feature selection. No separate models
-were fitted. Read [the definitions and timing policy](../research/BHA_FEATURE_CANDIDATES_2026-11-07.md);
+were fitted. Read [the definitions and timing policy](../archive/research/BHA_FEATURE_CANDIDATES_2026-11-07.md);
 the latest user decision uses an explicit 48-hour feature-availability assumption.
 The collector still records actual capture times; it does not rewrite them as
 historical publication times.
@@ -140,6 +140,6 @@ tracked separately until publication. The deployment preserved every other
 selected source version and the original report CSV hash. Use live status for
 subsequent totals rather than treating these checkpoints as completion.
 
-The [initial audit](BHA_STEWARDS_SOURCE_AUDIT_2026-11-07.md) describes the state
+The [initial audit](../archive/operations/BHA_STEWARDS_SOURCE_AUDIT_2026-11-07.md) describes the state
 before this integration, including the scope limits of the earlier negative
 feature experiment.

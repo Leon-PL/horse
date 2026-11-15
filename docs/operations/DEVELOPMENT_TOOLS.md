@@ -13,7 +13,6 @@ Run from the project root in PowerShell:
 .\scripts\tooling.ps1 setup
 .\scripts\tooling.ps1 venv
 .\scripts\tooling.ps1 test
-.\scripts\tooling.ps1 validate
 .\scripts\tooling.ps1 lint
 ```
 
@@ -79,7 +78,7 @@ SHAP (race explanations in `src/model.py`) is locked at `0.54.1`, the first
 release that resolves with `numba==0.64.0`; the live installation's `0.50.0`
 pins an unavailable numba prerelease on Python 3.14 and cannot be locked.
 `psutil` is a runtime dependency: `src/store_build.py` reports the build's
-memory with it when present, and `scripts/benchmark_data_queries.py` requires it.
+memory with it when present.
 
 On 2026-10-30 every direct dependency was checked against the project's
 imports. XGBoost, CatBoost and lxml had no remaining use and were removed with
@@ -104,31 +103,6 @@ before using the local uv executable. Regenerate the pip export afterwards:
 data\tooling\bootstrap\Scripts\uv.exe export --frozen --no-dev --no-group tooling --no-hashes --no-emit-project --output-file requirements.lock
 ```
 
-## Pandera: settled-field contracts
-
-[data_contracts.py](../../src/data_contracts.py) defines an opt-in schema for
-required columns, identities, dates, positions, winner flags and field sizes.
-Its whole-field check delegates to the existing `valid_race_mask` in
-`src/forecast_evaluation.py`, keeping one racing-specific rule owner.
-
-The schema never coerces types, adds columns, drops rows or fills histories.
-Genuine non-finishers remain starts. Extra feature columns and legitimate
-missing form values are preserved. It is an audit pilot outside the pinned
-training/serving imports.
-
-`tooling.ps1 validate` reads metadata columns from processed history. Its
-explicit `--eligible-only` mode first applies the existing whole-field rule:
-
-| Item | Runners | Fields |
-|---|---:|---:|
-| Source | 754,842 | 80,250 |
-| Existing exclusions | 1,549 | 162 |
-| Successfully validated | 753,293 | 80,088 |
-
-The source was unchanged. Invoke `scripts/validate_data_contracts.py` without
-`--eligible-only` to audit all stored fields strictly; known invalid fields
-will cause failure rather than being silently repaired.
-
 ## Hypothesis: generated racing cases
 
 [Generated invariant tests](../../tests/test_generated_racing_invariants.py)
@@ -144,35 +118,6 @@ exercise existing behavior on deterministic, bounded random cases:
 Contract and query tests add malformed-field and read-only fixture checks.
 Optional-library tests skip in the old environment if dependencies are absent;
 the tooling setup installs and executes them.
-
-## DuckDB: measured query pilot
-
-```powershell
-.\scripts\tooling.ps1 benchmark
-```
-
-The default report path is exclusive. For another run, invoke
-`scripts/benchmark_data_queries.py` with a new `--output` using the isolated
-Python. Each fresh worker reads the same dates and four numeric inputs from
-the 2.71 GB feature file and aggregates daily counts and means. Pandas already
-uses PyArrow column selection and date filters; the baseline does not load
-the full feature matrix unnecessarily.
-
-Both engines returned equivalent results for **32,523 runners / 90 dates**.
-Three fresh-worker repetitions per engine, two threads, alternating order:
-
-| Engine | Median query time | Median sampled peak process RSS |
-|---|---:|---:|
-| pandas/PyArrow | 0.305 seconds | 158.5 MiB |
-| DuckDB | 0.401 seconds | 190.9 MiB |
-
-DuckDB did not improve this query, so the normal read path is retained.
-It remains optional for future join-heavy research queries with their own
-benchmarks. This result does not measure full training or all SQL workloads.
-OS file caches were not cleared. Whole-process RSS was sampled every 5 ms and
-includes imported libraries. The live recorder was left running.
-Both workers import the same comparison libraries before timing, so these are
-benchmark-process memory figures rather than the normal app's memory use.
 
 ## Evidence
 

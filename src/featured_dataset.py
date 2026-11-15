@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 # Config flags that change FE output. Keep in sync with the flags read at
 # runtime by feature_engineer.py / ratings.py (see the audit grep in
-# docs/architecture/FE_REFACTOR_PLAN.md). A change to any of these invalidates the store.
+# docs/archive/architecture/FE_REFACTOR_PLAN.md). A change to any of these invalidates the store.
 FE_CONFIG_KEYS = [
     "ROLLING_WINDOWS",
     "GLICKO_ENABLED", "GLICKO_JOCKEY_TRAINER", "GLICKO_DIMENSIONAL",

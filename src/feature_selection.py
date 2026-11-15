@@ -2,7 +2,7 @@
 
 The allowlist this replaces was the top 150 by LightGBM *gain* from one pilot
 fit, on one split, on a store that still held three leaks, and it was then
-patched by hand for four months (``docs/research/FEATURE_SELECTION_048.md``). Gain
+patched by hand for four months (``docs/archive/research/FEATURE_SELECTION_048.md``). Gain
 rewards leaked and high-cardinality columns and splits credit between
 correlated copies; a single in-sample fit says nothing about generalisation.
 

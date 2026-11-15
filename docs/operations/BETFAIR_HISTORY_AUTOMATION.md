@@ -91,7 +91,7 @@ and repeated accepted observations of one ID are retained in `identity_review/`
 before the cache is replaced; duplicate incoming identities still stop publication.
 Old PLACE parses gain IDs from their exact retained source revision during normal
 publication, including records published before that field was collected. See the
-[runner identity recovery](BETFAIR_RUNNER_IDENTITY_2026-11-06.md).
+[runner identity recovery](../archive/operations/BETFAIR_RUNNER_IDENTITY_2026-11-06.md).
 New files publish atomically under the source
 writer lock. A crash between outputs can be resumed idempotently.
 

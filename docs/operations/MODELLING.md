@@ -44,7 +44,7 @@ finishing-order targets and the historical market-teacher share. The last two
 are training choices; prediction needs no results or prices. It records the
 fitted vocabulary, IDF, weights, scale, optimisation, cutoff and input digest;
 prediction never initiates fitting. An incomplete text field masks the expert
-for the whole race. The [text development report](../research/TEXT_MODEL_IMPROVEMENTS_2026-11-08.md)
+for the whole race. The [text development report](../archive/research/TEXT_MODEL_IMPROVEMENTS_2026-11-08.md)
 records the evaluated recipes and the separate current candidate. This explicit
 raw-text component is not dispatched by the numeric `--spec` CLI yet.
 The [validated text recipe](../../reference/modelling/timeform_text_market_v1.json)
@@ -314,7 +314,7 @@ gating and the timed market tier require separate registered comparisons.
 The selection list or ensemble must earn adoption; infrastructure alone is not
 an accuracy gain.
 
-The [initial performance/spread reproduction](../research/PERFORMANCE_SPREAD_REPRODUCTION_2026-11-08.md)
+The [initial performance/spread reproduction](../archive/research/PERFORMANCE_SPREAD_REPRODUCTION_2026-11-08.md)
 records the first fixed native-capacity comparison and its evidence limits.
 
 ## Current default list (selection of 2026-11-12)

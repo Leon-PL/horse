@@ -1,61 +1,18 @@
 # Documentation
 
-The [Racing Workbench guide](operations/RACING_WORKBENCH.md) describes the local
-ingestion UI, race inspection, BHA reports, source health, jobs and review.
-The [Features workspace](operations/WORKBENCH_FEATURES.md) adds stored-value
-inspection, named feature sets and model roles, quality checks and shared-store
-build jobs.
+Start with the [operating guide](../README.md) and the
+[module map](PROJECT_INVENTORY.md).
 
-The [current racing data flow](../Racing%20Data%20Flow.md) and
-[shared source publication](operations/SOURCE_PUBLICATION_2026-11-07.md) describe
-the immutable input boundary introduced on 7 November.
-
-Start with the [operating guide](../README.md) and
-[current project structure](architecture/PROJECT_STRUCTURE.md).
-
-For modelling, use the [revised migration plan](architecture/MODELLING_REVIEW_AND_PLAN_2026-11-08.md)
-and [supported modelling operations](operations/MODELLING.md). The
-[implementation report](architecture/MODELLING_IMPLEMENTATION_2026-11-08.md)
-records the delivered foundations, baseline, text comparison and remaining work.
-The [performance/spread reproduction](research/PERFORMANCE_SPREAD_REPRODUCTION_2026-11-08.md)
-records the next registered submodel comparison.
-
-The [feature execution and schema contracts](architecture/FEATURE_CONTRACTS.md)
-describe selected source inputs, explicit categorical completion, strict model
-inputs and private feature working state.
-
-| Folder or index | Contents |
+| Document | Contents |
 |---|---|
-| [Project inventory](PROJECT_INVENTORY.md) | Apps, source responsibilities and individual tools |
-| [architecture/](architecture/) | Current boundaries and feature-build contracts |
-| [operations/](operations/) | Collection, backfills, source audits and maintenance instructions |
-| [research/](research/) | Numbered experiments, feature reviews and measured results |
-| [archive/](archive/) | Earlier plans, handoffs and superseded architecture |
-| [Negative results](NEGATIVE_RESULTS.md) | Evidence ledger; consult before repeating experiments |
-| [Research progress](MARKET_PERFORMANCE_PROGRESS.md) | Chronology and experiment references |
-
-For current collection work, read the [consolidation report](operations/PRE_FEATURE_CONSOLIDATION_2026-11-06.md), the [cleanup report](operations/PRE_FEATURE_CLEANUP_2026-11-05.md),
-the [automatic Betfair archive setup](operations/BETFAIR_HISTORY_AUTOMATION.md),
-the [Betfair import speed measurements](operations/BETFAIR_IMPORT_SPEED_2026-11-06.md),
-the [Betfair runner identity recovery](operations/BETFAIR_RUNNER_IDENTITY_2026-11-06.md),
-the [ATR backfill guide](operations/ATR_REBUILD_2026-11-05.md),
-the [ATR ID repair and speed report](operations/ATR_SPEED_AND_IDS_2026-11-07.md),
-the [regular BHA report collection guide](operations/BHA_REGULAR_INGESTION_2026-11-07.md),
-the [BHA feature definitions](research/BHA_FEATURE_CANDIDATES_2026-11-07.md), and the
-[source implementation notes](operations/STAGE1_IMPLEMENTATION_2026-11-04.md).
-Historical reports describe the state at their recorded date. Use the runtime
-status command for current data and model compatibility.
-
-New ATR candidate derivations and their measured source coverage are in
-[the rich-data feature report](research/ATR_RICH_FEATURES_2026-11-06.md).
-The [efficiency, consistency and field-usage follow-up](research/ATR_EFFICIENCY_AND_USAGE_2026-11-06.md)
-records corrected score interpretation and the full collected/used inventory.
-That inventory covers the existing sectional collector. The
-[jumps-data and source-gap audit](research/ATR_JUMPS_AND_SOURCE_GAPS_2026-11-06.md)
-corrects the missed Jumps Data tab, verifies its separate fluency/consistency
-measurements and records the tested collector's current scope.
-The [five-tab collection guide](operations/ATR_TAB_COVERAGE_2026-11-06.md) supersedes
-that prototype's collection status: both Jumps Data and Distance Ran are now
-integrated, with per-tab catch-up, empty-template checks and navigation monitoring.
-The [new-tab feature pack](research/ATR_NEW_TAB_FEATURES_2026-11-06.md) documents
-the derived jumping/path predictors, point-in-time guards and frozen export.
+| [operations/MATCHBOOK_PAPER.md](operations/MATCHBOOK_PAPER.md) | The live paper record: daily schedule, files, settlement |
+| [operations/MODELLING.md](operations/MODELLING.md) | Win-model recipes, benchmarks, selection and candidate fits |
+| [operations/FORECAST_BENCHMARK_PROTOCOL.md](operations/FORECAST_BENCHMARK_PROTOCOL.md) | How forecasts are compared |
+| [operations/RACING_WORKBENCH.md](operations/RACING_WORKBENCH.md), [WORKBENCH_FEATURES.md](operations/WORKBENCH_FEATURES.md) | The local UI |
+| [operations/SOURCE_PUBLICATION_2026-11-07.md](operations/SOURCE_PUBLICATION_2026-11-07.md) | Immutable source versions and dataset manifests |
+| [operations/BETFAIR_HISTORY_AUTOMATION.md](operations/BETFAIR_HISTORY_AUTOMATION.md), [ATR_REBUILD_2026-11-05.md](operations/ATR_REBUILD_2026-11-05.md), [RTV_SCRAPER.md](operations/RTV_SCRAPER.md), [BHA_REGULAR_INGESTION_2026-11-07.md](operations/BHA_REGULAR_INGESTION_2026-11-07.md), [FOREIGN_RACES.md](operations/FOREIGN_RACES.md) | Running collectors |
+| [operations/DEVELOPMENT_TOOLS.md](operations/DEVELOPMENT_TOOLS.md) | Environment and test tooling |
+| [architecture/FE_TAXONOMY.md](architecture/FE_TAXONOMY.md), [FEATURE_CONTRACTS.md](architecture/FEATURE_CONTRACTS.md) | Feature-build structure and contracts |
+| [research/](research/) | The studies the live rule rests on: 104, 105, 107, 108, 109 and the error anatomy behind the correction |
+| [ALREADY_TRIED.md](ALREADY_TRIED.md) | One-line index of earlier ideas and verdicts, with the judging rules |
+| [archive/](archive/) | Everything older: the full negative-results ledger, progress log, plans, audits and earlier research write-ups. History, not current fact |

@@ -29,14 +29,14 @@ All under `data/matchbook/`. One command runs the day:
 .venv\Scripts\python.exe -m src.matchbook day --refresh
 ```
 
-Timings measured on 15 November:
+Timings measured on 15 November (after research 109):
 
 | Step | Time |
 |---|---|
 | 14-day results sync | 35 min |
-| Full store rebuild | 30 min |
-| Card forecast, cold caches (as after a store refresh) | up to 27 min |
-| Card forecast, warm caches | 4–5 min |
+| Full store rebuild | 15–16.5 min |
+| Card forecast before research 109, cold caches | up to 27 min |
+| `prepare` (card, features, win model, correction inputs) | about 3 min |
 | 11:00 step after `prepare` | 1.1 s |
 
 Nothing slow waits for 11:00, so the bet prices are the 11:00 quotes. A runner

@@ -1,21 +1,23 @@
 # CLAUDE.md
 
-Start with **[README.md](README.md)**, the current operating guide, then use
-**[the project inventory](docs/PROJECT_INVENTORY.md)** to find the pipeline
-modules and operating commands. Run `scripts/project_status.py` for actual
+Start with **[README.md](README.md)**, the current operating guide. The live
+system is the Matchbook paper record of the 11:00 rule
+([operations guide](docs/operations/MATCHBOOK_PAPER.md)); the
+**[module map](docs/PROJECT_INVENTORY.md)** lists the pipeline modules. Run `scripts/project_status.py` for actual
 readiness; dated prose is not a substitute for that check.
 
 **Layout:** `src/` is pipeline code, `scripts/` operating commands only, and new
 experiments, screens and audits go in **[research/](research/README.md)**.
 Research may import `src`; nothing in `src/`, `scripts/` or `tests/` may import
-`research` (`tests/test_layout.py`). Earlier research code is in git at `26d1b6f`.
+`research` (`tests/test_layout.py`). Everything removed in the November 2026
+cleanup (old training/backtest path, retired research, feature sets, dated docs)
+is in git at tag `pre-cleanup-2026-11`.
 
 **[CONTINUATION.md](CONTINUATION.md)** holds the current session handoff.
-**[Implementation progress](docs/MARKET_PERFORMANCE_PROGRESS.md)** and the
-**[negative-results ledger](docs/NEGATIVE_RESULTS.md)** index measured evidence.
-`docs/archive/PROJECT_OUTLINE_before_cleanup_2026-11-05.md`, older plans and `docs/archive/NEXT_AGENT_BRIEF.md` retain historical
-architecture and research context; their old work queues and model IDs do not
-define the current task or installation.
+**[docs/ALREADY_TRIED.md](docs/ALREADY_TRIED.md)** indexes earlier ideas and
+their verdicts; the full ledger, progress log, plans and audits are in
+`docs/archive/`. They were measured on older pipelines: history, not current
+fact, and their work queues and model IDs do not define the current task.
 
 The rules below are the ones that cause real damage when violated.
 
@@ -27,7 +29,7 @@ The rules below are the ones that cause real damage when violated.
    leaks across horses. Use `transform(lambda x: x.cummax().shift(1))`.
 2. **Bet rules live in `src/bet_settlement.py`.** Value thresholds, the
    each-way odds band, and settlement PnL maths are shared by the test-set
-   simulation, the walk-forward backtester, and live settlement. Never
+   simulation, research rehearsals and the Matchbook paper record. Never
    inline them — backtest and live results must use identical formulas.
 3. **Merge keys live in `src/utils.py`** (`normalise_horse_key`,
    `normalise_track_key`, `normalise_off_time_key`). Use them for any
@@ -53,11 +55,11 @@ The rules below are the ones that cause real damage when violated.
 
 ## Before proposing a new feature or data source
 
-Read **[docs/NEGATIVE_RESULTS.md](docs/NEGATIVE_RESULTS.md)**. It records what
-has already been built, measured and refuted, with numbers: sale price, wind
-surgery, trainer travel, jockey booking, stewards reports and par-time speed
-figures are all dead, as is the market combination (measured twice, on two
-different harnesses).
+Read **[docs/ALREADY_TRIED.md](docs/ALREADY_TRIED.md)**. It indexes what has
+already been built and measured: sale price, wind surgery, trainer travel,
+jockey booking, stewards reports, par-time speed figures and the market
+combination all came out dead on the pipelines of their day. Retry one only
+with a concrete reason the old test no longer applies.
 
 Judge candidates by **orthogonality to the market** (correlation with
 `won − market_implied_prob`) and by **CLV at BSP**, not raw predictiveness.
@@ -72,7 +74,7 @@ on the same bets).
 When comparing a selection rule to "no filter", compare against the **same
 universe the rule bets in**, not the whole band. A price-capped rule looks
 like a big win against an unrestricted baseline purely for avoiding long
-prices. (The retired `scripts/audit_selection_rule.py`, commit `26d1b6f`, reported both.)
+prices.
 
 ## Practical notes
 
@@ -82,9 +84,15 @@ prices. (The retired `scripts/audit_selection_rule.py`, commit `26d1b6f`, report
   `scripts/tooling.ps1 setup` builds the separate tooling env. Dependencies
   are declared in `pyproject.toml`, resolved in `uv.lock`, and exported to
   `requirements.lock`.
-- The project is in an experimentation phase with no live model. The forward
-  recorder and its source-pinned studies were removed on 2026-10-30; do not
-  rebuild that kind of source pinning, which made every edit a new study.
+- The live model is the Matchbook paper record (win run
+  `20261114_122027_967139` plus the correction in `data/matchbook/model`,
+  scheduled task `HorseMatchbookPaper`). It is read-only: nothing places bets.
+  Do not change `src/matchbook`, `src/correction` or the store on a racing
+  morning (07:50 until the last race). Do not reintroduce source-pinned
+  studies, which made every edit a new study.
+- The feature store keeps only `src/store_columns.py`'s 518 numeric columns,
+  generated by `research/feature_pruning_109/keep_list.py`. To use a dropped
+  column, add it to a feature-set file, regenerate and rebuild (~15 min).
 - Run `scripts/tooling.ps1 test` for pilot checks or
   `scripts/tooling.ps1 test -TestPath tests` for the full suite. See
   [development tools](docs/operations/DEVELOPMENT_TOOLS.md) for compatibility limits.

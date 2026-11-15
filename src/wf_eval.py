@@ -28,7 +28,7 @@ decision-changing errors:
   :func:`expanding_period_folds` applies the production purge by default.
 
 Use these helpers rather than hand-rolling a fold loop. See
-``docs/NEGATIVE_RESULTS.md`` for the bar an edge claim has to clear.
+``docs/ALREADY_TRIED.md`` for the bar an edge claim has to clear.
 """
 
 from __future__ import annotations

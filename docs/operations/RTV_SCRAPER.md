@@ -2,11 +2,11 @@
 
 `src/ingestion/racing_tv.py` collects everything Racing TV publishes about British and
 Irish races, from the JSON API its website calls. It replaces the scraper
-deleted on 2026-10-13 (see the [audit](RTV_SCRAPER_AUDIT_2026-10-29.md)). It
+deleted on 2026-10-13 (see the [audit](../archive/operations/RTV_SCRAPER_AUDIT_2026-10-29.md)). It
 is connected to normal source refreshes through `src/ingestion/pipeline.py`.
 Training, the Data app, picks and the recorder collect RTV sidecars automatically.
 The installed model has no selected RTV inputs; source collection and predictive
-adoption remain separate. See [the current comparison/integration](../research/RTV_PIPELINE_043.md).
+adoption remain separate. See [the current comparison/integration](../archive/research/RTV_PIPELINE_043.md).
 
 ## What it collects
 

@@ -2,7 +2,7 @@
 
 Ordinary processing, feature builds and training now select immutable accepted
 source versions. The collector-specific raw stores and active backfills remain
-in place. [Racing Data Flow](../../Racing%20Data%20Flow.md) describes the boundary.
+in place. [Racing Data Flow](../archive/Racing%20Data%20Flow.md) describes the boundary.
 
 ## Implementation
 

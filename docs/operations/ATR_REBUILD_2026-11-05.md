@@ -7,7 +7,7 @@ fields for the missing endpoints, reusing retained raw HTML. The queue now has
 per-tab coverage and a source navigation drift check. Final verification covers
 272 distinct checks. Following final reporting qualification at 12:30, current
 worker PID 16432, launcher 6748, pacing unchanged at two seconds.
-Read [the five-tab operating guide](ATR_TAB_COVERAGE_2026-11-06.md) for current
+Read [the five-tab operating guide](../archive/operations/ATR_TAB_COVERAGE_2026-11-06.md) for current
 scope, pins, missingness rules and evidence. Older three-tab coverage, pin lists
 and throughput figures below describe the earlier generation.
 
@@ -18,7 +18,7 @@ The guard now pins the **collector and worker**, excluding `atr_features.py`,
 which raw collection does not execute. A regression test confirms feature edits
 do not stop collection while parser/worker edits still do. Feature calculations
 remain guarded by the normal feature signature. All 178 relevant checks passed.
-The [efficiency/consistency usage audit](../research/ATR_EFFICIENCY_AND_USAGE_2026-11-06.md)
+The [efficiency/consistency usage audit](../archive/research/ATR_EFFICIENCY_AND_USAGE_2026-11-06.md)
 and `data/audit/atr_efficiency_20261106/` record the change, queue backup and resume.
 
 **6 November recovery, 07:16 UTC:** a feature-performance edit to shared ATR

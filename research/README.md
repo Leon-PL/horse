@@ -26,7 +26,7 @@ Experiments, screens, audits and benchmarks live here, apart from the pipeline.
    scans every file in this folder.
 4. **Outputs** go to `data/research/<experiment>/`. Record the result in
    [docs/research/](../docs/research/) and, if refuted, in the
-   [negative-results ledger](../docs/NEGATIVE_RESULTS.md).
+   [already-tried index](../docs/ALREADY_TRIED.md).
 5. **Promotion into the pipeline** means moving the code into `src/` with tests.
    A module that can change a feature value must be registered in
    `_FE_SOURCE_FILES` (`src/featured_dataset.py`).
