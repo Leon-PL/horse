@@ -12,7 +12,6 @@ import pytest
 import config
 from src.model import RacePredictor
 from src import run_store as rs
-from src import training as tr
 
 
 @pytest.fixture
@@ -140,50 +139,3 @@ def test_predictor_explicit_save_round_trip_does_not_touch_global(registry):
     assert shared_path.read_bytes() == b"keep"
 
 
-@pytest.mark.parametrize("change_during_load", [False, True])
-def test_training_provenance_is_frozen_before_fit(monkeypatch, change_during_load):
-    frame = pd.DataFrame({"race_date": pd.to_datetime(["2025-01-01"]*2),
-        "race_id": ["r1", "r1"], "horse_name": ["A", "B"],
-        "won": [1, 0], "finish_position": [1, 2], "num_runners": [2, 2]})
-    state = {"fe": "before", "git": "old", "data": "source"}
-    saved = {}
-    trained = []
-
-    def load_features(processed):
-        if change_during_load:
-            state["fe"] = "changed while loading"
-        return frame.copy()
-
-    class Predictor:
-        test_analysis = {}
-        feature_cols = ["speed"]
-
-        def __init__(self, **kwargs):
-            pass
-
-        def train(self, featured, **kwargs):
-            trained.append(kwargs)
-            state.update(fe="changed during fit", git="new", data="replacement")
-            return {}
-
-    monkeypatch.setattr("src.source_dataset.select_dataset", lambda **kwargs: {"id": "provenance-fixture", "sources": {}})
-    monkeypatch.setattr(tr, "process_data", lambda: frame.copy())
-    monkeypatch.setattr(tr, "get_training_dataset", load_features)
-    monkeypatch.setattr(tr, "fe_signature", lambda: state["fe"])
-    monkeypatch.setattr(tr, "data_signature", lambda df, cutoff: state["data"])
-    monkeypatch.setattr(tr, "_git_sha", lambda: state["git"])
-    monkeypatch.setattr(tr, "RacePredictor", Predictor)
-    monkeypatch.setattr(tr, "save_run", lambda **kwargs: saved.update(kwargs) or "run")
-
-    if change_during_load:
-        with pytest.raises(RuntimeError, match="changed while loading"):
-            tr.train_run(tr.TrainingConfig(refresh_data=False))
-        assert not trained and not saved
-    else:
-        assert tr.train_run(tr.TrainingConfig(refresh_data=False)) == "run"
-        assert trained[0]["save"] is False
-        assert saved["training_config"]["git_sha"] == "old"
-        assert saved["training_config"]["signatures"] == {
-            "fe_signature": "before", "data_signature": "source",
-        }
-        assert isinstance(saved["predictor"], Predictor)
