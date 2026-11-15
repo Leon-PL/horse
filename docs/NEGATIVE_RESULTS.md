@@ -1,5 +1,17 @@
 # Negative Results Ledger
 
+## 105. Betting the corrected forecast at a morning price: beats the close retrospectively; 11:00 beats T-60 (15 November 2026)
+
+[Report](research/T60_CLV_105.md). Scored quarters 2025Q3–2026Q2, value rule
+from `src.bet_settlement` against the race share at the cut, odds ≤ 51,
+reduction factors applied. T-60, threshold 0: geo CLV 1.0047, ROI +3.4%
+[+0.6, +6.3], gone at one tick worse (+0.2%). 11:00, threshold 0.02: geo CLV
+1.0424, ROI +7.1% [+2.6, +11.6], and +4.6% [+0.4, +9.2] at two ticks worse.
+Same universes: geo CLV 0.946 (T-60), 0.904 (11:00). Retrospective (recipe
+chosen on these quarters), taken at LTP: an open lead, not a confirmed edge.
+Model + BSP against BSP (walk-forward two-weight blend): corrected −0.00044
+[−0.00091, +0.00006] 3/3, native −0.00009; the close holds almost everything.
+
 ## 104. Price timing: a fixed hour before the off beats 11:00; hours-to-off adds nothing (15 November 2026)
 
 [Report](research/PRICE_TIMING_104.md). Inside the joint correction, native,
