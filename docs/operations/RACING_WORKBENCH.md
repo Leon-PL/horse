@@ -26,7 +26,7 @@ does not stop independently running collectors or workbench background jobs.
 | Sources | Shared health layout for SL, RTV, ATR, Betfair, BHA, pedigree, FX and weather; contracts, missingness, identity reasons and provenance |
 | Coverage | Accepted observations by source/date at the source's own grain; reference and publication-window states; click through to races |
 | Features | Shared-store status, named model input sets, race values, catalog, bounded quality checks and explicit feature-build jobs |
-| Modelling | Data and model readiness, walk-forward benchmarks, saved runs and candidate fitting |
+| Modelling | Data and model readiness, walk-forward benchmarks, saved runs, candidate fitting and historical evaluation |
 | Jobs | Existing worker state, bounded refresh, pedigree/weather options, retained SL replay, local source publication, dataset integrity checks, race checks and ATR graceful stop/resume |
 | Review queue | Bounded race/ATR findings, persistent acknowledgement/investigation states, bookmarks, notes and saved correction proposals |
 
@@ -78,6 +78,13 @@ completed benchmark and select a settled cutoff at or after its last scored race
 saved reports and metadata. The benchmark and fit use the same checks as the
 [modelling commands](MODELLING.md). A saved win-only fit has no held-out score
 for its own weights and is ineligible for win/place promotion.
+
+**Modelling → Evaluation** opens a saved test report and its bet ledger. Select a
+strategy, quarter and odds band to see units staked, profit, ROI, win strike rate,
+end-of-day drawdown and recorded bets. The saved Betfair SP CLV and calibration
+cover the full strategy and forecast samples respectively. Study 105 uses the
+archived 11:00 and T-60 snapshots and the recorded selection and settlement rules.
+Its one-tick control applies to the adjusted price before selecting bets.
 
 Regular collection and replay ranges are limited to 31 settled days. Race search
 is paginated and accepts up to 93 days; coverage accepts up to 366 days. Review

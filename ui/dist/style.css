@@ -10,6 +10,40 @@
 @media(max-width:620px){.feature-controls,.feature-family-grid,.feature-race-picker{grid-template-columns:1fr}.feature-family-grid{padding:0 16px 16px}.feature-provenance{gap:9px;flex-direction:column}.feature-matrix .sticky-runner{min-width:135px}.feature-role{flex-wrap:wrap}.feature-tabs{gap:22px}.feature-metrics{gap:9px}.feature-value-hero{align-items:flex-start;flex-direction:column}.feature-controls{padding:14px}}
 
 .modelling-context .date-range { display: none; }
+.evaluation-context { display: none; }
+#bet-history, #odds-band-breakdown { scroll-margin-top: 64px; }
+#run-feature-importance { scroll-margin-top: 64px; }
+#run-feature-importance > [data-importance-content] > .panel { margin: 0 16px 16px; }
+.importance-share { display: inline-flex; align-items: center; gap: 9px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.importance-share meter { width: clamp(48px, 9vw, 125px); height: 10px; }
+.model-summary .actions { margin-top: 9px; }
+.bet-history-pager, .bet-history-pager .actions { flex-wrap: wrap; }
+.bet-history-pager .button[aria-current="page"] { cursor: default; }
+.bet-history-jump input { width: 66px; min-height: 28px; border: 1px solid var(--line); border-radius: 6px; padding: 4px 7px; font: inherit; color: var(--ink); }
+.evaluation-modes { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.evaluation-filters { display: flex; align-items: end; flex-wrap: wrap; gap: 14px; }
+.evaluation-field { display: grid; gap: 6px; min-width: 112px; flex: 1 1 130px; color: var(--muted); font-size: 12px; }
+.evaluation-filters:not(.timing-filters) .evaluation-field:first-child { flex-basis: 280px; }
+.evaluation-field select { min-width: 0; width: 100%; height: 38px; background: white; border: 1px solid var(--line); border-radius: 7px; padding: 7px 10px; color: var(--ink); }
+.evaluation-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+.evaluation-metrics .metric-number { font-size: clamp(19px, 2vw, 30px); }
+.evaluation-clv { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; padding: 17px 19px; background: #f4f7f0; border-radius: 8px; }
+.evaluation-clv h3 { margin: 0 0 5px; font-size: 13px; }
+.evaluation-clv p { margin: 0; font-size: 11px; color: var(--muted); }
+.evaluation-clv dl { display: flex; flex-wrap: wrap; gap: 24px; margin: 0; }
+.evaluation-clv dt { color: var(--muted); font-size: 11px; }
+.evaluation-clv dd { margin: 5px 0 0; font-size: 16px; font-variant-numeric: tabular-nums; }
+.evaluation-chart { max-width: 850px; margin: 0; }
+.calibration-chart { max-width: 540px; margin-top: 14px; }
+.evaluation-chart svg { display: block; width: 100%; }
+.evaluation-chart text { fill: #566e5f; font: 11px sans-serif; }
+.evaluation-chart figcaption { color: var(--muted); font-size: 11px; }
+.evaluation-line { fill: none; stroke: #397354; stroke-width: 2; }
+.chart-gridline { stroke: #dfe8dd; }
+.chart-zero, .chart-reference { stroke: #83998a; stroke-dasharray: 4 4; fill: none; }
+.calibration-point { fill: #397354; stroke: white; stroke-width: 1.5; }
+.calibration-chart + .table-wrap { max-width: 540px; margin-top: 12px; }
+@media(max-width: 760px) { .evaluation-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .modelling-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .modelling-properties { margin: 0 0 16px; }
 .modelling-properties > div { display: contents; }

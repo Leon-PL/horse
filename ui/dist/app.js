@@ -322,6 +322,7 @@ async function render(showLoading=true) {
  state.page=segments[0];
  if(!['overview','races','race','sources','coverage','features','modelling','paper','jobs','review'].includes(state.page)){location.hash='overview';return;}
  $('.contextbar').classList.toggle('modelling-context',state.page==='modelling');
+ $('.contextbar').classList.toggle('evaluation-context',state.page==='modelling' && segments[1]==='evaluation');
  $$('#navigation a').forEach(a=>a.classList.toggle('active',a.dataset.page===(state.page==='race'?'races':state.page)));
  if(showLoading)$('#main').innerHTML='<div class="loading"><span class="spinner"></span>Reading your local data…</div>';
  try{

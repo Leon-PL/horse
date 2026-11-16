@@ -1,9 +1,12 @@
+import {createEvaluationUI} from './evaluation.js';
+
 export function createModellingUI({api, esc, number, pretty, banner, badge, empty, metric, toast, state, heading, queue, dateLabel}) {
  const $ = selector => document.querySelector(selector);
  const value = text => esc(text ?? 'Not recorded');
  const score = n => typeof n === 'number' && Number.isFinite(n) ? n.toFixed(5) : '—';
  const date = raw => esc(dateLabel(raw));
  const runLink = (run, label = run.name || run.id) => `<a class="link-button" href="#modelling/runs/${esc(run.id)}">${esc(label)}</a>`;
+ const importanceLink = run => `<a class="button small" href="#modelling/runs/${esc(run.id)}?importance=1">Feature importance</a>`;
  const benchmarkLink = (id, label) => `<a class="link-button" href="#modelling/benchmarks/${esc(id)}">${esc(label)}</a>`;
  const runType = run => ({win_stack_candidate: 'Win-only candidate', race_predictor: 'Win/place predictor'})[run.type] || pretty(run.type);
  const panel = (title, body, description = '') => `<section class="panel"><div class="panel-head"><div><h2>${esc(title)}</h2>${description ? `<p>${esc(description)}</p>` : ''}</div></div>${body}</section>`;
@@ -14,6 +17,7 @@ export function createModellingUI({api, esc, number, pretty, banner, badge, empt
  const blockers = (title, reasons, action = '') => reasons.length ? banner(title, reasons.join(' '), 'error', action) : '';
  const compatibility = run => run.matches == null ? badge('Unverified', 'neutral')
   : run.matches ? badge('Feature definitions match') : badge('Feature mismatch', 'warning');
+ const evaluation = createEvaluationUI({api, esc, number, pretty, empty, metric, dateLabel, panel, body, table, score, date});
 
  function overview(data) {
   const {store, promoted, latest_candidate: candidate, history, sources} = data;
@@ -34,7 +38,8 @@ export function createModellingUI({api, esc, number, pretty, banner, badge, empt
    <div class="actions"><a class="button small" href="#features/overview">Inspect features</a><a class="button small" href="#sources">Review sources</a></div>`));
   const models = panel('Saved models', body(`
    <div class="model-summary"><h3>Promoted win/place run</h3>
-    ${promoted ? `${runLink(promoted)} ${compatibility(promoted)}<p>Fitted through ${date(promoted.trained_through)}. ${esc(promoted.promotion)}</p>`
+    ${promoted ? `${runLink(promoted)} ${compatibility(promoted)}<p>Fitted through ${date(promoted.trained_through)}. ${esc(promoted.promotion)}</p>
+      ${promoted.has_model ? `<div class="actions">${importanceLink(promoted)}</div>` : ''}`
       : `<p>${data.promoted_id ? 'Promoted run metadata is unavailable.' : 'No run is promoted.'}</p>`}
    </div>
    <div class="model-summary"><h3>Latest win-only candidate</h3>
@@ -121,14 +126,52 @@ export function createModellingUI({api, esc, number, pretty, banner, badge, empt
    ])) : empty('No saved runs', 'Fit a candidate from a completed benchmark.'));
  }
 
- function runDetail(run) {
+ function importanceTable(features, peak) {
+  return table(['Feature', 'Share of gain', 'Splits'], features.map(row => [
+   `<span class="mono">${esc(row.feature)}</span>`,
+   `<span class="importance-share"><meter min="0" max="${peak}" value="${row.gain_share}" aria-label="${number(row.gain_share*100)}% of gain"></meter>
+    <span>${number(row.gain_share*100)}%</span></span>`,
+   number(row.splits)
+  ]));
+ }
+
+ async function loadImportance(section) {
+  if (!section.open || section.dataset.loaded) return;
+  section.dataset.loaded = 'loading';
+  const target = section.querySelector('[data-importance-content]');
+  target.innerHTML = '<div class="loading"><span class="spinner"></span>Reading saved feature importance…</div>';
+  try {
+   const {components} = await api(`modelling/runs/${encodeURIComponent(section.dataset.run)}/importance`);
+   if (!section.isConnected) return;
+   const results = components.map(({label, features}, index) => {
+    const peak = features[0]?.gain_share || 1;
+    return `<details class="panel" ${index === 0 ? 'open' : ''}><summary class="panel-head"><h2>${esc(label)}</h2>
+     ${badge(`${number(features.length)} inputs`, 'neutral')}</summary>
+     ${importanceTable(features.slice(0,20), peak)}
+     ${features.length > 20 ? body(`<details><summary>Show remaining ${number(features.length-20)} features</summary>
+       ${importanceTable(features.slice(20), peak)}</details>`) : ''}
+    </details>`;
+   }).join('');
+   target.innerHTML = body('<p class="hint">Gain is the improvement attributed to splits on a feature during fitting. The chart ranks features by their share of gain within each model.</p>') +
+    (results || empty('No feature importance available', 'This run has no fitted LightGBM trees to inspect.'));
+   section.dataset.loaded = 'true';
+  } catch (error) {
+   if (section.isConnected) target.innerHTML = body(banner('Feature importance unavailable', error.message, 'error'));
+   delete section.dataset.loaded;
+  }
+ }
+
+ function runDetail(run, showImportance) {
   const metrics = Object.entries(run.metrics);
   return `<a class="back-link" href="#modelling/runs">← All saved runs</a>` +
    panel(run.name || run.id, body(`<div class="actions">${compatibility(run)}${run.promoted ? badge('Promoted') : ''}</div>
     <p class="hint">${esc(run.promotion)}</p>
     ${props([['Run', run.id], ['Created', run.created_at], ['Fitted through', dateLabel(run.trained_through)], ['Inputs', run.features],
      ['Training rows', run.runners], ['Accepted dataset', run.dataset], ['Feature definition', run.signature], ['Model weights', run.has_model ? 'Saved' : 'Unavailable']])}
-    ${run.benchmark_id ? benchmarkLink(run.benchmark_id, 'Open source benchmark →') : ''}`), runType(run)) +
+    <div class="actions">${run.benchmark_id ? benchmarkLink(run.benchmark_id, 'Open source benchmark →') : ''}
+     <a class="button small" href="#modelling/evaluation/${esc(run.id)}">Open evaluation</a></div>`), runType(run)) +
+   (run.has_model ? `<details id="run-feature-importance" class="panel" data-run="${esc(run.id)}" ${showImportance ? 'open' : ''}>
+    <summary class="panel-head"><h2>Feature importance</h2></summary><div data-importance-content></div></details>` : '') +
    (metrics.length ? panel('Saved hold-out scores', table(['Head', 'Brier', 'Binary log loss', 'Calibration error'], metrics.map(([id, m]) => [
      esc(pretty(id)), score(m.brier_score), score(m.log_loss), score(m.ece)
    ])), `${number(run.holdout_races)} hold-out races`) : banner('No held-out score recorded for this fit', run.performance_claim || '')) +
@@ -136,19 +179,39 @@ export function createModellingUI({api, esc, number, pretty, banner, badge, empt
  }
 
  async function render(tab = 'overview', id, ticket) {
-  const tabs = {overview: 'Overview', benchmarks: 'Benchmarks', runs: 'Runs'};
+  const tabs = {overview: 'Overview', benchmarks: 'Benchmarks', runs: 'Runs', evaluation: 'Evaluation'};
   if (!Object.hasOwn(tabs, tab)) tab = 'overview';
-  const detail = id && tab !== 'overview';
+  const [identifier, runQuery] = tab === 'runs' ? (id || '').split('?') : [id];
+  const detail = identifier && tab !== 'overview';
+  const showImportance = tab === 'runs' && new URLSearchParams(runQuery).has('importance');
   const params = {dataset: state.dataset};
   const route = `modelling/${tab}`;
-  const data = await api(detail ? `${route}/${encodeURIComponent(id)}` : route, params);
+  const data = tab === 'evaluation' ? await evaluation.load(id)
+   : await api(detail ? `${route}/${encodeURIComponent(identifier)}` : route, params);
   if (ticket !== state.ticket) return;
-  const content = tab === 'overview' ? overview(data) : tab === 'runs' ? (detail ? runDetail(data) : runs(data))
+  const content = tab === 'evaluation' ? evaluation.content(data) : tab === 'overview' ? overview(data) : tab === 'runs' ? (detail ? runDetail(data, showImportance) : runs(data))
    : detail ? benchmark(data, data.selected_dataset, data.build_id) : benchmarks(data);
   $('#main').innerHTML = heading('Modelling', 'Inspect readiness, benchmark win recipes and fit candidates.', '', 'MODEL DEVELOPMENT') +
    `<nav class="tabs feature-tabs" aria-label="Modelling views">${Object.entries(tabs).map(([key, label]) =>
      `<a href="#modelling/${key}" ${tab === key ? 'class="active" aria-current="page"' : ''}>${label}</a>`).join('')}</nav>` + content;
+  if (tab === 'evaluation') {
+   const section = data.params.get('section') === 'odds-bands' ? $('#odds-band-breakdown')
+    : data.params.has('page') ? $('#bet-history') : null;
+   section?.focus({preventScroll: true});
+   section?.scrollIntoView();
+  }
+  if (showImportance) {
+   const importance = $('#run-feature-importance');
+   if (importance) {
+    importance.scrollIntoView();
+    void loadImportance(importance);
+   }
+  }
  }
+
+ document.addEventListener('toggle', event => {
+  if (event.target.matches('#run-feature-importance')) void loadImportance(event.target);
+ }, true);
 
  document.addEventListener('submit', async event => {
   const form = event.target.closest('[data-model-form]');

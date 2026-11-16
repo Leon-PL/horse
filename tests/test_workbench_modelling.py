@@ -96,3 +96,8 @@ def test_benchmark_to_candidate_preserves_recipe_and_evaluation(featured, monkey
     assert run["benchmark_id"] == identifier
     assert run["components"]["generalist"]["recipe"]["features"] == recipe["features"]
     assert not run["metrics"] and not run["promoted"]
+    importance, = service.importance(run["id"])["components"]
+    assert importance["label"] == "generalist"
+    assert {f["feature"] for f in importance["features"]} == set(recipe["features"])
+    assert sum(f["gain_share"] for f in importance["features"]) == pytest.approx(1)
+    assert importance["features"][0]["splits"] > 0

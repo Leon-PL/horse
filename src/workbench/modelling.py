@@ -4,7 +4,9 @@ from datetime import date, timedelta
 import hashlib
 import io
 import json
+from math import isfinite
 import os
+from pathlib import Path
 import re
 
 from src.workbench.data import read_json
@@ -22,6 +24,41 @@ def artifact_json(path):
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def fitted_feature_importance(predictor):
+    """Report the fitted LightGBM trees separately for each supported model head."""
+    from src.modelling.candidate import WinCandidate
+    from src.modelling.performance import PerformanceModel
+    from src.modelling.win import WinModel
+
+    heads = []
+    if isinstance(predictor, WinCandidate):
+        for name, model in predictor.models.items():
+            if isinstance(model, WinModel):
+                heads.append((name, model.estimator, model.spec.features))
+            elif isinstance(model, PerformanceModel):
+                heads.extend(((f"{name} · mean", model.mean, model.spec.features),
+                              (f"{name} · spread", model.spread, model.spec.features)))
+    else:
+        heads.extend((("Win", predictor.clf_model, predictor.feature_cols),
+                      ("Place", predictor.place_model, predictor.feature_cols)))
+
+    components = []
+    for label, estimator, features in heads:
+        booster = getattr(estimator, "booster_", None)
+        if booster is None:
+            continue
+        gains = booster.feature_importance("gain").tolist()
+        splits = booster.feature_importance("split").tolist()
+        if len(gains) != len(features) or len(splits) != len(features) or not all(isfinite(g) and g >= 0 for g in gains):
+            raise ValueError("Fitted feature names and tree importance could not be aligned")
+        total_gain = sum(gains)
+        ranked = [{"feature": name, "gain_share": gain/total_gain if total_gain else 0.0, "splits": count}
+                  for name, gain, count in zip(features, gains, splits, strict=True)]
+        ranked.sort(key=lambda row: (-row["gain_share"], -row["splits"], row["feature"]))
+        components.append({"label": label, "features": ranked})
+    return {"components": components}
 
 
 class Modelling:
@@ -188,6 +225,30 @@ class Modelling:
                 "components": lineage.get("components", {}),
                 "performance_claim": lineage.get("performance_claim"),
                 "metrics": (config.get("evals") or {}).get("calibration", {}) if row["holdout_races"] else {}}
+
+    def importance(self, identifier):
+        from src.run_store import load_run_predictor, run_model_path
+
+        if not RUN_ID.fullmatch(identifier):
+            raise FileNotFoundError("Saved run was not found")
+        folder = self.runs_root/identifier
+        metadata, model = folder/"meta.json", folder/"model.joblib"
+        if metadata.resolve() != metadata or model.resolve() != model:
+            raise FileNotFoundError("Saved model weights were not found")
+        meta = artifact_json(metadata)
+        path = run_model_path(identifier)
+        if meta.get("run_id") != identifier or not path or Path(path).resolve() != model:
+            raise FileNotFoundError("Saved model weights were not found")
+        stat = model.stat()
+        key = ("model_importance", identifier, meta.get("model_type"), stat.st_mtime_ns, stat.st_size)
+
+        def read_importance():
+            predictor = load_run_predictor(identifier)
+            if predictor is None:
+                raise FileNotFoundError("Saved model weights were not found")
+            return fitted_feature_importance(predictor)
+
+        return self.catalog.cached(key, 60, read_importance)
 
     def validate_job(self, kind, params):
         inputs = self.inputs(params.get("dataset"))

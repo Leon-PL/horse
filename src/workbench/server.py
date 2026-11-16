@@ -12,6 +12,7 @@ from src.workbench.jobs import Jobs
 from src.workbench.review import ReviewStore
 from src.workbench.features import Features
 from src.workbench.modelling import Modelling
+from src.workbench.evaluation import Evaluation
 from src.workbench.paper import Paper
 
 
@@ -24,6 +25,7 @@ class WorkbenchServer(ThreadingHTTPServer):
         self.catalog = catalog
         self.features = Features(catalog)
         self.modelling = Modelling(catalog, self.features)
+        self.evaluation = Evaluation(catalog)
         self.paper = Paper()
         self.jobs = Jobs(catalog, modelling=self.modelling)
         self.review = ReviewStore(catalog.root/"workbench/review.sqlite")
@@ -92,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
             if mutation:
                 raise FileNotFoundError("Unknown action")
             name = {"/": "index.html", "/app.js": "app.js", "/features.js": "features.js",
-                    "/modelling.js": "modelling.js", "/paper.js": "paper.js",
+                    "/modelling.js": "modelling.js", "/evaluation.js": "evaluation.js", "/paper.js": "paper.js",
                     "/style.css": "style.css"}.get(parsed.path)
             if not name:
                 raise FileNotFoundError("Page was not found")
@@ -149,10 +151,18 @@ class Handler(BaseHTTPRequestHandler):
                 return modelling.benchmarks(dataset)
             if route == "modelling/runs":
                 return modelling.runs(dataset)
+            if route == "modelling/evaluation":
+                return catalog.cached("evaluation_menu", 10, self.server.evaluation.menu)
+            if route == "modelling/evaluation/price-timing":
+                return self.server.evaluation.timing(params)
+            if len(parts) == 3 and parts[1] == "evaluation":
+                return self.server.evaluation.run(parts[2], params)
             if len(parts) == 3 and parts[1] == "benchmarks":
                 return modelling.benchmark(parts[2], dataset)[0]
             if len(parts) == 3 and parts[1] == "runs":
                 return modelling.run(parts[2], dataset)
+            if len(parts) == 4 and parts[1] == "runs" and parts[3] == "importance":
+                return modelling.importance(parts[2])
             raise FileNotFoundError("Modelling view was not found")
         if route == "features/catalog":
             return self.server.features.catalog_rows(params.get("feature_set"), params.get("query", ""),
