@@ -49,3 +49,17 @@ def test_day_before_eleven_shows_prepared_forecast(tmp_path):
     assert out["stage"] == "prepared" and len(out["races"]) == 2
     assert set(out["races"][0]["field"][0]) == {"horse_name", "p_model"}
     assert Paper(tmp_path).day("2020-01-01")["races"] == []
+
+
+def test_day_shows_sp_and_result_for_every_runner_once_settled(tmp_path, monkeypatch):
+    day = "2026-11-16"
+    (tmp_path / day).mkdir()
+    _forecast(day).to_parquet(tmp_path / day / "forecast.parquet")
+    pd.DataFrame({"race_id": [1, 1, 2, 2], "horse_id": [10, 11, 20, 21], "bsp": [1.7, 2.9, 2.2, 1.8],
+                  "won": [0, 1, 0, 1]}).to_parquet(tmp_path / day / "field.parquet")
+    pd.DataFrame({"race_id": [1], "horse_id": [10], "bsp": [1.7], "won": [0], "pnl_fill": [-10.], "clv": [0.94]}
+                 ).to_parquet(tmp_path / day / "settled.parquet")
+    monkeypatch.setattr(record, "closes", lambda d: pd.DataFrame())
+    first = Paper(tmp_path).day()["races"][0]["field"]
+    assert [(r["horse_name"], r["bsp"], r["won"]) for r in first] == [("A", 1.7, 0), ("B", 2.9, 1)]
+    assert first[0]["pnl_fill"] == -10. and first[1]["pnl_fill"] is None

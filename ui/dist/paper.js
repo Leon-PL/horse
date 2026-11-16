@@ -114,6 +114,15 @@ export function createPaperUI({api, esc, number, banner, badge, empty, metric, h
    ${metric(`Fill at £${d.rule.stake}`, s.fill_rate != null ? (100 * s.fill_rate).toFixed(0) + '%' : '—', s.pnl_filled != null ? `Profit on filled stakes ${money(s.pnl_filled)}` : 'Stake available at 11:00')}
   </div>`;
   const rule = `<p class="hint">Rule (research 107): back where the corrected forecast beats the race-normalised 11:00 Matchbook share by the value threshold (base ${d.rule.threshold}), best back price ≤ ${d.rule.max_odds}, races off after ${esc(d.rule.clock)}. Settled at Betfair SP results the next day. No bet is placed. Last price snapshot: ${esc(d.last_snapshot || 'none')}.</p>`;
+  const fs = s.field || {}, ll = fs.log_loss || {}, edge = (fs.clv_by_edge || {}).forecast_above_share || {};
+  const loss = x => typeof x === 'number' ? x.toFixed(4) : '—';
+  const field = fs.races ? `<div class="metric-grid">
+    ${metric('Forecast log loss', loss(ll.forecast), `Betfair SP ${loss(ll.betfair_sp)} · 11:00 Matchbook ${loss(ll.matchbook_1100)} · win model ${loss(ll.win_model)}`)}
+    ${metric('Forecast − SP', typeof fs.forecast_minus_sp === 'number' ? (fs.forecast_minus_sp >= 0 ? '+' : '') + fs.forecast_minus_sp.toFixed(4) : '—', `Per race, ${number(fs.races)} races over ${fs.days} days; below zero beats the close`)}
+    ${metric('Edge vs result', typeof fs.edge_result_corr === 'number' ? fs.edge_result_corr.toFixed(3) : '—', 'Correlation of (forecast − 11:00 share) with (won − SP share); above zero is information the close lacks')}
+    ${metric('CLV where forecast > share', ratio(edge.geometric_mean_clv), edge.n ? `${number(edge.n)} runners · median ${ratio(edge.median_clv)}` : 'Taken / BSP for every runner the forecast rated above the market')}
+   </div>`
+   : empty('No whole-field results yet', 'Settlement keeps SP and result for every runner from the first settled day.');
   const days = d.days.length ? table(['Date', 'Status', 'Card races', 'Matchbook races', 'Linked', 'Eligible', 'Bets', 'Settled'],
    d.days.map(r => [esc(r.date), r.error ? badge('Error', 'error') + ` <span class="muted">${esc(r.error)}</span>` : badge(r.status || '', r.status === 'settled' ? '' : 'neutral'),
     number(r.card_races ?? 0), number(r.matchbook_races ?? 0), number(r.races_linked ?? 0), number(r.eligible_races ?? 0), number(r.bets ?? 0), number(r.settled_bets ?? 0)]))
@@ -123,7 +132,8 @@ export function createPaperUI({api, esc, number, banner, badge, empty, metric, h
   const settled = d.settled_bets.length ? table(['Date', 'Off', 'Track', 'Horse', 'Forecast', '11:00 share', 'Back', 'On offer', 'BSP', 'CLV', 'Result', 'Profit (filled)'], betRows(d.settled_bets, true))
    : empty('Nothing settled yet', 'Betfair publishes SP the morning after racing.');
   $('#main').innerHTML = styles + heading('Matchbook paper record', 'The 11:00 rule followed forward on live Matchbook prices, before any money is staked.', '', 'BETTING VALIDATION') +
-   ready + metrics + rule + panel('Unsettled paper bets', open) + racesPanel(day) +
+   ready + metrics + rule + panel('Whole field', `<div class="panel-body">${field}</div>`, 'Every runner of every eligible, settled race: the forecast against the market, not just the bets.') +
+   panel('Unsettled paper bets', open) + racesPanel(day) +
    panel('Profit curve', `<div class="panel-body">${curve(d.curve) || empty('Curve appears after two settled days', '')}</div>`) +
    panel('Days', days) + panel('Settled bets', settled);
   bindDay();

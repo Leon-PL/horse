@@ -73,9 +73,13 @@ class Paper:
                 frame["latest_at"] = ids.map(last.taken_at).map(
                     lambda t: t.tz_convert(record.LONDON).strftime("%H:%M") if isinstance(t, pd.Timestamp) else None)
                 frame["withdrawn_now"] = ids.map(last.withdrawn)
+        if (folder / "field.parquet").exists():      # SP and result for every runner
+            field = pd.read_parquet(folder / "field.parquet")
+            frame = frame.merge(field[["race_id", "horse_id", "bsp", "won"]], on=["race_id", "horse_id"], how="left")
         if (folder / "settled.parquet").exists():
             settled = pd.read_parquet(folder / "settled.parquet")
-            keep = [c for c in ("race_id", "horse_id", "bsp", "won", "pnl_fill", "clv") if c in settled]
+            keep = [c for c in ("race_id", "horse_id", "bsp", "won", "pnl_fill", "clv") if c in settled
+                    and (c in ("race_id", "horse_id") or c not in frame)]
             frame = frame.merge(settled[keep], on=["race_id", "horse_id"], how="left")
         races, cols = [], [c for c in RUNNER_COLUMNS if c in frame]
         for race_id, field in frame.groupby("race_id", sort=False):
