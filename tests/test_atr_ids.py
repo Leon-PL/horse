@@ -10,6 +10,7 @@ from src.ingestion import atr_ids,atr_rebuild as rebuild,attheraces as atr
 from src.ingestion.storage import RawPayloadStore,atomic_json,read_json
 from test_atr_current_routes import article,DATE,CARD
 from test_atr_rebuild import client_for
+from test_atr_rich_collection import page
 import test_atr_rebuild as rebuild_tests
 
 environment = rebuild_tests.environment
@@ -69,6 +70,37 @@ def test_saved_results_page_queues_exact_links_and_protects_existing_evidence(en
     assert read_json(Path(index['index']))['race_ids'] == {CARD: '1629208'}
 
 
+def test_saved_replay_supplements_partial_results_without_overwriting_ids(environment, tmp_path):
+    root, canonical = environment
+    add_second(canonical)
+    rebuild.prepare(root)
+    other = CARD.replace('2030', '2100')
+    saved = tmp_path/'replays.html'
+    canonical_link = f'<link rel="canonical" href="{atr.ATR_BASE}/replays/{DATE}">'
+    replay_link = f'/replays/{DATE.lower()}/wolverhampton/2100'
+    replay_article = (f'<article class="article-preview"><a href="{other}">Result</a>'
+                      f'<a href="{replay_link}" data-video-raceid="1629209">Full replay</a>'
+                      f'<a href="{replay_link}?finish=yes" data-video-raceid="1629209">Finish</a></article>')
+    existing = Path(atr.ATR_INDEX_DIR)/f'{DATE}.json'
+    atomic_json(existing, {'race_ids':{CARD:'1629208'}})
+    saved.write_text(canonical_link + replay_article, encoding='utf-8')
+    imported = atr_ids.import_saved_results(saved, atr.ATR_INDEX_DIR)
+    assert read_json(existing)['race_ids'] == {CARD:'1629208'}
+    assert read_json(Path(imported['index']))['race_ids'] == {other:'1629209'}
+    with rebuild.connect(root) as con:
+        rebuild.set_control(con, 'discovery_retry', rebuild.utc_now().timestamp()+3600)
+        reports = atr_ids.recover_cached(con, atr.ATR_INDEX_DIR)
+        assert sum(report['ids_added_or_corrected'] for report in reports) == 1
+        assert dict(con.execute('SELECT race_id,native_id FROM jobs')) == {'r1':'1629208','r3':'1629209'}
+        assert con.execute("SELECT source_url FROM id_evidence WHERE race_id='r3'").fetchone()[0].endswith(f'/replays/{DATE}')
+        conflict = atr_ids.apply_index(con, DATE, {other:'999'}, {'source_url':f'{atr.ATR_BASE}/replays/{DATE}'})
+        assert conflict['conflicts'] == ['r3']
+        assert con.execute("SELECT native_id FROM jobs WHERE race_id='r3'").fetchone()[0] == '1629209'
+    saved.write_text(canonical_link + replay_article.replace('wolverhampton/2100','wolverhampton/2030'), encoding='utf-8')
+    with pytest.raises(ValueError, match='Conflicting replay links'):
+        atr_ids.import_saved_results(saved, atr.ATR_INDEX_DIR)
+
+
 def test_fresh_known_race_precedes_a_newer_retry(environment):
     root, canonical = environment
     add_second(canonical)
@@ -93,6 +125,36 @@ def test_incomplete_saved_day_does_not_starve_other_missing_dates(environment,mo
         assert con.execute('SELECT next_retry FROM id_discovery').fetchone()[0]>now+86300
         assert rebuild.discover_ids(con,client,now+61,'2026-11-05 00:00') is None
     assert len(client.calls)==1
+
+
+def test_results_lookup_gets_the_window_when_cooldown_expires_mid_field(environment, monkeypatch):
+    root, canonical = environment
+    add_second(canonical)
+    rebuild.prepare(root)
+    routes = {'/1629209/times': (429, '')}
+    routes.update({f'/{kind}':(200,page(kind)) for kind in ('times','tools','stride')})
+    routes['/results/'] = (200, article()+article(CARD.replace('2030','2100'),'1629209'))
+    client = client_for(monkeypatch, root, routes)
+    clock = rebuild.utc_now()
+    monkeypatch.setattr(rebuild, 'utc_now', lambda: clock)
+    original_get = client.get
+
+    def get(url, **kwargs):
+        nonlocal clock
+        if '/times' in url:
+            clock += pd.Timedelta(seconds=10)
+        return original_get(url, **kwargs)
+
+    monkeypatch.setattr(client, 'get', get)
+    with rebuild.connect(root) as con:
+        rebuild.set_control(con, 'inventory_retry', clock.timestamp()+5)
+        rebuild.set_control(con, 'discovery_retry', clock.timestamp()+5)
+    rebuild.run(root, max_races=2)
+    first_page = next(url for url in client.calls if '/ajax/' not in url)
+    assert first_page.endswith(f'/results/{DATE}')
+    with rebuild.connect(root) as con:
+        assert rebuild.control(con, 'last_id_discovery')['ids_added'] == 1
+        assert con.execute("SELECT native_id FROM jobs WHERE race_id='r3'").fetchone()[0] == '1629209'
 
 
 def test_index_uses_exact_bst_adjusted_time_and_never_guesses_ids(environment):

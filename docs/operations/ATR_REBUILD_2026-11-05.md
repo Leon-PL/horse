@@ -157,6 +157,25 @@ This full reconstruction is about sixteen times larger and uses a more
 conservative request delay. It is a multi-day job; uncached-day challenges
 prevent a reliable completion promise.
 
+## Recovering missing IDs from saved pages
+
+When the HTML cooldown expires, the worker gives eligible daily results lookups
+first use of that window. Its status records the most recent automatic attempt,
+including the date, outcome and number of IDs added.
+
+If ATR challenges the automatic lookup, save a dated results or replay archive
+page as HTML after it loads in a browser. Import one or more files through the
+same command. The running worker picks up new receipts within about a minute.
+
+```powershell
+.venv\Scripts\python.exe -m src.ingestion.atr_ids --import-results 'C:\path\to\results.html' 'C:\path\to\replays.html'
+```
+
+Replay pages supply IDs through the replay controls that accompany each racecard
+link. A replay import fills gaps alongside an existing results receipt. The
+worker keeps conflicting IDs for review and validates runner identity when it
+collects the performance tabs.
+
 ## Verified installation and recovery
 
 - **152 relevant tests pass**, including current-page fixtures, units, source

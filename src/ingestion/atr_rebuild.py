@@ -204,6 +204,13 @@ def audit_navigation(con, fetcher, job, root):
                         'state':'deferred','reason':'HTML discovery cooldown',
                         'retry_after':control(con,'discovery_retry',0)})
         return
+    if control(con,'global_retry',0) > now:
+        return
+    cutoff_day = (utc_now()-pd.Timedelta(hours=atr._PUBLICATION_DELAY_HOURS)).date().isoformat()
+    # A field can finish just after the shared cooldown expires. Give the next
+    # queue iteration the results lookup before another tab inventory request.
+    if _discovery_day(con, now, cutoff_day) is not None:
+        return
     day = atr._date_to_atr(job['race_date'])
     off = atr._off_time_to_hhmm(job['off_time'])
     if atr._is_bst(job['race_date']):
@@ -404,6 +411,7 @@ def publish_status(con, root, state, **extra):
               'publication_deferred_races':deferred,
               'global_retry_after':control(con,'global_retry',0),
               'discovery_retry_after':control(con,'discovery_retry',0),
+              'last_id_discovery':control(con,'last_id_discovery'),
               'native_ids':{'missing':con.execute('SELECT count(*) FROM jobs WHERE native_id IS NULL').fetchone()[0],
                             'evidence':dict(con.execute('SELECT state,count(*) FROM id_evidence GROUP BY state'))},
               'exports_pending':con.execute('SELECT count(*) FROM dirty_days').fetchone()[0],
@@ -496,19 +504,23 @@ def pick_job(con, now, cutoff, *, discovery_allowed):
     return pending if pending is not None else con.execute(job_query(discovery_allowed), ready).fetchone()
 
 
+def _discovery_day(con, now, cutoff_day, *, oldest=False):
+    order = 'ASC' if oldest else 'DESC'
+    day = con.execute("SELECT j.race_date FROM jobs j LEFT JOIN id_discovery d USING(race_date) "
+                      "WHERE j.native_id IS NULL AND j.state IN ('pending','retry') AND j.race_date<=? "
+                      "AND COALESCE(d.next_retry,0)<=? GROUP BY j.race_date ORDER BY j.race_date "+order+" LIMIT 1",
+                      (cutoff_day,now)).fetchone()
+    return day[0] if day else None
+
+
 def discover_ids(con, client, now, cutoff, *, retry_seconds=3600):
     """One paced day lookup, then save all matches; failed discovery backs off."""
     if any(control(con,key,0)>now for key in ('global_retry','discovery_retry','id_discovery_next')):
         return None
     oldest = control(con,'id_scan_oldest',False)
-    order = 'ASC' if oldest else 'DESC'
-    day = con.execute("SELECT j.race_date FROM jobs j LEFT JOIN id_discovery d USING(race_date) "
-                      "WHERE j.native_id IS NULL AND j.state IN ('pending','retry') AND j.race_date<=? "
-                      "AND COALESCE(d.next_retry,0)<=? GROUP BY j.race_date ORDER BY j.race_date "+order+" LIMIT 1",
-                      (cutoff[:10],now)).fetchone()
+    day = _discovery_day(con, now, cutoff[:10], oldest=oldest)
     if not day:
         return None
-    day = day[0]
     before = con.execute('SELECT count(*) FROM jobs WHERE native_id IS NULL').fetchone()[0]
     outcome, mapping = atr._results_index(client,atr._date_to_atr(day))
     last = client.last_response
@@ -536,10 +548,11 @@ def discover_ids(con, client, now, cutoff, *, retry_seconds=3600):
                         'attempts=id_discovery.attempts+1,next_retry=excluded.next_retry,error=excluded.error,'
                         'checked_at=excluded.checked_at',
                         (day,outcome,retry,last.get('url'),json.dumps(last),utc_now().isoformat()))
-        report = {'race_date':day,'outcome':outcome,'source_races':len(mapping),
+        report = {'race_date':day,'outcome':outcome,'source_races':len(mapping),'checked_at':utc_now().isoformat(),
                   'ids_added':before-con.execute('SELECT count(*) FROM jobs WHERE native_id IS NULL').fetchone()[0],
                   'retry_after':retry,'last_response':last}
         set_control(con,'last_id_discovery',report)
+    logger.info('ATR ID discovery for %s: %s, %d IDs added', day, outcome, report['ids_added'])
     return report
 
 
@@ -607,6 +620,9 @@ def run(root=DEFAULT_ROOT, *, request_delay=3.0, max_races=None, retry_seconds=3
                     for report in atr_ids.recover_cached(con,replay.index_dir,seen=seen_receipts):
                         if report.get('error') or report.get('conflicts'):
                             logger.warning('Saved ATR index needs review: %s', report)
+                        if report.get('ids_added_or_corrected'):
+                            logger.info('Saved ATR index for %s: %d IDs added or corrected',
+                                        report['date'], report['ids_added_or_corrected'])
                     next_receipt_scan = time.monotonic()+60
                 if max_races is not None and attempted >= max_races:
                     break

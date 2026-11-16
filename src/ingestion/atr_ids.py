@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 
 from src.ingestion import attheraces as atr
 from src.ingestion.storage import atomic_json, read_json
@@ -42,6 +43,7 @@ def apply_index(con, atr_date, mapping, receipt=None):
     receipt = receipt or {}
     url = receipt.get('source_url', f'{atr.ATR_BASE}/results/{atr_date}')
     sha = receipt.get('source_sha256')
+    supplemental = '/replays/' in url
     if not isinstance(mapping,dict) or not mapping:
         raise ValueError('Empty or invalid ATR identity mapping')
     paths, ids = {}, defaultdict(set)
@@ -66,6 +68,10 @@ def apply_index(con, atr_date, mapping, receipt=None):
             job = matching[0]
             others = con.execute('SELECT race_id,state FROM jobs WHERE native_id=? AND race_id<>?',
                                  (native_id,job['race_id'])).fetchall()
+            if supplemental and (job['native_id'] is not None or others):
+                if job['native_id'] != native_id or others:
+                    conflicts.append(job['race_id'])
+                continue
             if (job['state'] in ('data','data_partial') and job['native_id'] != native_id
                     or any(other['state'] in ('data','data_partial') for other in others)):
                 conflicts.append(job['race_id'])
@@ -97,7 +103,8 @@ def recover_cached(con, directory, *, seen=None):
             if seen is not None and seen.get(path) == stamp:
                 continue
             receipt = read_json(path)
-            reports.append(apply_index(con,path.stem,receipt['race_ids'],receipt))
+            day = path.stem.removesuffix('.replays')
+            reports.append(apply_index(con,day,receipt['race_ids'],receipt))
             if seen is not None:
                 seen[path] = stamp
         except (KeyError, OSError, ValueError, TypeError) as error:
@@ -105,8 +112,36 @@ def recover_cached(con, directory, *, seen=None):
     return reports
 
 
+def _parse_replay_index(soup, day):
+    """Pair a replay control with its own result link in the same article."""
+    mapping = {}
+    for article in soup.select('article.article-preview'):
+        cards = set()
+        for link in article.select('a[href^="/racecard/"]'):
+            path = urlsplit(link['href']).path.rstrip('/')
+            if re.fullmatch(rf'/racecard/[^/]+/{re.escape(day)}/\d{{4}}', path):
+                cards.add(path)
+        controls = article.select('a[href][data-video-raceid]')
+        if not cards or not controls:
+            continue
+        if len(cards) != 1:
+            raise ValueError('Replay article contains multiple racecard paths')
+        card = cards.pop()
+        _, _, course, _, off = card.split('/')
+        expected = f'/replays/{day}/{course}/{off}'.casefold()
+        ids = {link['data-video-raceid'] for link in controls}
+        if (len(ids) != 1 or any(urlsplit(link['href']).path.rstrip('/').casefold() != expected
+                                 for link in controls)):
+            raise ValueError(f'Conflicting replay links for {card}')
+        native = ids.pop()
+        if not re.fullmatch(r'\d+', native) or (card in mapping and mapping[card] != native):
+            raise ValueError(f'Conflicting replay ID for {card}')
+        mapping[card] = native
+    return mapping
+
+
 def import_saved_results(path, directory):
-    """Queue exact IDs from a saved, dated ATR results page without HTTP."""
+    """Queue exact IDs from a saved, dated ATR results or replay page."""
     import hashlib
     from bs4 import BeautifulSoup
 
@@ -114,21 +149,25 @@ def import_saved_results(path, directory):
     soup = BeautifulSoup(raw, 'html.parser')
     canonical = soup.select_one('link[rel="canonical"]')
     url = canonical.get('href', '') if canonical else ''
-    match = re.fullmatch(r'https://(?:www\.|m\.)attheraces\.com/results/(\d{2}-[A-Za-z]+-\d{4})/?', url)
+    match = re.fullmatch(r'https://(?:www\.|m\.)attheraces\.com/(results|replays)/(\d{2}-[A-Za-z]+-\d{4})/?', url)
     if not match or 'Client Challenge' in str(soup.title):
-        raise ValueError(f'{path} is not a saved, dated ATR results page')
-    day = match[1]
+        raise ValueError(f'{path} is not a saved, dated ATR results or replay page')
+    kind, day = match.groups()
     datetime.strptime(day, '%d-%B-%Y')
-    mapping = {card: native for card, native in atr._parse_results_index(str(soup)).items()
-               if re.fullmatch(rf'/racecard/[^/]+/{re.escape(day)}/\d{{4}}', card)}
+    if kind == 'replays':
+        mapping = _parse_replay_index(soup, day)
+        target = Path(directory)/f'{day}.replays.json'
+    else:
+        mapping = {card: native for card, native in atr._parse_results_index(str(soup)).items()
+                   if re.fullmatch(rf'/racecard/[^/]+/{re.escape(day)}/\d{{4}}', card)}
+        target = Path(directory)/f'{day}.json'
     folded = {card.casefold(): native for card, native in mapping.items()}
     if not mapping or len(folded) != len(mapping) or len(set(mapping.values())) != len(mapping):
         raise ValueError(f'{path} has no unambiguous dated ATR race index')
-    target = Path(directory)/f'{day}.json'
     previous = read_json(target) or {}
     if any(folded.get(card.casefold()) != str(native) for card, native in previous.get('race_ids', {}).items()):
         raise ValueError(f'{path} would remove or change existing ATR links for {day}')
-    atomic_json(target, {'source_url':url, 'source_format':'saved_results_html',
+    atomic_json(target, {'source_url':url, 'source_format':f'saved_{kind}_html',
                          'source_sha256':hashlib.sha256(raw).hexdigest(), 'source_file':str(path.resolve()),
                          'retrieved_at':datetime.now(timezone.utc).isoformat(), 'race_ids':mapping})
     return {'date':day, 'source_races':len(mapping), 'index':str(target)}
@@ -212,10 +251,10 @@ def main():
     from contextlib import closing
     import sqlite3
     import pandas as pd
-    parser = argparse.ArgumentParser(description='Audit ATR native IDs or import saved daily results pages')
+    parser = argparse.ArgumentParser(description='Audit ATR native IDs or import saved results and replay pages')
     parser.add_argument('--root',type=Path,default=Path(atr.ATR_CACHE_DIR)/'rebuild_v2')
     parser.add_argument('--out',type=Path,default=Path(atr.ATR_CACHE_DIR)/'id_audit.json')
-    parser.add_argument('--import-results',type=Path,nargs='+',help='Saved ATR results HTML files; queue exact IDs without HTTP')
+    parser.add_argument('--import-results',type=Path,nargs='+',help='Saved ATR results or replay HTML files')
     args = parser.parse_args()
     if args.import_results:
         for path in args.import_results:
