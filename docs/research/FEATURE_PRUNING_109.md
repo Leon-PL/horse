@@ -91,3 +91,19 @@ from the earliest changed date was not pursued.
 Tests now write saved histories to a temporary folder (`tests/conftest.py`).
 During this work they had pushed the real ATR history out of
 `data/processed/fe_cache`, which cost one recompute.
+
+## Second cut (16 November, after the project cleanup)
+
+The cleanup removed 32 old saved runs and every feature-set file except the
+live model's. Regenerating the keep list from what is left (the live 87 inputs,
+the correction's columns and the 44 raw ratings) keeps **338** numeric features
+(from 518). Rebuilt pinned to the same dataset publication:
+
+| Check | Result |
+|---|---|
+| Rebuild time | 883 s (14.7 min) |
+| Store file | 0.82 GB, 425 columns (from 1.4 GB, 605) |
+| Baseline vs this build, all 338 kept columns | identical in the store and on the live card |
+| Matchbook `prepare` / `eleven` | 225 s (first run after rebuild) / 2.1 s |
+
+fe_signature is now `3457b041a4c180f1`.

@@ -8,7 +8,7 @@ A numeric feature column is kept when anything names it:
 - the forecast correction's tracking, entity, card and settled columns;
 - every raw rating column, which ``src.rating_reuse`` reads back from the store to skip the rating sweep;
 - any string literal equal to a store column in code that reads the finished store (``src/`` outside the
-  feature-producing modules, ``scripts/``, ``train.py``).
+  feature-producing modules, ``scripts/``).
 Non-numeric columns and ``src.model.EXCLUDE_COLUMNS`` (keys, labels, metadata) are never pruned.
 """
 import ast
@@ -79,7 +79,7 @@ def code_literals(columns):
     from src.featured_dataset import _FE_SOURCE_FILES
     producers = {p.replace("\\", "/") for p in _FE_SOURCE_FILES} - STORE_READERS
     found = set()
-    files = [*glob.glob("src/**/*.py", recursive=True), *glob.glob("scripts/*.py"), "train.py"]
+    files = [*glob.glob("src/**/*.py", recursive=True), *glob.glob("scripts/*.py")]
     for path in files:
         if path.replace("\\", "/") in producers | RETIRED:
             continue

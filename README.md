@@ -21,7 +21,7 @@ Check the installed state before trusting any number:
 | Stage | Code | Command |
 |---|---|---|
 | Collect sources (Sporting Life results and cards, Racing TV, At The Races, Betfair history, BHA reports, FX, French/UAE form) and publish immutable versions | `src/ingestion/`, `src/source_dataset.py` | `python -m src.ingestion --sync 14 --results-only` |
-| Build or append the feature store (518 numeric features kept) | `src/store_refresh.py`, `src/store_build.py`, `src/feature_engineer.py`, `src/store_columns.py` | `python -c "from src.store_refresh import get_training_dataset; get_training_dataset()"` |
+| Build or append the feature store (338 numeric features kept) | `src/store_refresh.py`, `src/store_build.py`, `src/feature_engineer.py`, `src/store_columns.py` | `python -c "from src.store_refresh import get_training_dataset; get_training_dataset()"` |
 | Win model: 87 inputs, run `20261114_122027_967139` | `src/modelling/`, `src/model.py`, `src/run_store.py` | `python -m src.modelling --help` |
 | Forecast correction: how the win model's earlier forecasts turned out | `src/correction/` | `python -m src.correction status` |
 | 11:00 rule on Matchbook prices (correction with the race's own 11:00 price, threshold 0.02, odds up to 51) | `src/matchbook/`, `src/bet_settlement.py` | `python -m src.matchbook day --refresh` (scheduled task `HorseMatchbookPaper`, 07:50) |
