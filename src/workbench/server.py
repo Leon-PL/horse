@@ -137,6 +137,8 @@ class Handler(BaseHTTPRequestHandler):
             return {"rows": catalog.manifests()}
         if route == "paper":
             return self.server.paper.overview()
+        if route == "paper/day":
+            return self.server.paper.day(params.get("date") or None)
         if route == "features/overview":
             return self.server.features.overview(dataset)
         if parts[:1] == ["modelling"]:
