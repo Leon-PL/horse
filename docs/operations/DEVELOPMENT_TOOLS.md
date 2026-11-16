@@ -30,8 +30,8 @@ downloads dependencies. No model fitting, source scraping or promotion occurs.
 `lint` reports existing code issues and exits nonzero when it finds them. It
 applies no fixes or formatting. Treat its baseline as a review queue rather
 than a count of model defects. Formatting no longer changes the feature
-signature (it hashes the AST), but it still changes the raw-hash recipe
-certificates in `src/deployment_validation.py`.
+signature (it hashes the AST), (The raw-hash recipe certificates of the old
+`src/deployment_validation.py` went with the November 2026 cleanup.)
 
 `venv` rebuilds or updates the project `.venv` from `uv.lock` (runtime and dev
 groups, no tooling group). Use it after a lock change. Prefer it to bare
@@ -84,7 +84,7 @@ On 2026-10-30 every direct dependency was checked against the project's
 imports. XGBoost, CatBoost and lxml had no remaining use and were removed with
 their code paths (the XGBoost/CatBoost training options, the CatBoost and
 pytabkit experiments in `scripts/model_lab.py`, and an unused template scraper
-in `src/data_collector_sample.py`). All saved runs had used LightGBM only.
+in `src/data_collector_sample.py`, all since deleted). All saved runs had used LightGBM only.
 
 H2O, FLAML, experimental neural-network packages and other unrelated extras
 are absent from the new graph. On 2026-10-30 they were also uninstalled from

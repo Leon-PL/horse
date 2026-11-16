@@ -7,7 +7,6 @@ import pytest
 
 from src import database, identity_schema
 from src.runner_identity import join_runner_columns, runner_keys, runner_positions
-from src.verified_result_repair import apply_verified_results
 
 
 def twins():
@@ -142,19 +141,9 @@ def test_failed_migration_rolls_back_original_table_and_values(isolated,monkeypa
             con.execute("INSERT INTO results(race_id,race_date,horse_name,horse_id) VALUES ('123','2025-01-01','Sierra Nevada','2')")
 
 
-def test_reviewed_repair_can_target_namesakes_independently_and_repeat_without_changes(isolated):
+def test_result_rowid_rejects_an_ambiguous_namesake(isolated):
     database.ingest_results(twins())
     with sqlite3.connect(database.DB_PATH) as con:
-        before=pd.read_sql_query("SELECT * FROM results",con)
-        after=before.copy()
-        after["finish_position"]=[2,1]
-        after["won"]=[0,1]
-        after["lengths_behind"]=[np.nan,0.]
-        proof={"review_roster_sha256":"a"*64,"verification_sha256":"b"*64}
-        apply_verified_results(con,before,after,pd.DataFrame(),repair_id="twins",evidence=proof)
-        assert con.execute("SELECT horse_id FROM results WHERE won=1").fetchone()[0]=="2"
-        assert con.execute("SELECT COUNT(DISTINCT runner_key) FROM verified_result_rows").fetchone()[0]==2
-        assert apply_verified_results(con,before,after,pd.DataFrame(),repair_id="twins",evidence=proof)["already_applied"]
         with pytest.raises(ValueError,match="ambiguous"):
             identity_schema.result_rowid(con,{"race_id":"123","horse_name":"Sierra Nevada"})
 

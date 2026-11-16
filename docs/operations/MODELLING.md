@@ -2,8 +2,8 @@
 
 The supported entry point is `.venv\Scripts\python.exe -m src.modelling`.
 It uses accepted source datasets and compatible feature stores, never collects
-sources or silently rebuilds history. `train.py` and the selected production
-model keep their existing behaviour.
+sources or silently rebuilds history. The old `train.py` path was removed in the
+November 2026 cleanup (tag `pre-cleanup-2026-11`).
 
 ## Recipes and ownership
 

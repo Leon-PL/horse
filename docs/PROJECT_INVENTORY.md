@@ -68,7 +68,6 @@ Generated from each module's docstring on 16 November 2026. Commands are in
 | `src/race_objectives.py` | Race-structured LightGBM objectives (experiments 057, 058; 057 is in production). |
 | `src/rating_reuse.py` | Verified reuse of rating sweeps when only non-rating history inputs change. |
 | `src/ratings.py` | Dynamic strength ratings for horses (Elo, margin Elo, Glicko-1/2, TrueSkill) and value-added ratings for jockeys and trainers, computed from head-to-head race r |
-| `src/result_amendment_repair.py` | Conservative, transactional maintenance of source-verified final placings. |
 | `src/result_margins.py` | Convert the source's adjacent finishing gaps to distances behind the winner. |
 | `src/result_status.py` | Restore the distinction between settled non-finishers and pending cards. |
 | `src/rtv_features.py` | Quality-filtered prior RTV performance and timestamped pre-race context. |
@@ -87,7 +86,6 @@ Generated from each module's docstring on 16 November 2026. Commands are in
 | `src/trueskill_kernel.py` | Compiled TrueSkill sweep for races rated as free-for-alls. |
 | `src/utils.py` | == Helper functions used across the horse racing prediction application. |
 | `src/verified_race_metadata.py` | Immutable, source-confirmed corrections to published historical metadata. |
-| `src/verified_result_repair.py` | Transactional complete-field repair with original-row receipts and rollback. |
 | `src/wf_eval.py` | Shared walk-forward evaluation primitives — the measuring instrument. |
 
 ## Win-model recipes and fits

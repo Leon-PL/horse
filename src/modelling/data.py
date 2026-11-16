@@ -120,7 +120,10 @@ def load_dataset(store_root=None, *, features=None, development=True, start=None
         bad = frame.loc[pd.to_numeric(frame.odds, errors="coerce").lt(1.01), "race_id"]
         eligible_rows &= ~frame.race_id.isin(bad)
     excluded = int(frame.loc[~eligible_rows, "race_id"].nunique())
-    frame, _ = ordered_frame(frame.loc[eligible_rows])
+    frame = frame.loc[eligible_rows]
+    # An empty window (e.g. nothing settled after a run's cutoff) is a valid answer;
+    # callers such as `src.correction extend` check `frame.empty` themselves.
+    frame = ordered_frame(frame)[0] if not frame.empty else frame.reset_index(drop=True)
     receipt = {"dataset_manifest": manifest, "fe_signature": meta["fe_signature"],
                "data_signature": meta["data_signature"], "store_last_date": meta["last_date"],
                "dataset_start": str(pd.to_datetime(processed.race_date).min().date()),

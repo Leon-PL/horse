@@ -1,11 +1,18 @@
 # BHA reports in regular ingestion — 7 November 2026
 
+> **Current state (16 November 2026):** no feature reads BHA data. Research 109
+> removed the BHA feature stage on 15 November
+> ([FEATURE_PRUNING_109](../research/FEATURE_PRUNING_109.md)), and from 16 November
+> BHA is no longer a default sync source. The collector and its published data
+> are kept; run it explicitly with `--sources bha`. The rest of this page
+> describes the collector as built on 7 November.
+
 BHA is now a default source in `python -m src.ingestion --sync 14`. It collects
 the requested past days, checks recent amendments and publishes full reports,
 documents and race notes through the same immutable source boundary as the other
 providers. Its source key is `bha`; it is no longer a standalone CSV-only tool.
 
-**Feature derivation update:** 161 prior-history numeric candidates are now wired
+**Feature derivation (removed 15 November by research 109):** 161 prior-history numeric candidates are now wired
 into ordinary feature building for normal feature selection. No separate models
 were fitted. Read [the definitions and timing policy](../archive/research/BHA_FEATURE_CANDIDATES_2026-11-07.md);
 the latest user decision uses an explicit 48-hour feature-availability assumption.

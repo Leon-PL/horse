@@ -47,7 +47,8 @@ before the optional inner early-stopping split; it is a conservative upper
 bound for the disposable model's fitted rows. Calibration dates are recorded
 separately. The final estimator's training cutoff is exact.
 
-`scripts/benchmark_forecasts.py` uses the shared purged quarterly fold helper.
+`python -m src.modelling benchmark` uses the shared purged quarterly fold helper
+(the older `scripts/benchmark_forecasts.py` is at tag `pre-cleanup-2026-11`).
 For each predeclared experiment:
 
 1. Register the feature/data/source/price hashes, parameters, cutoffs, allowed

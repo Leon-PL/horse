@@ -141,14 +141,15 @@ whole queue for every file. The final report recounts committed state and includ
 can be replayed from retained raw data. WIN/PLACE coverage, parsing, the request
 limiter and SQLite durability settings are unchanged.
 
-`scripts/benchmark_betfair_ingestion.py` compares retained real markets against
+`scripts/benchmark_betfair_ingestion.py` (removed in the November 2026 cleanup;
+at tag `pre-cleanup-2026-11`) compared retained real markets against
 their accepted observations using read-only production connections and disposable
 queues. `--baseline-source` can compare a trusted local source snapshot. Its timing
 report distinguishes checkpoint writes, raw retention, lookup and parsing; storage
 timings alone are not an end-to-end backfill estimate.
 
-The former public data is frozen in `data/research/betfair_public_legacy/`, with
-existing research readers redirected there. Its volume and VWAP fields cannot be
+The former public data was frozen in `data/research/betfair_public_legacy/`; nothing
+read it after the cleanup and it was deleted on 16 November 2026. Its volume and VWAP fields cannot be
 reconstructed from BASIC, which has no traded volume; see the
 [package comparison](https://historicdata.betfair.com/). No public downloads run.
 

@@ -3,7 +3,7 @@
 The local project app covers ingestion, preparation, stored feature inspection and modelling.
 The [Features guide](WORKBENCH_FEATURES.md) describes model roles, named feature
 sets, quality checks and shared-store build jobs. It uses the existing Python environment and introduces
-no new runtime dependency. [Implementation plan](../architecture/INGESTION_WORKBENCH_PLAN.md).
+no new runtime dependency. [Implementation plan](../archive/architecture/INGESTION_WORKBENCH_PLAN.md) (archived).
 
 ## Start
 

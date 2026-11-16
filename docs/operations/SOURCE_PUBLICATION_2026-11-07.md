@@ -180,8 +180,7 @@ and 3 skipped, against 2,013 / 7 / 3 before. Seven failures are unchanged. Two
 ATR efficiency tests that reuse the ATR fixture were then ported and pass alone.
 The last one, `test_independent_feature_benchmark`, drives
 `scripts/audit_atr_invariance.py`, which patches the removed merge. That
-script, its two siblings and the test are already deleted by the cleanup in
-progress in the main checkout, so they were left untouched.
+script, its two siblings and the test were deleted in the November 2026 cleanup.
 
 ## Scope
 
