@@ -10,7 +10,10 @@ No bet is ever placed. Each day:
 2. ``settle``: Betfair's public daily BSP file (published the next day) gives the close and the result; the
    Matchbook close is the last stored quote before the off. CLV is taken / BSP.
 
-Files: ``data/matchbook/paper/<date>/{forecast,bets,links}.parquet``, ``run.json``, ``settled.parquet``.
+   ``field.parquet`` keeps SP and result for every forecast runner, settled apart from the bets.
+
+Files: ``data/matchbook/paper/<date>/{forecast,bets,links}.parquet``, ``run.json``, ``settled.parquet``,
+``field.parquet``.
 """
 import io
 import json
@@ -269,8 +272,94 @@ def settle(day):
     atomic_parquet(rows, out / "settled.parquet")
     run = json.loads((out / "run.json").read_text())
     run.update({"status": "settled", "settled_bets": int(ran.sum()), "settled_at": str(record.uk_now())})
+    # The whole field is settled apart from the bets, so a fault there can never change a bet's settlement.
+    try:
+        field = settle_field(day, bf_card, closes)
+        run["settled_field_runners"] = int(field.bsp.gt(1).sum()) if field is not None else 0
+    except Exception as exc:   # noqa: BLE001 - recorded, and the bets above stand
+        run["field_error"] = repr(exc)
     atomic_json(out / "run.json", run)
     return rows
+
+
+FIELD_COLUMNS = ("race_id", "horse_id", "race_date", "track", "off_time", "horse_name", "p_base", "p", "share", "edge",
+                 "back1", "back1_size", "lay1", "price_0800", "price_1100", "eligible_race", "race_tight", "bet",
+                 "runner_id")
+
+
+def settle_field(day, bf_card, closes=None):
+    """Betfair SP, result and Matchbook close for every forecast runner of ``day`` (``field.parquet``).
+
+    The bets are only a few runners a day; the whole field gives the forecast's daily log loss and its edge against
+    the market on every runner, which the summary reads as ``field``.
+    """
+    out = day_dir(day)
+    if not (out / "forecast.parquet").exists():
+        return None
+    forecast = pd.read_parquet(out / "forecast.parquet")
+    rows = forecast[[c for c in FIELD_COLUMNS if c in forecast]].rename(columns={"runner_id": "mb_runner_id"})
+    linked, _ = link.link(rows[["race_id", "horse_id", "horse_name", "track", "off_time"]], bf_card)
+    lookup = bf_card.drop_duplicates("runner_id").set_index("runner_id")
+    rows["bsp"] = linked.runner_id.map(lookup.bsp).to_numpy()
+    rows["won"] = linked.runner_id.map(lookup.won).to_numpy()
+    rows["bf_morning_volume"] = linked.runner_id.map(lookup.morningtradedvol).to_numpy()
+    if closes is not None and not closes.empty:
+        last = closes.drop_duplicates("runner_id", keep="last").set_index("runner_id")
+        rows["mb_close_back"] = rows.mb_runner_id.map(last.back1)
+        rows["mb_close_lay"] = rows.mb_runner_id.map(last.lay1)
+    atomic_parquet(rows, out / "field.parquet")
+    return rows
+
+
+def _race_log_loss(won, prob, race):
+    """Mean over races of −log(probability given to the winner); ``prob`` normalised within each race."""
+    p = pd.Series(np.asarray(prob, dtype=float))
+    race = pd.Series(np.asarray(race))
+    p = p / p.groupby(race).transform("sum")
+    winners = np.asarray(won, dtype=float) == 1
+    return float(-np.log(p[winners].clip(lower=1e-9)).mean())
+
+
+def field_summary():
+    """The forecast on every runner of eligible, fully settled races: log loss against both markets and its edge.
+
+    ``log_loss`` compares the win model, the corrected forecast, the 11:00 Matchbook share and the Betfair SP book
+    on the same races (lower is better). ``edge_result_corr`` is the correlation of (forecast − 11:00 share) with
+    (won − SP-implied probability): above zero means the forecast knows something the close does not. ``clv_by_edge``
+    reads taken / BSP for runners the forecast rated above and below the 11:00 share.
+    """
+    from src.clv import summarise_clv
+    frames = [pd.read_parquet(p) for p in sorted(PAPER.glob("*/field.parquet"))]
+    if not frames:
+        return {"races": 0}
+    f = pd.concat(frames, ignore_index=True)
+    f = f.loc[f.eligible_race.astype(bool)] if "eligible_race" in f else f
+    race = f.race_id
+    complete = (f.bsp.gt(1) & f.won.notna()).groupby(race).transform("all")
+    one_winner = f.won.eq(1).groupby(race).transform("sum").eq(1)
+    f = f.loc[complete & one_winner].reset_index(drop=True)
+    if f.empty:
+        return {"races": 0}
+    race = f.race_id
+    market = (1 / f.bsp) / (1 / f.bsp).groupby(race).transform("sum")
+    model = f.p_base / f.p_base.groupby(race).transform("sum")
+    losses = {"win_model": _race_log_loss(f.won, model, race), "forecast": _race_log_loss(f.won, f.p, race),
+              "matchbook_1100": _race_log_loss(f.won, f.share, race), "betfair_sp": _race_log_loss(f.won, market, race)}
+    clv = f.back1 / f.bsp
+    edge = f.p - f.share
+    by_day = []
+    for d, g in f.groupby("race_date"):
+        r = g.race_id
+        m = (1 / g.bsp) / (1 / g.bsp).groupby(r).transform("sum")
+        by_day.append({"date": str(d), "races": int(r.nunique()),
+                       "forecast": _race_log_loss(g.won, g.p, r), "betfair_sp": _race_log_loss(g.won, m, r)})
+    return {"days": int(f.race_date.nunique()), "races": int(race.nunique()), "runners": int(len(f)),
+            "log_loss": losses, "forecast_minus_sp": losses["forecast"] - losses["betfair_sp"],
+            "edge_result_corr": float(np.corrcoef(edge, f.won - market)[0, 1]) if len(f) > 2 else None,
+            "clv_by_edge": {"forecast_above_share": summarise_clv(clv[edge > 0]),
+                            "forecast_below_share": summarise_clv(clv[edge <= 0]),
+                            "bets": summarise_clv(clv[f.bet.astype(bool)])},
+            "by_day": by_day}
 
 
 def unsettled_days():
@@ -283,12 +372,13 @@ def summary(boot=2000, seed=0):
     from src.wf_eval import bootstrap_roi_ci
     frames = [pd.read_parquet(p) for p in sorted(PAPER.glob("*/settled.parquet"))]
     days = sorted(p.parent.name for p in PAPER.glob("*/run.json"))
+    field = field_summary()
     if not frames:
-        return {"days_recorded": len(days), "settled_bets": 0}
+        return {"days_recorded": len(days), "settled_bets": 0, "field": field}
     f = pd.concat(frames, ignore_index=True)
     f = f.loc[f.status.eq("settled")].reset_index(drop=True)
     if f.empty:
-        return {"days_recorded": len(days), "settled_bets": 0}
+        return {"days_recorded": len(days), "settled_bets": 0, "field": field}
     clv = summarise_clv(f.clv.to_numpy())
     log = np.log(f.clv.to_numpy())
     by_day = pd.DataFrame({"l": log, "d": f.race_date}).groupby("d").l.agg(["sum", "size"])
@@ -308,4 +398,4 @@ def summary(boot=2000, seed=0):
             "roi_unit": roi, "pnl_unit_stakes": float(f.pnl_unit.sum()),
             "stake_target": RULE["stake"], "stake_filled": float(filled),
             "fill_rate": float(filled / (RULE["stake"] * len(f))), "pnl_filled": float(f.pnl_fill.sum()),
-            "median_back_size": float(f.back1_size.median())}
+            "median_back_size": float(f.back1_size.median()), "field": field}

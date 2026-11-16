@@ -78,3 +78,17 @@ books make the 11:00 share unreliable. The evening before the first run,
 Judge it by geometric CLV against BSP first, then ROI. Expect little
 volume: Matchbook stakes at 11:00 are often a few pounds. The fill rate shows
 whether the edge is reachable at size.
+
+Five bets a day take a month or more to say anything. Settlement therefore also
+keeps Betfair SP and the result for every forecast runner (`field.parquet`,
+settled apart from the bets, so a fault there never changes a bet). The
+summary's `field` block and the workbench **Whole field** panel read it on
+every eligible race:
+
+- log loss per race of the win model, the corrected forecast, the 11:00
+  Matchbook share and the Betfair SP book, on the same races;
+- `forecast_minus_sp`: below zero means the forecast beat the close;
+- `edge_result_corr`: correlation of (forecast − 11:00 share) with
+  (won − SP share), the orthogonality test, which should stay above zero;
+- CLV (taken / BSP) for every runner the forecast rated above and below the
+  11:00 share, not just the bets.

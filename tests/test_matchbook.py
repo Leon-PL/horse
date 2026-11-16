@@ -66,3 +66,56 @@ def test_fill_walks_the_back_levels():
     assert stake == 10. and np.isclose(price, (4 * 5 + 3 * 4.8 + 3 * 4.5) / 10)
     price, stake = paper.fill(pd.Series({**row, "back2": np.nan, "back3": np.nan}), 10.)
     assert stake == 4. and price == 5.
+
+
+def _paper_day(tmp_path, monkeypatch):
+    """A settled-ready paper day: two races of three, one bet, and Betfair's SP file for both."""
+    from src.matchbook import record
+    day = "2026-11-16"
+    monkeypatch.setattr(paper, "PAPER", tmp_path)
+    folder = tmp_path / day
+    folder.mkdir()
+    names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]
+    forecast = pd.DataFrame({
+        "race_id": [1, 1, 1, 2, 2, 2], "horse_id": range(10, 16), "race_date": day, "horse_name": names,
+        "track": ["Plumpton"] * 3 + ["Wolverhampton"] * 3, "off_time": ["12:45"] * 3 + ["17:00"] * 3,
+        "p_base": [.5, .3, .2, .4, .4, .2], "p": [.55, .3, .15, .3, .5, .2], "share": [.5, .3, .2, .4, .4, .2],
+        "back1": [2.0, 3.3, 5.0, 2.5, 2.5, 5.0], "back1_size": 20., "lay1": [2.1, 3.5, 5.5, 2.6, 2.6, 5.5],
+        "price_0800": 3., "price_1100": [2.05, 3.4, 5.2, 2.55, 2.55, 5.2], "eligible_race": True,
+        "race_tight": 1., "runner_id": [f"m{i}" for i in range(6)], "event_id": "e"})
+    forecast["edge"] = forecast.p - forecast.share
+    forecast["bet"] = forecast.horse_id.isin([10, 14])
+    forecast["fill_price"] = np.where(forecast.bet, forecast.back1, np.nan)
+    forecast["fill_stake"] = np.where(forecast.bet, 10., 0.)
+    forecast.to_parquet(folder / "forecast.parquet")
+    forecast.loc[forecast.bet].reset_index(drop=True).to_parquet(folder / "bets.parquet")
+    (folder / "run.json").write_text('{"date": "2026-11-16", "status": "forecast"}')
+    bf = pd.DataFrame({"event_id": ["9"] * 3 + ["8"] * 3, "selection_id": [f"s{i}" for i in range(6)],
+                       "track": forecast.track, "off_time": forecast.off_time, "horse_name": names,
+                       "bsp": [1.8, 4.0, 6.0, 2.2, 3.0, 6.5], "won": [1, 0, 0, 0, 1, 0], "morningtradedvol": 100.})
+    monkeypatch.setattr(paper, "betfair_day", lambda d: bf)
+    monkeypatch.setattr(record, "closes", lambda d: pd.DataFrame())
+    return day, folder
+
+
+def test_settle_keeps_sp_and_result_for_the_whole_field(tmp_path, monkeypatch):
+    day, folder = _paper_day(tmp_path, monkeypatch)
+    bets = paper.settle(day)
+    assert bets.status.eq("settled").all() and bets.won.tolist() == [1, 1]
+    field = pd.read_parquet(folder / "field.parquet")
+    assert len(field) == 6 and field.bsp.notna().all() and field.won.sum() == 2
+    summary = paper.summary()["field"]
+    assert summary["races"] == 2 and summary["runners"] == 6
+    expected = -(np.log(.55) + np.log(.5)) / 2
+    assert abs(summary["log_loss"]["forecast"] - expected) < 1e-9
+    assert summary["clv_by_edge"]["forecast_above_share"]["n"] == 2
+
+
+def test_a_field_fault_never_changes_the_bets(tmp_path, monkeypatch):
+    import json
+    day, folder = _paper_day(tmp_path, monkeypatch)
+    monkeypatch.setattr(paper, "settle_field", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    bets = paper.settle(day)
+    assert len(bets) == 2 and (folder / "settled.parquet").exists() and not (folder / "field.parquet").exists()
+    run = json.loads((folder / "run.json").read_text())
+    assert run["status"] == "settled" and "boom" in run["field_error"]
